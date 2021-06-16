@@ -324,14 +324,18 @@ func (mgr *singleTypeChannelsMgr) createMsgStream(collectionID UniqueID) error {
 	mgr.updateChannels(channels)
 
 	id := getUniqueIntGeneratorIns().get()
-	vchans := getAllKeys(channels)
+
+	vchans, pchans := make([]string, 0, len(channels)), make([]string, 0, len(channels))
+	for k, v := range channels {
+		vchans = append(vchans, k)
+		pchans = append(pchans, v)
+	}
 	mgr.updateVChans(id, vchans)
 
 	stream, err := mgr.msgStreamFactory.NewMsgStream(context.Background())
 	if err != nil {
 		return err
 	}
-	pchans := getAllValues(channels)
 	stream.AsProducer(pchans)
 	repack := func(tsMsgs []msgstream.TsMsg, hashKeys [][]int32) (map[int32]*msgstream.MsgPack, error) {
 		// after assigning segment id to msg, tsMsgs was already re-bucketed
