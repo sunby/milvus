@@ -1,5 +1,11 @@
 package config
 
+import (
+	"io"
+
+	"gopkg.in/yaml.v3"
+)
+
 // Config contains all options for milvus
 type Config struct {
 	DefaultPartitionName string           `yaml:"defaultPartitionName"`
@@ -142,6 +148,19 @@ var defaultConfig = Config{
 		DataNodeSubnamePrefix:  "dataNode",
 		DataCoordSubnamePrefix: "dataCoord",
 	},
+}
+
+func (conf *Config) ParseFromFile(fr io.Reader) error {
+	err := yaml.NewDecoder(fr).Decode(conf)
+	if err != nil {
+		return err
+	}
+	return conf.Valid()
+}
+
+func (conf *Config) Valid() error {
+	// TODO implement
+	return nil
 }
 
 // EtcdConfig is the config for etcd
