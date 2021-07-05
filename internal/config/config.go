@@ -2,6 +2,7 @@ package config
 
 import (
 	"io"
+	"os"
 
 	"gopkg.in/yaml.v3"
 )
@@ -161,6 +162,20 @@ func (conf *Config) ParseFromFile(fr io.Reader) error {
 func (conf *Config) Valid() error {
 	// TODO implement
 	return nil
+}
+
+func InitConfig(confPath string) (*Config, error) {
+	conf := &defaultConfig
+	if confPath != "" {
+		fr, err := os.Open(confPath)
+		if err != nil {
+			return nil, err
+		}
+		if err = conf.ParseFromFile(fr); err != nil {
+			return nil, err
+		}
+	}
+	return conf, nil
 }
 
 // EtcdConfig is the config for etcd
