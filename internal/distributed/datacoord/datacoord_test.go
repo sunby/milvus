@@ -94,27 +94,6 @@ func TestRun(t *testing.T) {
 	err = dsServer.Run()
 	assert.Nil(t, err)
 
-	t.Run("get component states", func(t *testing.T) {
-		req := &internalpb.GetComponentStatesRequest{}
-		rsp, err := dsServer.GetComponentStates(ctx, req)
-		assert.Nil(t, err)
-		assert.Equal(t, rsp.Status.ErrorCode, commonpb.ErrorCode_Success)
-	})
-
-	t.Run("get time tick channel", func(t *testing.T) {
-		req := &internalpb.GetTimeTickChannelRequest{}
-		rsp, err := dsServer.GetTimeTickChannel(ctx, req)
-		assert.Nil(t, err)
-		assert.Equal(t, rsp.Status.ErrorCode, commonpb.ErrorCode_Success)
-	})
-
-	t.Run("get statistics channel", func(t *testing.T) {
-		req := &internalpb.GetStatisticsChannelRequest{}
-		rsp, err := dsServer.GetStatisticsChannel(ctx, req)
-		assert.Nil(t, err)
-		assert.Equal(t, rsp.Status.ErrorCode, commonpb.ErrorCode_Success)
-	})
-
 	t.Run("get segment info", func(t *testing.T) {
 		req := &datapb.GetSegmentInfoRequest{}
 		rsp, err := dsServer.GetSegmentInfo(ctx, req)
