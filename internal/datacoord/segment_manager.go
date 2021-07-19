@@ -19,7 +19,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/log"
-	"github.com/milvus-io/milvus/internal/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 
@@ -58,7 +57,6 @@ type SegmentManager struct {
 	meta                *meta
 	mu                  sync.RWMutex
 	allocator           allocator
-	helper              allocHelper
 	segments            []UniqueID
 	estimatePolicy      calUpperLimitPolicy
 	allocPolicy         allocatePolicy
@@ -66,10 +64,6 @@ type SegmentManager struct {
 	channelSealPolicies []channelSealPolicy
 	flushPolicy         flushPolicy
 	allocPool           sync.Pool
-}
-
-type allocHelper struct {
-	afterCreateSegment func(segment *datapb.SegmentInfo) error
 }
 
 // allocOption allction option applies to `SegmentManager`
@@ -83,18 +77,6 @@ type allocFunc func(manager *SegmentManager)
 // implement allocOption
 func (f allocFunc) apply(manager *SegmentManager) {
 	f(manager)
-}
-
-// get allocOption with allocHelper setting
-func withAllocHelper(helper allocHelper) allocOption {
-	return allocFunc(func(manager *SegmentManager) { manager.helper = helper })
-}
-
-// get default allocHelper, which does nothing
-func defaultAllocHelper() allocHelper {
-	return allocHelper{
-		afterCreateSegment: func(segment *datapb.SegmentInfo) error { return nil },
-	}
 }
 
 // get allocOption with estimatePolicy
@@ -153,7 +135,6 @@ func newSegmentManager(meta *meta, allocator allocator, opts ...allocOption) *Se
 	manager := &SegmentManager{
 		meta:                meta,
 		allocator:           allocator,
-		helper:              defaultAllocHelper(),
 		segments:            make([]UniqueID, 0),
 		estimatePolicy:      defaultCalUpperLimitPolicy(),
 		allocPolicy:         defaultAlocatePolicy(),
@@ -331,7 +312,6 @@ func (s *SegmentManager) openNewSegment(ctx context.Context, collectionID Unique
 		zap.Int("Rows", maxNumOfRows),
 		zap.String("Channel", segmentInfo.InsertChannel))
 
-	s.helper.afterCreateSegment(segmentInfo)
 	return segment, nil
 }
 
@@ -485,32 +465,4 @@ func (s *SegmentManager) SealSegment(ctx context.Context, segmentID UniqueID) er
 		return err
 	}
 	return nil
-}
-
-func createNewSegmentHelper(stream msgstream.MsgStream) allocHelper {
-	h := allocHelper{}
-	h.afterCreateSegment = func(segment *datapb.SegmentInfo) error {
-		infoMsg := &msgstream.SegmentInfoMsg{
-			BaseMsg: msgstream.BaseMsg{
-				HashValues: []uint32{0},
-			},
-			SegmentMsg: datapb.SegmentMsg{
-				Base: &commonpb.MsgBase{
-					MsgType:   commonpb.MsgType_SegmentInfo,
-					MsgID:     0,
-					Timestamp: 0,
-					SourceID:  Params.NodeID,
-				},
-				Segment: segment,
-			},
-		}
-		msgPack := &msgstream.MsgPack{
-			Msgs: []msgstream.TsMsg{infoMsg},
-		}
-		if err := stream.Produce(msgPack); err != nil {
-			return err
-		}
-		return nil
-	}
-	return h
 }
