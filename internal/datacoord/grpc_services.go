@@ -12,6 +12,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 )
 
 const serverNotServingErrMsg = "server is not serving"
@@ -429,4 +430,37 @@ func (s *Server) GetFlushedSegments(ctx context.Context, req *datapb.GetFlushedS
 		},
 		Segments: ret,
 	}, nil
+}
+
+func (s *Server) GetBloomFilterFiles(ctx context.Context, in *datapb.GetBloomFilterFileRequest, opts ...grpc.CallOption) (*datapb.GetBloomFilterFileResponse, error) {
+	resp := &datapb.GetBloomFilterFileResponse{}
+
+	if s.isClosed() {
+		resp.Status = &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_UnexpectedError,
+			Reason:    serverNotServingErrMsg,
+		}
+		return resp, nil
+	}
+
+	segments := s.meta.GetSegmentsByChannel(in.Channel)
+	segmentIds := make([]UniqueID, 0, len(segments))
+	files := make([]string, 0, len(segments))
+
+	for _, segment := range segments {
+		if len(segment.GetBloomFilterFile()) != 0 {
+			segmentIds = append(segmentIds, segment.GetID())
+			files = append(files, segment.GetBloomFilterFile())
+		}
+	}
+
+	resp.Status = &commonpb.Status{
+		ErrorCode: commonpb.ErrorCode_Success,
+	}
+	resp.Channel = in.GetChannel()
+	resp.Segments = segmentIds
+	resp.Files = files
+
+	return resp, nil
+
 }

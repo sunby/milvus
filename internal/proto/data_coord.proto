@@ -30,6 +30,8 @@ service DataCoord {
   rpc SaveBinlogPaths(SaveBinlogPathsRequest) returns (common.Status){}
   rpc GetRecoveryInfo(GetRecoveryInfoRequest) returns (GetRecoveryInfoResponse){}
   rpc GetFlushedSegments(GetFlushedSegmentsRequest) returns(GetFlushedSegmentsResponse){}
+
+  rpc GetBloomFilterFiles(GetBloomFilterFileRequest) returns(GetBloomFilterFileResponse){}
 }
 
 service DataNode {
