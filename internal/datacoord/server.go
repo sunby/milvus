@@ -75,8 +75,7 @@ const (
 type dataNodeCreatorFunc func(ctx context.Context, addr string) (types.DataNode, error)
 type rootCoordCreatorFunc func(ctx context.Context, metaRootPath string, etcdEndpoints []string) (types.RootCoord, error)
 
-// Server implements `types.Datacoord`
-// handles Data Cooridinator related jobs
+// Server implements `types.Datacoord`, handling Data Cooridinator related jobs
 type Server struct {
 	ctx              context.Context
 	serverLoopCtx    context.Context
