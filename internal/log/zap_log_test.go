@@ -198,7 +198,6 @@ func TestRotateLog(t *testing.T) {
 		writeSize       int
 		expectedFileNum int
 	}{
-		{"test default max size", 0, defaultLogMaxSize * 1024 * 1024, 2},
 		{"test limited max size", 1, 1 * 1024 * 1024, 2},
 	}
 	for _, c := range cases {
@@ -241,6 +240,19 @@ func TestWithOptions(t *testing.T) {
 	logger.Error("Testing", zap.Error(errors.New("log-with-option")))
 	ts.assertMessagesNotContains("errorVerbose")
 	ts.assertMessagesNotContains("stack")
+}
+
+func TestNamedLogger(t *testing.T) {
+	ts := newTestLogSpy(t)
+	conf := &Config{
+		Level:               "debug",
+		DisableTimestamp:    true,
+		DisableErrorVerbose: true,
+	}
+	logger, _, _ := InitTestLogger(ts, conf, zap.AddStacktrace(zapcore.FatalLevel))
+	namedLogger := logger.Named("testLogger")
+	namedLogger.Error("testing")
+	ts.assertMessagesContains("testLogger")
 }
 
 // testLogSpy is a testing.TB that captures logged messages.
