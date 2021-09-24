@@ -145,7 +145,6 @@ func (it *InsertMsg) Unmarshal(input MarshalType) (TsMsg, error) {
 }
 
 /////////////////////////////////////////Delete//////////////////////////////////////////
-// TODO(wxyu): comment it until really needed
 type DeleteMsg struct {
 	BaseMsg
 	internalpb.DeleteRequest
@@ -188,19 +187,8 @@ func (dt *DeleteMsg) Unmarshal(input MarshalType) (TsMsg, error) {
 		return nil, err
 	}
 	deleteMsg := &DeleteMsg{DeleteRequest: deleteRequest}
-	for _, timestamp := range deleteMsg.Timestamps {
-		deleteMsg.BeginTimestamp = timestamp
-		deleteMsg.EndTimestamp = timestamp
-		break
-	}
-	for _, timestamp := range deleteMsg.Timestamps {
-		if timestamp > deleteMsg.EndTimestamp {
-			deleteMsg.EndTimestamp = timestamp
-		}
-		if timestamp < deleteMsg.BeginTimestamp {
-			deleteMsg.BeginTimestamp = timestamp
-		}
-	}
+	deleteMsg.BeginTimestamp = deleteMsg.Timestamp
+	deleteMsg.EndTimestamp = deleteMsg.Timestamp
 
 	return deleteMsg, nil
 }
@@ -763,7 +751,7 @@ func (dp *DropPartitionMsg) Unmarshal(input MarshalType) (TsMsg, error) {
 }
 
 /////////////////////////////////////////LoadIndex//////////////////////////////////////////
-// TODO(wxyu): comment it until really needed
+// FIXME(wxyu): comment it until really needed
 /*
 type LoadIndexMsg struct {
 	BaseMsg

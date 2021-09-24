@@ -9,7 +9,7 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License.
 
-package grpcproxy
+package grpcindexnode
 
 import (
 	"strconv"
@@ -23,13 +23,11 @@ import (
 	"github.com/milvus-io/milvus/internal/util/paramtable"
 )
 
+// ParamTable is used to record configuration items.
 type ParamTable struct {
 	paramtable.BaseTable
 
-	RootCoordAddress  string
 	IndexCoordAddress string
-	DataCoordAddress  string
-	QueryCoordAddress string
 
 	IP      string
 	Port    int
@@ -39,9 +37,11 @@ type ParamTable struct {
 	ServerMaxRecvSize int
 }
 
+// Params is an alias for ParamTable.
 var Params ParamTable
 var once sync.Once
 
+// Init is used to initialize configuration items.
 func (pt *ParamTable) Init() {
 	once.Do(func() {
 		pt.BaseTable.Init()
@@ -49,23 +49,29 @@ func (pt *ParamTable) Init() {
 
 		pt.initServerMaxSendSize()
 		pt.initServerMaxRecvSize()
+
+		if !funcutil.CheckPortAvailable(pt.Port) {
+			pt.Port = funcutil.GetAvailablePort()
+			log.Warn("IndexNode init", zap.Any("Port", pt.Port))
+		}
+		pt.LoadFromEnv()
+		pt.LoadFromArgs()
 	})
 }
 
+// LoadFromArgs is used to initialize configuration items from args.
 func (pt *ParamTable) LoadFromArgs() {
 
 }
 
+// LoadFromEnv is used to initialize configuration items from env.
 func (pt *ParamTable) LoadFromEnv() {
 	Params.IP = funcutil.GetLocalIP()
 }
 
 func (pt *ParamTable) initParams() {
 	pt.initPort()
-	pt.initRootCoordAddress()
 	pt.initIndexCoordAddress()
-	pt.initDataCoordAddress()
-	pt.initQueryCoordAddress()
 }
 
 // todo remove and use load from env
@@ -77,50 +83,23 @@ func (pt *ParamTable) initIndexCoordAddress() {
 	pt.IndexCoordAddress = ret
 }
 
-// todo remove and use load from env
-func (pt *ParamTable) initRootCoordAddress() {
-	ret, err := pt.Load("_RootCoordAddress")
-	if err != nil {
-		panic(err)
-	}
-	pt.RootCoordAddress = ret
-}
-
-// todo remove and use load from env
-func (pt *ParamTable) initDataCoordAddress() {
-	ret, err := pt.Load("_DataCoordAddress")
-	if err != nil {
-		panic(err)
-	}
-	pt.DataCoordAddress = ret
-}
-
-// todo remove and use load from env
-func (pt *ParamTable) initQueryCoordAddress() {
-	ret, err := pt.Load("_QueryCoordAddress")
-	if err != nil {
-		panic(err)
-	}
-	pt.QueryCoordAddress = ret
-}
-
 func (pt *ParamTable) initPort() {
-	port := pt.ParseInt("proxy.port")
+	port := pt.ParseInt("indexNode.port")
 	pt.Port = port
 }
 
 func (pt *ParamTable) initServerMaxSendSize() {
 	var err error
 
-	valueStr, err := pt.Load("proxy.grpc.serverMaxSendSize")
+	valueStr, err := pt.Load("indexNode.grpc.serverMaxSendSize")
 	if err != nil { // not set
 		pt.ServerMaxSendSize = grpcconfigs.DefaultServerMaxSendSize
 	}
 
 	value, err := strconv.Atoi(valueStr)
 	if err != nil { // not in valid format
-		log.Warn("Failed to parse proxy.grpc.serverMaxSendSize, set to default",
-			zap.String("proxy.grpc.serverMaxSendSize", valueStr),
+		log.Warn("Failed to parse indexNode.grpc.serverMaxSendSize, set to default",
+			zap.String("indexNode.grpc.serverMaxSendSize", valueStr),
 			zap.Error(err))
 
 		pt.ServerMaxSendSize = grpcconfigs.DefaultServerMaxSendSize
@@ -129,21 +108,21 @@ func (pt *ParamTable) initServerMaxSendSize() {
 	}
 
 	log.Debug("initServerMaxSendSize",
-		zap.Int("proxy.grpc.serverMaxSendSize", pt.ServerMaxSendSize))
+		zap.Int("indexNode.grpc.serverMaxSendSize", pt.ServerMaxSendSize))
 }
 
 func (pt *ParamTable) initServerMaxRecvSize() {
 	var err error
 
-	valueStr, err := pt.Load("proxy.grpc.serverMaxRecvSize")
+	valueStr, err := pt.Load("indexNode.grpc.serverMaxRecvSize")
 	if err != nil { // not set
 		pt.ServerMaxRecvSize = grpcconfigs.DefaultServerMaxRecvSize
 	}
 
 	value, err := strconv.Atoi(valueStr)
 	if err != nil { // not in valid format
-		log.Warn("Failed to parse proxy.grpc.serverMaxRecvSize, set to default",
-			zap.String("proxy.grpc.serverMaxRecvSize", valueStr),
+		log.Warn("Failed to parse indexNode.grpc.serverMaxRecvSize, set to default",
+			zap.String("indexNode.grpc.serverMaxRecvSize", valueStr),
 			zap.Error(err))
 
 		pt.ServerMaxRecvSize = grpcconfigs.DefaultServerMaxRecvSize
@@ -152,5 +131,5 @@ func (pt *ParamTable) initServerMaxRecvSize() {
 	}
 
 	log.Debug("initServerMaxRecvSize",
-		zap.Int("proxy.grpc.serverMaxRecvSize", pt.ServerMaxRecvSize))
+		zap.Int("indexNode.grpc.serverMaxRecvSize", pt.ServerMaxRecvSize))
 }

@@ -14,6 +14,8 @@ from milvus_benchmark.runners import utils
 
 logger = logging.getLogger("milvus_benchmark.client")
 
+
+# yaml file and code file comparison table of Index parameters
 INDEX_MAP = {
     "flat": "FLAT",
     "ivf_flat": "IVF_FLAT",
@@ -467,7 +469,7 @@ class MilvusClient(object):
 
         entities = utils.generate_entities(collection_info, vectors, ids)
         logger.debug("[scene_test] Start insert : %s" % collection_name)
-        self.insert(entities)
+        self.insert(entities, collection_name=collection_name)
         logger.debug("[scene_test] Start flush : %s" % collection_name)
         self.flush()
 

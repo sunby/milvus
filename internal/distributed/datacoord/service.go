@@ -69,12 +69,11 @@ func NewServer(ctx context.Context, factory msgstream.Factory, opts ...datacoord
 
 func (s *Server) init() error {
 	Params.Init()
-	Params.LoadFromEnv()
 
 	closer := trace.InitTracing("datacoord")
 	s.closer = closer
 
-	datacoord.Params.Init()
+	datacoord.Params.InitOnce()
 	datacoord.Params.IP = Params.IP
 	datacoord.Params.Port = Params.Port
 
@@ -177,14 +176,17 @@ func (s *Server) Run() error {
 	return nil
 }
 
+// GetComponentStates gets states of datacoord and datanodes
 func (s *Server) GetComponentStates(ctx context.Context, req *internalpb.GetComponentStatesRequest) (*internalpb.ComponentStates, error) {
 	return s.dataCoord.GetComponentStates(ctx)
 }
 
+// GetTimeTickChannel gets timetick channel
 func (s *Server) GetTimeTickChannel(ctx context.Context, req *internalpb.GetTimeTickChannelRequest) (*milvuspb.StringResponse, error) {
 	return s.dataCoord.GetTimeTickChannel(ctx)
 }
 
+// GetStatisticsChannel gets statistics channel
 func (s *Server) GetStatisticsChannel(ctx context.Context, req *internalpb.GetStatisticsChannelRequest) (*milvuspb.StringResponse, error) {
 	return s.dataCoord.GetStatisticsChannel(ctx)
 }
@@ -198,22 +200,27 @@ func (s *Server) Flush(ctx context.Context, req *datapb.FlushRequest) (*datapb.F
 	return s.dataCoord.Flush(ctx, req)
 }
 
+// AssignSegmentID requests to allocate segment space for insert
 func (s *Server) AssignSegmentID(ctx context.Context, req *datapb.AssignSegmentIDRequest) (*datapb.AssignSegmentIDResponse, error) {
 	return s.dataCoord.AssignSegmentID(ctx, req)
 }
 
+// GetSegmentStates gets states of segments
 func (s *Server) GetSegmentStates(ctx context.Context, req *datapb.GetSegmentStatesRequest) (*datapb.GetSegmentStatesResponse, error) {
 	return s.dataCoord.GetSegmentStates(ctx, req)
 }
 
+// GetInsertBinlogPaths gets insert binlog paths of a segment
 func (s *Server) GetInsertBinlogPaths(ctx context.Context, req *datapb.GetInsertBinlogPathsRequest) (*datapb.GetInsertBinlogPathsResponse, error) {
 	return s.dataCoord.GetInsertBinlogPaths(ctx, req)
 }
 
+// GetCollectionStatistics gets statistics of a collection
 func (s *Server) GetCollectionStatistics(ctx context.Context, req *datapb.GetCollectionStatisticsRequest) (*datapb.GetCollectionStatisticsResponse, error) {
 	return s.dataCoord.GetCollectionStatistics(ctx, req)
 }
 
+// GetPartitionStatistics gets statistics of a partition
 func (s *Server) GetPartitionStatistics(ctx context.Context, req *datapb.GetPartitionStatisticsRequest) (*datapb.GetPartitionStatisticsResponse, error) {
 	return s.dataCoord.GetPartitionStatistics(ctx, req)
 }

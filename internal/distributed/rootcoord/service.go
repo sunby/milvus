@@ -128,7 +128,7 @@ func (s *Server) Run() error {
 func (s *Server) init() error {
 	Params.Init()
 
-	rootcoord.Params.Init()
+	rootcoord.Params.InitOnce()
 	rootcoord.Params.Address = Params.Address
 	rootcoord.Params.Port = Params.Port
 	log.Debug("grpc init done ...")
@@ -286,19 +286,22 @@ func (s *Server) GetStatisticsChannel(ctx context.Context, req *internalpb.GetSt
 	return s.rootCoord.GetStatisticsChannel(ctx)
 }
 
-//DDL request
+// CreateCollection creates a collection
 func (s *Server) CreateCollection(ctx context.Context, in *milvuspb.CreateCollectionRequest) (*commonpb.Status, error) {
 	return s.rootCoord.CreateCollection(ctx, in)
 }
 
+// DropCollection drops a collection
 func (s *Server) DropCollection(ctx context.Context, in *milvuspb.DropCollectionRequest) (*commonpb.Status, error) {
 	return s.rootCoord.DropCollection(ctx, in)
 }
 
+// HasCollection checks whether a collection is created
 func (s *Server) HasCollection(ctx context.Context, in *milvuspb.HasCollectionRequest) (*milvuspb.BoolResponse, error) {
 	return s.rootCoord.HasCollection(ctx, in)
 }
 
+// DescribeCollection gets meta info of a collection
 func (s *Server) DescribeCollection(ctx context.Context, in *milvuspb.DescribeCollectionRequest) (*milvuspb.DescribeCollectionResponse, error) {
 	return s.rootCoord.DescribeCollection(ctx, in)
 }

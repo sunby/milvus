@@ -61,18 +61,18 @@ Milvus 基于 [Apache 2.0 License](https://github.com/milvus-io/milvus/blob/mast
 
 <details>
   <summary><b>广受社区支持和业界认可</b></summary>
-  Milvus 项目在 GitHub 上获星超 7500，拥有逾 1000 家企业用户，还有活跃的开源社区。Milvus 由 <a href="https://lfaidata.foundation/">LF AI & Data 基金会</a> 背书，是该基金会的毕业项目。
+  Milvus 项目在 GitHub 上获星超 7900，拥有逾 1000 家企业用户，还有活跃的开源社区。Milvus 由 <a href="https://lfaidata.foundation/">LF AI & Data 基金会</a> 背书，是该基金会的毕业项目。
   </details>
 
 ## 快速开始
 
-### 开始使用 Milvus
+### 启动 Milvus
 
-- [Standalone Quick Start Guide](https://milvus.io/cn/docs/v2.0.0/install_standalone-docker.md)
+- [安装 Milvus 单机版](https://milvus.io/cn/docs/v2.0.0/install_standalone-docker.md)
 
-- [Cluster Quick Start Guide](https://milvus.io/cn/docs/v2.0.0/install_cluster-docker.md)
+- [安装 Milvus 分布式版本](https://milvus.io/cn/docs/v2.0.0/install_cluster-docker.md)
 
-### 开发 Milvus
+### 源码编译 Milvus
 
 ```bash
 # Clone github repository.
@@ -152,7 +152,7 @@ Milvus [训练营](https://github.com/milvus-io/bootcamp)能够帮助你了解�
 ### All contributors
 
 <br><!-- Do not remove start of hero-bot -->
-<img src="https://img.shields.io/badge/all--contributors-168-orange"><br>
+<img src="https://img.shields.io/badge/all--contributors-170-orange"><br>
 <a href="https://github.com/ABNER-1"><img src="https://avatars.githubusercontent.com/u/24547351?v=4" width="30px" /></a>
 <a href="https://github.com/Accagain2014"><img src="https://avatars.githubusercontent.com/u/9635216?v=4" width="30px" /></a>
 <a href="https://github.com/AllenYu1987"><img src="https://avatars.githubusercontent.com/u/12489985?v=4" width="30px" /></a>
@@ -257,6 +257,7 @@ Milvus [训练营](https://github.com/milvus-io/bootcamp)能够帮助你了解�
 <a href="https://github.com/linchpinlin"><img src="https://avatars.githubusercontent.com/u/31131753?v=4" width="30px" /></a>
 <a href="https://github.com/lixiangMindSpore"><img src="https://avatars.githubusercontent.com/u/78945582?v=4" width="30px" /></a>
 <a href="https://github.com/loguo"><img src="https://avatars.githubusercontent.com/u/15364733?v=4" width="30px" /></a>
+<a href="https://github.com/lsgrep"><img src="https://avatars.githubusercontent.com/u/3893940?v=4" width="30px" /></a>
 <a href="https://github.com/lwglgy"><img src="https://avatars.githubusercontent.com/u/26682620?v=4" width="30px" /></a>
 <a href="https://github.com/maclandrol"><img src="https://avatars.githubusercontent.com/u/5290110?v=4" width="30px" /></a>
 <a href="https://github.com/matrixji"><img src="https://avatars.githubusercontent.com/u/183388?v=4" width="30px" /></a>
@@ -269,6 +270,7 @@ Milvus [训练营](https://github.com/milvus-io/bootcamp)能够帮助你了解�
 <a href="https://github.com/natoka"><img src="https://avatars.githubusercontent.com/u/1751024?v=4" width="30px" /></a>
 <a href="https://github.com/neza2017"><img src="https://avatars.githubusercontent.com/u/34152706?v=4" width="30px" /></a>
 <a href="https://github.com/op-hunter"><img src="https://avatars.githubusercontent.com/u/5617677?v=4" width="30px" /></a>
+<a href="https://github.com/parsa-ra"><img src="https://avatars.githubusercontent.com/u/11356471?v=4" width="30px" /></a>
 <a href="https://github.com/pengjeck"><img src="https://avatars.githubusercontent.com/u/14035577?v=4" width="30px" /></a>
 <a href="https://github.com/phantom8548"><img src="https://avatars.githubusercontent.com/u/11576622?v=4" width="30px" /></a>
 <a href="https://github.com/qbzenker"><img src="https://avatars.githubusercontent.com/u/51972064?v=4" width="30px" /></a>
@@ -330,6 +332,8 @@ Milvus [训练营](https://github.com/milvus-io/bootcamp)能够帮助你了解�
 ### SDK
 
 - [PyMilvus](https://github.com/milvus-io/pymilvus)
+- [Java SDK](https://github.com/milvus-io/milvus-sdk-java)(开发中)
+- [Go SDK](https://github.com/milvus-io/milvus-sdk-go)(开发中)
 - [Node SDK](https://github.com/milvus-io/milvus-sdk-node)
 
 ## 社区
