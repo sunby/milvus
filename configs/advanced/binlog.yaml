@@ -1,0 +1,4 @@
+
+binlog:
+  compress:
+    type: "UNCOMPRESSED" # "SNAPPY", "GZIP", "UNCOMPRESSED"

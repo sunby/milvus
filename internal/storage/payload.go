@@ -80,6 +80,10 @@ func NewPayloadWriter(colType schemapb.DataType, compressType CompressType) (*Pa
 	if w == nil {
 		return nil, errors.New("create Payload writer failed")
 	}
+	if compressType == CompressType_UNCOMPRESSED { // 使用全局yaml文件中的配置
+		Params.Init()
+		compressType = Params.compressType
+	}
 	return &PayloadWriter{payloadWriterPtr: w, colType: colType, compressType: compressType}, nil
 }
 
