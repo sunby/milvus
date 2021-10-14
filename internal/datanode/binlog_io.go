@@ -71,7 +71,7 @@ func (b *binlogIO) download(ctx context.Context, paths []string) ([]*Blob, error
 
 			case <-ctx.Done():
 				close(r)
-				log.Debug("binlog download canceled by context done")
+				log.Warn("ctx done when downloading kvs from blob storage")
 				return
 
 			default:
