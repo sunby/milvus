@@ -373,7 +373,7 @@ func (s *Server) GetRecoveryInfo(ctx context.Context, req *datapb.GetRecoveryInf
 		resp.Status.Reason = serverNotServingErrMsg
 		return resp, nil
 	}
-	segmentIDs := s.meta.GetSegmentsOfPartition(collectionID, partitionID)
+	segmentIDs := s.meta.GetSegmentsIDOfPartition(collectionID, partitionID)
 	segment2Binlogs := make(map[UniqueID][]*datapb.FieldBinlog)
 	segmentsNumOfRows := make(map[UniqueID]int64)
 	for _, id := range segmentIDs {
@@ -463,9 +463,9 @@ func (s *Server) GetFlushedSegments(ctx context.Context, req *datapb.GetFlushedS
 	}
 	var segmentIDs []UniqueID
 	if partitionID < 0 {
-		segmentIDs = s.meta.GetSegmentsOfCollection(collectionID)
+		segmentIDs = s.meta.GetSegmentsIDOfCollection(collectionID)
 	} else {
-		segmentIDs = s.meta.GetSegmentsOfPartition(collectionID, partitionID)
+		segmentIDs = s.meta.GetSegmentsIDOfPartition(collectionID, partitionID)
 	}
 	ret := make([]UniqueID, 0, len(segmentIDs))
 	for _, id := range segmentIDs {

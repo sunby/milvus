@@ -89,17 +89,17 @@ func TestMeta_Basic(t *testing.T) {
 		assert.True(t, proto.Equal(info1_0, segInfo1_0))
 
 		// check GetSegmentsOfCollection
-		segIDs := meta.GetSegmentsOfCollection(collID)
+		segIDs := meta.GetSegmentsIDOfCollection(collID)
 		assert.EqualValues(t, 3, len(segIDs))
 		assert.Contains(t, segIDs, segID0_0)
 		assert.Contains(t, segIDs, segID1_0)
 		assert.Contains(t, segIDs, segID1_1)
 
 		// check GetSegmentsOfPartition
-		segIDs = meta.GetSegmentsOfPartition(collID, partID0)
+		segIDs = meta.GetSegmentsIDOfPartition(collID, partID0)
 		assert.EqualValues(t, 1, len(segIDs))
 		assert.Contains(t, segIDs, segID0_0)
-		segIDs = meta.GetSegmentsOfPartition(collID, partID1)
+		segIDs = meta.GetSegmentsIDOfPartition(collID, partID1)
 		assert.EqualValues(t, 2, len(segIDs))
 		assert.Contains(t, segIDs, segID1_0)
 		assert.Contains(t, segIDs, segID1_1)
@@ -107,7 +107,7 @@ func TestMeta_Basic(t *testing.T) {
 		// check DropSegment
 		err = meta.DropSegment(segID1_0)
 		assert.Nil(t, err)
-		segIDs = meta.GetSegmentsOfPartition(collID, partID1)
+		segIDs = meta.GetSegmentsIDOfPartition(collID, partID1)
 		assert.EqualValues(t, 1, len(segIDs))
 		assert.Contains(t, segIDs, segID1_1)
 

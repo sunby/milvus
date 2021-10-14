@@ -91,6 +91,18 @@ func (m *meta) GetCollection(collectionID UniqueID) *datapb.CollectionInfo {
 	return collection
 }
 
+// GetCollections get all collections id from local cache
+func (m *meta) GetCollectionsID() []UniqueID {
+	m.RLock()
+	defer m.RUnlock()
+
+	res := make([]UniqueID, 0, len(m.collections))
+	for _, c := range m.collections {
+		res = append(res, c.GetID())
+	}
+	return res
+}
+
 // GetNumRowsOfCollection returns total rows count of segments belongs to provided collection
 func (m *meta) GetNumRowsOfCollection(collectionID UniqueID) int64 {
 	m.RLock()
@@ -300,8 +312,21 @@ func (m *meta) GetSegmentsByChannel(dmlCh string) []*SegmentInfo {
 	return infos
 }
 
-// GetSegmentsOfCollection returns all segment ids which collection equals to provided `collectionID`
-func (m *meta) GetSegmentsOfCollection(collectionID UniqueID) []UniqueID {
+// GetSegmentsOfCollection get all segments of collection
+func (m *meta) GetSegmentsOfCollection(collectionID UniqueID) []*SegmentInfo {
+	m.RLock()
+	defer m.RUnlock()
+
+	ret := make([]*SegmentInfo, 0)
+	segments := m.segments.GetSegments()
+	for _, info := range segments {
+		ret = append(ret, info)
+	}
+	return ret
+}
+
+// GetSegmentsIDOfCollection returns all segment ids which collection equals to provided `collectionID`
+func (m *meta) GetSegmentsIDOfCollection(collectionID UniqueID) []UniqueID {
 	m.RLock()
 	defer m.RUnlock()
 	ret := make([]UniqueID, 0)
@@ -314,8 +339,8 @@ func (m *meta) GetSegmentsOfCollection(collectionID UniqueID) []UniqueID {
 	return ret
 }
 
-// GetSegmentsOfPartition returns all segments ids which collection & partition equals to provided `collectionID`, `partitionID`
-func (m *meta) GetSegmentsOfPartition(collectionID, partitionID UniqueID) []UniqueID {
+// GetSegmentsIDOfPartition returns all segments ids which collection & partition equals to provided `collectionID`, `partitionID`
+func (m *meta) GetSegmentsIDOfPartition(collectionID, partitionID UniqueID) []UniqueID {
 	m.RLock()
 	defer m.RUnlock()
 	ret := make([]UniqueID, 0)
