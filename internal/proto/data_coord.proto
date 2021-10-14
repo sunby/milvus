@@ -301,6 +301,42 @@ message ChannelWatchInfo {
     ChannelWatchState state = 3;
 }
 
+message CompactionLog {
+  string path = 1;
+  bool in_time_travel =2;
+}
+
+enum CompactionType {
+  UndefinedCompaction = 0;
+  InnerCompaction = 1;
+  MergeCompaction = 2;
+}
+
+message CompactionSegmentBinlogs {
+  int64 segmentID = 1;
+  repeated FieldBinlog fieldBinlogs = 2;
+}
+
+message CompactionMergeGroup {
+  repeated CompactionSegmentBinlogs segmentBinlogs = 1;
+}
+
+message CompactionPlan {
+  int64 planID = 1;
+  repeated CompactionMergeGroup mergeGroup = 2;
+  uint64 start_time = 3;
+  int32 timeout_in_seconds = 4;
+  CompactionType type = 5;
+  int64 timetravel = 6;
+}
+
+message CompactionResult {
+  int64 planID = 1;
+  int64 segmentID = 2;
+  repeated string insert_logs = 3;
+  repeated string delta_logs = 4;
+}
+
 // Deprecated
 message SegmentFieldBinlogMeta {
   int64  fieldID = 1;
