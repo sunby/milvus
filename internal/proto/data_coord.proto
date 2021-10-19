@@ -33,8 +33,7 @@ service DataCoord {
 
   // https://wiki.lfaidata.foundation/display/MIL/MEP+8+--+Add+metrics+for+proxy
   rpc GetMetrics(milvus.GetMetricsRequest) returns (milvus.GetMetricsResponse) {}
-  rpc Compaction(CompactionPlan) returns (common.Status) {}
-  rpc CompleteCompaction()
+  rpc CompleteCompaction(CompactionResult) returns (common.Status) {}
 }
 
 service DataNode {
@@ -46,6 +45,7 @@ service DataNode {
 
   // https://wiki.lfaidata.foundation/display/MIL/MEP+8+--+Add+metrics+for+proxy
   rpc GetMetrics(milvus.GetMetricsRequest) returns (milvus.GetMetricsResponse) {}
+  rpc Compaction(CompactionPlan) returns (common.Status) {}
 }
 
 message FlushRequest {

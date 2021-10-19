@@ -282,7 +282,7 @@ func SetFlushTime(t time.Time) SegmentInfoOption {
 // SetIsCompacting is the option to set compacton state for segment info
 func SetIsCompacting(isCompacting bool) SegmentInfoOption {
 	return func(segment *SegmentInfo) {
-		segment. = isCompacting
+		segment.isCompacting = isCompacting
 	}
 }
 

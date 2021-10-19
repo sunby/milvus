@@ -261,3 +261,7 @@ func (s *Server) GetFlushedSegments(ctx context.Context, req *datapb.GetFlushedS
 func (s *Server) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
 	return s.dataCoord.GetMetrics(ctx, req)
 }
+
+func (s *Server) CompleteCompaction(_ context.Context, _ *datapb.CompactionResult) (*commonpb.Status, error) {
+	panic("not implemented") // TODO: Implement
+}

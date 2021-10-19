@@ -2880,6 +2880,7 @@ type DataCoordClient interface {
 	GetFlushedSegments(ctx context.Context, in *GetFlushedSegmentsRequest, opts ...grpc.CallOption) (*GetFlushedSegmentsResponse, error)
 	// https://wiki.lfaidata.foundation/display/MIL/MEP+8+--+Add+metrics+for+proxy
 	GetMetrics(ctx context.Context, in *milvuspb.GetMetricsRequest, opts ...grpc.CallOption) (*milvuspb.GetMetricsResponse, error)
+	CompleteCompaction(ctx context.Context, in *CompactionResult, opts ...grpc.CallOption) (*commonpb.Status, error)
 }
 
 type dataCoordClient struct {
@@ -3025,6 +3026,15 @@ func (c *dataCoordClient) GetMetrics(ctx context.Context, in *milvuspb.GetMetric
 	return out, nil
 }
 
+func (c *dataCoordClient) CompleteCompaction(ctx context.Context, in *CompactionResult, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	out := new(commonpb.Status)
+	err := c.cc.Invoke(ctx, "/milvus.proto.data.DataCoord/CompleteCompaction", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DataCoordServer is the server API for DataCoord service.
 type DataCoordServer interface {
 	GetComponentStates(context.Context, *internalpb.GetComponentStatesRequest) (*internalpb.ComponentStates, error)
@@ -3043,6 +3053,7 @@ type DataCoordServer interface {
 	GetFlushedSegments(context.Context, *GetFlushedSegmentsRequest) (*GetFlushedSegmentsResponse, error)
 	// https://wiki.lfaidata.foundation/display/MIL/MEP+8+--+Add+metrics+for+proxy
 	GetMetrics(context.Context, *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error)
+	CompleteCompaction(context.Context, *CompactionResult) (*commonpb.Status, error)
 }
 
 // UnimplementedDataCoordServer can be embedded to have forward compatible implementations.
@@ -3093,6 +3104,9 @@ func (*UnimplementedDataCoordServer) GetFlushedSegments(ctx context.Context, req
 }
 func (*UnimplementedDataCoordServer) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetMetrics not implemented")
+}
+func (*UnimplementedDataCoordServer) CompleteCompaction(ctx context.Context, req *CompactionResult) (*commonpb.Status, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CompleteCompaction not implemented")
 }
 
 func RegisterDataCoordServer(s *grpc.Server, srv DataCoordServer) {
@@ -3369,6 +3383,24 @@ func _DataCoord_GetMetrics_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _DataCoord_CompleteCompaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CompactionResult)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DataCoordServer).CompleteCompaction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/milvus.proto.data.DataCoord/CompleteCompaction",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DataCoordServer).CompleteCompaction(ctx, req.(*CompactionResult))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 var _DataCoord_serviceDesc = grpc.ServiceDesc{
 	ServiceName: "milvus.proto.data.DataCoord",
 	HandlerType: (*DataCoordServer)(nil),
@@ -3433,6 +3465,10 @@ var _DataCoord_serviceDesc = grpc.ServiceDesc{
 			MethodName: "GetMetrics",
 			Handler:    _DataCoord_GetMetrics_Handler,
 		},
+		{
+			MethodName: "CompleteCompaction",
+			Handler:    _DataCoord_CompleteCompaction_Handler,
+		},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "data_coord.proto",
@@ -3448,6 +3484,7 @@ type DataNodeClient interface {
 	FlushSegments(ctx context.Context, in *FlushSegmentsRequest, opts ...grpc.CallOption) (*commonpb.Status, error)
 	// https://wiki.lfaidata.foundation/display/MIL/MEP+8+--+Add+metrics+for+proxy
 	GetMetrics(ctx context.Context, in *milvuspb.GetMetricsRequest, opts ...grpc.CallOption) (*milvuspb.GetMetricsResponse, error)
+	Compaction(ctx context.Context, in *CompactionPlan, opts ...grpc.CallOption) (*commonpb.Status, error)
 }
 
 type dataNodeClient struct {
@@ -3503,6 +3540,15 @@ func (c *dataNodeClient) GetMetrics(ctx context.Context, in *milvuspb.GetMetrics
 	return out, nil
 }
 
+func (c *dataNodeClient) Compaction(ctx context.Context, in *CompactionPlan, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	out := new(commonpb.Status)
+	err := c.cc.Invoke(ctx, "/milvus.proto.data.DataNode/Compaction", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DataNodeServer is the server API for DataNode service.
 type DataNodeServer interface {
 	GetComponentStates(context.Context, *internalpb.GetComponentStatesRequest) (*internalpb.ComponentStates, error)
@@ -3511,6 +3557,7 @@ type DataNodeServer interface {
 	FlushSegments(context.Context, *FlushSegmentsRequest) (*commonpb.Status, error)
 	// https://wiki.lfaidata.foundation/display/MIL/MEP+8+--+Add+metrics+for+proxy
 	GetMetrics(context.Context, *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error)
+	Compaction(context.Context, *CompactionPlan) (*commonpb.Status, error)
 }
 
 // UnimplementedDataNodeServer can be embedded to have forward compatible implementations.
@@ -3531,6 +3578,9 @@ func (*UnimplementedDataNodeServer) FlushSegments(ctx context.Context, req *Flus
 }
 func (*UnimplementedDataNodeServer) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetMetrics not implemented")
+}
+func (*UnimplementedDataNodeServer) Compaction(ctx context.Context, req *CompactionPlan) (*commonpb.Status, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Compaction not implemented")
 }
 
 func RegisterDataNodeServer(s *grpc.Server, srv DataNodeServer) {
@@ -3627,6 +3677,24 @@ func _DataNode_GetMetrics_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _DataNode_Compaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CompactionPlan)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DataNodeServer).Compaction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/milvus.proto.data.DataNode/Compaction",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DataNodeServer).Compaction(ctx, req.(*CompactionPlan))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 var _DataNode_serviceDesc = grpc.ServiceDesc{
 	ServiceName: "milvus.proto.data.DataNode",
 	HandlerType: (*DataNodeServer)(nil),
@@ -3650,6 +3718,10 @@ var _DataNode_serviceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetMetrics",
 			Handler:    _DataNode_GetMetrics_Handler,
+		},
+		{
+			MethodName: "Compaction",
+			Handler:    _DataNode_Compaction_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
