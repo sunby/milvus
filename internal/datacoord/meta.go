@@ -430,6 +430,14 @@ func (m *meta) SetLastFlushTime(segmentID UniqueID, t time.Time) {
 	m.segments.SetFlushTime(segmentID, t)
 }
 
+// SetSegmentCompacting sets compaction state for segment
+func (m *meta) SetSegmentCompacting(segmentID UniqueID, compacting bool) {
+	m.Lock()
+	defer m.Unlock()
+
+	m.segments.SetIsCompacting(segmentID, compacting)
+}
+
 // MoveSegmentBinlogs migration logic, moving segment binlong information for legacy keys
 func (m *meta) MoveSegmentBinlogs(segmentID UniqueID, oldPathPrefix string, field2Binlogs map[UniqueID][]string) error {
 	m.Lock()

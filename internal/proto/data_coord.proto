@@ -33,6 +33,8 @@ service DataCoord {
 
   // https://wiki.lfaidata.foundation/display/MIL/MEP+8+--+Add+metrics+for+proxy
   rpc GetMetrics(milvus.GetMetricsRequest) returns (milvus.GetMetricsResponse) {}
+  rpc Compaction(CompactionPlan) returns (common.Status) {}
+  rpc CompleteCompaction()
 }
 
 service DataNode {
@@ -200,6 +202,7 @@ message SegmentInfo {
   repeated FieldBinlog binlogs = 11;
   repeated FieldBinlog statslogs = 12;
   repeated DeltaLogInfo deltalogs = 13;
+  
 }
 
 message SegmentStartPosition {
