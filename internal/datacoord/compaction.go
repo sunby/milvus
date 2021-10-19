@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"sync"
-	"time"
 
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/util/tsoutil"
@@ -39,11 +38,10 @@ const (
 var errNotEnoughDataNode = errors.New("there is not enough datanode")
 
 type compactionTask struct {
-	triggerInfo  *compactionSignal
-	timerecorder *compactionTimeRecorder
-	plan         *datapb.CompactionPlan
-	state        compactionTaskState
-	dataNodeID   int64
+	triggerInfo *compactionSignal
+	plan        *datapb.CompactionPlan
+	state       compactionTaskState
+	dataNodeID  int64
 }
 
 func (t *compactionTask) shadowClone(opts ...compactionTaskOpt) *compactionTask {
@@ -63,6 +61,7 @@ var _ compactionPlanContext = (*compactionPlanHandler)(nil)
 type compactionPlanHandler struct {
 	plans    map[int64]*compactionTask // planid -> task
 	sessions *SessionManager
+	meta     *meta
 	mu       sync.RWMutex
 }
 
@@ -85,6 +84,8 @@ func (c *compactionPlanHandler) execCompactionPlan(plan *datapb.CompactionPlan) 
 	}
 
 	// TODO change segment state in meta and send rpc
+	c.setSegmentsCompacting(plan, true)
+
 	task := &compactionTask{
 		plan:       plan,
 		state:      executing,
@@ -123,6 +124,14 @@ func (c *compactionPlanHandler) findNodeWithLeastTask(sessions []*Session) (int6
 	}
 
 	return node, nil
+}
+
+func (c *compactionPlanHandler) setSegmentsCompacting(plan *datapb.CompactionPlan, compacting bool) {
+	for _, mg := range plan.GetMergeGroup() {
+		for _, tmp := range mg.GetSegmentBinlogs() {
+			c.meta.SetSegmentCompacting(tmp.GetSegmentID(), compacting)
+		}
+	}
 }
 
 // completeCompaction record the result of a compaction
@@ -194,33 +203,4 @@ func setState(state compactionTaskState) compactionTaskOpt {
 	return func(task *compactionTask) {
 		task.state = state
 	}
-}
-
-type compactionTimeRecorder struct {
-	planGenerationStartTime time.Time
-	planGenerationEndTime   time.Time
-	planExecutionStartTime  time.Time
-	planExecutionEndTime    time.Time
-}
-
-func (r *compactionTimeRecorder) startGeneratePlan() {
-	r.planGenerationStartTime = time.Now()
-}
-
-func (r *compactionTimeRecorder) endGeneratePlan() {
-	r.planGenerationEndTime = time.Now()
-}
-
-func (r *compactionTimeRecorder) startExecutePlan() {
-	r.planExecutionStartTime = time.Now()
-}
-
-func (r *compactionTimeRecorder) endExecutePlan() {
-	r.planExecutionEndTime = time.Now()
-}
-
-func (r *compactionTimeRecorder) String() string {
-	return fmt.Sprintf("planGenerationCost: %d, planExecutionCost: %d",
-		r.planGenerationEndTime.Sub(r.planGenerationStartTime).Milliseconds(),
-		r.planExecutionEndTime.Sub(r.planExecutionStartTime).Milliseconds())
 }

@@ -33,6 +33,8 @@ service DataCoord {
 
   // https://wiki.lfaidata.foundation/display/MIL/MEP+8+--+Add+metrics+for+proxy
   rpc GetMetrics(milvus.GetMetricsRequest) returns (milvus.GetMetricsResponse) {}
+  rpc Compaction(CompactionPlan) returns (common.Status) {}
+  rpc CompleteCompaction()
 }
 
 service DataNode {
@@ -200,6 +202,7 @@ message SegmentInfo {
   repeated FieldBinlog binlogs = 11;
   repeated FieldBinlog statslogs = 12;
   repeated DeltaLogInfo deltalogs = 13;
+  
 }
 
 message SegmentStartPosition {
@@ -301,11 +304,6 @@ message ChannelWatchInfo {
     ChannelWatchState state = 3;
 }
 
-message CompactionLog {
-  string path = 1;
-  bool in_time_travel =2;
-}
-
 enum CompactionType {
   UndefinedCompaction = 0;
   InnerCompaction = 1;
@@ -315,6 +313,8 @@ enum CompactionType {
 message CompactionSegmentBinlogs {
   int64 segmentID = 1;
   repeated FieldBinlog fieldBinlogs = 2;
+  repeated FieldBinlog field2StatslogPaths = 3;
+  repeated DeltaLogInfo deltalogs = 4;
 }
 
 message CompactionMergeGroup {
@@ -333,8 +333,9 @@ message CompactionPlan {
 message CompactionResult {
   int64 planID = 1;
   int64 segmentID = 2;
-  repeated string insert_logs = 3;
-  repeated string delta_logs = 4;
+  repeated FieldBinlog insert_logs = 3;
+  repeated FieldBinlog field2StatslogPaths = 8;
+  repeated DeltaLogInfo deltalogs = 9;
 }
 
 // Deprecated
