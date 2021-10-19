@@ -293,3 +293,7 @@ func (s *Server) FlushSegments(ctx context.Context, req *datapb.FlushSegmentsReq
 func (s *Server) GetMetrics(ctx context.Context, request *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
 	return s.datanode.GetMetrics(ctx, request)
 }
+
+func (s *Server) Compaction(_ context.Context, _ *datapb.CompactionPlan) (*commonpb.Status, error) {
+	panic("not implemented") // TODO: Implement
+}
