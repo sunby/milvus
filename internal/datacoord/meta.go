@@ -460,6 +460,31 @@ func (m *meta) MoveSegmentBinlogs(segmentID UniqueID, oldPathPrefix string, fiel
 	return m.client.MultiSaveAndRemoveWithPrefix(kv, removals)
 }
 
+func (m *meta) CompleteCompaction(removed []UniqueID, result *datapb.CompactionResult) {
+	m.Lock()
+	defer m.Unlock()
+
+	segments := make([]*SegmentInfo, 0, len(removed)+1)
+	for _, rid := range removed {
+		if segment := m.segments.GetSegment(rid); segment != nil {
+			cloned := segment.Clone()
+			cloned.State = commonpb.SegmentState_NotExist
+			segments = append(segments, cloned)
+		}
+	}
+
+	// segment := &SegmentInfo{
+	// 	SegmentInfo: &datapb.SegmentInfo{
+	// 		ID: result.GetSegmentID(),
+	// 		CollectionID: segments[0].CollectionID,
+	// 		PartitionID: segments[0].PartitionID,
+	// 		InsertChannel: segments[0].InsertChannel,
+	// 		NumOfRows: ,
+	// 		State:
+	// 	},
+	// }
+}
+
 // saveSegmentInfo utility function saving segment info into kv store
 func (m *meta) saveSegmentInfo(segment *SegmentInfo) error {
 	segBytes, err := proto.Marshal(segment.SegmentInfo)

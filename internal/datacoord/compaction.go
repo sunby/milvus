@@ -1,17 +1,22 @@
 package datacoord
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/util/tsoutil"
 )
 
 // TODO this num should be determined by resources of datanode, for now, we set to a fixed value for simple
-const maxParallelCompactionTaskNum = 100
+const (
+	maxParallelCompactionTaskNum = 100
+	compactionTimeout            = 10 * time.Second
+)
 
 type compactionPlanContext interface {
 	// execCompactionPlan start to execute plan and return immediately
@@ -83,8 +88,12 @@ func (c *compactionPlanHandler) execCompactionPlan(plan *datapb.CompactionPlan) 
 		return err
 	}
 
-	// TODO change segment state in meta and send rpc
 	c.setSegmentsCompacting(plan, true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), compactionTimeout)
+	defer cancel()
+	// FIXME: check response of compaction call and restore segment state if failed
+	c.sessions.Compaction(ctx, nodeID, plan)
 
 	task := &compactionTask{
 		plan:       plan,
@@ -149,6 +158,7 @@ func (c *compactionPlanHandler) completeCompaction(result *datapb.CompactionResu
 	}
 
 	// TODO merge segments in meta
+	
 	c.plans[planID] = c.plans[planID].shadowClone(setState(completed))
 	return nil
 }
