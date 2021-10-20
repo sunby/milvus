@@ -25,8 +25,7 @@ import (
 )
 
 const (
-	flushTimeout      = 5 * time.Second
-	compactionTimeout = 5 * time.Second
+	flushTimeout = 5 * time.Second
 )
 
 // SessionManager provides the grpc interfaces of cluster
@@ -131,9 +130,6 @@ func (c *SessionManager) execCompaction(ctx context.Context, nodeID int64, plan 
 		log.Warn("failed to get client", zap.Int64("nodeID", nodeID), zap.Error(err))
 		return
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, compactionTimeout)
-	defer cancel()
 
 	resp, err := cli.Compaction(ctx, plan)
 	if err := VerifyResponse(resp, err); err != nil {

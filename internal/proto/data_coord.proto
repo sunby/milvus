@@ -333,9 +333,10 @@ message CompactionPlan {
 message CompactionResult {
   int64 planID = 1;
   int64 segmentID = 2;
-  repeated FieldBinlog insert_logs = 3;
-  repeated FieldBinlog field2StatslogPaths = 8;
-  repeated DeltaLogInfo deltalogs = 9;
+  int64 num_of_rows = 3;
+  repeated FieldBinlog insert_logs = 4;
+  repeated FieldBinlog field2StatslogPaths = 5;
+  repeated DeltaLogInfo deltalogs = 6;
 }
 
 // Deprecated
