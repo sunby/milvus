@@ -556,3 +556,7 @@ func (s *Server) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest
 		Response: "",
 	}, nil
 }
+
+func (s *Server) CompleteCompaction(ctx context.Context, req *datapb.CompactionResult) (*commonpb.Status, error) {
+	panic("not implemented") // TODO: Implement
+}

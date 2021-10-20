@@ -715,3 +715,7 @@ func (node *DataNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRe
 		Response: "",
 	}, nil
 }
+
+func (node *DataNode) Compaction(ctx context.Context, req *datapb.CompactionPlan) (*commonpb.Status, error) {
+	panic("not implemented") // TODO: Implement
+}

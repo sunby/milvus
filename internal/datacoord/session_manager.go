@@ -13,6 +13,7 @@ package datacoord
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -23,7 +24,10 @@ import (
 	"go.uber.org/zap"
 )
 
-const flushTimeout = 5 * time.Second
+const (
+	flushTimeout      = 5 * time.Second
+	compactionTimeout = 5 * time.Second
+)
 
 // SessionManager provides the grpc interfaces of cluster
 type SessionManager struct {
@@ -100,20 +104,11 @@ func (c *SessionManager) Flush(ctx context.Context, nodeID int64, req *datapb.Fl
 }
 
 func (c *SessionManager) execFlush(ctx context.Context, nodeID int64, req *datapb.FlushSegmentsRequest) {
-	c.sessions.RLock()
-	session, ok := c.sessions.data[nodeID]
-	c.sessions.RUnlock()
-
-	if !ok {
-		return
-	}
-
-	cli, err := session.GetOrCreateClient(ctx)
+	cli, err := c.getClient(ctx, nodeID)
 	if err != nil {
-		log.Warn("unable to connect to node", zap.Int64("node", nodeID), zap.Error(err))
+		log.Warn("failed to get client", zap.Int64("nodeID", nodeID), zap.Error(err))
 		return
 	}
-
 	ctx, cancel := context.WithTimeout(ctx, flushTimeout)
 	defer cancel()
 
@@ -124,6 +119,41 @@ func (c *SessionManager) execFlush(ctx context.Context, nodeID int64, req *datap
 	}
 
 	log.Debug("success to flush", zap.Int64("node", nodeID), zap.Any("segments", req))
+}
+
+func (c *SessionManager) Compaction(ctx context.Context, nodeID int64, plan *datapb.CompactionPlan) {
+	go c.execCompaction(ctx, nodeID, plan)
+}
+
+func (c *SessionManager) execCompaction(ctx context.Context, nodeID int64, plan *datapb.CompactionPlan) {
+	cli, err := c.getClient(ctx, nodeID)
+	if err != nil {
+		log.Warn("failed to get client", zap.Int64("nodeID", nodeID), zap.Error(err))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, compactionTimeout)
+	defer cancel()
+
+	resp, err := cli.Compaction(ctx, plan)
+	if err := VerifyResponse(resp, err); err != nil {
+		log.Warn("failed to execute compaction", zap.Int64("node", nodeID), zap.Error(err), zap.Int64("planID", plan.GetPlanID()))
+		return
+	}
+
+	log.Debug("success to flush", zap.Int64("node", nodeID), zap.Any("planID", plan.GetPlanID()))
+}
+
+func (c *SessionManager) getClient(ctx context.Context, nodeID int64) (types.DataNode, error) {
+	c.sessions.RLock()
+	session, ok := c.sessions.data[nodeID]
+	c.sessions.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("can not find session of node %d", nodeID)
+	}
+
+	return session.GetOrCreateClient(ctx)
 }
 
 // Close release sessions
