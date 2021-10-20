@@ -87,14 +87,17 @@ func (f *ConsistentHashChannelPolicyFactory) NewDeregisterPolicy() DeregisterPol
 	return ConsistentHashDeregisterPolicy(f.hashring)
 }
 
+// NewAssignPolicy create a new assign policy
 func (f *ConsistentHashChannelPolicyFactory) NewAssignPolicy() ChannelAssignPolicy {
 	return ConsistentHashChannelAssignPolicy(f.hashring)
 }
 
+// NewReassignPolicy creates a new reassign policy
 func (f *ConsistentHashChannelPolicyFactory) NewReassignPolicy() ChannelReassignPolicy {
 	return EmptyReassignPolicy
 }
 
+// NewBgChecker creates a new background checker
 func (f *ConsistentHashChannelPolicyFactory) NewBgChecker() ChannelBGChecker {
 	return EmptyBgChecker
 }

@@ -246,8 +246,11 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 		segmentsToFlush = append(segmentsToFlush, currentSegID)
 		bd, ok := ibNode.insertBuffer.Load(currentSegID)
 		var err error
-		buf := bd.(*BufferData)
-		if !ok || buf.size <= 0 { // Buffer empty
+		var buf *BufferData
+		if ok {
+			buf = bd.(*BufferData)
+		}
+		if buf == nil || buf.size <= 0 { // Buffer empty
 			log.Debug(".. Buffer empty ...")
 			err = ibNode.flushManager.flushBufferData(nil, currentSegID, true, endPositions[0])
 		} else { // Buffer not empty
@@ -547,6 +550,10 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 
 				fieldData.NumRows = append(fieldData.NumRows, int64(len(msg.RowData)))
 			}
+			if field.IsPrimaryKey {
+				// update segment pk filter
+				ibNode.replica.updateSegmentPKRange(currentSegID, fieldData.Data)
+			}
 
 		case schemapb.DataType_Float:
 			if _, ok := idata.Data[field.FieldID]; !ok {
@@ -595,8 +602,6 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 	// store current endPositions as Segment->EndPostion
 	ibNode.replica.updateSegmentEndPosition(currentSegID, endPos)
 
-	// update segment pk filter
-	ibNode.replica.updateSegmentPKRange(currentSegID, msg.GetRowIDs())
 	return nil
 }
 
