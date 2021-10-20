@@ -64,10 +64,11 @@ func (t *compactionTask) shadowClone(opts ...compactionTaskOpt) *compactionTask 
 var _ compactionPlanContext = (*compactionPlanHandler)(nil)
 
 type compactionPlanHandler struct {
-	plans    map[int64]*compactionTask // planid -> task
-	sessions *SessionManager
-	meta     *meta
-	mu       sync.RWMutex
+	plans            map[int64]*compactionTask // planid -> task
+	sessions         *SessionManager
+	meta             *meta
+	mu               sync.RWMutex
+	executingTaskNum int
 }
 
 func newCompactionPlanHandler(sessions *SessionManager) *compactionPlanHandler {
@@ -101,6 +102,7 @@ func (c *compactionPlanHandler) execCompactionPlan(plan *datapb.CompactionPlan) 
 		dataNodeID: nodeID,
 	}
 	c.plans[plan.PlanID] = task
+	c.executingTaskNum++
 	return nil
 }
 
@@ -157,10 +159,39 @@ func (c *compactionPlanHandler) completeCompaction(result *datapb.CompactionResu
 		return fmt.Errorf("plan %d's state is %v", planID, c.plans[planID].state)
 	}
 
-	// TODO merge segments in meta
-	
+	plan := c.plans[planID].plan
+	switch plan.GetType() {
+	case datapb.CompactionType_InnerCompaction:
+		if err := c.handleInnerCompactionResult(plan, result); err != nil {
+			return err
+		}
+	case datapb.CompactionType_MergeCompaction:
+		if err := c.handleMergeCompactionResult(plan, result); err != nil {
+			return err
+		}
+	default:
+		return errors.New("unknown compaction type")
+	}
 	c.plans[planID] = c.plans[planID].shadowClone(setState(completed))
+	c.executingTaskNum--
+	// FIXME: when to remove plan
 	return nil
+}
+
+func (c *compactionPlanHandler) handleInnerCompactionResult(plan *datapb.CompactionPlan, result *datapb.CompactionResult) error {
+	mergeGroup := plan.GetMergeGroup()[0]
+	segmentBinlogs := mergeGroup.GetSegmentBinlogs()[0]
+	return c.meta.CompleteInnerCompaction(segmentBinlogs, result)
+}
+
+func (c *compactionPlanHandler) handleMergeCompactionResult(plan *datapb.CompactionPlan, result *datapb.CompactionResult) error {
+	compacted := make([]UniqueID, 0)
+	for _, mg := range plan.GetMergeGroup() {
+		for _, s := range mg.GetSegmentBinlogs() {
+			compacted = append(compacted, s.GetSegmentID())
+		}
+	}
+	return c.meta.CompleteMergeCompaction(compacted, result)
 }
 
 // getCompaction return compaction task. If planId does not exist, return nil.
@@ -178,23 +209,29 @@ func (c *compactionPlanHandler) expireCompaction(ts Timestamp) error {
 
 	tasks := c.getExecutingCompactions()
 	for _, task := range tasks {
-		starttime, _ := tsoutil.ParseTS(task.plan.StartTime)
-		now, _ := tsoutil.ParseTS(ts)
-		s := int32(now.Sub(starttime).Seconds())
-		if s >= task.plan.TimeoutInSeconds {
-			planID := task.plan.PlanID
-			// TODO change segment meta
-			c.plans[planID] = c.plans[planID].shadowClone(setState(timeout))
+		if !c.isTimeout(ts, task.plan.GetStartTime(), task.plan.GetTimeoutInSeconds()) {
+			continue
 		}
+
+		c.setSegmentsCompacting(task.plan, false)
+
+		planID := task.plan.PlanID
+		c.plans[planID] = c.plans[planID].shadowClone(setState(timeout))
+		c.executingTaskNum--
 	}
 
 	return nil
 }
 
+func (c *compactionPlanHandler) isTimeout(now Timestamp, start Timestamp, timeout int32) bool {
+	starttime, _ := tsoutil.ParseTS(start)
+	ts, _ := tsoutil.ParseTS(now)
+	return int32(ts.Sub(starttime).Seconds()) >= timeout
+}
+
 // isFull return true if the task pool is full
 func (c *compactionPlanHandler) isFull() bool {
-	// TODO check is full
-	return true
+	return c.executingTaskNum >= maxParallelCompactionTaskNum
 }
 
 func (c *compactionPlanHandler) getExecutingCompactions() []*compactionTask {

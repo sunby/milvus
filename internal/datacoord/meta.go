@@ -460,7 +460,7 @@ func (m *meta) MoveSegmentBinlogs(segmentID UniqueID, oldPathPrefix string, fiel
 	return m.client.MultiSaveAndRemoveWithPrefix(kv, removals)
 }
 
-func (m *meta) CompleteCompaction(removed []UniqueID, result *datapb.CompactionResult) {
+func (m *meta) CompleteMergeCompaction(removed []UniqueID, result *datapb.CompactionResult) error {
 	m.Lock()
 	defer m.Unlock()
 
@@ -473,16 +473,140 @@ func (m *meta) CompleteCompaction(removed []UniqueID, result *datapb.CompactionR
 		}
 	}
 
-	// segment := &SegmentInfo{
-	// 	SegmentInfo: &datapb.SegmentInfo{
-	// 		ID: result.GetSegmentID(),
-	// 		CollectionID: segments[0].CollectionID,
-	// 		PartitionID: segments[0].PartitionID,
-	// 		InsertChannel: segments[0].InsertChannel,
-	// 		NumOfRows: ,
-	// 		State:
-	// 	},
-	// }
+	segment := &SegmentInfo{
+		SegmentInfo: &datapb.SegmentInfo{
+			ID:            result.GetSegmentID(),
+			CollectionID:  segments[0].CollectionID,
+			PartitionID:   segments[0].PartitionID,
+			InsertChannel: segments[0].InsertChannel,
+			NumOfRows:     result.NumOfRows,
+			State:         commonpb.SegmentState_Flushing,
+			MaxRowNum:     segments[0].MaxRowNum,
+		},
+		isCompacting: false,
+	}
+
+	data := make(map[string]string)
+
+	for _, s := range segments {
+		k, v, err := m.marshal(s)
+		if err != nil {
+			return err
+		}
+		data[k] = v
+	}
+	k, v, err := m.marshal(segment)
+	if err != nil {
+		return err
+	}
+	data[k] = v
+
+	if err := m.saveKvTxn(data); err != nil {
+		return err
+	}
+
+	for _, s := range segments {
+		m.segments.DropSegment(s.GetID())
+	}
+
+	m.segments.SetSegment(segment.GetID(), segment)
+	return nil
+}
+
+func (m *meta) CompleteInnerCompaction(segmentBinlogs *datapb.CompactionSegmentBinlogs, result *datapb.CompactionResult) error {
+	m.Lock()
+	defer m.Unlock()
+
+	if segment := m.segments.GetSegment(segmentBinlogs.SegmentID); segment != nil {
+		cloned := segment.Clone()
+		cloned.Binlogs = m.updateBinlogs(cloned.GetBinlogs(), segmentBinlogs.GetFieldBinlogs(), result.GetInsertLogs())
+		cloned.Statslogs = m.updateBinlogs(cloned.GetStatslogs(), segmentBinlogs.GetField2StatslogPaths(), result.GetField2StatslogPaths())
+		cloned.Deltalogs = m.updateDeltalogs(cloned.GetDeltalogs(), segmentBinlogs.GetDeltalogs(), result.GetDeltalogs())
+		if err := m.saveSegmentInfo(cloned); err != nil {
+			return err
+		}
+
+		cloned.isCompacting = false
+
+		m.segments.SetSegment(cloned.GetID(), cloned)
+	}
+	return nil
+}
+
+func (m *meta) updateBinlogs(origin []*datapb.FieldBinlog, removes []*datapb.FieldBinlog, adds []*datapb.FieldBinlog) []*datapb.FieldBinlog {
+	fieldBinlogs := make(map[int64]map[string]struct{})
+	for _, f := range origin {
+		fid := f.GetFieldID()
+		if _, ok := fieldBinlogs[fid]; !ok {
+			fieldBinlogs[fid] = make(map[string]struct{})
+		}
+		for _, p := range f.GetBinlogs() {
+			fieldBinlogs[fid][p] = struct{}{}
+		}
+	}
+
+	for _, f := range removes {
+		fid := f.GetFieldID()
+		if _, ok := fieldBinlogs[fid]; !ok {
+			continue
+		}
+		for _, p := range f.GetBinlogs() {
+			delete(fieldBinlogs[fid], p)
+		}
+	}
+
+	for _, f := range adds {
+		fid := f.GetFieldID()
+		if _, ok := fieldBinlogs[fid]; !ok {
+			fieldBinlogs[fid] = make(map[string]struct{})
+		}
+		for _, p := range f.GetBinlogs() {
+			fieldBinlogs[fid][p] = struct{}{}
+		}
+	}
+
+	res := make([]*datapb.FieldBinlog, 0, len(fieldBinlogs))
+	for fid, logs := range fieldBinlogs {
+		if len(logs) == 0 {
+			continue
+		}
+
+		binlogs := make([]string, 0, len(logs))
+		for path := range logs {
+			binlogs = append(binlogs, path)
+		}
+
+		field := &datapb.FieldBinlog{FieldID: fid, Binlogs: binlogs}
+		res = append(res, field)
+	}
+	return res
+}
+
+func (m *meta) updateDeltalogs(origin []*datapb.DeltaLogInfo, removes []*datapb.DeltaLogInfo, adds []*datapb.DeltaLogInfo) []*datapb.DeltaLogInfo {
+	deltalogs := make(map[string]*datapb.DeltaLogInfo)
+	for _, d := range origin {
+		deltalogs[d.GetDeltaLogPath()] = d
+	}
+
+	for _, r := range removes {
+		delete(deltalogs, r.GetDeltaLogPath())
+	}
+
+	res := make([]*datapb.DeltaLogInfo, 0, len(deltalogs))
+	for _, log := range deltalogs {
+		res = append(res, log)
+	}
+	res = append(res, adds...)
+	return res
+}
+
+func (m *meta) marshal(segment *SegmentInfo) (string, string, error) {
+	segBytes, err := proto.Marshal(segment.SegmentInfo)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to marshal segment info, %v", err)
+	}
+	key := buildSegmentPath(segment.GetCollectionID(), segment.GetPartitionID(), segment.GetID())
+	return key, string(segBytes), nil
 }
 
 // saveSegmentInfo utility function saving segment info into kv store
