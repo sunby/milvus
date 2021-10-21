@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	signalBufferSize              = 100
-	maxLittleSegmentNum           = 10
-	maxCompactionTimeoutInSeconds = 60
+	signalBufferSize               = 100
+	maxLittleSegmentNum            = 10
+	maxCompactionTimeoutInSeconds  = 60
+	singleCompactionRatioThreshold = 0.2
 )
 
 type timetravel struct {
@@ -129,6 +130,10 @@ func (t *compactionTrigger) handleForceSignal(signal *compactionSignal) {
 func (t *compactionTrigger) handleGlobalSignal(signal *compactionSignal) {
 	t1 := time.Now()
 	// 1. find all segments needed to be
+	if t.compactionHandler.isFull() {
+		return
+	}
+
 	// 2. find channel&partition level segments needed to be merged
 	if t.compactionHandler.isFull() {
 		return
@@ -151,9 +156,17 @@ func (t *compactionTrigger) handleGlobalSignal(signal *compactionSignal) {
 func (t *compactionTrigger) handleSignal(signal *compactionSignal) {
 	t1 := time.Now()
 	// 1. check whether segment's binlogs should be compacted or not
-	segment := t.meta.GetSegment(signal.segmentID)
-	if segment != nil {
+	if t.compactionHandler.isFull() {
+		return
+	}
 
+	segment := t.meta.GetSegment(signal.segmentID)
+	singleCompactionPlan, err := t.singleCompaction(segment, signal.timetravel)
+	if err != nil {
+		log.Warn("failed to do single compaction", zap.Int64("segmentID", segment.ID), zap.Error(err))
+	} else {
+		log.Info("time cost of generating single compaction plan", zap.Int64("milllis", time.Since(t1).Milliseconds()),
+			zap.Int64("planID", singleCompactionPlan.GetPlanID()))
 	}
 
 	// 2. check whether segments of partition&channel level should be compacted or not
@@ -171,15 +184,18 @@ func (t *compactionTrigger) handleSignal(signal *compactionSignal) {
 		log.Warn("failed to do merge compaction", zap.Error(err))
 	}
 
-	log.Info("%s", zap.Int64("planID", plan.PlanID), zap.Any("time cost", time.Since(t1).Milliseconds()),
+	log.Info("time cost of generating merge compaction", zap.Int64("planID", plan.PlanID), zap.Any("time cost", time.Since(t1).Milliseconds()),
 		zap.String("channel", channel), zap.Int64("partitionID", partitionID))
 }
 
 func (t *compactionTrigger) globalMergeCompaction(timetravel *timetravel, collections ...UniqueID) error {
-	m := t.getGlobalCandidateSegments(collections...)
+	m := t.getGlobalCandidateSegments(collections...) // m is map[channel]map[partition][]segment
 
 	for _, v := range m {
 		for _, segments := range v {
+			if t.compactionHandler.isFull() {
+				return nil
+			}
 			_, err := t.mergeCompaction(segments, timetravel)
 			if err != nil {
 				return err
@@ -265,4 +281,59 @@ func (t *compactionTrigger) fillOriginPlan(plan *datapb.CompactionPlan) error {
 	plan.PlanID = id
 	plan.TimeoutInSeconds = maxCompactionTimeoutInSeconds
 	return nil
+}
+
+func (t *compactionTrigger) shouldDoSingleCompaction(segment *SegmentInfo, timetravel *timetravel) bool {
+	// single compaction only merge insert and delta log beyond the timetravel
+	// segment's insert binlogs dont have time range info, so we wait until the segment's last expire time is less than timetravel
+	// to ensure that all insert logs is beyond the timetravel.
+	// TODO: add meta in insert binlog
+	if segment.LastExpireTime >= timetravel.time {
+		return false
+	}
+
+	deltaLogs := make([]*datapb.DeltaLogInfo, 0)
+	totalDeletedRows := 0
+	for _, l := range segment.GetDeltalogs() {
+		if l.TimestampTo < timetravel.time {
+			deltaLogs = append(deltaLogs, l)
+			totalDeletedRows += int(l.GetRecordEntries())
+		}
+	}
+
+	// TODO: other policy
+	return float32(totalDeletedRows)/float32(segment.NumOfRows) >= singleCompactionRatioThreshold
+}
+
+func (t *compactionTrigger) globalSingleCompaction(segments []*SegmentInfo, timetravel *timetravel) error {
+	for _, segment := range segments {
+		if t.compactionHandler.isFull() {
+			return nil
+		}
+		_, err := t.singleCompaction(segment, timetravel)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (t *compactionTrigger) singleCompaction(segment *SegmentInfo, timetravel *timetravel) (*datapb.CompactionPlan, error) {
+	if segment == nil {
+		return nil, nil
+	}
+
+	if !t.shouldDoSingleCompaction(segment, timetravel) {
+		return nil, nil
+	}
+
+	plan := t.singleCompactionPolicy.generatePlan(segment, timetravel)
+	if plan == nil {
+		return nil, nil
+	}
+
+	if err := t.fillOriginPlan(plan); err != nil {
+		return nil, err
+	}
+	return plan, t.compactionHandler.execCompactionPlan(plan)
 }

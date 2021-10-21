@@ -16,6 +16,36 @@ type mergeCompactionPolicy interface {
 	generatePlan(segments []*SegmentInfo, timetravel *timetravel) *datapb.CompactionPlan
 }
 
+type singleCompactionFunc func(segment *SegmentInfo, timetravel *timetravel) *datapb.CompactionPlan
+
+func (f singleCompactionFunc) generatePlan(segment *SegmentInfo, timetravel *timetravel) *datapb.CompactionPlan {
+	return f(segment, timetravel)
+}
+
+func chooseAllBinlogs(segment *SegmentInfo, timetravel *timetravel) *datapb.CompactionPlan {
+	deltaLogs := make([]*datapb.DeltaLogInfo, 0)
+	for _, l := range segment.GetDeltalogs() {
+		if l.TimestampTo < timetravel.time {
+			deltaLogs = append(deltaLogs, l)
+		}
+	}
+
+	return &datapb.CompactionPlan{
+		MergeGroup: []*datapb.CompactionMergeGroup{
+			{SegmentBinlogs: []*datapb.CompactionSegmentBinlogs{
+				{
+					SegmentID:           segment.GetID(),
+					FieldBinlogs:        segment.GetBinlogs(),
+					Field2StatslogPaths: segment.GetStatslogs(),
+					Deltalogs:           deltaLogs,
+				},
+			}},
+		},
+		Type:       datapb.CompactionType_InnerCompaction,
+		Timetravel: timetravel.time,
+	}
+}
+
 type mergeCompactionFunc func(segments []*SegmentInfo, timetravel *timetravel) *datapb.CompactionPlan
 
 func (f mergeCompactionFunc) generatePlan(segments []*SegmentInfo, timetravel *timetravel) *datapb.CompactionPlan {
@@ -37,7 +67,7 @@ func greedyMergeCompaction(segments []*SegmentInfo, timetravel *timetravel) *dat
 	}
 
 	return &datapb.CompactionPlan{
-		Timetravel: int64(timetravel.time),
+		Timetravel: timetravel.time,
 		Type:       datapb.CompactionType_MergeCompaction,
 		MergeGroup: mergeGroups,
 	}
