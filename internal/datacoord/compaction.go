@@ -40,7 +40,11 @@ const (
 	timeout
 )
 
-var errNotEnoughDataNode = errors.New("there is not enough datanode")
+var (
+	errNotEnoughDataNode = errors.New("there is not enough datanode")
+	errChannelNotWatched = errors.New("channel is not watched")
+	errChannelInBuffer   = errors.New("channel is in buffer")
+)
 
 type compactionTask struct {
 	triggerInfo *compactionSignal
@@ -67,14 +71,17 @@ type compactionPlanHandler struct {
 	plans            map[int64]*compactionTask // planid -> task
 	sessions         *SessionManager
 	meta             *meta
+	chManager        *ChannelManager
 	mu               sync.RWMutex
 	executingTaskNum int
 }
 
-func newCompactionPlanHandler(sessions *SessionManager) *compactionPlanHandler {
+func newCompactionPlanHandler(sessions *SessionManager, cm *ChannelManager, meta *meta) *compactionPlanHandler {
 	return &compactionPlanHandler{
-		plans:    make(map[int64]*compactionTask),
-		sessions: sessions,
+		plans:     make(map[int64]*compactionTask),
+		chManager: cm,
+		meta:      meta,
+		sessions:  sessions,
 	}
 }
 
@@ -83,8 +90,7 @@ func (c *compactionPlanHandler) execCompactionPlan(plan *datapb.CompactionPlan) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	sessions := c.sessions.GetSessions()
-	nodeID, err := c.findNodeWithLeastTask(sessions)
+	nodeID, err := c.chManager.FindWatcher(plan.GetChannel())
 	if err != nil {
 		return err
 	}

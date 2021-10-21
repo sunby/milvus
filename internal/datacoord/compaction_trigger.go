@@ -87,7 +87,7 @@ func (t *compactionTrigger) triggerCompaction(timetravel *timetravel) {
 	t.signals <- signal
 }
 
-// triggerSingleCompaction trigerr a compaction bundled with collection-partiiton-channel-segment
+// triggerSingleCompaction triger a compaction bundled with collection-partiiton-channel-segment
 func (t *compactionTrigger) triggerSingleCompaction(collectionID, partitionID, segmentID int64, channel string, timetravel *timetravel) {
 	signal := &compactionSignal{
 		isForce:      false,

@@ -328,6 +328,7 @@ message CompactionPlan {
   int32 timeout_in_seconds = 4;
   CompactionType type = 5;
   uint64 timetravel = 6;
+  string channel = 7;
 }
 
 message CompactionResult {
