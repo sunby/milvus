@@ -745,6 +745,8 @@ func (s *Server) GetVChanPositions(channel string, collectionID UniqueID, seekFr
 		}
 	}
 
+	pts, _ := tsoutil.ParseTS(seekPosition.Timestamp)
+	log.Debug("get vchan info", zap.Any("channel", channel), zap.Any("pts", pts))
 	return &datapb.VchannelInfo{
 		CollectionID:      collectionID,
 		ChannelName:       channel,
