@@ -483,6 +483,7 @@ func (rmq *rocksmq) Produce(topicName string, messages []ProducerMessage) ([]Uni
 
 	if vals, ok := rmq.consumers.Load(topicName); ok {
 		for _, v := range vals.([]*Consumer) {
+			log.Debug("produce notify", zap.Any("group name", v.GroupName), zap.Any("topic", v.Topic))
 			select {
 			case v.MsgMutex <- struct{}{}:
 				continue

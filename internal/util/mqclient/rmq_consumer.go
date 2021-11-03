@@ -14,7 +14,9 @@ package mqclient
 import (
 	"sync"
 
+	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/util/rocksmq/client/rocksmq"
+	"go.uber.org/zap"
 )
 
 // RmqConsumer is a client that used to consume messages from rocksmq
@@ -39,6 +41,7 @@ func (rc *RmqConsumer) Chan() <-chan ConsumerMessage {
 				for { //nolint:gosimple
 					select {
 					case msg, ok := <-rc.c.Chan():
+						log.Debug("receive rmq consumer msg", zap.Any("sub", rc.Subscription()), zap.Any("topic", rc.c.Topic()))
 						if !ok {
 							close(rc.msgChannel)
 							return

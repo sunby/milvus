@@ -466,6 +466,7 @@ func (ms *mqMsgStream) receiveMsg(consumer mqclient.Consumer) {
 		case <-ms.ctx.Done():
 			return
 		case msg, ok := <-consumer.Chan():
+			log.Debug("consume received", zap.Any("sub", consumer.Subscription()))
 			if !ok {
 				return
 			}

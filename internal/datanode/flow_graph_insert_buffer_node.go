@@ -25,6 +25,7 @@ import (
 	"io"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/opentracing/opentracing-go"
@@ -657,7 +658,10 @@ func (ibNode *insertBufferNode) writeHardTimeTick(ts Timestamp) error {
 		},
 	}
 	msgPack.Msgs = append(msgPack.Msgs, &timeTickMsg)
-	return ibNode.timeTickStream.Produce(&msgPack)
+	t1 := time.Now()
+	ret := ibNode.timeTickStream.Produce(&msgPack)
+	log.Debug("write hard timetick cost", zap.Any("time", time.Since(t1).Milliseconds()))
+	return ret
 }
 
 // uploadMemStates2Coord uploads latest changed segments statistics in DataNode memory to DataCoord

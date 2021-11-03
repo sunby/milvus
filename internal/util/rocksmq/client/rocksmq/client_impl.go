@@ -127,6 +127,7 @@ func (c *client) consume(consumer *consumer) {
 		case <-c.closeCh:
 			return
 		case _, ok := <-consumer.MsgMutex():
+			log.Debug("recieve msg mutex", zap.Any("topic", consumer.topic), zap.Any("consumename", consumer.consumerName))
 			if !ok {
 				// consumer MsgMutex closed, goroutine exit
 				log.Debug("Consumer MsgMutex closed")
@@ -135,6 +136,7 @@ func (c *client) consume(consumer *consumer) {
 
 			for {
 				msg, err := consumer.client.server.Consume(consumer.topic, consumer.consumerName, 1)
+				log.Debug("receive server consume", zap.Any("topic", consumer.topic), zap.Any("consumename", consumer.consumerName), zap.Any("len", len(msg)))
 				if err != nil {
 					log.Debug("Consumer's goroutine cannot consume from (" + consumer.topic +
 						"," + consumer.consumerName + "): " + err.Error())

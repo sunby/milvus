@@ -376,6 +376,7 @@ func (s *Server) startDataNodeTtLoop(ctx context.Context) {
 	ttMsgStream.Start()
 
 	go func() {
+		log.Debug("start tt loop xxxxx")
 		var checker *LongTermChecker
 		if enableTtChecker {
 			checker = NewLongTermChecker(ctx, ttCheckerName, ttMaxInterval, ttCheckerWarnMsg)
@@ -386,13 +387,17 @@ func (s *Server) startDataNodeTtLoop(ctx context.Context) {
 		defer s.serverLoopWg.Done()
 		defer ttMsgStream.Close()
 		for {
+
 			select {
 			case <-ctx.Done():
 				log.Debug("data node tt loop shutdown")
 				return
 			default:
 			}
+			t1 := time.Now()
 			msgPack := ttMsgStream.Consume()
+			t2 := time.Now()
+			log.Debug("consume cost", zap.Any("cost", t2.Sub(t1).Milliseconds()))
 			if msgPack == nil {
 				log.Debug("receive nil tt msg, shutdown tt channel")
 				return
@@ -462,6 +467,8 @@ func (s *Server) startDataNodeTtLoop(ctx context.Context) {
 				}
 			}
 			s.helper.eventAfterHandleDataNodeTt()
+			log.Debug("datacoord tt consume cost", zap.Any("consume", t2.Sub(t1).Milliseconds()),
+				zap.Any("logic", time.Since(t2).Milliseconds()))
 		}
 	}()
 }

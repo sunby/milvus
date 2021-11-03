@@ -34,6 +34,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
+	"github.com/milvus-io/milvus/internal/util/tsoutil"
 
 	"github.com/milvus-io/milvus/internal/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
@@ -1552,4 +1553,10 @@ func initEtcd(etcdEndpoints []string) (*clientv3.Client, error) {
 		return nil, err
 	}
 	return etcdCli, nil
+}
+
+func TestXX(t *testing.T) {
+	pts, _ := tsoutil.ParseTS(428830251101454339)
+	log.Debug("xxxx", zap.Any("pts", pts.UTC()))
+	assert.Equal(t, 1, 2)
 }
