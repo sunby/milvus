@@ -766,7 +766,14 @@ func (s *Server) ManualCompaction(ctx context.Context, req *milvuspb.ManualCompa
 		return resp, nil
 	}
 
-	id, err := s.compactionTrigger.forceTriggerCompaction(req.CollectionID, &timetravel{req.Timetravel})
+	tt, err := getTimetravelReverseTime(ctx, s.allocator)
+	if err != nil {
+		log.Warn("failed to get timetravel reverse time", zap.Error(err))
+		resp.Status.Reason = err.Error()
+		return resp, nil
+	}
+
+	id, err := s.compactionTrigger.forceTriggerCompaction(req.CollectionID, tt)
 	if err != nil {
 		log.Error("failed to trigger manual compaction", zap.Int64("collectionID", req.GetCollectionID()), zap.Error(err))
 		resp.Status.Reason = err.Error()
