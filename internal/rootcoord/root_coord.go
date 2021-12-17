@@ -1401,8 +1401,12 @@ func (c *Core) ShowCollections(ctx context.Context, in *milvuspb.ShowCollections
 		}, nil
 	}
 
-	log.Debug("ShowCollections", zap.String("role", typeutil.RootCoordRole),
-		zap.String("dbname", in.DbName), zap.Int64("msgID", in.Base.MsgID))
+	log.Debug("received show collections request",
+		zap.String("role", typeutil.RootCoordRole),
+		zap.String("dbname", in.DbName),
+		zap.Int64("msgID", in.Base.MsgID),
+	)
+
 	t := &ShowCollectionReqTask{
 		baseReqTask: baseReqTask{
 			ctx:  ctx,
@@ -1413,15 +1417,22 @@ func (c *Core) ShowCollections(ctx context.Context, in *milvuspb.ShowCollections
 	}
 	err := executeTask(t)
 	if err != nil {
-		log.Error("ShowCollections failed", zap.String("role", typeutil.RootCoordRole),
-			zap.String("dbname", in.DbName), zap.Int64("msgID", in.Base.MsgID), zap.Error(err))
+		log.Error("failed to execute show collections task",
+			zap.String("role", typeutil.RootCoordRole),
+			zap.String("dbname", in.DbName),
+			zap.Int64("msgID", in.Base.MsgID),
+			zap.Error(err),
+		)
 		return &milvuspb.ShowCollectionsResponse{
-			Status: failStatus(commonpb.ErrorCode_UnexpectedError, "ShowCollections failed: "+err.Error()),
+			Status: failStatus(commonpb.ErrorCode_UnexpectedError, fmt.Sprintf("failed to execute show collections task: %s", err.Error())),
 		}, nil
 	}
-	log.Debug("ShowCollections success", zap.String("role", typeutil.RootCoordRole),
-		zap.String("dbname", in.DbName), zap.Int("num of collections", len(t.Rsp.CollectionNames)),
-		zap.Int64("msgID", in.Base.MsgID))
+	log.Debug("success to show collections",
+		zap.String("role", typeutil.RootCoordRole),
+		zap.String("dbname", in.DbName),
+		zap.Int("num of collections", len(t.Rsp.CollectionNames)),
+		zap.Int64("msgID", in.Base.MsgID),
+	)
 
 	metrics.RootCoordShowCollectionsCounter.WithLabelValues(metricProxy(in.Base.SourceID), MetricRequestsSuccess).Inc()
 	t.Rsp.Status = succStatus()
