@@ -2,8 +2,8 @@ cluster:
   enabled: true
 image:
   all:
-    repository: milvusdb/milvus-dev
-    tag: master-latest
+    repository: harbor.zilliz.cc/milvus-dev/milvus
+    tag: sunby-set_wait_for_ready_false-20211227
     pullPolicy: IfNotPresent
 
 etcd:
