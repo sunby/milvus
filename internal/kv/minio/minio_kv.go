@@ -192,10 +192,7 @@ func (kv *MinIOKV) Save(key, value string) error {
 	reader := strings.NewReader(value)
 	_, err := kv.minioClient.PutObject(kv.ctx, kv.bucketName, key, reader, int64(len(value)), minio.PutObjectOptions{})
 
-	if err != nil {
-		return err
-	}
-
+	log.Debug("minio save", zap.String("key", key), zap.Any("value", value), zap.Error(err))
 	return err
 }
 
@@ -216,6 +213,7 @@ func (kv *MinIOKV) MultiSave(kvs map[string]string) error {
 
 // RemoveWithPrefix removes all objects with the same prefix @prefix from minio.
 func (kv *MinIOKV) RemoveWithPrefix(prefix string) error {
+	log.Debug("minio remove with preifx", zap.Any("prefix", prefix))
 	objectsCh := make(chan minio.ObjectInfo)
 
 	go func() {
@@ -237,6 +235,7 @@ func (kv *MinIOKV) RemoveWithPrefix(prefix string) error {
 // Remove deletes an object with @key.
 func (kv *MinIOKV) Remove(key string) error {
 	err := kv.minioClient.RemoveObject(kv.ctx, kv.bucketName, string(key), minio.RemoveObjectOptions{})
+	log.Debug("minio remove", zap.Any("key", key), zap.Error(err))
 	return err
 }
 

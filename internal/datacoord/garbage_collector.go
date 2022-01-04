@@ -140,6 +140,7 @@ func (gc *garbageCollector) scan() {
 				e++
 				// ignore error since it could be cleaned up next time
 				_ = gc.option.cli.RemoveObject(context.TODO(), gc.option.bucketName, info.Key, minio.RemoveObjectOptions{})
+				log.Debug("gc remove object", zap.Any("key", info.Key))
 			}
 		}
 	}
