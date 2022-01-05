@@ -192,7 +192,7 @@ func (kv *MinIOKV) Save(key, value string) error {
 	reader := strings.NewReader(value)
 	_, err := kv.minioClient.PutObject(kv.ctx, kv.bucketName, key, reader, int64(len(value)), minio.PutObjectOptions{})
 
-	log.Debug("minio save", zap.String("key", key), zap.Any("value", value), zap.Error(err))
+	log.Debug("minio save", zap.String("key", key), zap.Error(err))
 	return err
 }
 
