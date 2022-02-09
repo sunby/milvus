@@ -511,7 +511,7 @@ class TestIndexBase:
         expected: return search success
         """
         result = connect.insert(collection, default_entities)
-        connect.flush([collection])
+        # connect.flush([collection])
         connect.create_index(collection, field_name, get_simple_index)
         log.info(connect.describe_index(collection, ""))
         nq = get_nq

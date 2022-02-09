@@ -18,8 +18,8 @@ namespace = "milvus"
 default_flush_interval = 1
 big_flush_interval = 1000
 default_drop_interval = 3
-default_dim = 128
-default_nb = 3000
+default_dim = 512
+default_nb = 10000000
 default_top_k = 10
 max_top_k = 16384
 max_partition_num = 4096
@@ -855,12 +855,12 @@ def gen_index():
 
 def gen_simple_index():
     index_params = []
-    for i in range(len(all_index_types)):
-        if all_index_types[i] in binary_support():
-            continue
-        dic = {"index_type": all_index_types[i], "metric_type": "L2"}
-        dic.update({"params": default_index_params[i]})
-        index_params.append(dic)
+    # for i in range(len(all_index_types)):
+    #     if all_index_types[i] in binary_support():
+    #         continue
+    dic = {"index_type": "IVF_PQ", "metric_type": "IP"}
+    dic.update({"params": {"nlist": 500, "m": 64, "nbits": 8}})
+    index_params.append(dic)
     return index_params
 
 
