@@ -97,7 +97,8 @@ type QueryCoord struct {
 
 	stateCode atomic.Value
 
-	msFactory msgstream.Factory
+	msFactory      msgstream.Factory
+	queryNodesInfo *queryNodesInfo
 }
 
 // Register register query service at etcd
@@ -378,11 +379,10 @@ func (qc *QueryCoord) watchNodeLoop() {
 			}
 			switch event.EventType {
 			case sessionutil.SessionAddEvent:
-				serverID := event.Session.ServerID
-				log.Debug("start add a QueryNode to cluster", zap.Any("nodeID", serverID))
-				err := qc.cluster.registerNode(ctx, event.Session, serverID, disConnect)
+				log.Debug("start add a QueryNode to cluster", zap.Any("nodeID", event.Session.ServerID))
+				err := qc.queryNodesInfo.registerNode(ctx, event.Session, disConnect)
 				if err != nil {
-					log.Error("QueryCoord failed to register a QueryNode", zap.Int64("nodeID", serverID), zap.String("error info", err.Error()))
+					log.Error("QueryCoord failed to register a QueryNode", zap.Int64("nodeID", event.Session.ServerID), zap.String("error info", err.Error()))
 				}
 				qc.metricsCacheManager.InvalidateSystemInfoMetrics()
 			case sessionutil.SessionDelEvent:
@@ -490,9 +490,9 @@ func (qc *QueryCoord) loadBalanceSegmentLoop() {
 			nodeID2SegmentInfos := make(map[int64]map[UniqueID]*querypb.SegmentInfo)
 			var availableNodeIDs []int64
 			for _, nodeID := range onlineNodeIDs {
-				nodeInfo, err := qc.cluster.getNodeInfoByID(nodeID)
-				if err != nil {
-					log.Warn("loadBalanceSegmentLoop: get node info from QueryNode failed", zap.Int64("nodeID", nodeID), zap.Error(err))
+				nodeInfo := qc.queryNodesInfo.getNode(nodeID)
+				if nodeInfo == nil {
+					log.Warn("loadBalanceSegmentLoop: get node info from QueryNode failed", zap.Int64("nodeID", nodeID))
 					continue
 				}
 

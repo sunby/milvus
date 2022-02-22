@@ -21,9 +21,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/milvus-io/milvus/internal/kv"
+
 	"google.golang.org/grpc"
 
-	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
@@ -42,7 +43,7 @@ type queryNodeClientMock struct {
 	addr string
 }
 
-func newQueryNodeTest(ctx context.Context, address string, id UniqueID, kv *etcdkv.EtcdKV) (Node, error) {
+func newQueryNodeTest(ctx context.Context, address string, id UniqueID, kv kv.TxnKV, state nodeState) (Node, error) {
 	watchedChannels := make(map[UniqueID]*querypb.QueryChannelInfo)
 	watchedDeltaChannels := make(map[UniqueID][]*datapb.VchannelInfo)
 	childCtx, cancel := context.WithCancel(ctx)
@@ -60,6 +61,7 @@ func newQueryNodeTest(ctx context.Context, address string, id UniqueID, kv *etcd
 		kvClient:             kv,
 		watchedQueryChannels: watchedChannels,
 		watchedDeltaChannels: watchedDeltaChannels,
+		state:                state,
 	}
 
 	return node, nil

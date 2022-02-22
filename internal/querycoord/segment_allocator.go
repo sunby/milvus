@@ -34,18 +34,18 @@ func defaultSegAllocatePolicy() SegmentAllocatePolicy {
 const shuffleWaitInterval = 1 * time.Second
 
 // SegmentAllocatePolicy helper function definition to allocate Segment to queryNode
-type SegmentAllocatePolicy func(ctx context.Context, reqs []*querypb.LoadSegmentsRequest, cluster Cluster, metaCache Meta, wait bool, excludeNodeIDs []int64, includeNodeIDs []int64) error
+type SegmentAllocatePolicy func(ctx context.Context, reqs []*querypb.LoadSegmentsRequest, queryNodesInfo *queryNodesInfo, metaCache Meta, wait bool, excludeNodeIDs []int64, includeNodeIDs []int64) error
 
 // shuffleSegmentsToQueryNode shuffle segments to online nodes
 // returned are noded id for each segment, which satisfies:
 //     len(returnedNodeIds) == len(segmentIDs) && segmentIDs[i] is assigned to returnedNodeIds[i]
-func shuffleSegmentsToQueryNode(ctx context.Context, reqs []*querypb.LoadSegmentsRequest, cluster Cluster, metaCache Meta, wait bool, excludeNodeIDs []int64, includeNodeIDs []int64) error {
+func shuffleSegmentsToQueryNode(ctx context.Context, reqs []*querypb.LoadSegmentsRequest, queryNodesInfo *queryNodesInfo, metaCache Meta, wait bool, excludeNodeIDs []int64, includeNodeIDs []int64) error {
 	if len(reqs) == 0 {
 		return nil
 	}
 
 	for {
-		onlineNodeIDs := cluster.onlineNodeIDs()
+		onlineNodeIDs := queryNodesInfo.onlineNodeIDs()
 		if len(onlineNodeIDs) == 0 {
 			err := errors.New("no online QueryNode to allocate")
 			log.Error("shuffleSegmentsToQueryNode failed", zap.Error(err))
@@ -95,7 +95,7 @@ func shuffleSegmentsToQueryNode(ctx context.Context, reqs []*querypb.LoadSegment
 	}
 }
 
-func shuffleSegmentsToQueryNodeV2(ctx context.Context, reqs []*querypb.LoadSegmentsRequest, cluster Cluster, metaCache Meta, wait bool, excludeNodeIDs []int64, includeNodeIDs []int64) error {
+func shuffleSegmentsToQueryNodeV2(ctx context.Context, reqs []*querypb.LoadSegmentsRequest, queryNodesInfo *queryNodesInfo, metaCache Meta, wait bool, excludeNodeIDs []int64, includeNodeIDs []int64) error {
 	// key = offset, value = segmentSize
 	if len(reqs) == 0 {
 		return nil
@@ -115,7 +115,7 @@ func shuffleSegmentsToQueryNodeV2(ctx context.Context, reqs []*querypb.LoadSegme
 		totalMem := make(map[int64]uint64)
 		memUsage := make(map[int64]uint64)
 		memUsageRate := make(map[int64]float64)
-		onlineNodeIDs := cluster.onlineNodeIDs()
+		onlineNodeIDs := queryNodesInfo.onlineNodeIDs()
 		if len(onlineNodeIDs) == 0 && !wait {
 			err := errors.New("no online queryNode to allocate")
 			log.Error("shuffleSegmentsToQueryNode failed", zap.Error(err))
@@ -134,9 +134,9 @@ func shuffleSegmentsToQueryNodeV2(ctx context.Context, reqs []*querypb.LoadSegme
 				continue
 			}
 			// statistic nodeInfo, used memory, memory usage of every query node
-			nodeInfo, err := cluster.getNodeInfoByID(nodeID)
-			if err != nil {
-				log.Warn("shuffleSegmentsToQueryNodeV2: getNodeInfoByID failed", zap.Error(err))
+			nodeInfo := queryNodesInfo.getNode(nodeID)
+			if nodeInfo == nil {
+				log.Warn("shuffleSegmentsToQueryNodeV2: getNodeInfoByID failed", zap.Int64("nodeID", nodeID))
 				continue
 			}
 			queryNodeInfo := nodeInfo.(*queryNode)

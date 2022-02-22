@@ -22,10 +22,11 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/milvus-io/milvus/internal/kv"
+
 	"go.uber.org/zap"
 
 	nodeclient "github.com/milvus-io/milvus/internal/distributed/querynode/client"
-	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
@@ -66,6 +67,7 @@ type Node interface {
 	getComponentInfo(ctx context.Context) *internalpb.ComponentInfo
 
 	getMetrics(ctx context.Context, in *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error)
+	getID() int64
 }
 
 type queryNode struct {
@@ -74,7 +76,7 @@ type queryNode struct {
 	id       int64
 	address  string
 	client   types.QueryNode
-	kvClient *etcdkv.EtcdKV
+	kvClient kv.TxnKV
 
 	sync.RWMutex
 	watchedQueryChannels map[UniqueID]*querypb.QueryChannelInfo
@@ -88,7 +90,7 @@ type queryNode struct {
 	cpuUsage     float64
 }
 
-func newQueryNode(ctx context.Context, address string, id UniqueID, kv *etcdkv.EtcdKV) (Node, error) {
+func newQueryNode(ctx context.Context, address string, id UniqueID, kv kv.TxnKV, state nodeState) (Node, error) {
 	watchedChannels := make(map[UniqueID]*querypb.QueryChannelInfo)
 	watchedDeltaChannels := make(map[UniqueID][]*datapb.VchannelInfo)
 	childCtx, cancel := context.WithCancel(ctx)
@@ -106,7 +108,7 @@ func newQueryNode(ctx context.Context, address string, id UniqueID, kv *etcdkv.E
 		kvClient:             kv,
 		watchedQueryChannels: watchedChannels,
 		watchedDeltaChannels: watchedDeltaChannels,
-		state:                disConnect,
+		state:                state,
 	}
 
 	return node, nil
@@ -444,4 +446,8 @@ func (qn *queryNode) getNodeInfo() (Node, error) {
 		memUsageRate: qn.memUsageRate,
 		cpuUsage:     qn.cpuUsage,
 	}, nil
+}
+
+func (qn *queryNode) getID() int64 {
+	return qn.id
 }

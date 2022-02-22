@@ -25,6 +25,8 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/milvus-io/milvus/internal/kv"
+
 	"go.uber.org/zap"
 
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
@@ -62,7 +64,6 @@ type Cluster interface {
 	getSegmentInfoByNode(ctx context.Context, nodeID int64, in *querypb.GetSegmentInfoRequest) ([]*querypb.SegmentInfo, error)
 	getSegmentInfoByID(ctx context.Context, segmentID UniqueID) (*querypb.SegmentInfo, error)
 
-	registerNode(ctx context.Context, session *sessionutil.Session, id UniqueID, state nodeState) error
 	getNodeInfoByID(nodeID int64) (Node, error)
 	removeNodeInfo(nodeID int64) error
 	stopNode(nodeID int64)
@@ -79,7 +80,7 @@ type Cluster interface {
 	getMetrics(ctx context.Context, in *milvuspb.GetMetricsRequest) []queryNodeGetMetricsResponse
 }
 
-type newQueryNodeFn func(ctx context.Context, address string, id UniqueID, kv *etcdkv.EtcdKV) (Node, error)
+type newQueryNodeFn func(ctx context.Context, address string, id UniqueID, kv kv.TxnKV, state nodeState) (Node, error)
 
 type nodeState int
 
@@ -548,36 +549,6 @@ func (c *queryNodeCluster) setNodeState(nodeID int64, node Node, state nodeState
 	node.setState(state)
 }
 
-func (c *queryNodeCluster) registerNode(ctx context.Context, session *sessionutil.Session, id UniqueID, state nodeState) error {
-	c.Lock()
-	defer c.Unlock()
-
-	if _, ok := c.nodes[id]; !ok {
-		sessionJSON, err := json.Marshal(session)
-		if err != nil {
-			log.Debug("registerNode: marshal session error", zap.Int64("nodeID", id), zap.Any("address", session))
-			return err
-		}
-		key := fmt.Sprintf("%s/%d", queryNodeInfoPrefix, id)
-		err = c.client.Save(key, string(sessionJSON))
-		if err != nil {
-			return err
-		}
-		node, err := c.newNodeFn(ctx, session.Address, id, c.client)
-		if err != nil {
-			log.Debug("registerNode: create a new QueryNode failed", zap.Int64("nodeID", id), zap.Error(err))
-			return err
-		}
-		c.setNodeState(id, node, state)
-		if state < online {
-			go node.start()
-		}
-		c.nodes[id] = node
-		log.Debug("registerNode: create a new QueryNode", zap.Int64("nodeID", id), zap.String("address", session.Address), zap.Any("state", state))
-		return nil
-	}
-	return fmt.Errorf("registerNode: QueryNode %d alredy exists in cluster", id)
-}
 
 func (c *queryNodeCluster) getNodeInfoByID(nodeID int64) (Node, error) {
 	c.RLock()
@@ -697,3 +668,129 @@ func (c *queryNodeCluster) allocateSegmentsToQueryNode(ctx context.Context, reqs
 func (c *queryNodeCluster) allocateChannelsToQueryNode(ctx context.Context, reqs []*querypb.WatchDmChannelsRequest, wait bool, excludeNodeIDs []int64) error {
 	return c.channelAllocator(ctx, reqs, c, c.clusterMeta, wait, excludeNodeIDs)
 }
+
+type queryNodesInfo struct {
+	queryNodesMu struct {
+		sync.RWMutex
+		queryNodeIDMap map[int64]Node
+	}
+	cli              kv.TxnKV
+	session sessionutil.Session
+	queryNodeCreator newQueryNodeFn
+}
+
+func (q *queryNodesInfo) init(ctx context.Context, sessions []*sessionutil.Session) error{
+	onlineMap := make(map[int64]struct{})
+	for _, session := range sessions {
+		if err := q.registerNode(ctx, session, online); err != nil {
+			return err
+		}
+		onlineMap[session.ServerID] = struct{}{}
+	}
+
+	_, oldNodeSessions, err := q.cli.LoadWithPrefix(queryNodeInfoPrefix)
+	if err != nil {
+		return err
+	}
+	for _,s := range oldNodeSessions {
+		session := &sessionutil.Session{}
+		if err = json.Unmarshal([]byte(s), session);err != nil {
+			return err
+		}
+		if _, ok := onlineMap[session.ServerID]; !ok {
+			continue
+		}
+		if err = q.registerNode(context.TODO(), session, offline);err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (q *queryNodesInfo) registerNode(ctx context.Context, session *sessionutil.Session, state nodeState) error {
+	sessionJSON, err := json.Marshal(session)
+	if err != nil {
+		return err
+	}
+	key := fmt.Sprintf("%s/%d", queryNodeInfoPrefix, session.ServerID)
+	err = q.cli.Save(key, string(sessionJSON))
+	if err != nil {
+		return err
+	}
+	node, err := q.queryNodeCreator(ctx, session.Address, session.ServerID, q.cli, state)
+	if err != nil {
+		return err
+	}
+
+	q.queryNodesMu.Lock()
+	defer q.queryNodesMu.Unlock()
+	q.queryNodesMu.queryNodeIDMap[session.ServerID] = node
+	return nil
+}
+
+func (q *queryNodesInfo) getNode(nodeID int64) Node {
+	q.queryNodesMu.RLock()
+	defer q.queryNodesMu.RUnlock()
+	if node, ok := q.queryNodesMu.queryNodeIDMap[nodeID]; ok {
+		return node
+	}
+	return nil
+}
+func (q *queryNodesInfo) removeNode(nodeID int64) error {
+	key := fmt.Sprintf("%s/%d", queryNodeInfoPrefix, nodeID)
+	if err := q.cli.Remove(key); err != nil {
+		return err
+	}
+
+	q.queryNodesMu.Lock()
+	defer q.queryNodesMu.Unlock()
+	delete(q.queryNodesMu.queryNodeIDMap, nodeID)
+	return nil
+}
+G
+func (q *queryNodesInfo) stopNode(nodeID int64) {
+	q.queryNodesMu.Lock()
+	defer q.queryNodesMu.Unlock()
+	delete(q.queryNodesMu.queryNodeIDMap, nodeID)
+}
+
+func (q *queryNodesInfo) onlineNodeIDs() []int64 {
+	q.queryNodesMu.RLock()
+	defer q.queryNodesMu.RUnlock()
+	var res []int64
+	for ID, node := range q.queryNodesMu.queryNodeIDMap {
+		if node.isOnline() {
+			res = append(res, ID)
+		}
+	}
+	return res
+}
+
+func (q *queryNodesInfo) isOnline(nodeID int64) (bool, error) {
+	q.queryNodesMu.RLock()
+	defer q.queryNodesMu.RUnlock()
+	if node, ok := q.queryNodesMu.queryNodeIDMap[nodeID]; ok {
+		return node.isOnline(), nil
+	}
+	return false, fmt.Errorf("node %d not found", nodeID)
+
+}
+func (q *queryNodesInfo) offlineNodeIDs() []int64 {
+	q.queryNodesMu.RLock()
+	defer q.queryNodesMu.RUnlock()
+	var res []int64
+	for ID, node := range q.queryNodesMu.queryNodeIDMap {
+		if node.isOffline() {
+			res = append(res, ID)
+		}
+	}
+	return res
+}
+func (q *queryNodesInfo) hasNode(nodeID int64) bool {
+	q.queryNodesMu.RLock()
+	defer q.queryNodesMu.RUnlock()
+	_, ok := q.queryNodesMu.queryNodeIDMap[nodeID]
+	return ok
+}
+

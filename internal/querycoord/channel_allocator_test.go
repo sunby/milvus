@@ -43,16 +43,6 @@ func TestShuffleChannelsToQueryNode(t *testing.T) {
 	clusterSession.Register()
 	meta, err := newMeta(baseCtx, kv, nil, nil)
 	assert.Nil(t, err)
-	cluster := &queryNodeCluster{
-		ctx:         baseCtx,
-		cancel:      cancel,
-		client:      kv,
-		clusterMeta: meta,
-		nodes:       make(map[int64]Node),
-		newNodeFn:   newQueryNodeTest,
-		session:     clusterSession,
-	}
-
 	firstReq := &querypb.WatchDmChannelsRequest{
 		CollectionID: defaultCollectionID,
 		PartitionIDs: []UniqueID{defaultPartitionID},
@@ -80,6 +70,16 @@ func TestShuffleChannelsToQueryNode(t *testing.T) {
 	assert.Nil(t, err)
 	nodeSession := node.session
 	nodeID := node.queryNodeID
+	cluster := &queryNodeCluster{
+		ctx:         baseCtx,
+		cancel:      cancel,
+		client:      kv,
+		clusterMeta: meta,
+		nodes:       make(map[int64]Node),
+		newNodeFn:   newQueryNodeTest,
+		session:     clusterSession,
+	}
+
 	cluster.registerNode(baseCtx, nodeSession, nodeID, disConnect)
 	waitQueryNodeOnline(cluster, nodeID)
 

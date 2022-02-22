@@ -203,7 +203,7 @@ func TestNewQueryNode(t *testing.T) {
 
 	addr := queryNode1.session.Address
 	nodeID := queryNode1.queryNodeID
-	node, err := newQueryNode(baseCtx, addr, nodeID, kv)
+	node, err := newQueryNode(baseCtx, addr, nodeID, kv, disConnect)
 	assert.Nil(t, err)
 
 	err = node.start()
@@ -224,7 +224,7 @@ func TestReleaseCollectionOnOfflineNode(t *testing.T) {
 	defer etcdCli.Close()
 	kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
 
-	node, err := newQueryNode(baseCtx, "test", 100, kv)
+	node, err := newQueryNode(baseCtx, "test", 100, kv, disConnect)
 	assert.Nil(t, err)
 
 	node.setState(offline)
