@@ -32,28 +32,17 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/cmd/components"
-	"github.com/milvus-io/milvus/internal/datacoord"
-	"github.com/milvus-io/milvus/internal/datanode"
-	"github.com/milvus-io/milvus/internal/indexcoord"
-	"github.com/milvus-io/milvus/internal/indexnode"
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/metrics"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
-	"github.com/milvus-io/milvus/internal/proxy"
-	"github.com/milvus-io/milvus/internal/querycoord"
-	"github.com/milvus-io/milvus/internal/querynode"
-	"github.com/milvus-io/milvus/internal/rootcoord"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/healthz"
 	logutil "github.com/milvus-io/milvus/internal/util/logutil"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/milvus-io/milvus/internal/util/trace"
-	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
-
-var Params paramtable.ComponentParam
 
 func newMsgFactory(localMsg bool) msgstream.Factory {
 	if localMsg {
@@ -90,22 +79,15 @@ func (mr *MilvusRoles) EnvValue(env string) bool {
 	return env == "1" || env == "true"
 }
 
-func (mr *MilvusRoles) runRootCoord(ctx context.Context, localMsg bool) *components.RootCoord {
+func (mr *MilvusRoles) runRootCoord(ctx context.Context, cfg *configs.Config, localMsg bool) *components.RootCoord {
 	var rc *components.RootCoord
 	var wg sync.WaitGroup
 
 	wg.Add(1)
 	go func() {
-		rootcoord.Params.InitOnce()
-		if localMsg {
-			rootcoord.Params.SetLogConfig(typeutil.StandaloneRole)
-		} else {
-			rootcoord.Params.SetLogConfig(typeutil.RootCoordRole)
-		}
-
 		factory := newMsgFactory(localMsg)
 		var err error
-		rc, err = components.NewRootCoord(ctx, factory)
+		rc, err = components.NewRootCoord(ctx, cfg, factory)
 		if err != nil {
 			panic(err)
 		}
@@ -121,23 +103,15 @@ func (mr *MilvusRoles) runRootCoord(ctx context.Context, localMsg bool) *compone
 	return rc
 }
 
-func (mr *MilvusRoles) runProxy(ctx context.Context, localMsg bool, alias string) *components.Proxy {
+func (mr *MilvusRoles) runProxy(ctx context.Context, cfg *configs.Config, localMsg bool, alias string) *components.Proxy {
 	var pn *components.Proxy
 	var wg sync.WaitGroup
 
 	wg.Add(1)
 	go func() {
-		proxy.Params.ProxyCfg.InitAlias(alias)
-		proxy.Params.InitOnce()
-		if localMsg {
-			proxy.Params.SetLogConfig(typeutil.StandaloneRole)
-		} else {
-			proxy.Params.SetLogConfig(typeutil.ProxyRole)
-		}
-
 		factory := newMsgFactory(localMsg)
 		var err error
-		pn, err = components.NewProxy(ctx, factory)
+		pn, err = components.NewProxy(ctx, cfg, factory)
 		if err != nil {
 			panic(err)
 		}
@@ -159,13 +133,6 @@ func (mr *MilvusRoles) runQueryCoord(ctx context.Context, localMsg bool) *compon
 
 	wg.Add(1)
 	go func() {
-		querycoord.Params.InitOnce()
-		if localMsg {
-			querycoord.Params.SetLogConfig(typeutil.StandaloneRole)
-		} else {
-			querycoord.Params.SetLogConfig(typeutil.QueryCoordRole)
-		}
-
 		factory := newMsgFactory(localMsg)
 		var err error
 		qs, err = components.NewQueryCoord(ctx, factory)
@@ -190,14 +157,6 @@ func (mr *MilvusRoles) runQueryNode(ctx context.Context, localMsg bool, alias st
 
 	wg.Add(1)
 	go func() {
-		querynode.Params.QueryNodeCfg.InitAlias(alias)
-		querynode.Params.InitOnce()
-		if localMsg {
-			querynode.Params.SetLogConfig(typeutil.StandaloneRole)
-		} else {
-			querynode.Params.SetLogConfig(typeutil.QueryNodeRole)
-		}
-
 		factory := newMsgFactory(localMsg)
 		var err error
 		qn, err = components.NewQueryNode(ctx, factory)
@@ -222,13 +181,6 @@ func (mr *MilvusRoles) runDataCoord(ctx context.Context, localMsg bool) *compone
 
 	wg.Add(1)
 	go func() {
-		datacoord.Params.InitOnce()
-		if localMsg {
-			datacoord.Params.SetLogConfig(typeutil.StandaloneRole)
-		} else {
-			datacoord.Params.SetLogConfig(typeutil.DataCoordRole)
-		}
-
 		factory := newMsgFactory(localMsg)
 
 		dctx := logutil.WithModule(ctx, "DataCoord")
@@ -255,14 +207,6 @@ func (mr *MilvusRoles) runDataNode(ctx context.Context, localMsg bool, alias str
 
 	wg.Add(1)
 	go func() {
-		datanode.Params.DataNodeCfg.InitAlias(alias)
-		datanode.Params.InitOnce()
-		if localMsg {
-			datanode.Params.SetLogConfig(typeutil.StandaloneRole)
-		} else {
-			datanode.Params.SetLogConfig(typeutil.DataNodeRole)
-		}
-
 		factory := newMsgFactory(localMsg)
 		var err error
 		dn, err = components.NewDataNode(ctx, factory)
@@ -287,13 +231,6 @@ func (mr *MilvusRoles) runIndexCoord(ctx context.Context, localMsg bool) *compon
 
 	wg.Add(1)
 	go func() {
-		indexcoord.Params.InitOnce()
-		if localMsg {
-			indexcoord.Params.SetLogConfig(typeutil.StandaloneRole)
-		} else {
-			indexcoord.Params.SetLogConfig(typeutil.IndexCoordRole)
-		}
-
 		var err error
 		is, err = components.NewIndexCoord(ctx)
 		if err != nil {
@@ -317,14 +254,6 @@ func (mr *MilvusRoles) runIndexNode(ctx context.Context, localMsg bool, alias st
 
 	wg.Add(1)
 	go func() {
-		indexnode.Params.IndexNodeCfg.InitAlias(alias)
-		indexnode.Params.InitOnce()
-		if localMsg {
-			indexnode.Params.SetLogConfig(typeutil.StandaloneRole)
-		} else {
-			indexnode.Params.SetLogConfig(typeutil.IndexNodeRole)
-		}
-
 		var err error
 		in, err = components.NewIndexNode(ctx)
 		if err != nil {
@@ -343,7 +272,7 @@ func (mr *MilvusRoles) runIndexNode(ctx context.Context, localMsg bool, alias st
 }
 
 // Run Milvus components.
-func (mr *MilvusRoles) Run(local bool, alias string) {
+func (mr *MilvusRoles) Run(cfg *configs.Config, local bool, alias string) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// only standalone enable localMsg
@@ -351,16 +280,16 @@ func (mr *MilvusRoles) Run(local bool, alias string) {
 		if err := os.Setenv(metricsinfo.DeployModeEnvKey, metricsinfo.StandaloneDeployMode); err != nil {
 			log.Error("Failed to set deploy mode: ", zap.Error(err))
 		}
-		Params.Init()
-
 		if err := initRocksmq(); err != nil {
 			panic(err)
 		}
 		defer stopRocksmq()
 
-		if Params.EtcdCfg.UseEmbedEtcd {
-			// Start etcd server.
-			etcd.InitEtcdServer(&Params.EtcdCfg)
+		if cfg.Etcd.UseEmbed {
+			// start etcd server
+			if err := etcd.InitEtcdServer(cfg); err != nil {
+				log.Fatal("initialize etcd failure", zap.Error(err))
+			}
 			defer etcd.StopEtcdServer()
 		}
 	} else {
@@ -378,7 +307,7 @@ func (mr *MilvusRoles) Run(local bool, alias string) {
 
 	var rc *components.RootCoord
 	if mr.EnableRootCoord {
-		rc = mr.runRootCoord(ctx, local)
+		rc = mr.runRootCoord(ctx, cfg, local)
 		if rc != nil {
 			defer rc.Stop()
 		}
@@ -387,7 +316,7 @@ func (mr *MilvusRoles) Run(local bool, alias string) {
 	var pn *components.Proxy
 	if mr.EnableProxy {
 		pctx := logutil.WithModule(ctx, "Proxy")
-		pn = mr.runProxy(pctx, local, alias)
+		pn = mr.runProxy(pctx, cfg, local, alias)
 		if pn != nil {
 			defer pn.Stop()
 		}

@@ -27,6 +27,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/stretchr/testify/assert"
@@ -166,13 +167,13 @@ func (tt *testTask) postExecute(ctx context.Context) error {
 }
 
 func TestWatchQueryChannel_ClearEtcdInfoAfterAssignedNodeDown(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	baseCtx := context.Background()
-	queryCoord, err := startQueryCoord(baseCtx)
+	queryCoord, err := startQueryCoord(baseCtx, cfg)
 	assert.Nil(t, err)
 	activeTaskIDKeys, _, err := queryCoord.scheduler.client.LoadWithPrefix(activeTaskPrefix)
 	assert.Nil(t, err)
-	queryNode, err := startQueryNodeServer(baseCtx)
+	queryNode, err := startQueryNodeServer(baseCtx, cfg)
 	assert.Nil(t, err)
 	queryNode.addQueryChannels = returnFailedResult
 
@@ -209,11 +210,11 @@ func TestWatchQueryChannel_ClearEtcdInfoAfterAssignedNodeDown(t *testing.T) {
 }
 
 func TestUnMarshalTask(t *testing.T) {
-	refreshParams()
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := refreshParams()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer etcdCli.Close()
-	kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
+	kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
 	baseCtx, cancel := context.WithCancel(context.Background())
 	taskScheduler := &TaskScheduler{
 		ctx:    baseCtx,
@@ -457,11 +458,11 @@ func TestUnMarshalTask(t *testing.T) {
 }
 
 func TestReloadTaskFromKV(t *testing.T) {
-	refreshParams()
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := refreshParams()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer etcdCli.Close()
-	kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
+	kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
 	assert.Nil(t, err)
 	baseCtx, cancel := context.WithCancel(context.Background())
 	taskScheduler := &TaskScheduler{
@@ -511,9 +512,9 @@ func TestReloadTaskFromKV(t *testing.T) {
 }
 
 func Test_saveInternalTaskToEtcd(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
 	testTask := &testTask{
@@ -547,11 +548,11 @@ func Test_saveInternalTaskToEtcd(t *testing.T) {
 }
 
 func Test_generateDerivedInternalTasks(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	baseCtx := context.Background()
-	queryCoord, err := startQueryCoord(baseCtx)
+	queryCoord, err := startQueryCoord(baseCtx, cfg)
 	assert.Nil(t, err)
-	node1, err := startQueryNodeServer(baseCtx)
+	node1, err := startQueryNodeServer(baseCtx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node1.queryNodeID)
 

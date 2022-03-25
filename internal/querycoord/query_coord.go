@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/allocator"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
@@ -40,8 +41,8 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/tsoutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
@@ -64,9 +65,6 @@ type queryChannelInfo struct {
 	requestChannel  string
 	responseChannel string
 }
-
-// Params is param table of query coordinator
-var Params paramtable.ComponentParam
 
 // QueryCoord is the coordinator of queryNodes
 type QueryCoord struct {
@@ -101,6 +99,9 @@ type QueryCoord struct {
 
 	msFactory    msgstream.Factory
 	chunkManager storage.ChunkManager
+	cfg          *configs.Config
+	CreatedTime  time.Time
+	UpdatedTime  time.Time
 }
 
 // Register register query service at etcd
@@ -122,19 +123,19 @@ func (qc *QueryCoord) Register() error {
 }
 
 func (qc *QueryCoord) initSession() error {
-	qc.session = sessionutil.NewSession(qc.loopCtx, Params.EtcdCfg.MetaRootPath, qc.etcdCli)
+	qc.session = sessionutil.NewSession(qc.loopCtx, util.GetPath(qc.cfg, util.EtcdMeta), qc.etcdCli)
 	if qc.session == nil {
 		return fmt.Errorf("session is nil, the etcd client connection may have failed")
 	}
-	qc.session.Init(typeutil.QueryCoordRole, Params.QueryCoordCfg.Address, true, true)
-	Params.QueryCoordCfg.NodeID = uint64(qc.session.ServerID)
-	Params.SetLogger(qc.session.ServerID)
+	addr := fmt.Sprintf("%s:%d", qc.cfg.AdvertiseAddress, qc.cfg.RootCoord.Port)
+	qc.session.Init(typeutil.QueryCoordRole, addr, true, true)
 	return nil
 }
 
 // Init function initializes the queryCoord's meta, cluster, etcdKV and task scheduler
 func (qc *QueryCoord) Init() error {
-	log.Debug("query coordinator start init, session info", zap.String("metaPath", Params.EtcdCfg.MetaRootPath), zap.String("address", Params.QueryCoordCfg.Address))
+	addr := fmt.Sprintf("%s:%d", qc.cfg.AdvertiseAddress, qc.cfg.RootCoord.Port)
+	log.Debug("query coordinator start init, session info", zap.String("metaPath", util.GetPath(qc.cfg, util.EtcdMeta)), zap.String("address", addr))
 	var initError error
 	qc.initOnce.Do(func() {
 		err := qc.initSession()
@@ -144,12 +145,12 @@ func (qc *QueryCoord) Init() error {
 			return
 		}
 		log.Debug("queryCoord try to connect etcd")
-		etcdKV := etcdkv.NewEtcdKV(qc.etcdCli, Params.EtcdCfg.MetaRootPath)
+		etcdKV := etcdkv.NewEtcdKV(qc.etcdCli, util.GetPath(qc.cfg, util.EtcdMeta))
 		qc.kvClient = etcdKV
 		log.Debug("query coordinator try to connect etcd success")
 
 		// init id allocator
-		idAllocatorKV := tsoutil.NewTSOKVBase(qc.etcdCli, Params.EtcdCfg.KvRootPath, "queryCoordTaskID")
+		idAllocatorKV := tsoutil.NewTSOKVBase(qc.etcdCli, util.GetPath(qc.cfg, util.EtcdKv), "queryCoordTaskID")
 		idAllocator := allocator.NewGlobalIDAllocator("idTimestamp", idAllocatorKV)
 		initError = idAllocator.Initialize()
 		if initError != nil {
@@ -161,14 +162,14 @@ func (qc *QueryCoord) Init() error {
 		}
 
 		// init meta
-		qc.meta, initError = newMeta(qc.loopCtx, qc.kvClient, qc.msFactory, qc.idAllocator)
+		qc.meta, initError = newMeta(qc.loopCtx, qc.cfg, qc.kvClient, qc.msFactory, qc.idAllocator)
 		if initError != nil {
 			log.Error("query coordinator init meta failed", zap.Error(initError))
 			return
 		}
 
 		// init channelUnsubscribeHandler
-		qc.handler, initError = newChannelUnsubscribeHandler(qc.loopCtx, qc.kvClient, qc.msFactory)
+		qc.handler, initError = newChannelUnsubscribeHandler(qc.loopCtx, qc.cfg, qc.kvClient, qc.msFactory)
 		if initError != nil {
 			log.Error("query coordinator init channelUnsubscribeHandler failed", zap.Error(initError))
 			return
@@ -182,11 +183,11 @@ func (qc *QueryCoord) Init() error {
 		}
 
 		qc.chunkManager, initError = storage.NewMinioChunkManager(qc.loopCtx,
-			storage.Address(Params.MinioCfg.Address),
-			storage.AccessKeyID(Params.MinioCfg.AccessKeyID),
-			storage.SecretAccessKeyID(Params.MinioCfg.SecretAccessKey),
-			storage.UseSSL(Params.MinioCfg.UseSSL),
-			storage.BucketName(Params.MinioCfg.BucketName),
+			storage.Address(fmt.Sprintf("%s:%d", qc.cfg.Minio.Address, qc.cfg.Minio.Port)),
+			storage.AccessKeyID(qc.cfg.Minio.AccessKeyID),
+			storage.SecretAccessKeyID(qc.cfg.Minio.SecretAccessKey),
+			storage.UseSSL(qc.cfg.Minio.UseSSL),
+			storage.BucketName(qc.cfg.Minio.BucketName),
 			storage.CreateBucket(true))
 
 		if initError != nil {
@@ -209,7 +210,7 @@ func (qc *QueryCoord) Init() error {
 		}
 
 		// init index checker
-		qc.indexChecker, initError = newIndexChecker(qc.loopCtx, qc.kvClient, qc.meta, qc.cluster, qc.scheduler, qc.broker)
+		qc.indexChecker, initError = newIndexChecker(qc.loopCtx, qc.cfg, qc.kvClient, qc.meta, qc.cluster, qc.scheduler, qc.broker)
 		if initError != nil {
 			log.Error("query coordinator init index checker failed", zap.Error(initError))
 			return
@@ -224,7 +225,7 @@ func (qc *QueryCoord) Init() error {
 // Start function starts the goroutines to watch the meta and node updates
 func (qc *QueryCoord) Start() error {
 	m := map[string]interface{}{
-		"PulsarAddress":  Params.PulsarCfg.Address,
+		"pulsarAddress":  util.CreatePulsarAddress(qc.cfg.Pulsar.Address, qc.cfg.Pulsar.Port),
 		"ReceiveBufSize": 1024,
 		"PulsarBufSize":  1024}
 	err := qc.msFactory.SetParams(m)
@@ -240,8 +241,8 @@ func (qc *QueryCoord) Start() error {
 	qc.handler.start()
 	log.Debug("start channel unsubscribe loop ...")
 
-	Params.QueryCoordCfg.CreatedTime = time.Now()
-	Params.QueryCoordCfg.UpdatedTime = time.Now()
+	qc.CreatedTime = time.Now()
+	qc.UpdatedTime = time.Now()
 
 	qc.loopWg.Add(1)
 	go qc.watchNodeLoop()
@@ -249,7 +250,7 @@ func (qc *QueryCoord) Start() error {
 	qc.loopWg.Add(1)
 	go qc.watchHandoffSegmentLoop()
 
-	if Params.QueryCoordCfg.AutoBalance {
+	if qc.cfg.QueryCoord.AutoBalance {
 		qc.loopWg.Add(1)
 		go qc.loadBalanceSegmentLoop()
 	}
@@ -294,12 +295,12 @@ func (qc *QueryCoord) UpdateStateCode(code internalpb.StateCode) {
 }
 
 // NewQueryCoord creates a QueryCoord object.
-func NewQueryCoord(ctx context.Context, factory msgstream.Factory) (*QueryCoord, error) {
+func NewQueryCoord(ctx context.Context, cfg *configs.Config, factory msgstream.Factory) (*QueryCoord, error) {
 	rand.Seed(time.Now().UnixNano())
 	queryChannels := make([]*queryChannelInfo, 0)
 	channelID := len(queryChannels)
-	searchPrefix := Params.CommonCfg.QueryCoordSearch
-	searchResultPrefix := Params.CommonCfg.QueryCoordSearchResult
+	searchPrefix := util.GetPath(cfg, util.QueryCoordSearchChannel)
+	searchResultPrefix := util.GetPath(cfg, util.QueryCoordSearchResultChannel)
 	allocatedQueryChannel := searchPrefix + "-" + strconv.FormatInt(int64(channelID), 10)
 	allocatedQueryResultChannel := searchResultPrefix + "-" + strconv.FormatInt(int64(channelID), 10)
 
@@ -372,7 +373,7 @@ func (qc *QueryCoord) watchNodeLoop() {
 			SourceNodeIDs: offlineNodeIDs,
 		}
 
-		baseTask := newBaseTask(qc.loopCtx, querypb.TriggerCondition_NodeDown)
+		baseTask := newBaseTask(qc.loopCtx, qc.cfg, querypb.TriggerCondition_NodeDown)
 		loadBalanceTask := &loadBalanceTask{
 			baseTask:           baseTask,
 			LoadBalanceRequest: loadBalanceSegment,
@@ -435,7 +436,7 @@ func (qc *QueryCoord) handleNodeEvent(ctx context.Context) {
 					BalanceReason: querypb.TriggerCondition_NodeDown,
 				}
 
-				baseTask := newBaseTask(qc.loopCtx, querypb.TriggerCondition_NodeDown)
+				baseTask := newBaseTask(qc.loopCtx, qc.cfg, querypb.TriggerCondition_NodeDown)
 				loadBalanceTask := &loadBalanceTask{
 					baseTask:           baseTask,
 					LoadBalanceRequest: loadBalanceSegment,
@@ -476,7 +477,7 @@ func (qc *QueryCoord) watchHandoffSegmentLoop() {
 				switch event.Type {
 				case mvccpb.PUT:
 					validHandoffReq, _ := qc.indexChecker.verifyHandoffReqValid(segmentInfo)
-					if Params.QueryCoordCfg.AutoHandoff && validHandoffReq {
+					if qc.cfg.QueryCoord.AutoHandOff && validHandoffReq {
 						qc.indexChecker.enqueueHandoffReq(segmentInfo)
 						log.Debug("watchHandoffSegmentLoop: enqueue a handoff request to index checker", zap.Any("segment info", segmentInfo))
 					} else {
@@ -502,7 +503,7 @@ func (qc *QueryCoord) loadBalanceSegmentLoop() {
 	defer qc.loopWg.Done()
 	log.Debug("QueryCoord start load balance segment loop")
 
-	timer := time.NewTicker(time.Duration(Params.QueryCoordCfg.BalanceIntervalSeconds) * time.Second)
+	timer := time.NewTicker(time.Duration(qc.cfg.QueryCoord.BalanceInterval) * time.Second)
 
 	for {
 		select {
@@ -567,11 +568,11 @@ func (qc *QueryCoord) loadBalanceSegmentLoop() {
 				memUsageRateDiff := nodeID2MemUsageRate[sourceNodeID] - nodeID2MemUsageRate[dstNodeID]
 				// if memoryUsageRate of source node is greater than 90%, and the max memUsageDiff is greater than 30%
 				// then migrate the segments on source node to other query nodes
-				if nodeID2MemUsageRate[sourceNodeID] > Params.QueryCoordCfg.OverloadedMemoryThresholdPercentage ||
-					memUsageRateDiff > Params.QueryCoordCfg.MemoryUsageMaxDifferencePercentage {
+				if nodeID2MemUsageRate[sourceNodeID] > qc.cfg.QueryCoord.MemoryUsageLimitRatio ||
+					memUsageRateDiff > qc.cfg.QueryCoord.AutoBalanceMemoryUsageGapRatio {
 					segmentInfos := nodeID2SegmentInfos[sourceNodeID]
 					// select the segment that needs balance on the source node
-					selectedSegmentInfo, err := chooseSegmentToBalance(sourceNodeID, dstNodeID, segmentInfos, nodeID2MemUsage, nodeID2TotalMem, nodeID2MemUsageRate)
+					selectedSegmentInfo, err := chooseSegmentToBalance(qc.cfg, sourceNodeID, dstNodeID, segmentInfos, nodeID2MemUsage, nodeID2TotalMem, nodeID2MemUsageRate)
 					if err != nil {
 						// no enough memory on query nodes to balance, then notify proxy to stop insert
 						memoryInsufficient = true
@@ -588,7 +589,7 @@ func (qc *QueryCoord) loadBalanceSegmentLoop() {
 							DstNodeIDs:       []UniqueID{dstNodeID},
 							SealedSegmentIDs: []UniqueID{selectedSegmentInfo.SegmentID},
 						}
-						baseTask := newBaseTask(qc.loopCtx, querypb.TriggerCondition_LoadBalance)
+						baseTask := newBaseTask(qc.loopCtx, qc.cfg, querypb.TriggerCondition_LoadBalance)
 						balanceTask := &loadBalanceTask{
 							baseTask:           baseTask,
 							LoadBalanceRequest: req,
@@ -637,7 +638,7 @@ func (qc *QueryCoord) loadBalanceSegmentLoop() {
 	}
 }
 
-func chooseSegmentToBalance(sourceNodeID int64, dstNodeID int64,
+func chooseSegmentToBalance(cfg *configs.Config, sourceNodeID int64, dstNodeID int64,
 	segmentInfos map[UniqueID]*querypb.SegmentInfo,
 	nodeID2MemUsage map[int64]uint64,
 	nodeID2TotalMem map[int64]uint64,
@@ -649,7 +650,7 @@ func chooseSegmentToBalance(sourceNodeID int64, dstNodeID int64,
 		dstNodeMemUsageAfterBalance := nodeID2MemUsage[dstNodeID] + uint64(info.MemSize)
 		dstNodeMemUsageRateAfterBalance := float64(dstNodeMemUsageAfterBalance) / float64(nodeID2TotalMem[dstNodeID])
 		// if memUsageRate of dstNode is greater than OverloadedMemoryThresholdPercentage after balance, than can't balance
-		if dstNodeMemUsageRateAfterBalance < Params.QueryCoordCfg.OverloadedMemoryThresholdPercentage {
+		if dstNodeMemUsageRateAfterBalance < cfg.QueryCoord.MemoryUsageLimitRatio {
 			memoryInsufficient = false
 			sourceNodeMemUsageAfterBalance := nodeID2MemUsage[sourceNodeID] - uint64(info.MemSize)
 			sourceNodeMemUsageRateAfterBalance := float64(sourceNodeMemUsageAfterBalance) / float64(nodeID2TotalMem[sourceNodeID])

@@ -23,6 +23,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
+	"github.com/milvus-io/milvus/internal/util"
+
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
@@ -31,15 +34,14 @@ import (
 )
 
 func TestProxyManager(t *testing.T) {
-	Params.Init()
-
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer etcdCli.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	sessKey := path.Join(Params.EtcdCfg.MetaRootPath, sessionutil.DefaultServiceRoot)
+	sessKey := path.Join(util.GetPath(cfg, util.EtcdMeta), sessionutil.DefaultServiceRoot)
 	etcdCli.Delete(ctx, sessKey, clientv3.WithPrefix())
 	defer etcdCli.Delete(ctx, sessKey, clientv3.WithPrefix())
 	s1 := sessionutil.Session{
@@ -66,7 +68,7 @@ func TestProxyManager(t *testing.T) {
 		assert.Equal(t, int64(99), sess[1].ServerID)
 		t.Log("get sessions", sess[0], sess[1])
 	}
-	pm := newProxyManager(ctx, etcdCli, f1)
+	pm := newProxyManager(ctx, configs.NewConfig(), etcdCli, f1)
 	assert.Nil(t, err)
 	fa := func(sess *sessionutil.Session) {
 		assert.Equal(t, int64(101), sess.ServerID)

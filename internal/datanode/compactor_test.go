@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	memkv "github.com/milvus-io/milvus/internal/kv/mem"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/etcdpb"
@@ -241,7 +242,8 @@ func TestCompactionTaskInnerMethods(t *testing.T) {
 
 	t.Run("Test merge", func(t *testing.T) {
 		t.Run("Merge without expiration", func(t *testing.T) {
-			Params.DataCoordCfg.CompactionEntityExpiration = math.MaxInt64
+			cfg := configs.NewConfig()
+			cfg.Compaction.EntityExpiration = math.MaxInt64
 			iData := genInsertDataWithExpiredTS()
 			meta := NewMetaFactory().GetCollectionMeta(1, "test")
 
@@ -257,7 +259,9 @@ func TestCompactionTaskInnerMethods(t *testing.T) {
 				1: 10000,
 			}
 
-			ct := &compactionTask{}
+			ct := &compactionTask{
+				cfg: cfg,
+			}
 			idata, numOfRow, err := ct.merge(mitr, dm, meta.GetSchema(), ct.GetCurrentTime())
 			assert.NoError(t, err)
 			assert.Equal(t, int64(1), numOfRow)
@@ -265,12 +269,9 @@ func TestCompactionTaskInnerMethods(t *testing.T) {
 			assert.NotEmpty(t, idata[0].Data)
 		})
 		t.Run("Merge without expiration2", func(t *testing.T) {
-			Params.DataCoordCfg.CompactionEntityExpiration = math.MaxInt64
-			flushInsertBufferSize := Params.DataNodeCfg.FlushInsertBufferSize
-			defer func() {
-				Params.DataNodeCfg.FlushInsertBufferSize = flushInsertBufferSize
-			}()
-			Params.DataNodeCfg.FlushInsertBufferSize = 128
+			cfg := configs.NewConfig()
+			cfg.Compaction.EntityExpiration = math.MaxInt64
+			cfg.DataNode.InsertBufferSizeLimit = 128
 			iData := genInsertDataWithExpiredTS()
 			meta := NewMetaFactory().GetCollectionMeta(1, "test")
 
@@ -284,7 +285,9 @@ func TestCompactionTaskInnerMethods(t *testing.T) {
 
 			dm := map[UniqueID]Timestamp{}
 
-			ct := &compactionTask{}
+			ct := &compactionTask{
+				cfg: cfg,
+			}
 			idata, numOfRow, err := ct.merge(mitr, dm, meta.GetSchema(), ct.GetCurrentTime())
 			assert.NoError(t, err)
 			assert.Equal(t, int64(2), numOfRow)
@@ -293,7 +296,8 @@ func TestCompactionTaskInnerMethods(t *testing.T) {
 		})
 
 		t.Run("Merge with expiration", func(t *testing.T) {
-			Params.DataCoordCfg.CompactionEntityExpiration = 864000 // 10 days in seconds
+			cfg := configs.NewConfig()
+			cfg.Compaction.EntityExpiration = 864000 // 10 days in seconds
 			iData := genInsertDataWithExpiredTS()
 			meta := NewMetaFactory().GetCollectionMeta(1, "test")
 
@@ -309,7 +313,9 @@ func TestCompactionTaskInnerMethods(t *testing.T) {
 				1: 10000,
 			}
 
-			ct := &compactionTask{}
+			ct := &compactionTask{
+				cfg: cfg,
+			}
 			idata, numOfRow, err := ct.merge(mitr, dm, meta.GetSchema(), genTimestamp())
 			assert.NoError(t, err)
 			assert.Equal(t, int64(0), numOfRow)
@@ -319,9 +325,12 @@ func TestCompactionTaskInnerMethods(t *testing.T) {
 
 	t.Run("Test isExpiredEntity", func(t *testing.T) {
 		t.Run("When CompactionEntityExpiration is set math.MaxInt64", func(t *testing.T) {
-			Params.DataCoordCfg.CompactionEntityExpiration = math.MaxInt64
+			cfg := configs.NewConfig()
+			cfg.Compaction.EntityExpiration = math.MaxInt64
 
-			ct := &compactionTask{}
+			ct := &compactionTask{
+				cfg: cfg,
+			}
 			res := ct.isExpiredEntity(0, genTimestamp())
 			assert.Equal(t, false, res)
 
@@ -338,9 +347,12 @@ func TestCompactionTaskInnerMethods(t *testing.T) {
 			assert.Equal(t, false, res)
 		})
 		t.Run("When CompactionEntityExpiration is set MAX_ENTITY_EXPIRATION = 9223372036", func(t *testing.T) {
-			Params.DataCoordCfg.CompactionEntityExpiration = 9223372036 // math.MaxInt64 / time.Second
+			cfg := configs.NewConfig()
+			cfg.Compaction.EntityExpiration = 9223372036 // math.MaxInt64 / time.Second
 
-			ct := &compactionTask{}
+			ct := &compactionTask{
+				cfg: cfg,
+			}
 			res := ct.isExpiredEntity(0, genTimestamp())
 			assert.Equal(t, false, res)
 
@@ -357,9 +369,12 @@ func TestCompactionTaskInnerMethods(t *testing.T) {
 			assert.Equal(t, false, res)
 		})
 		t.Run("When CompactionEntityExpiration is set 10 days", func(t *testing.T) {
-			Params.DataCoordCfg.CompactionEntityExpiration = 864000 // 10 days in seconds
+			cfg := configs.NewConfig()
+			cfg.Compaction.EntityExpiration = 864000 // 10 days in seconds
 
-			ct := &compactionTask{}
+			ct := &compactionTask{
+				cfg: cfg,
+			}
 			res := ct.isExpiredEntity(0, genTimestamp())
 			assert.Equal(t, true, res)
 
@@ -406,12 +421,14 @@ func TestCompactorInterfaceMethods(t *testing.T) {
 		Field2StatslogPaths: nil,
 		Deltalogs:           nil,
 	}}
-	Params.DataCoordCfg.CompactionEntityExpiration = math.MaxInt64 // Turn off auto expiration
+	cfg := configs.NewConfig()
+	cfg.Compaction.EntityExpiration = math.MaxInt64 // Turn off auto expiration
 
 	t.Run("Test compact invalid", func(t *testing.T) {
 		invalidAlloc := NewAllocatorFactory(-1)
 		ctx, cancel := context.WithCancel(context.TODO())
 		emptyTask := &compactionTask{
+			cfg:    cfg,
 			ctx:    ctx,
 			cancel: cancel,
 		}
@@ -451,7 +468,8 @@ func TestCompactorInterfaceMethods(t *testing.T) {
 		rc := &RootCoordFactory{}
 		dc := &DataCoordFactory{}
 		mockfm := &mockFlushManager{}
-		mockbIO := &binlogIO{cm, alloc}
+		cfg := configs.NewConfig()
+		mockbIO := &binlogIO{cm, alloc, cfg}
 		replica, err := newReplica(context.TODO(), rc, cm, collID)
 		require.NoError(t, err)
 		replica.addFlushedSegmentWithPKs(segID, collID, partID, "channelname", 2, []UniqueID{1, 2})
@@ -487,11 +505,11 @@ func TestCompactorInterfaceMethods(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(context.TODO())
 		cancel()
-		canceledTask := newCompactionTask(ctx, mockbIO, mockbIO, replica, mockfm, alloc, dc, plan)
+		canceledTask := newCompactionTask(ctx, cfg, mockbIO, mockbIO, replica, mockfm, alloc, dc, plan)
 		err = canceledTask.compact()
 		assert.Error(t, err)
 
-		task := newCompactionTask(context.TODO(), mockbIO, mockbIO, replica, mockfm, alloc, dc, plan)
+		task := newCompactionTask(context.TODO(), cfg, mockbIO, mockbIO, replica, mockfm, alloc, dc, plan)
 		err = task.compact()
 		assert.NoError(t, err)
 
@@ -579,7 +597,8 @@ func TestCompactorInterfaceMethods(t *testing.T) {
 		dc := &DataCoordFactory{}
 		mockfm := &mockFlushManager{}
 		mockKv := memkv.NewMemoryKV()
-		mockbIO := &binlogIO{cm, alloc}
+		cfg := configs.NewConfig()
+		mockbIO := &binlogIO{cm, alloc, cfg}
 		replica, err := newReplica(context.TODO(), rc, cm, collID)
 		require.NoError(t, err)
 
@@ -634,7 +653,7 @@ func TestCompactorInterfaceMethods(t *testing.T) {
 		}
 
 		alloc.random = false // generated ID = 19530
-		task := newCompactionTask(context.TODO(), mockbIO, mockbIO, replica, mockfm, alloc, dc, plan)
+		task := newCompactionTask(context.TODO(), cfg, mockbIO, mockbIO, replica, mockfm, alloc, dc, plan)
 		err = task.compact()
 		assert.NoError(t, err)
 
@@ -704,7 +723,8 @@ func TestCompactorInterfaceMethods(t *testing.T) {
 		rc := &RootCoordFactory{}
 		dc := &DataCoordFactory{}
 		mockfm := &mockFlushManager{}
-		mockbIO := &binlogIO{cm, alloc}
+		cfg := configs.NewConfig()
+		mockbIO := &binlogIO{cm, alloc, cfg}
 		replica, err := newReplica(context.TODO(), rc, cm, collID)
 		require.NoError(t, err)
 
@@ -762,7 +782,7 @@ func TestCompactorInterfaceMethods(t *testing.T) {
 		}
 
 		alloc.random = false // generated ID = 19530
-		task := newCompactionTask(context.TODO(), mockbIO, mockbIO, replica, mockfm, alloc, dc, plan)
+		task := newCompactionTask(context.TODO(), cfg, mockbIO, mockbIO, replica, mockfm, alloc, dc, plan)
 		err = task.compact()
 		assert.NoError(t, err)
 

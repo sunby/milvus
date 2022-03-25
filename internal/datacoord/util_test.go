@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
 	"github.com/milvus-io/milvus/internal/util/tsoutil"
@@ -112,11 +113,11 @@ func TestVerifyResponse(t *testing.T) {
 }
 
 func Test_getTimetravelReverseTime(t *testing.T) {
-	Params.Init()
-	Params.CommonCfg.RetentionDuration = 43200 // 5 days
+	cfg := configs.NewConfig()
+	cfg.RetentionDuration = 43200 // 5 days
 
 	tFixed := time.Date(2021, 11, 15, 0, 0, 0, 0, time.Local)
-	tBefore := tFixed.Add(-time.Duration(Params.CommonCfg.RetentionDuration) * time.Second)
+	tBefore := tFixed.Add(-time.Duration(cfg.RetentionDuration) * time.Second)
 
 	type args struct {
 		allocator allocator
@@ -136,7 +137,7 @@ func Test_getTimetravelReverseTime(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := getTimetravelReverseTime(context.TODO(), tt.args.allocator)
+			got, err := getTimetravelReverseTime(context.TODO(), cfg.RetentionDuration, tt.args.allocator)
 			assert.Equal(t, tt.wantErr, err != nil)
 			assert.EqualValues(t, tt.want, got)
 		})

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
@@ -664,7 +665,8 @@ func Test_compactionTrigger_triggerCompaction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			Params.DataCoordCfg.EnableAutoCompaction = tt.fields.autoCompactionEnabled
+			cfg := configs.NewConfig()
+			cfg.Compaction.EnableAutoCompaction = tt.fields.autoCompactionEnabled
 			tr := &compactionTrigger{
 				meta:                            tt.fields.meta,
 				allocator:                       tt.fields.allocator,
@@ -673,6 +675,7 @@ func Test_compactionTrigger_triggerCompaction(t *testing.T) {
 				mergeCompactionPolicy:           tt.fields.mergeCompactionPolicy,
 				compactionHandler:               tt.fields.compactionHandler,
 				mergeCompactionSegmentThreshold: tt.fields.mergeCompactionSegmentThreshold,
+				cfg:                             cfg,
 			}
 			tr.start()
 			defer tr.stop()
@@ -1083,8 +1086,10 @@ func Test_compactionTrigger_singleTriggerCompaction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			Params.DataCoordCfg.EnableAutoCompaction = tt.fields.enableAutoCompaction
+			cfg := configs.NewConfig()
+			cfg.Compaction.EnableAutoCompaction = tt.fields.enableAutoCompaction
 			tr := &compactionTrigger{
+				cfg:                    cfg,
 				meta:                   tt.fields.meta,
 				allocator:              tt.fields.allocator,
 				signals:                tt.fields.signals,
@@ -1141,7 +1146,7 @@ func Test_newCompactionTrigger(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := newCompactionTrigger(tt.args.meta, tt.args.compactionHandler, tt.args.allocator)
+			got := newCompactionTrigger(configs.NewConfig(), tt.args.meta, tt.args.compactionHandler, tt.args.allocator)
 			assert.Equal(t, tt.args.meta, got.meta)
 			assert.Equal(t, tt.args.compactionHandler, got.compactionHandler)
 			assert.Equal(t, tt.args.allocator, got.allocator)
@@ -1150,8 +1155,7 @@ func Test_newCompactionTrigger(t *testing.T) {
 }
 
 func Test_handleSignal(t *testing.T) {
-
-	got := newCompactionTrigger(&meta{segments: NewSegmentsInfo()}, &compactionPlanHandler{}, newMockAllocator())
+	got := newCompactionTrigger(configs.NewConfig(), &meta{segments: NewSegmentsInfo()}, &compactionPlanHandler{}, newMockAllocator())
 	signal := &compactionSignal{
 		segmentID: 1,
 	}

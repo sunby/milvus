@@ -31,7 +31,7 @@ func getSystemInfoMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest, 
 	totalMem := metricsinfo.GetMemoryCount()
 	nodeInfos := metricsinfo.QueryNodeInfos{
 		BaseComponentInfos: metricsinfo.BaseComponentInfos{
-			Name: metricsinfo.ConstructComponentName(typeutil.QueryNodeRole, Params.QueryNodeCfg.QueryNodeID),
+			Name: metricsinfo.ConstructComponentName(typeutil.QueryNodeRole, queryNodeID),
 			HardwareInfos: metricsinfo.HardwareMetrics{
 				IP:           node.session.Address,
 				CPUCoreCount: metricsinfo.GetCPUCoreCount(false),
@@ -42,20 +42,13 @@ func getSystemInfoMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest, 
 				DiskUsage:    metricsinfo.GetDiskUsage(),
 			},
 			SystemInfo:  metricsinfo.DeployMetrics{},
-			CreatedTime: Params.QueryNodeCfg.CreatedTime.String(),
-			UpdatedTime: Params.QueryNodeCfg.UpdatedTime.String(),
+			CreatedTime: node.createdTime.String(),
+			UpdatedTime: node.updatedTime.String(),
 			Type:        typeutil.QueryNodeRole,
 			ID:          node.session.ServerID,
 		},
 		SystemConfigurations: metricsinfo.QueryNodeConfiguration{
-			SearchReceiveBufSize:         Params.QueryNodeCfg.SearchReceiveBufSize,
-			SearchPulsarBufSize:          Params.QueryNodeCfg.SearchPulsarBufSize,
-			SearchResultReceiveBufSize:   Params.QueryNodeCfg.SearchResultReceiveBufSize,
-			RetrieveReceiveBufSize:       Params.QueryNodeCfg.RetrieveReceiveBufSize,
-			RetrievePulsarBufSize:        Params.QueryNodeCfg.RetrievePulsarBufSize,
-			RetrieveResultReceiveBufSize: Params.QueryNodeCfg.RetrieveResultReceiveBufSize,
-
-			SimdType: Params.CommonCfg.SimdType,
+			SimdType: node.cfg.SIMDType,
 		},
 	}
 	metricsinfo.FillDeployMetricsWithEnv(&nodeInfos.SystemInfo)
@@ -68,7 +61,7 @@ func getSystemInfoMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest, 
 				Reason:    err.Error(),
 			},
 			Response:      "",
-			ComponentName: metricsinfo.ConstructComponentName(typeutil.QueryNodeRole, Params.QueryNodeCfg.QueryNodeID),
+			ComponentName: metricsinfo.ConstructComponentName(typeutil.QueryNodeRole, queryNodeID),
 		}, nil
 	}
 
@@ -78,6 +71,6 @@ func getSystemInfoMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest, 
 			Reason:    "",
 		},
 		Response:      resp,
-		ComponentName: metricsinfo.ConstructComponentName(typeutil.QueryNodeRole, Params.QueryNodeCfg.QueryNodeID),
+		ComponentName: metricsinfo.ConstructComponentName(typeutil.QueryNodeRole, queryNodeID),
 	}, nil
 }

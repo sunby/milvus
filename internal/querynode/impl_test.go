@@ -26,10 +26,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	queryPb "github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
@@ -458,7 +460,8 @@ func TestImpl_GetMetrics(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.NoError(t, err)
 	defer etcdCli.Close()
 
@@ -468,7 +471,7 @@ func TestImpl_GetMetrics(t *testing.T) {
 		defer wg.Done()
 		node, err := genSimpleQueryNode(ctx)
 		assert.NoError(t, err)
-		node.session = sessionutil.NewSession(node.queryNodeLoopCtx, Params.EtcdCfg.MetaRootPath, etcdCli)
+		node.session = sessionutil.NewSession(node.queryNodeLoopCtx, util.GetPath(cfg, util.EtcdMeta), etcdCli)
 
 		metricReq := make(map[string]string)
 		metricReq[metricsinfo.MetricTypeKey] = "system_info"

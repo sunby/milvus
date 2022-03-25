@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/indexnode"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
@@ -30,9 +31,10 @@ func TestGetSystemInfoMetrics(t *testing.T) {
 	ctx := context.Background()
 	ic, err := NewIndexCoord(ctx)
 	assert.Nil(t, err)
-	Params.Init()
+	()
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	defer etcdCli.Close()
 	assert.NoError(t, err)
 

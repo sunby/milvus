@@ -32,11 +32,11 @@ import (
 
 	ot "github.com/grpc-ecosystem/go-grpc-middleware/tracing/opentracing"
 
+	"github.com/milvus-io/milvus/configs"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
-
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
@@ -99,7 +99,6 @@ import (
 
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/metrics"
-	"github.com/milvus-io/milvus/internal/rootcoord"
 	"github.com/milvus-io/milvus/internal/util/logutil"
 )
 
@@ -121,15 +120,11 @@ func runRootCoord(ctx context.Context, localMsg bool) *grpcrootcoord.Server {
 
 	wg.Add(1)
 	go func() {
-		rootcoord.Params.Init()
-		if !localMsg {
-			logutil.SetupLogger(&rootcoord.Params.Log)
-			defer log.Sync()
-		}
-
 		factory := newMsgFactory(localMsg)
 		var err error
-		rc, err = grpcrootcoord.NewServer(ctx, factory)
+		cfg := configs.NewConfig()
+		cfg.AdvertiseAddress = "127.0.0.1"
+		rc, err = grpcrootcoord.NewServer(ctx, cfg, factory)
 		if err != nil {
 			panic(err)
 		}
@@ -317,7 +312,8 @@ func runIndexNode(ctx context.Context, localMsg bool, alias string) *grpcindexno
 			panic(err)
 		}
 		wg.Done()
-		etcd, err := etcd.GetEtcdClient(&indexnode.Params.EtcdCfg)
+		cfg := configs.NewConfig()
+		etcd, err := etcd.GetEtcdClient(cfg)
 		if err != nil {
 			panic(err)
 		}
@@ -358,11 +354,6 @@ func (s *proxyTestServer) GetStatisticsChannel(ctx context.Context, request *int
 func (s *proxyTestServer) startGrpc(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	var p paramtable.GrpcServerConfig
-	p.InitOnce(typeutil.ProxyRole)
-	Params.InitOnce()
-	Params.ProxyCfg.NetworkAddress = p.GetAddress()
-
 	var kaep = keepalive.EnforcementPolicy{
 		MinTime:             5 * time.Second, // If a client pings more than once every 5 seconds, terminate the connection
 		PermitWithoutStream: true,            // Allow pings even when there are no active streams
@@ -373,14 +364,15 @@ func (s *proxyTestServer) startGrpc(ctx context.Context, wg *sync.WaitGroup) {
 		Timeout: 10 * time.Second, // Wait 10 second for the ping ack before assuming the connection is dead
 	}
 
-	log.Debug("Proxy server listen on tcp", zap.Int("port", p.Port))
-	lis, err := net.Listen("tcp", ":"+strconv.Itoa(p.Port))
+	cfg := configs.NewConfig()
+	log.Debug("Proxy server listen on tcp", zap.Int("port", cfg.Proxy.Port))
+	lis, err := net.Listen("tcp", ":"+strconv.Itoa(cfg.Proxy.Port))
 	if err != nil {
-		log.Warn("Proxy server failed to listen on", zap.Error(err), zap.Int("port", p.Port))
+		log.Warn("Proxy server failed to listen on", zap.Error(err), zap.Int("port", cfg.Proxy.Port))
 		s.ch <- err
 		return
 	}
-	log.Debug("Proxy server already listen on tcp", zap.Int("port", p.Port))
+	log.Debug("Proxy server already listen on tcp", zap.Int("port", cfg.Proxy.Port))
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -389,8 +381,8 @@ func (s *proxyTestServer) startGrpc(ctx context.Context, wg *sync.WaitGroup) {
 	s.grpcServer = grpc.NewServer(
 		grpc.KeepaliveEnforcementPolicy(kaep),
 		grpc.KeepaliveParams(kasp),
-		grpc.MaxRecvMsgSize(p.ServerMaxRecvSize),
-		grpc.MaxSendMsgSize(p.ServerMaxSendSize),
+		grpc.MaxRecvMsgSize(int(cfg.Grpc.ClientMaxReceiveSize)),
+		grpc.MaxSendMsgSize(int(cfg.Grpc.ClientMaxSendSize)),
 		grpc.UnaryInterceptor(ot.UnaryServerInterceptor(opts...)),
 		grpc.StreamInterceptor(ot.StreamServerInterceptor(opts...)))
 	proxypb.RegisterProxyServer(s.grpcServer, s)
@@ -513,14 +505,14 @@ func TestProxy(t *testing.T) {
 
 	time.Sleep(10 * time.Millisecond)
 
-	proxy, err := NewProxy(ctx, factory)
+	cfg := configs.NewConfig()
+	cfg.AdvertiseAddress = "127.0.0.1"
+
+	proxy, err := NewProxy(ctx, cfg, factory)
 	assert.NoError(t, err)
 	assert.NotNil(t, proxy)
 
-	Params.Init()
-	log.Info("Initialize parameter table of Proxy")
-
-	etcdcli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdcli, err := etcd.GetEtcdClient(cfg)
 	defer etcdcli.Close()
 	assert.NoError(t, err)
 	proxy.SetEtcdClient(etcdcli)
@@ -530,7 +522,7 @@ func TestProxy(t *testing.T) {
 	go testServer.startGrpc(ctx, &wg)
 	assert.NoError(t, testServer.waitForGrpcReady())
 
-	rootCoordClient, err := rcc.NewClient(ctx, Params.EtcdCfg.MetaRootPath, etcdcli)
+	rootCoordClient, err := rcc.NewClient(ctx, util.GetPath(cfg, util.EtcdMeta), etcdcli)
 	assert.NoError(t, err)
 	err = rootCoordClient.Init()
 	assert.NoError(t, err)
@@ -539,7 +531,7 @@ func TestProxy(t *testing.T) {
 	proxy.SetRootCoordClient(rootCoordClient)
 	log.Info("Proxy set root coordinator client")
 
-	dataCoordClient, err := grpcdatacoordclient2.NewClient(ctx, Params.EtcdCfg.MetaRootPath, etcdcli)
+	dataCoordClient, err := grpcdatacoordclient2.NewClient(ctx, util.GetPath(cfg, util.EtcdMeta), etcdcli)
 	assert.NoError(t, err)
 	err = dataCoordClient.Init()
 	assert.NoError(t, err)
@@ -548,7 +540,7 @@ func TestProxy(t *testing.T) {
 	proxy.SetDataCoordClient(dataCoordClient)
 	log.Info("Proxy set data coordinator client")
 
-	queryCoordClient, err := grpcquerycoordclient.NewClient(ctx, Params.EtcdCfg.MetaRootPath, etcdcli)
+	queryCoordClient, err := grpcquerycoordclient.NewClient(ctx, util.GetPath(cfg, util.EtcdMeta), etcdcli)
 	assert.NoError(t, err)
 	err = queryCoordClient.Init()
 	assert.NoError(t, err)
@@ -557,7 +549,7 @@ func TestProxy(t *testing.T) {
 	proxy.SetQueryCoordClient(queryCoordClient)
 	log.Info("Proxy set query coordinator client")
 
-	indexCoordClient, err := grpcindexcoordclient.NewClient(ctx, Params.EtcdCfg.MetaRootPath, etcdcli)
+	indexCoordClient, err := grpcindexcoordclient.NewClient(ctx, util.GetPath(cfg, util.EtcdMeta), etcdcli)
 	assert.NoError(t, err)
 	err = indexCoordClient.Init()
 	assert.NoError(t, err)
@@ -587,7 +579,7 @@ func TestProxy(t *testing.T) {
 		states, err := proxy.GetComponentStates(ctx)
 		assert.NoError(t, err)
 		assert.Equal(t, commonpb.ErrorCode_Success, states.Status.ErrorCode)
-		assert.Equal(t, Params.ProxyCfg.ProxyID, states.State.NodeID)
+		assert.Equal(t, proxy.session.ServerID, states.State.NodeID)
 		assert.Equal(t, typeutil.ProxyRole, states.State.Role)
 		assert.Equal(t, proxy.stateCode.Load().(internalpb.StateCode), states.State.StateCode)
 	})
@@ -1375,7 +1367,7 @@ func TestProxy(t *testing.T) {
 		wg.Add(1)
 		t.Run("search_travel", func(t *testing.T) {
 			defer wg.Done()
-			past := time.Now().Add(time.Duration(-1*Params.CommonCfg.RetentionDuration-100) * time.Second)
+			past := time.Now().Add(time.Duration(-1*int(cfg.RetentionDuration)-100) * time.Second)
 			travelTs := tsoutil.ComposeTSByTime(past, 0)
 			req := constructSearchRequest()
 			req.TravelTimestamp = travelTs
@@ -1388,7 +1380,7 @@ func TestProxy(t *testing.T) {
 		wg.Add(1)
 		t.Run("search_travel_succ", func(t *testing.T) {
 			defer wg.Done()
-			past := time.Now().Add(time.Duration(-1*Params.CommonCfg.RetentionDuration+100) * time.Second)
+			past := time.Now().Add(time.Duration(-1*int(cfg.RetentionDuration)+100) * time.Second)
 			travelTs := tsoutil.ComposeTSByTime(past, 0)
 			req := constructSearchRequest()
 			req.TravelTimestamp = travelTs
@@ -1421,7 +1413,7 @@ func TestProxy(t *testing.T) {
 		wg.Add(1)
 		t.Run("query_travel", func(t *testing.T) {
 			defer wg.Done()
-			past := time.Now().Add(time.Duration(-1*Params.CommonCfg.RetentionDuration-100) * time.Second)
+			past := time.Now().Add(time.Duration(-1*int(cfg.RetentionDuration-100)) * time.Second)
 			travelTs := tsoutil.ComposeTSByTime(past, 0)
 			queryReq := &milvuspb.QueryRequest{
 				Base:               nil,
@@ -1441,7 +1433,7 @@ func TestProxy(t *testing.T) {
 		wg.Add(1)
 		t.Run("query_travel_succ", func(t *testing.T) {
 			defer wg.Done()
-			past := time.Now().Add(time.Duration(-1*Params.CommonCfg.RetentionDuration+100) * time.Second)
+			past := time.Now().Add(time.Duration(-1*int(cfg.RetentionDuration)+100) * time.Second)
 			travelTs := tsoutil.ComposeTSByTime(past, 0)
 			queryReq := &milvuspb.QueryRequest{
 				Base:               nil,

@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/indexnode"
 	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
@@ -40,6 +41,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
@@ -370,15 +372,16 @@ func TestQueryNodeCluster_getMetrics(t *testing.T) {
 }
 
 func TestReloadClusterFromKV(t *testing.T) {
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	defer etcdCli.Close()
 	assert.Nil(t, err)
 	t.Run("Test LoadOnlineNodes", func(t *testing.T) {
-		refreshParams()
+		cfg := refreshParams()
 		baseCtx := context.Background()
-		kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
-		clusterSession := sessionutil.NewSession(context.Background(), Params.EtcdCfg.MetaRootPath, etcdCli)
-		clusterSession.Init(typeutil.QueryCoordRole, Params.QueryCoordCfg.Address, true, false)
+		kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
+		clusterSession := sessionutil.NewSession(context.Background(), util.GetPath(cfg, util.EtcdMeta), etcdCli)
+		clusterSession.Init(typeutil.QueryCoordRole, fmt.Sprintf("%s:%s", cfg.AdvertiseAddress, cfg.QueryCoord.Port), true, false)
 		clusterSession.Register()
 		cluster := &queryNodeCluster{
 			ctx:       baseCtx,
@@ -388,7 +391,7 @@ func TestReloadClusterFromKV(t *testing.T) {
 			session:   clusterSession,
 		}
 
-		queryNode, err := startQueryNodeServer(baseCtx)
+		queryNode, err := startQueryNodeServer(baseCtx, cfg)
 		assert.Nil(t, err)
 
 		cluster.reloadFromKV()
@@ -402,16 +405,16 @@ func TestReloadClusterFromKV(t *testing.T) {
 	})
 
 	t.Run("Test LoadOfflineNodes", func(t *testing.T) {
-		refreshParams()
+		cfg := refreshParams()
 		ctx, cancel := context.WithCancel(context.Background())
-		kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
-		clusterSession := sessionutil.NewSession(context.Background(), Params.EtcdCfg.MetaRootPath, etcdCli)
-		clusterSession.Init(typeutil.QueryCoordRole, Params.QueryCoordCfg.Address, true, false)
+		kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
+		clusterSession := sessionutil.NewSession(context.Background(), util.GetPath(cfg, util.EtcdMeta), etcdCli)
+		clusterSession.Init(typeutil.QueryCoordRole, fmt.Sprintf("%s:%s", cfg.AdvertiseAddress, cfg.QueryCoord.Port), true, false)
 		clusterSession.Register()
 		factory := msgstream.NewPmsFactory()
-		handler, err := newChannelUnsubscribeHandler(ctx, kv, factory)
+		handler, err := newChannelUnsubscribeHandler(ctx, cfg, kv, factory)
 		assert.Nil(t, err)
-		meta, err := newMeta(ctx, kv, factory, nil)
+		meta, err := newMeta(ctx, cfg, kv, factory, nil)
 		assert.Nil(t, err)
 
 		cluster := &queryNodeCluster{
@@ -446,18 +449,18 @@ func TestReloadClusterFromKV(t *testing.T) {
 }
 
 func TestGrpcRequest(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	baseCtx, cancel := context.WithCancel(context.Background())
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer etcdCli.Close()
-	kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
-	clusterSession := sessionutil.NewSession(context.Background(), Params.EtcdCfg.MetaRootPath, etcdCli)
-	clusterSession.Init(typeutil.QueryCoordRole, Params.QueryCoordCfg.Address, true, false)
+	kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
+	clusterSession := sessionutil.NewSession(context.Background(), util.GetPath(cfg, util.EtcdMeta), etcdCli)
+	clusterSession.Init(typeutil.QueryCoordRole, fmt.Sprintf("%s:%s", cfg.AdvertiseAddress, cfg.QueryCoord.Port), true, false)
 	clusterSession.Register()
 	factory := msgstream.NewPmsFactory()
 	m := map[string]interface{}{
-		"PulsarAddress":  Params.PulsarCfg.Address,
+		"PulsarAddress":  util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port),
 		"ReceiveBufSize": 1024,
 		"PulsarBufSize":  1024}
 	err = factory.SetParams(m)
@@ -465,10 +468,10 @@ func TestGrpcRequest(t *testing.T) {
 	idAllocator := func() (UniqueID, error) {
 		return 0, nil
 	}
-	meta, err := newMeta(baseCtx, kv, factory, idAllocator)
+	meta, err := newMeta(baseCtx, cfg, kv, factory, idAllocator)
 	assert.Nil(t, err)
 
-	handler, err := newChannelUnsubscribeHandler(baseCtx, kv, factory)
+	handler, err := newChannelUnsubscribeHandler(baseCtx, cfg, kv, factory)
 	assert.Nil(t, err)
 
 	cluster := &queryNodeCluster{
@@ -498,7 +501,7 @@ func TestGrpcRequest(t *testing.T) {
 		assert.NotNil(t, err)
 	})
 
-	node, err := startQueryNodeServer(baseCtx)
+	node, err := startQueryNodeServer(baseCtx, cfg)
 	assert.Nil(t, err)
 	nodeSession := node.session
 	nodeID := node.queryNodeID
@@ -641,18 +644,18 @@ func TestGrpcRequest(t *testing.T) {
 }
 
 func TestSetNodeState(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	baseCtx, cancel := context.WithCancel(context.Background())
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer etcdCli.Close()
-	kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
-	clusterSession := sessionutil.NewSession(context.Background(), Params.EtcdCfg.MetaRootPath, etcdCli)
-	clusterSession.Init(typeutil.QueryCoordRole, Params.QueryCoordCfg.Address, true, false)
+	kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
+	clusterSession := sessionutil.NewSession(context.Background(), util.GetPath(cfg, util.EtcdMeta), etcdCli)
+	clusterSession.Init(typeutil.QueryCoordRole, fmt.Sprintf("%s:%s", cfg.AdvertiseAddress, cfg.QueryCoord.Port), true, false)
 	clusterSession.Register()
 	factory := msgstream.NewPmsFactory()
 	m := map[string]interface{}{
-		"PulsarAddress":  Params.PulsarCfg.Address,
+		"PulsarAddress":  util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port),
 		"ReceiveBufSize": 1024,
 		"PulsarBufSize":  1024}
 	err = factory.SetParams(m)
@@ -660,10 +663,10 @@ func TestSetNodeState(t *testing.T) {
 	idAllocator := func() (UniqueID, error) {
 		return 0, nil
 	}
-	meta, err := newMeta(baseCtx, kv, factory, idAllocator)
+	meta, err := newMeta(baseCtx, cfg, kv, factory, idAllocator)
 	assert.Nil(t, err)
 
-	handler, err := newChannelUnsubscribeHandler(baseCtx, kv, factory)
+	handler, err := newChannelUnsubscribeHandler(baseCtx, cfg, kv, factory)
 	assert.Nil(t, err)
 
 	cluster := &queryNodeCluster{
@@ -677,7 +680,7 @@ func TestSetNodeState(t *testing.T) {
 		session:     clusterSession,
 	}
 
-	node, err := startQueryNodeServer(baseCtx)
+	node, err := startQueryNodeServer(baseCtx, cfg)
 	assert.Nil(t, err)
 	err = cluster.registerNode(baseCtx, node.session, node.queryNodeID, disConnect)
 	assert.Nil(t, err)

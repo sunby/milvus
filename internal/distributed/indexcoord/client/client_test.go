@@ -20,6 +20,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
+
 	grpcindexcoord "github.com/milvus-io/milvus/internal/distributed/indexcoord"
 	"github.com/milvus-io/milvus/internal/indexcoord"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
@@ -43,7 +45,8 @@ func TestIndexCoordClient(t *testing.T) {
 	err = server.Run()
 	assert.Nil(t, err)
 
-	etcdCli, err := etcd.GetEtcdClient(&indexcoord.Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	icc, err := NewClient(ctx, indexcoord.Params.EtcdCfg.MetaRootPath, etcdCli)
 	assert.Nil(t, err)

@@ -23,6 +23,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
+
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
@@ -31,6 +33,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/stretchr/testify/assert"
 )
@@ -81,18 +84,10 @@ func BenchmarkAllocTimestamp(b *testing.B) {
 	defer cancel()
 
 	msFactory := msgstream.NewPmsFactory()
-	Params.Init()
-	core, err := NewCore(ctx, msFactory)
+	cfg := configs.NewConfig()
+	core, err := NewCore(ctx, cfg, msFactory)
 
 	assert.Nil(b, err)
-
-	randVal := rand.Int()
-
-	Params.CommonCfg.RootCoordTimeTick = fmt.Sprintf("master-time-tick-%d", randVal)
-	Params.CommonCfg.RootCoordStatistics = fmt.Sprintf("master-statistics-%d", randVal)
-	Params.EtcdCfg.MetaRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.MetaRootPath)
-	Params.EtcdCfg.KvRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.KvRootPath)
-	Params.CommonCfg.RootCoordSubName = fmt.Sprintf("subname-%d", randVal)
 
 	err = core.SetDataCoord(ctx, &tbd{})
 	assert.Nil(b, err)
@@ -121,8 +116,8 @@ func BenchmarkAllocTimestamp(b *testing.B) {
 	assert.Nil(b, err)
 
 	m := map[string]interface{}{
+		"pulsarAddress":  util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port),
 		"receiveBufSize": 1024,
-		"pulsarAddress":  Params.PulsarCfg.Address,
 		"pulsarBufSize":  1024}
 	err = msFactory.SetParams(m)
 	assert.Nil(b, err)

@@ -20,6 +20,8 @@ import (
 	"os"
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
+
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 
 	embed_etcd_kv "github.com/milvus-io/milvus/internal/kv/etcd"
@@ -43,7 +45,7 @@ func TestEtcdConfigLoad(te *testing.T) {
 	}()
 	te.Run("Etcd Config", func(t *testing.T) {
 		rootPath := "/test"
-		metaKv, err := embed_etcd_kv.NewMetaKvFactory(rootPath, &param.EtcdCfg)
+		metaKv, err := embed_etcd_kv.NewMetaKvFactory(rootPath, configs.NewConfig())
 		require.NoError(te, err)
 		assert.NotNil(te, metaKv)
 		require.NoError(t, err)

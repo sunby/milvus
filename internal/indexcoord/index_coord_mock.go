@@ -19,13 +19,16 @@ package indexcoord
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 
+	"github.com/milvus-io/milvus/configs"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -65,16 +68,17 @@ func (icm *Mock) Stop() error {
 
 // Register registers an IndexCoord role in ETCD, if Param `Failure` is true, it will return an error.
 func (icm *Mock) Register() error {
+	cfg := configs.NewConfig()
 	if icm.Failure {
 		return errors.New("IndexCoordinate register failed")
 	}
-	icm.etcdKV = etcdkv.NewEtcdKV(icm.etcdCli, Params.EtcdCfg.MetaRootPath)
+	icm.etcdKV = etcdkv.NewEtcdKV(icm.etcdCli, util.GetPath(cfg, util.EtcdMeta))
 	err := icm.etcdKV.RemoveWithPrefix("session/" + typeutil.IndexCoordRole)
 	if err != nil {
 		return err
 	}
-	session := sessionutil.NewSession(context.Background(), Params.EtcdCfg.MetaRootPath, icm.etcdCli)
-	session.Init(typeutil.IndexCoordRole, Params.IndexCoordCfg.Address, true, false)
+	session := sessionutil.NewSession(context.Background(), util.GetPath(cfg, util.EtcdMeta), icm.etcdCli)
+	session.Init(typeutil.IndexCoordRole, fmt.Sprintf("%s:%d", cfg.AdvertiseAddress, cfg.IndexCoord.Port), true, false)
 	session.Register()
 	return err
 }

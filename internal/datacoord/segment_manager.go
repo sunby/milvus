@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
@@ -104,6 +105,7 @@ type SegmentManager struct {
 	segmentSealPolicies []segmentSealPolicy
 	channelSealPolicies []channelSealPolicy
 	flushPolicy         flushPolicy
+	cfg                 *configs.Config
 }
 
 type allocHelper struct {
@@ -174,10 +176,10 @@ func defaultAllocatePolicy() AllocatePolicy {
 	return AllocatePolicyV1
 }
 
-func defaultSegmentSealPolicy() []segmentSealPolicy {
+func defaultSegmentSealPolicy(cfg *configs.Config) []segmentSealPolicy {
 	return []segmentSealPolicy{
 		sealByLifetimePolicy(segmentMaxLifetime),
-		getSegmentCapacityPolicy(Params.DataCoordCfg.SegmentSealProportion),
+		getSegmentCapacityPolicy(cfg.SegmentSealThreshold),
 	}
 }
 
@@ -186,7 +188,7 @@ func defaultFlushPolicy() flushPolicy {
 }
 
 // newSegmentManager should be the only way to retrieve SegmentManager.
-func newSegmentManager(meta *meta, allocator allocator, opts ...allocOption) *SegmentManager {
+func newSegmentManager(cfg *configs.Config, meta *meta, allocator allocator, opts ...allocOption) *SegmentManager {
 	manager := &SegmentManager{
 		meta:                meta,
 		allocator:           allocator,
@@ -194,9 +196,10 @@ func newSegmentManager(meta *meta, allocator allocator, opts ...allocOption) *Se
 		segments:            make([]UniqueID, 0),
 		estimatePolicy:      defaultCalUpperLimitPolicy(),
 		allocPolicy:         defaultAllocatePolicy(),
-		segmentSealPolicies: defaultSegmentSealPolicy(), // default only segment size policy
-		channelSealPolicies: []channelSealPolicy{},      // no default channel seal policy
+		segmentSealPolicies: defaultSegmentSealPolicy(cfg), // default only segment size policy
+		channelSealPolicies: []channelSealPolicy{},         // no default channel seal policy
 		flushPolicy:         defaultFlushPolicy(),
+		cfg:                 cfg,
 	}
 	for _, opt := range opts {
 		opt.apply(manager)
@@ -288,7 +291,7 @@ func (s *SegmentManager) genExpireTs(ctx context.Context) (Timestamp, error) {
 		return 0, err
 	}
 	physicalTs, logicalTs := tsoutil.ParseTS(ts)
-	expirePhysicalTs := physicalTs.Add(time.Duration(Params.DataCoordCfg.SegAssignmentExpiration) * time.Millisecond)
+	expirePhysicalTs := physicalTs.Add(time.Duration(s.cfg.SegmentAllocationExpirationInMS) * time.Millisecond)
 	expireTs := tsoutil.ComposeTS(expirePhysicalTs.UnixNano()/int64(time.Millisecond), int64(logicalTs))
 	return expireTs, nil
 }
@@ -334,7 +337,7 @@ func (s *SegmentManager) estimateMaxNumOfRows(collectionID UniqueID) (int, error
 	if collMeta == nil {
 		return -1, fmt.Errorf("failed to get collection %d", collectionID)
 	}
-	return s.estimatePolicy(collMeta.Schema)
+	return s.estimatePolicy(s.cfg, collMeta.Schema)
 }
 
 // DropSegment drop the segment from manager.

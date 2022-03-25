@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
+
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/log"
@@ -57,6 +59,7 @@ type channelsTimeTickerImpl struct {
 	wg                sync.WaitGroup
 	ctx               context.Context
 	cancel            context.CancelFunc
+	cfg               *configs.Config
 	defaultTimestamp  Timestamp
 	minTimestamp      Timestamp
 }
@@ -118,7 +121,7 @@ func (ticker *channelsTimeTickerImpl) tick() error {
 		} else {
 			if stat.minTs > current {
 				ticker.minTsStatistics[pchan] = stat.minTs - 1
-				next := now + Timestamp(Params.ProxyCfg.TimeTickInterval)
+				next := now + Timestamp(time.Duration(ticker.cfg.TimeTickInterval)*time.Millisecond)
 				if next > stat.maxTs {
 					next = stat.maxTs
 				}
@@ -208,6 +211,7 @@ func (ticker *channelsTimeTickerImpl) getMinTick() Timestamp {
 // newChannelsTimeTicker returns a channels time ticker.
 func newChannelsTimeTicker(
 	ctx context.Context,
+	cfg *configs.Config,
 	interval time.Duration,
 	pchans []pChan,
 	getStatisticsFunc getPChanStatisticsFuncType,
@@ -224,6 +228,7 @@ func newChannelsTimeTicker(
 		currents:          make(map[pChan]Timestamp),
 		ctx:               ctx1,
 		cancel:            cancel,
+		cfg:               cfg,
 	}
 
 	for _, pchan := range pchans {

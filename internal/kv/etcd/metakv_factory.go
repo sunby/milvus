@@ -17,40 +17,41 @@
 package etcdkv
 
 import (
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/kv"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/util/etcd"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"go.etcd.io/etcd/server/v3/embed"
 	"go.uber.org/zap"
 )
 
 // NewMetaKvFactory returns an object that implements the kv.MetaKv interface using etcd.
 // The UseEmbedEtcd in the param is used to determine whether the etcd service is external or embedded.
-func NewMetaKvFactory(rootPath string, etcdCfg *paramtable.EtcdConfig) (kv.MetaKv, error) {
+// TODO: Duplicated with `InitEtcdServer` in etcd_util.go
+func NewMetaKvFactory(rootPath string, cfg *configs.Config) (kv.MetaKv, error) {
 	log.Info("start etcd with rootPath",
 		zap.String("rootpath", rootPath),
-		zap.Bool("isEmbed", etcdCfg.UseEmbedEtcd))
-	if etcdCfg.UseEmbedEtcd {
-		path := etcdCfg.ConfigPath
-		var cfg *embed.Config
+		zap.Bool("isEmbed", cfg.Etcd.UseEmbed))
+	if cfg.Etcd.UseEmbed {
+		path := cfg.Etcd.ConfigPath
+		var etcdCfg *embed.Config
 		if len(path) > 0 {
 			cfgFromFile, err := embed.ConfigFromFile(path)
 			if err != nil {
 				return nil, err
 			}
-			cfg = cfgFromFile
+			etcdCfg = cfgFromFile
 		} else {
-			cfg = embed.NewConfig()
+			etcdCfg = embed.NewConfig()
 		}
-		cfg.Dir = etcdCfg.DataDir
-		metaKv, err := NewEmbededEtcdKV(cfg, rootPath)
+		etcdCfg.Dir = cfg.Etcd.DataPath
+		metaKv, err := NewEmbededEtcdKV(etcdCfg, rootPath)
 		if err != nil {
 			return nil, err
 		}
 		return metaKv, err
 	}
-	client, err := etcd.GetEtcdClient(etcdCfg)
+	client, err := etcd.GetEtcdClient(cfg)
 	if err != nil {
 		return nil, err
 	}

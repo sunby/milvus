@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
@@ -259,11 +260,11 @@ func Test_SuffixSnapshotLoad(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	randVal := rand.Int()
 
-	Params.Init()
 	rootPath := fmt.Sprintf("/test/meta/%d", randVal)
 	sep := "_ts"
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	require.Nil(t, err)
 	defer etcdCli.Close()
 	etcdkv := etcdkv.NewEtcdKV(etcdCli, rootPath)
@@ -312,10 +313,10 @@ func Test_SuffixSnapshotMultiSave(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	randVal := rand.Int()
 
-	Params.Init()
 	rootPath := fmt.Sprintf("/test/meta/%d", randVal)
 	sep := "_ts"
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	require.Nil(t, err)
 	defer etcdCli.Close()
 	etcdkv := etcdkv.NewEtcdKV(etcdCli, rootPath)
@@ -387,11 +388,11 @@ func Test_SuffixSnapshotMultiSaveAndRemoveWithPrefix(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	randVal := rand.Int()
 
-	Params.Init()
 	rootPath := fmt.Sprintf("/test/meta/%d", randVal)
 	sep := "_ts"
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	require.Nil(t, err)
 	defer etcdCli.Close()
 	etcdkv := etcdkv.NewEtcdKV(etcdCli, rootPath)

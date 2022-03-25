@@ -18,6 +18,7 @@ package querycoord
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,24 +26,25 @@ import (
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
 func TestShuffleSegmentsToQueryNode(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	baseCtx, cancel := context.WithCancel(context.Background())
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	defer etcdCli.Close()
 	assert.Nil(t, err)
-	kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
-	clusterSession := sessionutil.NewSession(context.Background(), Params.EtcdCfg.MetaRootPath, etcdCli)
-	clusterSession.Init(typeutil.QueryCoordRole, Params.QueryCoordCfg.Address, true, false)
+	kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
+	clusterSession := sessionutil.NewSession(context.Background(), util.GetPath(cfg, util.EtcdMeta), etcdCli)
+	clusterSession.Init(typeutil.QueryCoordRole, fmt.Sprintf("%s:%s", cfg.AdvertiseAddress, cfg.QueryCoord.Port), true, false)
 	factory := msgstream.NewPmsFactory()
-	meta, err := newMeta(baseCtx, kv, factory, nil)
+	meta, err := newMeta(baseCtx, cfg, kv, factory, nil)
 	assert.Nil(t, err)
-	handler, err := newChannelUnsubscribeHandler(baseCtx, kv, factory)
+	handler, err := newChannelUnsubscribeHandler(baseCtx, cfg, kv, factory)
 	assert.Nil(t, err)
 	cluster := &queryNodeCluster{
 		ctx:         baseCtx,
@@ -83,11 +85,11 @@ func TestShuffleSegmentsToQueryNode(t *testing.T) {
 	reqs := []*querypb.LoadSegmentsRequest{firstReq, secondReq}
 
 	t.Run("Test shuffleSegmentsWithoutQueryNode", func(t *testing.T) {
-		err = shuffleSegmentsToQueryNode(baseCtx, reqs, cluster, meta, false, nil, nil)
+		err = shuffleSegmentsToQueryNode(baseCtx, cfg, reqs, cluster, meta, false, nil, nil)
 		assert.NotNil(t, err)
 	})
 
-	node1, err := startQueryNodeServer(baseCtx)
+	node1, err := startQueryNodeServer(baseCtx, cfg)
 	assert.Nil(t, err)
 	node1Session := node1.session
 	node1ID := node1.queryNodeID
@@ -95,14 +97,14 @@ func TestShuffleSegmentsToQueryNode(t *testing.T) {
 	waitQueryNodeOnline(cluster, node1ID)
 
 	t.Run("Test shuffleSegmentsToQueryNode", func(t *testing.T) {
-		err = shuffleSegmentsToQueryNode(baseCtx, reqs, cluster, meta, false, nil, nil)
+		err = shuffleSegmentsToQueryNode(baseCtx, cfg, reqs, cluster, meta, false, nil, nil)
 		assert.Nil(t, err)
 
 		assert.Equal(t, node1ID, firstReq.DstNodeID)
 		assert.Equal(t, node1ID, secondReq.DstNodeID)
 	})
 
-	node2, err := startQueryNodeServer(baseCtx)
+	node2, err := startQueryNodeServer(baseCtx, cfg)
 	assert.Nil(t, err)
 	node2Session := node2.session
 	node2ID := node2.queryNodeID
@@ -111,13 +113,13 @@ func TestShuffleSegmentsToQueryNode(t *testing.T) {
 	cluster.stopNode(node1ID)
 
 	t.Run("Test shuffleSegmentsToQueryNodeV2", func(t *testing.T) {
-		err = shuffleSegmentsToQueryNodeV2(baseCtx, reqs, cluster, meta, false, nil, nil)
+		err = shuffleSegmentsToQueryNodeV2(baseCtx, cfg, reqs, cluster, meta, false, nil, nil)
 		assert.Nil(t, err)
 
 		assert.Equal(t, node2ID, firstReq.DstNodeID)
 		assert.Equal(t, node2ID, secondReq.DstNodeID)
 
-		err = shuffleSegmentsToQueryNodeV2(baseCtx, reqs, cluster, meta, true, nil, nil)
+		err = shuffleSegmentsToQueryNodeV2(baseCtx, cfg, reqs, cluster, meta, true, nil, nil)
 		assert.Nil(t, err)
 
 		assert.Equal(t, node2ID, firstReq.DstNodeID)

@@ -24,6 +24,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/kv"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
@@ -48,10 +49,11 @@ type IndexChecker struct {
 
 	broker *globalMetaBroker
 
-	wg sync.WaitGroup
+	wg  sync.WaitGroup
+	cfg *configs.Config
 }
 
-func newIndexChecker(ctx context.Context, client kv.MetaKv, meta Meta, cluster Cluster, scheduler *TaskScheduler, broker *globalMetaBroker) (*IndexChecker, error) {
+func newIndexChecker(ctx context.Context, cfg *configs.Config, client kv.MetaKv, meta Meta, cluster Cluster, scheduler *TaskScheduler, broker *globalMetaBroker) (*IndexChecker, error) {
 	childCtx, cancel := context.WithCancel(ctx)
 	reqChan := make(chan *querypb.SegmentInfo, 1024)
 	unIndexChan := make(chan *querypb.SegmentInfo, 1024)
@@ -71,6 +73,7 @@ func newIndexChecker(ctx context.Context, client kv.MetaKv, meta Meta, cluster C
 		cluster:   cluster,
 
 		broker: broker,
+		cfg:    cfg,
 	}
 	err := checker.reloadFromKV()
 	if err != nil {
@@ -109,7 +112,7 @@ func (ic *IndexChecker) reloadFromKV() error {
 			return err
 		}
 		validHandoffReq, _ := ic.verifyHandoffReqValid(segmentInfo)
-		if validHandoffReq && Params.QueryCoordCfg.AutoHandoff {
+		if validHandoffReq && ic.cfg.QueryCoord.AutoHandOff {
 			// push the req to handoffReqChan and then wait to load after index created
 			// in case handoffReqChan is full, and block start process
 			go ic.enqueueHandoffReq(segmentInfo)
@@ -179,7 +182,7 @@ func (ic *IndexChecker) checkIndexLoop() {
 			log.Debug("checkIndexLoop: start check index for handoff segment", zap.Int64("segmentID", segmentInfo.SegmentID))
 			for {
 				validHandoffReq, collectionInfo := ic.verifyHandoffReqValid(segmentInfo)
-				if validHandoffReq && Params.QueryCoordCfg.AutoHandoff {
+				if validHandoffReq && ic.cfg.QueryCoord.AutoHandOff {
 					indexInfo, err := ic.broker.getIndexInfo(ic.ctx, segmentInfo.CollectionID, segmentInfo.SegmentID, collectionInfo.Schema)
 					if err == nil {
 						// if index exist or not enableIndex, ready to load

@@ -19,6 +19,7 @@ package indexcoord
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"os"
 	"sort"
@@ -28,8 +29,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/metrics"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util"
 
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.uber.org/zap"
@@ -46,7 +49,6 @@ import (
 	"github.com/milvus-io/milvus/internal/tso"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/milvus-io/milvus/internal/util/retry"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/trace"
@@ -61,8 +63,6 @@ var _ types.IndexCoord = (*IndexCoord)(nil)
 const (
 	indexSizeFactor = 6
 )
-
-var Params paramtable.ComponentParam
 
 // IndexCoord is a component responsible for scheduling index construction tasks and maintaining index status.
 // IndexCoord accepts requests from rootcoord to build indexes, delete indexes, and query index information.
@@ -103,13 +103,18 @@ type IndexCoord struct {
 	// Add callback functions at different stages
 	startCallbacks []func()
 	closeCallbacks []func()
+
+	cfg *configs.Config
+
+	createdTime time.Time
+	updatedTime time.Time
 }
 
 // UniqueID is an alias of int64, is used as a unique identifier for the request.
 type UniqueID = typeutil.UniqueID
 
 // NewIndexCoord creates a new IndexCoord component.
-func NewIndexCoord(ctx context.Context) (*IndexCoord, error) {
+func NewIndexCoord(ctx context.Context, cfg *configs.Config) (*IndexCoord, error) {
 	rand.Seed(time.Now().UnixNano())
 	ctx1, cancel := context.WithCancel(ctx)
 	i := &IndexCoord{
@@ -119,6 +124,7 @@ func NewIndexCoord(ctx context.Context) (*IndexCoord, error) {
 		durationInterval:   time.Second * 10,
 		assignTaskInterval: time.Second * 3,
 		taskLimit:          20,
+		cfg:                cfg,
 	}
 	i.UpdateStateCode(internalpb.StateCode_Abnormal)
 	return i, nil
@@ -143,19 +149,17 @@ func (i *IndexCoord) Register() error {
 }
 
 func (i *IndexCoord) initSession() error {
-	i.session = sessionutil.NewSession(i.loopCtx, Params.EtcdCfg.MetaRootPath, i.etcdCli)
+	i.session = sessionutil.NewSession(i.loopCtx, util.GetPath(i.cfg, util.EtcdMeta), i.etcdCli)
 	if i.session == nil {
 		return errors.New("failed to initialize session")
 	}
-	i.session.Init(typeutil.IndexCoordRole, Params.IndexCoordCfg.Address, true, true)
-	Params.SetLogger(i.session.ServerID)
+	i.session.Init(typeutil.IndexCoordRole, fmt.Sprintf("%s:%d", i.cfg.AdvertiseAddress, i.cfg.IndexCoord.Port), true, true)
 	return nil
 }
 
 // Init initializes the IndexCoord component.
 func (i *IndexCoord) Init() error {
 	var initErr error
-	Params.InitOnce()
 	i.initOnce.Do(func() {
 		i.UpdateStateCode(internalpb.StateCode_Initializing)
 		log.Debug("IndexCoord init", zap.Any("stateCode", i.stateCode.Load().(internalpb.StateCode)))
@@ -168,7 +172,7 @@ func (i *IndexCoord) Init() error {
 		}
 
 		connectEtcdFn := func() error {
-			etcdKV := etcdkv.NewEtcdKV(i.etcdCli, Params.EtcdCfg.MetaRootPath)
+			etcdKV := etcdkv.NewEtcdKV(i.etcdCli, util.GetPath(i.cfg, util.EtcdMeta))
 			metakv, err := NewMetaTable(etcdKV)
 			if err != nil {
 				return err
@@ -212,7 +216,7 @@ func (i *IndexCoord) Init() error {
 		}
 
 		//init idAllocator
-		kvRootPath := Params.EtcdCfg.KvRootPath
+		kvRootPath := util.GetPath(i.cfg, util.EtcdKv)
 		etcdKV := tsoutil.NewTSOKVBase(i.etcdCli, kvRootPath, "index_gid")
 
 		i.idAllocator = allocator.NewGlobalIDAllocator("idTimestamp", etcdKV)
@@ -222,11 +226,11 @@ func (i *IndexCoord) Init() error {
 		}
 
 		chunkManager, err := storage.NewMinioChunkManager(i.loopCtx,
-			storage.Address(Params.MinioCfg.Address),
-			storage.AccessKeyID(Params.MinioCfg.AccessKeyID),
-			storage.SecretAccessKeyID(Params.MinioCfg.SecretAccessKey),
-			storage.UseSSL(Params.MinioCfg.UseSSL),
-			storage.BucketName(Params.MinioCfg.BucketName),
+			storage.Address(fmt.Sprintf("%s:%d", i.cfg.Minio.Address, i.cfg.Minio.Port)),
+			storage.AccessKeyID(i.cfg.Minio.AccessKeyID),
+			storage.SecretAccessKeyID(i.cfg.Minio.SecretAccessKey),
+			storage.UseSSL(i.cfg.Minio.UseSSL),
+			storage.BucketName(i.cfg.Minio.BucketName),
 			storage.CreateBucket(true))
 
 		if err != nil {
@@ -281,8 +285,8 @@ func (i *IndexCoord) Start() error {
 		cb()
 	}
 
-	Params.IndexCoordCfg.CreatedTime = time.Now()
-	Params.IndexCoordCfg.UpdatedTime = time.Now()
+	i.createdTime = time.Now()
+	i.updatedTime = time.Now()
 
 	i.UpdateStateCode(internalpb.StateCode_Healthy)
 	log.Debug("IndexCoord start successfully", zap.Any("State", i.stateCode.Load()))
@@ -717,7 +721,7 @@ func (i *IndexCoord) recycleUnusedIndexFiles() {
 			metas := i.metaTable.GetUnusedIndexFiles(i.taskLimit)
 			for _, meta := range metas {
 				if meta.indexMeta.MarkDeleted {
-					unusedIndexFilePathPrefix := Params.IndexCoordCfg.IndexStorageRootPath + "/" + strconv.Itoa(int(meta.indexMeta.IndexBuildID))
+					unusedIndexFilePathPrefix := util.GetPath(i.cfg, util.IndexStorageRoot) + "/" + strconv.Itoa(int(meta.indexMeta.IndexBuildID))
 					log.Debug("IndexCoord recycleUnusedIndexFiles",
 						zap.Int64("Recycle the index files for deleted index with indexBuildID", meta.indexMeta.IndexBuildID))
 					if err := i.chunkManager.RemoveWithPrefix(unusedIndexFilePathPrefix); err != nil {
@@ -731,7 +735,7 @@ func (i *IndexCoord) recycleUnusedIndexFiles() {
 					log.Debug("IndexCoord recycleUnusedIndexFiles",
 						zap.Int64("Recycle the low version index files of the index with indexBuildID", meta.indexMeta.IndexBuildID))
 					for j := 1; j < int(meta.indexMeta.Version); j++ {
-						unusedIndexFilePathPrefix := Params.IndexCoordCfg.IndexStorageRootPath + "/" + strconv.Itoa(int(meta.indexMeta.IndexBuildID)) + "/" + strconv.Itoa(j)
+						unusedIndexFilePathPrefix := util.GetPath(i.cfg, util.IndexStorageRoot) + "/" + strconv.Itoa(int(meta.indexMeta.IndexBuildID)) + "/" + strconv.Itoa(j)
 						if err := i.chunkManager.RemoveWithPrefix(unusedIndexFilePathPrefix); err != nil {
 							log.Error("IndexCoord recycleUnusedIndexFiles Remove index files failed",
 								zap.Bool("MarkDeleted", false), zap.Error(err))

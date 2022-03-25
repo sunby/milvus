@@ -18,6 +18,7 @@ package components
 
 import (
 	"context"
+	"github.com/milvus-io/milvus/configs"
 	"io"
 
 	"github.com/milvus-io/milvus/internal/log"
@@ -38,8 +39,8 @@ type RootCoord struct {
 }
 
 // NewRootCoord creates a new RoorCoord
-func NewRootCoord(ctx context.Context, factory msgstream.Factory) (*RootCoord, error) {
-	svr, err := rc.NewServer(ctx, factory)
+func NewRootCoord(ctx context.Context, cfg *configs.Config, factory msgstream.Factory) (*RootCoord, error) {
+	svr, err := rc.NewServer(ctx, cfg, factory)
 	if err != nil {
 		return nil, err
 	}

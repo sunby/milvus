@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/kv"
 	memkv "github.com/milvus-io/milvus/internal/kv/mem"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
@@ -34,7 +35,7 @@ func TestClusterCreate(t *testing.T) {
 	t.Run("startup normally", func(t *testing.T) {
 		kv := memkv.NewMemoryKV()
 		sessionManager := NewSessionManager()
-		channelManager, err := NewChannelManager(kv, newMockHandler())
+		channelManager, err := NewChannelManager(kv, newMockHandler(), configs.NewConfig())
 		assert.Nil(t, err)
 		cluster := NewCluster(sessionManager, channelManager)
 		defer cluster.Close()
@@ -52,7 +53,7 @@ func TestClusterCreate(t *testing.T) {
 	})
 
 	t.Run("startup with existed channel data", func(t *testing.T) {
-		Params.Init()
+
 		var err error
 		kv := memkv.NewMemoryKV()
 		info1 := &datapb.ChannelWatchInfo{
@@ -63,11 +64,12 @@ func TestClusterCreate(t *testing.T) {
 		}
 		info1Data, err := proto.Marshal(info1)
 		assert.Nil(t, err)
-		err = kv.Save(Params.DataCoordCfg.ChannelWatchSubPath+"/1/channel1", string(info1Data))
+		cfg := configs.NewConfig()
+		err = kv.Save(cfg.DataCoord.ChannelWatchPath+"/1/channel1", string(info1Data))
 		assert.Nil(t, err)
 
 		sessionManager := NewSessionManager()
-		channelManager, err := NewChannelManager(kv, newMockHandler())
+		channelManager, err := NewChannelManager(kv, newMockHandler(), configs.NewConfig())
 		assert.Nil(t, err)
 		cluster := NewCluster(sessionManager, channelManager)
 		defer cluster.Close()
@@ -82,7 +84,7 @@ func TestClusterCreate(t *testing.T) {
 	t.Run("remove all nodes and restart with other nodes", func(t *testing.T) {
 		kv := memkv.NewMemoryKV()
 		sessionManager := NewSessionManager()
-		channelManager, err := NewChannelManager(kv, newMockHandler())
+		channelManager, err := NewChannelManager(kv, newMockHandler(), configs.NewConfig())
 		assert.Nil(t, err)
 		cluster := NewCluster(sessionManager, channelManager)
 
@@ -103,7 +105,7 @@ func TestClusterCreate(t *testing.T) {
 		cluster.Close()
 
 		sessionManager2 := NewSessionManager()
-		channelManager2, err := NewChannelManager(kv, newMockHandler())
+		channelManager2, err := NewChannelManager(kv, newMockHandler(), configs.NewConfig())
 		assert.Nil(t, err)
 		clusterReload := NewCluster(sessionManager2, channelManager2)
 		defer clusterReload.Close()
@@ -128,7 +130,7 @@ func TestClusterCreate(t *testing.T) {
 	t.Run("loadKv Fails", func(t *testing.T) {
 		kv := memkv.NewMemoryKV()
 		fkv := &loadPrefixFailKV{TxnKV: kv}
-		_, err := NewChannelManager(fkv, newMockHandler())
+		_, err := NewChannelManager(fkv, newMockHandler(), configs.NewConfig())
 		assert.NotNil(t, err)
 	})
 }
@@ -147,7 +149,7 @@ func TestRegister(t *testing.T) {
 	t.Run("register to empty cluster", func(t *testing.T) {
 		kv := memkv.NewMemoryKV()
 		sessionManager := NewSessionManager()
-		channelManager, err := NewChannelManager(kv, newMockHandler())
+		channelManager, err := NewChannelManager(kv, newMockHandler(), configs.NewConfig())
 		assert.Nil(t, err)
 		cluster := NewCluster(sessionManager, channelManager)
 		defer cluster.Close()
@@ -168,7 +170,7 @@ func TestRegister(t *testing.T) {
 	t.Run("register to empty cluster with buffer channels", func(t *testing.T) {
 		kv := memkv.NewMemoryKV()
 		sessionManager := NewSessionManager()
-		channelManager, err := NewChannelManager(kv, newMockHandler())
+		channelManager, err := NewChannelManager(kv, newMockHandler(), configs.NewConfig())
 		assert.Nil(t, err)
 		err = channelManager.Watch(&channel{
 			Name:         "ch1",
@@ -197,7 +199,7 @@ func TestRegister(t *testing.T) {
 	t.Run("register and restart with no channel", func(t *testing.T) {
 		kv := memkv.NewMemoryKV()
 		sessionManager := NewSessionManager()
-		channelManager, err := NewChannelManager(kv, newMockHandler())
+		channelManager, err := NewChannelManager(kv, newMockHandler(), configs.NewConfig())
 		assert.Nil(t, err)
 		cluster := NewCluster(sessionManager, channelManager)
 		addr := "localhost:8080"
@@ -212,7 +214,7 @@ func TestRegister(t *testing.T) {
 		cluster.Close()
 
 		sessionManager2 := NewSessionManager()
-		channelManager2, err := NewChannelManager(kv, newMockHandler())
+		channelManager2, err := NewChannelManager(kv, newMockHandler(), configs.NewConfig())
 		assert.Nil(t, err)
 		restartCluster := NewCluster(sessionManager2, channelManager2)
 		defer restartCluster.Close()
@@ -225,7 +227,7 @@ func TestUnregister(t *testing.T) {
 	t.Run("remove node after unregister", func(t *testing.T) {
 		kv := memkv.NewMemoryKV()
 		sessionManager := NewSessionManager()
-		channelManager, err := NewChannelManager(kv, newMockHandler())
+		channelManager, err := NewChannelManager(kv, newMockHandler(), configs.NewConfig())
 		assert.Nil(t, err)
 		cluster := NewCluster(sessionManager, channelManager)
 		defer cluster.Close()
@@ -246,7 +248,7 @@ func TestUnregister(t *testing.T) {
 	t.Run("move channels to online nodes after unregister", func(t *testing.T) {
 		kv := memkv.NewMemoryKV()
 		sessionManager := NewSessionManager()
-		channelManager, err := NewChannelManager(kv, newMockHandler())
+		channelManager, err := NewChannelManager(kv, newMockHandler(), configs.NewConfig())
 		assert.Nil(t, err)
 		cluster := NewCluster(sessionManager, channelManager)
 		defer cluster.Close()
@@ -280,7 +282,7 @@ func TestUnregister(t *testing.T) {
 		}
 		kv := memkv.NewMemoryKV()
 		sessionManager := NewSessionManager(withSessionCreator(mockSessionCreator))
-		channelManager, err := NewChannelManager(kv, newMockHandler())
+		channelManager, err := NewChannelManager(kv, newMockHandler(), configs.NewConfig())
 		assert.Nil(t, err)
 		cluster := NewCluster(sessionManager, channelManager)
 		defer cluster.Close()
@@ -311,7 +313,7 @@ func TestWatchIfNeeded(t *testing.T) {
 		}
 		kv := memkv.NewMemoryKV()
 		sessionManager := NewSessionManager(withSessionCreator(mockSessionCreator))
-		channelManager, err := NewChannelManager(kv, newMockHandler())
+		channelManager, err := NewChannelManager(kv, newMockHandler(), configs.NewConfig())
 		assert.Nil(t, err)
 		cluster := NewCluster(sessionManager, channelManager)
 		defer cluster.Close()
@@ -334,7 +336,7 @@ func TestWatchIfNeeded(t *testing.T) {
 	t.Run("watch channel to empty cluster", func(t *testing.T) {
 		kv := memkv.NewMemoryKV()
 		sessionManager := NewSessionManager()
-		channelManager, err := NewChannelManager(kv, newMockHandler())
+		channelManager, err := NewChannelManager(kv, newMockHandler(), configs.NewConfig())
 		assert.Nil(t, err)
 		cluster := NewCluster(sessionManager, channelManager)
 		defer cluster.Close()
@@ -355,7 +357,7 @@ func TestConsistentHashPolicy(t *testing.T) {
 	sessionManager := NewSessionManager()
 	chash := consistent.New()
 	factory := NewConsistentHashChannelPolicyFactory(chash)
-	channelManager, err := NewChannelManager(kv, newMockHandler(), withFactory(factory))
+	channelManager, err := NewChannelManager(kv, newMockHandler(), configs.NewConfig(), withFactory(factory))
 	assert.Nil(t, err)
 	cluster := NewCluster(sessionManager, channelManager)
 	defer cluster.Close()
@@ -430,7 +432,7 @@ func TestConsistentHashPolicy(t *testing.T) {
 func TestCluster_Flush(t *testing.T) {
 	kv := memkv.NewMemoryKV()
 	sessionManager := NewSessionManager()
-	channelManager, err := NewChannelManager(kv, newMockHandler())
+	channelManager, err := NewChannelManager(kv, newMockHandler(), configs.NewConfig())
 	assert.Nil(t, err)
 	cluster := NewCluster(sessionManager, channelManager)
 	defer cluster.Close()

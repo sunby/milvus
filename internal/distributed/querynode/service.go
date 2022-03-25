@@ -25,6 +25,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
+
 	ot "github.com/grpc-ecosystem/go-grpc-middleware/tracing/opentracing"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
@@ -98,7 +100,7 @@ func (s *Server) init() error {
 
 	log.Debug("QueryNode", zap.Int("port", Params.Port))
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(configs.NewConfig())
 	if err != nil {
 		log.Debug("QueryNode connect to etcd failed", zap.Error(err))
 		return err

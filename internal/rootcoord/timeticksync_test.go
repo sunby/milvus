@@ -21,6 +21,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
+	"github.com/milvus-io/milvus/internal/util"
+
 	"github.com/stretchr/testify/assert"
 
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
@@ -32,9 +35,10 @@ func TestTimetickSync(t *testing.T) {
 	ctx := context.Background()
 	sourceID := int64(100)
 
+	cfg := configs.NewConfig()
 	factory := msgstream.NewPmsFactory()
 	m := map[string]interface{}{
-		"pulsarAddress":  Params.PulsarCfg.Address,
+		"pulsarAddress":  util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port),
 		"receiveBufSize": 1024,
 		"pulsarBufSize":  1024}
 	err := factory.SetParams(m)
@@ -44,10 +48,7 @@ func TestTimetickSync(t *testing.T) {
 	//	int64(1): {"rootcoord-dml_0"},
 	//}
 
-	Params.RootCoordCfg.DmlChannelNum = 2
-	Params.CommonCfg.RootCoordDml = "rootcoord-dml"
-	Params.CommonCfg.RootCoordDelta = "rootcoord-delta"
-	ttSync := newTimeTickSync(ctx, sourceID, factory, nil)
+	ttSync := newTimeTickSync(ctx, cfg, sourceID, factory, nil)
 
 	var wg sync.WaitGroup
 	wg.Add(1)

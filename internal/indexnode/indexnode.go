@@ -32,6 +32,7 @@ import "C"
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand"
 	"os"
@@ -42,8 +43,10 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/metrics"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util"
 
 	"github.com/milvus-io/milvus/internal/common"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
@@ -99,16 +102,24 @@ type IndexNode struct {
 	closer io.Closer
 
 	initOnce sync.Once
+
+	cfg *configs.Config
+
+	createdTime time.Time
+	updatedTime time.Time
+
+	port int
 }
 
 // NewIndexNode creates a new IndexNode component.
-func NewIndexNode(ctx context.Context) (*IndexNode, error) {
+func NewIndexNode(ctx context.Context, cfg *configs.Config) (*IndexNode, error) {
 	log.Debug("New IndexNode ...")
 	rand.Seed(time.Now().UnixNano())
 	ctx1, cancel := context.WithCancel(ctx)
 	b := &IndexNode{
 		loopCtx:    ctx1,
 		loopCancel: cancel,
+		cfg:        cfg,
 	}
 	b.UpdateStateCode(internalpb.StateCode_Abnormal)
 	sc, err := NewTaskScheduler(b.loopCtx, b.chunkManager)
@@ -144,21 +155,20 @@ func (i *IndexNode) initKnowhere() {
 	C.IndexBuilderInit()
 
 	// override index builder SIMD type
-	cSimdType := C.CString(Params.CommonCfg.SimdType)
+	cSimdType := C.CString(i.cfg.SIMDType)
 	cRealSimdType := C.IndexBuilderSetSimdType(cSimdType)
-	Params.CommonCfg.SimdType = C.GoString(cRealSimdType)
+	i.cfg.SIMDType = C.GoString(cRealSimdType)
 	C.free(unsafe.Pointer(cRealSimdType))
 	C.free(unsafe.Pointer(cSimdType))
 }
 
 func (i *IndexNode) initSession() error {
-	i.session = sessionutil.NewSession(i.loopCtx, Params.EtcdCfg.MetaRootPath, i.etcdCli)
+	i.session = sessionutil.NewSession(i.loopCtx, util.GetPath(i.cfg, util.EtcdMeta), i.etcdCli)
 	if i.session == nil {
 		return errors.New("failed to initialize session")
 	}
-	i.session.Init(typeutil.IndexNodeRole, Params.IndexNodeCfg.IP+":"+strconv.Itoa(Params.IndexNodeCfg.Port), false, true)
-	Params.IndexNodeCfg.NodeID = i.session.ServerID
-	Params.SetLogger(Params.IndexNodeCfg.NodeID)
+	i.session.Init(typeutil.IndexNodeRole, fmt.Sprintf("%s:%d", i.cfg.AdvertiseAddress, i.port), false, true)
+	serverID = i.session.ServerID
 	return nil
 }
 
@@ -166,8 +176,6 @@ func (i *IndexNode) initSession() error {
 func (i *IndexNode) Init() error {
 	var initErr error = nil
 	i.initOnce.Do(func() {
-		Params.Init()
-
 		i.UpdateStateCode(internalpb.StateCode_Initializing)
 		log.Debug("IndexNode init", zap.Any("State", i.stateCode.Load().(internalpb.StateCode)))
 		err := i.initSession()
@@ -178,15 +186,15 @@ func (i *IndexNode) Init() error {
 		}
 		log.Debug("IndexNode init session successful", zap.Int64("serverID", i.session.ServerID))
 
-		etcdKV := etcdkv.NewEtcdKV(i.etcdCli, Params.EtcdCfg.MetaRootPath)
+		etcdKV := etcdkv.NewEtcdKV(i.etcdCli, util.GetPath(i.cfg, util.EtcdMeta))
 		i.etcdKV = etcdKV
 
 		chunkManager, err := storage.NewMinioChunkManager(i.loopCtx,
-			storage.Address(Params.MinioCfg.Address),
-			storage.AccessKeyID(Params.MinioCfg.AccessKeyID),
-			storage.SecretAccessKeyID(Params.MinioCfg.SecretAccessKey),
-			storage.UseSSL(Params.MinioCfg.UseSSL),
-			storage.BucketName(Params.MinioCfg.BucketName),
+			storage.Address(fmt.Sprintf("%s:%d", i.cfg.Minio.Address, i.cfg.Minio.Port)),
+			storage.AccessKeyID(i.cfg.Minio.AccessKeyID),
+			storage.SecretAccessKeyID(i.cfg.Minio.SecretAccessKey),
+			storage.UseSSL(i.cfg.Minio.UseSSL),
+			storage.BucketName(i.cfg.Minio.BucketName),
 			storage.CreateBucket(true))
 
 		if err != nil {
@@ -214,8 +222,8 @@ func (i *IndexNode) Start() error {
 	i.once.Do(func() {
 		startErr = i.sched.Start()
 
-		Params.IndexNodeCfg.CreatedTime = time.Now()
-		Params.IndexNodeCfg.UpdatedTime = time.Now()
+		i.createdTime = time.Now()
+		i.updatedTime = time.Now()
 
 		i.UpdateStateCode(internalpb.StateCode_Healthy)
 		log.Debug("IndexNode", zap.Any("State", i.stateCode.Load()))
@@ -284,17 +292,18 @@ func (i *IndexNode) CreateIndex(ctx context.Context, request *indexpb.CreateInde
 	sp, ctx2 := trace.StartSpanFromContextWithOperationName(i.loopCtx, "IndexNode-CreateIndex")
 	defer sp.Finish()
 	sp.SetTag("IndexBuildID", strconv.FormatInt(request.IndexBuildID, 10))
-	metrics.IndexNodeBuildIndexTaskCounter.WithLabelValues(strconv.FormatInt(Params.IndexNodeCfg.NodeID, 10), metrics.TotalLabel).Inc()
+	metrics.IndexNodeBuildIndexTaskCounter.WithLabelValues(strconv.FormatInt(serverID, 10), metrics.TotalLabel).Inc()
 
 	t := &IndexBuildTask{
 		BaseTask: BaseTask{
 			ctx:  ctx2,
 			done: make(chan error),
+			cfg:  i.cfg,
 		},
 		req:            request,
 		cm:             i.chunkManager,
 		etcdKV:         i.etcdKV,
-		nodeID:         Params.IndexNodeCfg.NodeID,
+		nodeID:         serverID,
 		serializedSize: 0,
 	}
 
@@ -307,12 +316,12 @@ func (i *IndexNode) CreateIndex(ctx context.Context, request *indexpb.CreateInde
 		log.Warn("IndexNode failed to schedule", zap.Int64("indexBuildID", request.IndexBuildID), zap.Error(err))
 		ret.ErrorCode = commonpb.ErrorCode_UnexpectedError
 		ret.Reason = err.Error()
-		metrics.IndexNodeBuildIndexTaskCounter.WithLabelValues(strconv.FormatInt(Params.IndexNodeCfg.NodeID, 10), metrics.FailLabel).Inc()
+		metrics.IndexNodeBuildIndexTaskCounter.WithLabelValues(strconv.FormatInt(serverID, 10), metrics.FailLabel).Inc()
 		return ret, nil
 	}
 	log.Info("IndexNode successfully scheduled", zap.Int64("indexBuildID", request.IndexBuildID))
 
-	metrics.IndexNodeBuildIndexTaskCounter.WithLabelValues(strconv.FormatInt(Params.IndexNodeCfg.NodeID, 10), metrics.SuccessLabel).Inc()
+	metrics.IndexNodeBuildIndexTaskCounter.WithLabelValues(strconv.FormatInt(serverID, 10), metrics.SuccessLabel).Inc()
 	return ret, nil
 }
 
@@ -324,7 +333,6 @@ func (i *IndexNode) GetComponentStates(ctx context.Context) (*internalpb.Compone
 		nodeID = i.session.ServerID
 	}
 	stateInfo := &internalpb.ComponentInfo{
-		// NodeID:    Params.NodeID, // will race with i.Register()
 		NodeID:    nodeID,
 		Role:      "NodeImpl",
 		StateCode: i.stateCode.Load().(internalpb.StateCode),
@@ -371,14 +379,14 @@ func (i *IndexNode) GetStatisticsChannel(ctx context.Context) (*milvuspb.StringR
 func (i *IndexNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
 	if !i.isHealthy() {
 		log.Warn("IndexNode.GetMetrics failed",
-			zap.Int64("node_id", Params.IndexNodeCfg.NodeID),
+			zap.Int64("node_id", serverID),
 			zap.String("req", req.Request),
-			zap.Error(errIndexNodeIsUnhealthy(Params.IndexNodeCfg.NodeID)))
+			zap.Error(errIndexNodeIsUnhealthy(serverID)))
 
 		return &milvuspb.GetMetricsResponse{
 			Status: &commonpb.Status{
 				ErrorCode: commonpb.ErrorCode_UnexpectedError,
-				Reason:    msgIndexNodeIsUnhealthy(Params.IndexNodeCfg.NodeID),
+				Reason:    msgIndexNodeIsUnhealthy(serverID),
 			},
 			Response: "",
 		}, nil
@@ -387,7 +395,7 @@ func (i *IndexNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequ
 	metricType, err := metricsinfo.ParseMetricType(req.Request)
 	if err != nil {
 		log.Warn("IndexNode.GetMetrics failed to parse metric type",
-			zap.Int64("node_id", Params.IndexNodeCfg.NodeID),
+			zap.Int64("node_id", serverID),
 			zap.String("req", req.Request),
 			zap.Error(err))
 
@@ -404,7 +412,7 @@ func (i *IndexNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequ
 		metrics, err := getSystemInfoMetrics(ctx, req, i)
 
 		log.Debug("IndexNode.GetMetrics",
-			zap.Int64("node_id", Params.IndexNodeCfg.NodeID),
+			zap.Int64("node_id", serverID),
 			zap.String("req", req.Request),
 			zap.String("metric_type", metricType),
 			zap.Error(err))
@@ -413,7 +421,7 @@ func (i *IndexNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequ
 	}
 
 	log.Warn("IndexNode.GetMetrics failed, request metric type is not implemented yet",
-		zap.Int64("node_id", Params.IndexNodeCfg.NodeID),
+		zap.Int64("node_id", serverID),
 		zap.String("req", req.Request),
 		zap.String("metric_type", metricType))
 
@@ -425,3 +433,5 @@ func (i *IndexNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequ
 		Response: "",
 	}, nil
 }
+
+var serverID int64

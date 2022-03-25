@@ -21,6 +21,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
+
 	grpcindexnode "github.com/milvus-io/milvus/internal/distributed/indexnode"
 	"github.com/milvus-io/milvus/internal/indexnode"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
@@ -128,7 +130,8 @@ func TestIndexNodeClient(t *testing.T) {
 
 	inm := &indexnode.Mock{}
 	ParamsGlobal.InitOnce()
-	etcdCli, err := etcd.GetEtcdClient(&ParamsGlobal.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.NoError(t, err)
 	inm.SetEtcdClient(etcdCli)
 	err = ins.SetClient(inm)

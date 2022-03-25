@@ -21,11 +21,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"sync"
 
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
 	"github.com/milvus-io/milvus/internal/storage"
@@ -59,6 +59,7 @@ func qsOptWithSessionManager(s *SessionManager) qsOpt {
 }
 
 func newQueryService(ctx context.Context,
+	cfg *configs.Config,
 	historical *historical,
 	streaming *streaming,
 	factory msgstream.Factory,
@@ -68,22 +69,22 @@ func newQueryService(ctx context.Context,
 	queryServiceCtx, queryServiceCancel := context.WithCancel(ctx)
 
 	//TODO godchen: change this to configuration
-	path, err := Params.Load("localStorage.Path")
-	if err != nil {
+
+	path := cfg.LocalStorage.Path
+	if len(path) == 0 {
 		path = "/tmp/milvus/data"
 	}
-	enabled, _ := Params.Load("localStorage.enabled")
-	localCacheEnabled, _ := strconv.ParseBool(enabled)
+	localCacheEnabled := cfg.LocalStorage.Enable
 
 	localChunkManager := storage.NewLocalChunkManager(storage.RootPath(path))
 
-	remoteChunkManager, err := storage.NewMinioChunkManager(
+	remoteChunkManager, _ := storage.NewMinioChunkManager(
 		ctx,
-		storage.Address(Params.MinioCfg.Address),
-		storage.AccessKeyID(Params.MinioCfg.AccessKeyID),
-		storage.SecretAccessKeyID(Params.MinioCfg.SecretAccessKey),
-		storage.UseSSL(Params.MinioCfg.UseSSL),
-		storage.BucketName(Params.MinioCfg.BucketName),
+		storage.Address(fmt.Sprintf("%s:%d", cfg.Minio.Address, cfg.Minio.Port)),
+		storage.AccessKeyID(cfg.Minio.AccessKeyID),
+		storage.SecretAccessKeyID(cfg.Minio.SecretAccessKey),
+		storage.UseSSL(cfg.Minio.UseSSL),
+		storage.BucketName(cfg.Minio.BucketName),
 		storage.CreateBucket(true))
 
 	qs := &queryService{

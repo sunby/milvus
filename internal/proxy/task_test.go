@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/util/timerecord"
 
 	"github.com/golang/protobuf/proto"
@@ -803,9 +804,9 @@ func TestSearchTask(t *testing.T) {
 		SearchRequest: &internalpb.SearchRequest{
 			Base: &commonpb.MsgBase{
 				MsgType:  commonpb.MsgType_Search,
-				SourceID: Params.ProxyCfg.ProxyID,
+				SourceID: ServerID,
 			},
-			ResultChannelID: strconv.FormatInt(Params.ProxyCfg.ProxyID, 10),
+			ResultChannelID: strconv.FormatInt(ServerID, 10),
 		},
 		resultBuf: make(chan []*internalpb.SearchResults),
 		query:     nil,
@@ -834,9 +835,9 @@ func TestSearchTask(t *testing.T) {
 		SearchRequest: &internalpb.SearchRequest{
 			Base: &commonpb.MsgBase{
 				MsgType:  commonpb.MsgType_Search,
-				SourceID: Params.ProxyCfg.ProxyID,
+				SourceID: ServerID,
 			},
-			ResultChannelID: strconv.FormatInt(Params.ProxyCfg.ProxyID, 10),
+			ResultChannelID: strconv.FormatInt(ServerID, 10),
 		},
 		resultBuf: make(chan []*internalpb.SearchResults),
 		query:     nil,
@@ -870,9 +871,9 @@ func TestSearchTask(t *testing.T) {
 		SearchRequest: &internalpb.SearchRequest{
 			Base: &commonpb.MsgBase{
 				MsgType:  commonpb.MsgType_Search,
-				SourceID: Params.ProxyCfg.ProxyID,
+				SourceID: ServerID,
 			},
-			ResultChannelID: strconv.FormatInt(Params.ProxyCfg.ProxyID, 10),
+			ResultChannelID: strconv.FormatInt(ServerID, 10),
 		},
 		resultBuf: make(chan []*internalpb.SearchResults),
 		query:     nil,
@@ -903,7 +904,6 @@ func TestSearchTask(t *testing.T) {
 }
 
 func TestCreateCollectionTask(t *testing.T) {
-	Params.Init()
 
 	rc := NewRootCoordMock()
 	rc.Start()
@@ -995,7 +995,8 @@ func TestCreateCollectionTask(t *testing.T) {
 		assert.Error(t, err)
 		task.Schema = marshaledSchema
 
-		task.ShardsNum = Params.ProxyCfg.MaxShardNum + 1
+		cfg := configs.NewConfig()
+		task.ShardsNum = int32(cfg.ShardCountLimit) + 1
 		err = task.PreExecute(ctx)
 		assert.Error(t, err)
 		task.ShardsNum = shardsNum
@@ -1007,7 +1008,7 @@ func TestCreateCollectionTask(t *testing.T) {
 			Name:        collectionName,
 			Description: "",
 			AutoID:      false,
-			Fields:      make([]*schemapb.FieldSchema, Params.ProxyCfg.MaxFieldNum+1),
+			Fields:      make([]*schemapb.FieldSchema, cfg.FieldCountLimit+1),
 		}
 		marshaledSchemaWithTooManyFields, err := proto.Marshal(schemaWithTooManyFields)
 		assert.NoError(t, err)
@@ -1027,7 +1028,7 @@ func TestCreateCollectionTask(t *testing.T) {
 		assert.Error(t, err)
 
 		schema.Name = prefix
-		for i := 0; i < int(Params.ProxyCfg.MaxNameLength); i++ {
+		for i := 0; i < int(cfg.NameLengthLimit); i++ {
 			schema.Name += strconv.Itoa(i % 10)
 		}
 		tooLongNameSchema, err := proto.Marshal(schema)
@@ -1113,7 +1114,7 @@ func TestCreateCollectionTask(t *testing.T) {
 				schema.Fields[idx].TypeParams = []*commonpb.KeyValuePair{
 					{
 						Key:   "dim",
-						Value: strconv.Itoa(int(Params.ProxyCfg.MaxDimension) + 1),
+						Value: strconv.Itoa(int(cfg.DimensionLimit) + 1),
 					},
 				}
 			}
@@ -1129,7 +1130,7 @@ func TestCreateCollectionTask(t *testing.T) {
 		schema.Fields[1].TypeParams = []*commonpb.KeyValuePair{
 			{
 				Key:   "dim",
-				Value: strconv.Itoa(int(Params.ProxyCfg.MaxDimension) + 1),
+				Value: strconv.Itoa(int(cfg.DimensionLimit) + 1),
 			},
 		}
 		binaryTooLargeDimSchema, err := proto.Marshal(schema)
@@ -1167,7 +1168,6 @@ func TestCreateCollectionTask(t *testing.T) {
 }
 
 func TestDropCollectionTask(t *testing.T) {
-	Params.Init()
 	rc := NewRootCoordMock()
 	rc.Start()
 	defer rc.Stop()
@@ -1228,7 +1228,7 @@ func TestDropCollectionTask(t *testing.T) {
 	assert.Equal(t, UniqueID(100), task.ID())
 	assert.Equal(t, Timestamp(100), task.BeginTs())
 	assert.Equal(t, Timestamp(100), task.EndTs())
-	assert.Equal(t, Params.ProxyCfg.ProxyID, task.GetBase().GetSourceID())
+	assert.Equal(t, ServerID, task.GetBase().GetSourceID())
 	// missing collectionID in globalMetaCache
 	err = task.Execute(ctx)
 	assert.NotNil(t, err)
@@ -1252,7 +1252,6 @@ func TestDropCollectionTask(t *testing.T) {
 }
 
 func TestHasCollectionTask(t *testing.T) {
-	Params.Init()
 	rc := NewRootCoordMock()
 	rc.Start()
 	defer rc.Stop()
@@ -1305,7 +1304,7 @@ func TestHasCollectionTask(t *testing.T) {
 	assert.Equal(t, UniqueID(100), task.ID())
 	assert.Equal(t, Timestamp(100), task.BeginTs())
 	assert.Equal(t, Timestamp(100), task.EndTs())
-	assert.Equal(t, Params.ProxyCfg.ProxyID, task.GetBase().GetSourceID())
+	assert.Equal(t, ServerID, task.GetBase().GetSourceID())
 	// missing collectionID in globalMetaCache
 	err = task.Execute(ctx)
 	assert.Nil(t, err)
@@ -1334,7 +1333,6 @@ func TestHasCollectionTask(t *testing.T) {
 }
 
 func TestDescribeCollectionTask(t *testing.T) {
-	Params.Init()
 	rc := NewRootCoordMock()
 	rc.Start()
 	defer rc.Stop()
@@ -1366,7 +1364,7 @@ func TestDescribeCollectionTask(t *testing.T) {
 	assert.Equal(t, UniqueID(100), task.ID())
 	assert.Equal(t, Timestamp(100), task.BeginTs())
 	assert.Equal(t, Timestamp(100), task.EndTs())
-	assert.Equal(t, Params.ProxyCfg.ProxyID, task.GetBase().GetSourceID())
+	assert.Equal(t, ServerID, task.GetBase().GetSourceID())
 	// missing collectionID in globalMetaCache
 	err := task.Execute(ctx)
 	assert.Nil(t, err)
@@ -1393,7 +1391,6 @@ func TestDescribeCollectionTask(t *testing.T) {
 }
 
 func TestDescribeCollectionTask_ShardsNum1(t *testing.T) {
-	Params.Init()
 	rc := NewRootCoordMock()
 	rc.Start()
 	defer rc.Stop()
@@ -1454,7 +1451,6 @@ func TestDescribeCollectionTask_ShardsNum1(t *testing.T) {
 }
 
 func TestDescribeCollectionTask_ShardsNum2(t *testing.T) {
-	Params.Init()
 	rc := NewRootCoordMock()
 	rc.Start()
 	defer rc.Stop()
@@ -1516,7 +1512,6 @@ func TestDescribeCollectionTask_ShardsNum2(t *testing.T) {
 }
 
 func TestCreatePartitionTask(t *testing.T) {
-	Params.Init()
 	rc := NewRootCoordMock()
 	rc.Start()
 	defer rc.Stop()
@@ -1548,7 +1543,7 @@ func TestCreatePartitionTask(t *testing.T) {
 	assert.Equal(t, UniqueID(100), task.ID())
 	assert.Equal(t, Timestamp(100), task.BeginTs())
 	assert.Equal(t, Timestamp(100), task.EndTs())
-	assert.Equal(t, Params.ProxyCfg.ProxyID, task.GetBase().GetSourceID())
+	assert.Equal(t, ServerID, task.GetBase().GetSourceID())
 	err := task.Execute(ctx)
 	assert.NotNil(t, err)
 
@@ -1563,7 +1558,7 @@ func TestCreatePartitionTask(t *testing.T) {
 }
 
 func TestDropPartitionTask(t *testing.T) {
-	Params.Init()
+
 	rc := NewRootCoordMock()
 	rc.Start()
 	defer rc.Stop()
@@ -1595,7 +1590,7 @@ func TestDropPartitionTask(t *testing.T) {
 	assert.Equal(t, UniqueID(100), task.ID())
 	assert.Equal(t, Timestamp(100), task.BeginTs())
 	assert.Equal(t, Timestamp(100), task.EndTs())
-	assert.Equal(t, Params.ProxyCfg.ProxyID, task.GetBase().GetSourceID())
+	assert.Equal(t, ServerID, task.GetBase().GetSourceID())
 	err := task.Execute(ctx)
 	assert.NotNil(t, err)
 
@@ -1610,7 +1605,7 @@ func TestDropPartitionTask(t *testing.T) {
 }
 
 func TestHasPartitionTask(t *testing.T) {
-	Params.Init()
+
 	rc := NewRootCoordMock()
 	rc.Start()
 	defer rc.Stop()
@@ -1642,7 +1637,7 @@ func TestHasPartitionTask(t *testing.T) {
 	assert.Equal(t, UniqueID(100), task.ID())
 	assert.Equal(t, Timestamp(100), task.BeginTs())
 	assert.Equal(t, Timestamp(100), task.EndTs())
-	assert.Equal(t, Params.ProxyCfg.ProxyID, task.GetBase().GetSourceID())
+	assert.Equal(t, ServerID, task.GetBase().GetSourceID())
 	err := task.Execute(ctx)
 	assert.NotNil(t, err)
 
@@ -1657,7 +1652,7 @@ func TestHasPartitionTask(t *testing.T) {
 }
 
 func TestShowPartitionsTask(t *testing.T) {
-	Params.Init()
+
 	rc := NewRootCoordMock()
 	rc.Start()
 	defer rc.Stop()
@@ -1690,7 +1685,7 @@ func TestShowPartitionsTask(t *testing.T) {
 	assert.Equal(t, UniqueID(100), task.ID())
 	assert.Equal(t, Timestamp(100), task.BeginTs())
 	assert.Equal(t, Timestamp(100), task.EndTs())
-	assert.Equal(t, Params.ProxyCfg.ProxyID, task.GetBase().GetSourceID())
+	assert.Equal(t, ServerID, task.GetBase().GetSourceID())
 	err := task.Execute(ctx)
 	assert.NotNil(t, err)
 
@@ -1714,9 +1709,6 @@ func TestShowPartitionsTask(t *testing.T) {
 
 func TestSearchTask_all(t *testing.T) {
 	var err error
-
-	Params.Init()
-	Params.ProxyCfg.SearchResultChannelNames = []string{funcutil.GenRandomStr()}
 
 	rc := NewRootCoordMock()
 	rc.Start()
@@ -1790,7 +1782,7 @@ func TestSearchTask_all(t *testing.T) {
 			MsgType:   commonpb.MsgType_LoadCollection,
 			MsgID:     0,
 			Timestamp: 0,
-			SourceID:  Params.ProxyCfg.ProxyID,
+			SourceID:  ServerID,
 		},
 		DbID:         0,
 		CollectionID: collectionID,
@@ -1811,9 +1803,9 @@ func TestSearchTask_all(t *testing.T) {
 				MsgType:   commonpb.MsgType_Search,
 				MsgID:     0,
 				Timestamp: 0,
-				SourceID:  Params.ProxyCfg.ProxyID,
+				SourceID:  ServerID,
 			},
-			ResultChannelID:    strconv.FormatInt(Params.ProxyCfg.ProxyID, 10),
+			ResultChannelID:    strconv.FormatInt(ServerID, 10),
 			DbID:               0,
 			CollectionID:       0,
 			PartitionIDs:       nil,
@@ -2067,9 +2059,6 @@ func TestSearchTask_all(t *testing.T) {
 func TestSearchTaskWithInvalidRoundDecimal(t *testing.T) {
 	var err error
 
-	Params.Init()
-	Params.ProxyCfg.SearchResultChannelNames = []string{funcutil.GenRandomStr()}
-
 	rc := NewRootCoordMock()
 	rc.Start()
 	defer rc.Stop()
@@ -2142,7 +2131,7 @@ func TestSearchTaskWithInvalidRoundDecimal(t *testing.T) {
 			MsgType:   commonpb.MsgType_LoadCollection,
 			MsgID:     0,
 			Timestamp: 0,
-			SourceID:  Params.ProxyCfg.ProxyID,
+			SourceID:  ServerID,
 		},
 		DbID:         0,
 		CollectionID: collectionID,
@@ -2163,9 +2152,9 @@ func TestSearchTaskWithInvalidRoundDecimal(t *testing.T) {
 				MsgType:   commonpb.MsgType_Search,
 				MsgID:     0,
 				Timestamp: 0,
-				SourceID:  Params.ProxyCfg.ProxyID,
+				SourceID:  ServerID,
 			},
-			ResultChannelID:    strconv.FormatInt(Params.ProxyCfg.ProxyID, 10),
+			ResultChannelID:    strconv.FormatInt(ServerID, 10),
 			DbID:               0,
 			CollectionID:       0,
 			PartitionIDs:       nil,
@@ -2417,9 +2406,6 @@ func TestSearchTaskWithInvalidRoundDecimal(t *testing.T) {
 func TestSearchTask_7803_reduce(t *testing.T) {
 	var err error
 
-	Params.Init()
-	Params.ProxyCfg.SearchResultChannelNames = []string{funcutil.GenRandomStr()}
-
 	rc := NewRootCoordMock()
 	rc.Start()
 	defer rc.Stop()
@@ -2488,7 +2474,7 @@ func TestSearchTask_7803_reduce(t *testing.T) {
 			MsgType:   commonpb.MsgType_LoadCollection,
 			MsgID:     0,
 			Timestamp: 0,
-			SourceID:  Params.ProxyCfg.ProxyID,
+			SourceID:  ServerID,
 		},
 		DbID:         0,
 		CollectionID: collectionID,
@@ -2509,9 +2495,9 @@ func TestSearchTask_7803_reduce(t *testing.T) {
 				MsgType:   commonpb.MsgType_Search,
 				MsgID:     0,
 				Timestamp: 0,
-				SourceID:  Params.ProxyCfg.ProxyID,
+				SourceID:  ServerID,
 			},
-			ResultChannelID:    strconv.FormatInt(Params.ProxyCfg.ProxyID, 10),
+			ResultChannelID:    strconv.FormatInt(ServerID, 10),
 			DbID:               0,
 			CollectionID:       0,
 			PartitionIDs:       nil,
@@ -2666,7 +2652,6 @@ func TestSearchTask_7803_reduce(t *testing.T) {
 }
 
 func TestSearchTask_Type(t *testing.T) {
-	Params.Init()
 
 	task := &searchTask{
 		SearchRequest: &internalpb.SearchRequest{
@@ -2679,7 +2664,6 @@ func TestSearchTask_Type(t *testing.T) {
 }
 
 func TestSearchTask_Ts(t *testing.T) {
-	Params.Init()
 
 	task := &searchTask{
 		SearchRequest: &internalpb.SearchRequest{
@@ -2697,8 +2681,6 @@ func TestSearchTask_Ts(t *testing.T) {
 
 func TestSearchTask_Channels(t *testing.T) {
 	var err error
-
-	Params.Init()
 
 	rc := NewRootCoordMock()
 	rc.Start()
@@ -2780,9 +2762,6 @@ func TestSearchTask_Channels(t *testing.T) {
 
 func TestSearchTask_PreExecute(t *testing.T) {
 	var err error
-
-	Params.Init()
-	Params.ProxyCfg.SearchResultChannelNames = []string{funcutil.GenRandomStr()}
 
 	rc := NewRootCoordMock()
 	rc.Start()
@@ -3069,9 +3048,6 @@ func TestSearchTask_PreExecute(t *testing.T) {
 func TestSearchTask_Execute(t *testing.T) {
 	var err error
 
-	Params.Init()
-	Params.ProxyCfg.SearchResultChannelNames = []string{funcutil.GenRandomStr()}
-
 	rc := NewRootCoordMock()
 	rc.Start()
 	defer rc.Stop()
@@ -3215,7 +3191,6 @@ func TestSearchTask_Reduce(t *testing.T) {
 func TestQueryTask_all(t *testing.T) {
 	var err error
 
-	Params.Init()
 	Params.ProxyCfg.RetrieveResultChannelNames = []string{funcutil.GenRandomStr()}
 
 	rc := NewRootCoordMock()
@@ -3287,7 +3262,7 @@ func TestQueryTask_all(t *testing.T) {
 			MsgType:   commonpb.MsgType_LoadCollection,
 			MsgID:     0,
 			Timestamp: 0,
-			SourceID:  Params.ProxyCfg.ProxyID,
+			SourceID:  ServerID,
 		},
 		DbID:         0,
 		CollectionID: collectionID,
@@ -3303,9 +3278,9 @@ func TestQueryTask_all(t *testing.T) {
 				MsgType:   commonpb.MsgType_Retrieve,
 				MsgID:     0,
 				Timestamp: 0,
-				SourceID:  Params.ProxyCfg.ProxyID,
+				SourceID:  ServerID,
 			},
-			ResultChannelID:    strconv.Itoa(int(Params.ProxyCfg.ProxyID)),
+			ResultChannelID:    strconv.Itoa(int(ServerID)),
 			DbID:               0,
 			CollectionID:       collectionID,
 			PartitionIDs:       nil,
@@ -3327,7 +3302,7 @@ func TestQueryTask_all(t *testing.T) {
 				MsgType:   commonpb.MsgType_Retrieve,
 				MsgID:     0,
 				Timestamp: 0,
-				SourceID:  Params.ProxyCfg.ProxyID,
+				SourceID:  ServerID,
 			},
 			DbName:             dbName,
 			CollectionName:     collectionName,
@@ -3385,7 +3360,7 @@ func TestQueryTask_all(t *testing.T) {
 							ErrorCode: commonpb.ErrorCode_Success,
 							Reason:    "",
 						},
-						ResultChannelID: strconv.Itoa(int(Params.ProxyCfg.ProxyID)),
+						ResultChannelID: strconv.Itoa(int(ServerID)),
 						Ids: &schemapb.IDs{
 							IdField: &schemapb.IDs_IntId{
 								IntId: &schemapb.LongArray{
@@ -3534,7 +3509,6 @@ func TestQueryTask_all(t *testing.T) {
 func TestTask_all(t *testing.T) {
 	var err error
 
-	Params.Init()
 	Params.ProxyCfg.RetrieveResultChannelNames = []string{funcutil.GenRandomStr()}
 
 	rc := NewRootCoordMock()
@@ -3598,7 +3572,7 @@ func TestTask_all(t *testing.T) {
 				MsgType:   commonpb.MsgType_CreatePartition,
 				MsgID:     0,
 				Timestamp: 0,
-				SourceID:  Params.ProxyCfg.ProxyID,
+				SourceID:  ServerID,
 			},
 			DbName:         dbName,
 			CollectionName: collectionName,
@@ -3624,11 +3598,11 @@ func TestTask_all(t *testing.T) {
 	interval := time.Millisecond * 10
 	tso := newMockTsoAllocator()
 
-	ticker := newChannelsTimeTicker(ctx, interval, []string{}, newGetStatisticsFunc(pchans), tso)
+	ticker := newChannelsTimeTicker(ctx, configs.NewConfig(), interval, []string{}, newGetStatisticsFunc(pchans), tso)
 	_ = ticker.start()
 	defer ticker.close()
 
-	idAllocator, err := allocator.NewIDAllocator(ctx, rc, Params.ProxyCfg.ProxyID)
+	idAllocator, err := allocator.NewIDAllocator(ctx, rc, ServerID)
 	assert.NoError(t, err)
 	_ = idAllocator.Start()
 	defer idAllocator.Close()
@@ -3660,7 +3634,7 @@ func TestTask_all(t *testing.T) {
 					MsgType:   commonpb.MsgType_Insert,
 					MsgID:     0,
 					Timestamp: 0,
-					SourceID:  Params.ProxyCfg.ProxyID,
+					SourceID:  ServerID,
 				},
 				DbName:         dbName,
 				CollectionName: collectionName,
@@ -3817,7 +3791,7 @@ func TestTask_all(t *testing.T) {
 						MsgType:   commonpb.MsgType_Delete,
 						MsgID:     0,
 						Timestamp: 0,
-						SourceID:  Params.ProxyCfg.ProxyID,
+						SourceID:  ServerID,
 					},
 					CollectionName: collectionName,
 					PartitionName:  partitionName,
@@ -3828,7 +3802,7 @@ func TestTask_all(t *testing.T) {
 					MsgType:   commonpb.MsgType_Delete,
 					MsgID:     0,
 					Timestamp: 0,
-					SourceID:  Params.ProxyCfg.ProxyID,
+					SourceID:  ServerID,
 				},
 				DbName:         dbName,
 				CollectionName: collectionName,
@@ -3876,7 +3850,7 @@ func TestTask_all(t *testing.T) {
 }
 
 func TestCreateAlias_all(t *testing.T) {
-	Params.Init()
+
 	rc := NewRootCoordMock()
 	rc.Start()
 	defer rc.Stop()
@@ -3918,7 +3892,7 @@ func TestCreateAlias_all(t *testing.T) {
 }
 
 func TestDropAlias_all(t *testing.T) {
-	Params.Init()
+
 	rc := NewRootCoordMock()
 	rc.Start()
 	defer rc.Stop()
@@ -3957,7 +3931,7 @@ func TestDropAlias_all(t *testing.T) {
 }
 
 func TestAlterAlias_all(t *testing.T) {
-	Params.Init()
+
 	rc := NewRootCoordMock()
 	rc.Start()
 	defer rc.Stop()

@@ -21,21 +21,23 @@ import (
 	"testing"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/milvus-io/milvus/configs"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestMetaTable(t *testing.T) {
-	Params.Init()
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	defer etcdCli.Close()
 	assert.NoError(t, err)
 	assert.Nil(t, err)
-	etcdKV := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
+	etcdKV := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
 
 	req := &indexpb.BuildIndexRequest{
 		IndexBuildID: 1,
@@ -313,12 +315,12 @@ func TestMetaTable(t *testing.T) {
 }
 
 func TestMetaTable_Error(t *testing.T) {
-	Params.Init()
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	defer etcdCli.Close()
 	assert.NoError(t, err)
 
-	etcdKV := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
+	etcdKV := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
 
 	t.Run("reloadFromKV error", func(t *testing.T) {
 		value := "indexMeta-1"

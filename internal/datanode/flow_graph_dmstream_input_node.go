@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/metrics"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/flowgraph"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"go.uber.org/zap"
@@ -32,10 +34,9 @@ import (
 // DmInputNode receives messages from message streams, packs messages between two timeticks, and passes all
 //  messages between two timeticks to the following flowgraph node. In DataNode, the following flow graph node is
 //  flowgraph ddNode.
-func newDmInputNode(ctx context.Context, seekPos *internalpb.MsgPosition, dmNodeConfig *nodeConfig) (*flowgraph.InputNode, error) {
+func newDmInputNode(ctx context.Context, cfg *configs.Config, seekPos *internalpb.MsgPosition, dmNodeConfig *nodeConfig) (*flowgraph.InputNode, error) {
 	// subName should be unique, since pchannelName is shared among several collections
-	//	consumeSubName := Params.MsgChannelSubName + "-" + strconv.FormatInt(collID, 10)
-	consumeSubName := fmt.Sprintf("%s-%d-%d", Params.CommonCfg.DataNodeSubName, Params.DataNodeCfg.NodeID, dmNodeConfig.collectionID)
+	consumeSubName := fmt.Sprintf("%s-%d-%d", util.GetPath(cfg, util.DataNodeSubName), serverID, dmNodeConfig.collectionID)
 	insertStream, err := dmNodeConfig.msFactory.NewTtMsgStream(ctx)
 	if err != nil {
 		return nil, err
@@ -45,7 +46,7 @@ func newDmInputNode(ctx context.Context, seekPos *internalpb.MsgPosition, dmNode
 	//  is virtual channel name, so we need to convert vchannel name into pchannel neme here.
 	pchannelName := funcutil.ToPhysicalChannel(dmNodeConfig.vChannelName)
 	insertStream.AsConsumer([]string{pchannelName}, consumeSubName)
-	metrics.DataNodeNumConsumers.WithLabelValues(fmt.Sprint(Params.DataNodeCfg.NodeID)).Inc()
+	metrics.DataNodeNumConsumers.WithLabelValues(fmt.Sprint(serverID)).Inc()
 	log.Info("datanode AsConsumer", zap.String("physical channel", pchannelName), zap.String("subName", consumeSubName), zap.Int64("collection ID", dmNodeConfig.collectionID))
 
 	if seekPos != nil {

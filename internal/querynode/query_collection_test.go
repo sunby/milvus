@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/common"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
@@ -40,6 +41,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 	"github.com/milvus-io/milvus/internal/proto/segcorepb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/tsoutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
@@ -72,7 +74,7 @@ func genSimpleQueryCollection(ctx context.Context, cancel context.CancelFunc) (*
 		return nil, err
 	}
 
-	queryCollection, err := newQueryCollection(ctx, cancel,
+	queryCollection, err := newQueryCollection(ctx, cancel, configs.NewConfig(),
 		defaultCollectionID,
 		historical,
 		streaming,
@@ -93,9 +95,9 @@ func genSimpleSegmentInfo() *querypb.SegmentInfo {
 
 func genSimpleSealedSegmentsChangeInfo() *querypb.SealedSegmentsChangeInfo {
 	changeInfo := &querypb.SegmentChangeInfo{
-		OnlineNodeID:    Params.QueryNodeCfg.QueryNodeID,
+		OnlineNodeID:    queryNodeID,
 		OnlineSegments:  []*querypb.SegmentInfo{},
-		OfflineNodeID:   Params.QueryNodeCfg.QueryNodeID,
+		OfflineNodeID:   queryNodeID,
 		OfflineSegments: []*querypb.SegmentInfo{},
 	}
 	return &querypb.SealedSegmentsChangeInfo{
@@ -125,17 +127,18 @@ func updateTSafe(queryCollection *queryCollection, timestamp Timestamp) error {
 
 func TestQueryCollection_withoutVChannel(t *testing.T) {
 	ctx := context.Background()
+	cfg := configs.NewConfig()
 	m := map[string]interface{}{
-		"PulsarAddress":  Params.PulsarCfg.Address,
+		"PulsarAddress":  util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port),
 		"ReceiveBufSize": 1024,
 		"PulsarBufSize":  1024}
 	factory := msgstream.NewPmsFactory()
 	err := factory.SetParams(m)
 	assert.Nil(t, err)
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer etcdCli.Close()
-	etcdKV := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
+	etcdKV := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
 
 	schema := genTestCollectionSchema(0, false, 2)
 	historicalReplica := newCollectionReplica(etcdKV)
@@ -172,7 +175,7 @@ func TestQueryCollection_withoutVChannel(t *testing.T) {
 	assert.Nil(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	queryCollection, err := newQueryCollection(ctx, cancel, 0, historical, streaming, factory, nil, nil, false)
+	queryCollection, err := newQueryCollection(ctx, cancel, cfg, 0, historical, streaming, factory, nil, nil, false)
 	assert.NoError(t, err)
 
 	// producerChannels := []string{"testResultChannel"}
@@ -489,7 +492,8 @@ func TestQueryCollection_serviceableTime(t *testing.T) {
 	st := Timestamp(1000)
 	queryCollection.setServiceableTime(st)
 
-	gracefulTimeInMilliSecond := Params.QueryNodeCfg.GracefulTime
+	cfg := configs.NewConfig()
+	gracefulTimeInMilliSecond := int64(cfg.QueryNode.GracefulTime)
 	gracefulTime := tsoutil.ComposeTS(gracefulTimeInMilliSecond, 0)
 	resST := queryCollection.getServiceableTime()
 	assert.Equal(t, st+gracefulTime, resST)

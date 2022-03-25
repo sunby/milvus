@@ -211,7 +211,7 @@ func (s *streaming) search(searchReqs []*searchRequest, collID UniqueID, partIDs
 					err2 = err
 					return
 				}
-				metrics.QueryNodeSQSegmentLatency.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID),
+				metrics.QueryNodeSQSegmentLatency.WithLabelValues(fmt.Sprint(queryNodeID),
 					metrics.SearchLabel,
 					metrics.GrowingSegmentLabel).Observe(float64(tr.ElapseSpan().Milliseconds()))
 				segmentLock.Lock()

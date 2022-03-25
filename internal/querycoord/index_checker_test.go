@@ -23,6 +23,7 @@ import (
 
 	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/milvus-io/milvus/internal/allocator"
@@ -36,13 +37,13 @@ import (
 var indexCheckerTestDir = "/tmp/milvus_test/index_checker"
 
 func TestReloadFromKV(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	baseCtx, cancel := context.WithCancel(context.Background())
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	defer etcdCli.Close()
 	assert.Nil(t, err)
-	kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
-	meta, err := newMeta(baseCtx, kv, nil, nil)
+	kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
+	meta, err := newMeta(baseCtx, cfg, kv, nil, nil)
 	assert.Nil(t, err)
 
 	segmentInfo := &querypb.SegmentInfo{
@@ -58,7 +59,7 @@ func TestReloadFromKV(t *testing.T) {
 	assert.Nil(t, err)
 
 	t.Run("Test_CollectionNotExist", func(t *testing.T) {
-		indexChecker, err := newIndexChecker(baseCtx, kv, meta, nil, nil, nil)
+		indexChecker, err := newIndexChecker(baseCtx, cfg, kv, meta, nil, nil, nil)
 		assert.Nil(t, err)
 		assert.Equal(t, 0, len(indexChecker.handoffReqChan))
 	})
@@ -69,7 +70,7 @@ func TestReloadFromKV(t *testing.T) {
 	meta.addCollection(defaultCollectionID, querypb.LoadType_LoadPartition, genDefaultCollectionSchema(false))
 
 	t.Run("Test_PartitionNotExist", func(t *testing.T) {
-		indexChecker, err := newIndexChecker(baseCtx, kv, meta, nil, nil, nil)
+		indexChecker, err := newIndexChecker(baseCtx, cfg, kv, meta, nil, nil, nil)
 		assert.Nil(t, err)
 		assert.Equal(t, 0, len(indexChecker.handoffReqChan))
 	})
@@ -79,7 +80,7 @@ func TestReloadFromKV(t *testing.T) {
 	meta.setLoadType(defaultCollectionID, querypb.LoadType_LoadCollection)
 
 	t.Run("Test_CollectionExist", func(t *testing.T) {
-		indexChecker, err := newIndexChecker(baseCtx, kv, meta, nil, nil, nil)
+		indexChecker, err := newIndexChecker(baseCtx, cfg, kv, meta, nil, nil, nil)
 		assert.Nil(t, err)
 		for {
 			if len(indexChecker.handoffReqChan) > 0 {
@@ -92,13 +93,13 @@ func TestReloadFromKV(t *testing.T) {
 }
 
 func TestCheckIndexLoop(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx, cancel := context.WithCancel(context.Background())
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	defer etcdCli.Close()
 	assert.Nil(t, err)
-	kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
-	meta, err := newMeta(ctx, kv, nil, nil)
+	kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
+	meta, err := newMeta(ctx, cfg, kv, nil, nil)
 	assert.Nil(t, err)
 
 	rootCoord := newRootCoordMock(ctx)
@@ -122,7 +123,7 @@ func TestCheckIndexLoop(t *testing.T) {
 
 	t.Run("Test_ReqInValid", func(t *testing.T) {
 		childCtx, childCancel := context.WithCancel(context.Background())
-		indexChecker, err := newIndexChecker(childCtx, kv, meta, nil, nil, broker)
+		indexChecker, err := newIndexChecker(childCtx, cfg, kv, meta, nil, nil, broker)
 		assert.Nil(t, err)
 
 		err = kv.Save(key, string(value))
@@ -143,7 +144,7 @@ func TestCheckIndexLoop(t *testing.T) {
 	meta.addCollection(defaultCollectionID, querypb.LoadType_LoadCollection, genDefaultCollectionSchema(false))
 	t.Run("Test_GetIndexInfo", func(t *testing.T) {
 		childCtx, childCancel := context.WithCancel(context.Background())
-		indexChecker, err := newIndexChecker(childCtx, kv, meta, nil, nil, broker)
+		indexChecker, err := newIndexChecker(childCtx, cfg, kv, meta, nil, nil, broker)
 		assert.Nil(t, err)
 
 		indexChecker.enqueueHandoffReq(segmentInfo)
@@ -162,13 +163,13 @@ func TestCheckIndexLoop(t *testing.T) {
 }
 
 func TestHandoffNotExistSegment(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx, cancel := context.WithCancel(context.Background())
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	defer etcdCli.Close()
 	assert.Nil(t, err)
-	kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
-	meta, err := newMeta(ctx, kv, nil, nil)
+	kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
+	meta, err := newMeta(ctx, cfg, kv, nil, nil)
 	assert.Nil(t, err)
 
 	rootCoord := newRootCoordMock(ctx)
@@ -195,7 +196,7 @@ func TestHandoffNotExistSegment(t *testing.T) {
 	value, err := proto.Marshal(segmentInfo)
 	assert.Nil(t, err)
 
-	indexChecker, err := newIndexChecker(ctx, kv, meta, nil, nil, broker)
+	indexChecker, err := newIndexChecker(ctx, cfg, kv, meta, nil, nil, broker)
 	assert.Nil(t, err)
 
 	err = kv.Save(key, string(value))
@@ -215,14 +216,14 @@ func TestHandoffNotExistSegment(t *testing.T) {
 }
 
 func TestProcessHandoffAfterIndexDone(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx, cancel := context.WithCancel(context.Background())
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer etcdCli.Close()
 
-	kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
-	meta, err := newMeta(ctx, kv, nil, nil)
+	kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
+	meta, err := newMeta(ctx, cfg, kv, nil, nil)
 	assert.Nil(t, err)
 	taskScheduler := &TaskScheduler{
 		ctx:              ctx,
@@ -230,14 +231,14 @@ func TestProcessHandoffAfterIndexDone(t *testing.T) {
 		client:           kv,
 		triggerTaskQueue: newTaskQueue(),
 	}
-	idAllocatorKV := tsoutil.NewTSOKVBase(etcdCli, Params.EtcdCfg.KvRootPath, "queryCoordTaskID")
+	idAllocatorKV := tsoutil.NewTSOKVBase(etcdCli, util.GetPath(cfg, util.EtcdKv), "queryCoordTaskID")
 	idAllocator := allocator.NewGlobalIDAllocator("idTimestamp", idAllocatorKV)
 	err = idAllocator.Initialize()
 	assert.Nil(t, err)
 	taskScheduler.taskIDAllocator = func() (UniqueID, error) {
 		return idAllocator.AllocOne()
 	}
-	indexChecker, err := newIndexChecker(ctx, kv, meta, nil, taskScheduler, nil)
+	indexChecker, err := newIndexChecker(ctx, cfg, kv, meta, nil, taskScheduler, nil)
 	assert.Nil(t, err)
 	indexChecker.wg.Add(1)
 	go indexChecker.processHandoffAfterIndexDone()

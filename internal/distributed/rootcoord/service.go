@@ -18,11 +18,15 @@ package grpcrootcoord
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/milvus-io/milvus/configs"
+	"github.com/milvus-io/milvus/internal/util"
 
 	ot "github.com/grpc-ecosystem/go-grpc-middleware/tracing/opentracing"
 	pnc "github.com/milvus-io/milvus/internal/distributed/proxy/client"
@@ -38,10 +42,8 @@ import (
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/trace"
-	"github.com/milvus-io/milvus/internal/util/typeutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -51,8 +53,6 @@ import (
 	icc "github.com/milvus-io/milvus/internal/distributed/indexcoord/client"
 	qcc "github.com/milvus-io/milvus/internal/distributed/querycoord/client"
 )
-
-var Params paramtable.GrpcServerConfig
 
 // Server grpc wrapper
 type Server struct {
@@ -65,6 +65,7 @@ type Server struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	cfg        *configs.Config
 	etcdCli    *clientv3.Client
 	dataCoord  types.DataCoord
 	indexCoord types.IndexCoord
@@ -93,16 +94,17 @@ func (s *Server) AlterAlias(ctx context.Context, request *milvuspb.AlterAliasReq
 }
 
 // NewServer create a new RootCoord grpc server.
-func NewServer(ctx context.Context, factory msgstream.Factory) (*Server, error) {
+func NewServer(ctx context.Context, cfg *configs.Config, factory msgstream.Factory) (*Server, error) {
 	ctx1, cancel := context.WithCancel(ctx)
 	s := &Server{
 		ctx:         ctx1,
+		cfg:         cfg,
 		cancel:      cancel,
 		grpcErrChan: make(chan error),
 	}
 	s.setClient()
 	var err error
-	s.rootCoord, err = rootcoord.NewCore(s.ctx, factory)
+	s.rootCoord, err = rootcoord.NewCore(s.ctx, cfg, factory)
 	if err != nil {
 		return nil, err
 	}
@@ -148,17 +150,10 @@ func (s *Server) Run() error {
 }
 
 func (s *Server) init() error {
-	Params.InitOnce(typeutil.RootCoordRole)
-
-	rootcoord.Params.InitOnce()
-	rootcoord.Params.RootCoordCfg.Address = Params.GetAddress()
-	rootcoord.Params.RootCoordCfg.Port = Params.Port
-	log.Debug("init params done..")
-
 	closer := trace.InitTracing("root_coord")
 	s.closer = closer
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(s.cfg)
 	if err != nil {
 		log.Debug("RootCoord connect to etcd failed", zap.Error(err))
 		return err
@@ -167,7 +162,7 @@ func (s *Server) init() error {
 	s.rootCoord.SetEtcdClient(s.etcdCli)
 	log.Debug("etcd connect done ...")
 
-	err = s.startGrpc(Params.Port)
+	err = s.startGrpc(s.cfg.RootCoord.Port)
 	if err != nil {
 		return err
 	}
@@ -193,7 +188,7 @@ func (s *Server) init() error {
 
 	if s.newDataCoordClient != nil {
 		log.Debug("RootCoord start to create DataCoord client")
-		dataCoord := s.newDataCoordClient(rootcoord.Params.EtcdCfg.MetaRootPath, s.etcdCli)
+		dataCoord := s.newDataCoordClient(util.GetPath(s.cfg, util.EtcdMeta), s.etcdCli)
 		if err := s.rootCoord.SetDataCoord(s.ctx, dataCoord); err != nil {
 			panic(err)
 		}
@@ -201,7 +196,7 @@ func (s *Server) init() error {
 	}
 	if s.newIndexCoordClient != nil {
 		log.Debug("RootCoord start to create IndexCoord client")
-		indexCoord := s.newIndexCoordClient(rootcoord.Params.EtcdCfg.MetaRootPath, s.etcdCli)
+		indexCoord := s.newIndexCoordClient(util.GetPath(s.cfg, util.EtcdMeta), s.etcdCli)
 		if err := s.rootCoord.SetIndexCoord(indexCoord); err != nil {
 			panic(err)
 		}
@@ -209,7 +204,7 @@ func (s *Server) init() error {
 	}
 	if s.newQueryCoordClient != nil {
 		log.Debug("RootCoord start to create QueryCoord client")
-		queryCoord := s.newQueryCoordClient(rootcoord.Params.EtcdCfg.MetaRootPath, s.etcdCli)
+		queryCoord := s.newQueryCoordClient(util.GetPath(s.cfg, util.EtcdMeta), s.etcdCli)
 		if err := s.rootCoord.SetQueryCoord(queryCoord); err != nil {
 			panic(err)
 		}
@@ -253,8 +248,8 @@ func (s *Server) startGrpcLoop(port int) {
 	s.grpcServer = grpc.NewServer(
 		grpc.KeepaliveEnforcementPolicy(kaep),
 		grpc.KeepaliveParams(kasp),
-		grpc.MaxRecvMsgSize(Params.ServerMaxRecvSize),
-		grpc.MaxSendMsgSize(Params.ServerMaxSendSize),
+		grpc.MaxRecvMsgSize(int(s.cfg.Grpc.ServerMaxReceiveSize)),
+		grpc.MaxSendMsgSize(int(s.cfg.Grpc.ServerMaxSendSize)),
 		grpc.UnaryInterceptor(ot.UnaryServerInterceptor(opts...)),
 		grpc.StreamInterceptor(ot.StreamServerInterceptor(opts...)))
 	rootcoordpb.RegisterRootCoordServer(s.grpcServer, s)
@@ -280,7 +275,7 @@ func (s *Server) start() error {
 }
 
 func (s *Server) Stop() error {
-	log.Debug("Rootcoord stop", zap.String("Address", Params.GetAddress()))
+	log.Debug("Rootcoord stop", zap.String("Address", fmt.Sprintf("%s:%d", s.cfg.AdvertiseAddress, s.cfg.RootCoord.Port)))
 	if s.closer != nil {
 		if err := s.closer.Close(); err != nil {
 			log.Error("Failed to close opentracing", zap.Error(err))

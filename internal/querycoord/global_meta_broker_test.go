@@ -27,7 +27,6 @@ import (
 var globalMetaTestDir = "/tmp/milvus_test/global_meta"
 
 func TestGlobalMetaBroker_RootCoord(t *testing.T) {
-	refreshParams()
 	ctx, cancel := context.WithCancel(context.Background())
 	rootCoord := newRootCoordMock(ctx)
 	rootCoord.createCollection(defaultCollectionID)
@@ -74,7 +73,6 @@ func TestGlobalMetaBroker_RootCoord(t *testing.T) {
 }
 
 func TestGlobalMetaBroker_DataCoord(t *testing.T) {
-	refreshParams()
 	ctx, cancel := context.WithCancel(context.Background())
 	dataCoord := newDataCoordMock(ctx)
 
@@ -112,7 +110,6 @@ func TestGlobalMetaBroker_DataCoord(t *testing.T) {
 }
 
 func TestGlobalMetaBroker_IndexCoord(t *testing.T) {
-	refreshParams()
 	ctx, cancel := context.WithCancel(context.Background())
 	rootCoord := newRootCoordMock(ctx)
 	rootCoord.enableIndex = true

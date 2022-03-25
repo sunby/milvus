@@ -22,6 +22,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
@@ -38,7 +39,8 @@ func genLoadCollectionTask(ctx context.Context, queryCoord *QueryCoord) *loadCol
 		CollectionID: defaultCollectionID,
 		Schema:       genDefaultCollectionSchema(false),
 	}
-	baseTask := newBaseTask(ctx, querypb.TriggerCondition_GrpcRequest)
+	cfg := configs.NewConfig()
+	baseTask := newBaseTask(ctx, cfg, querypb.TriggerCondition_GrpcRequest)
 	loadCollectionTask := &loadCollectionTask{
 		baseTask:              baseTask,
 		LoadCollectionRequest: req,
@@ -59,7 +61,8 @@ func genLoadPartitionTask(ctx context.Context, queryCoord *QueryCoord) *loadPart
 		PartitionIDs: []UniqueID{defaultPartitionID},
 		Schema:       genDefaultCollectionSchema(false),
 	}
-	baseTask := newBaseTask(ctx, querypb.TriggerCondition_GrpcRequest)
+	cfg := configs.NewConfig()
+	baseTask := newBaseTask(ctx, cfg, querypb.TriggerCondition_GrpcRequest)
 	loadPartitionTask := &loadPartitionTask{
 		baseTask:              baseTask,
 		LoadPartitionsRequest: req,
@@ -77,7 +80,8 @@ func genReleaseCollectionTask(ctx context.Context, queryCoord *QueryCoord) *rele
 		},
 		CollectionID: defaultCollectionID,
 	}
-	baseTask := newBaseTask(ctx, querypb.TriggerCondition_GrpcRequest)
+	cfg := configs.NewConfig()
+	baseTask := newBaseTask(ctx, cfg, querypb.TriggerCondition_GrpcRequest)
 	releaseCollectionTask := &releaseCollectionTask{
 		baseTask:                 baseTask,
 		ReleaseCollectionRequest: req,
@@ -97,7 +101,8 @@ func genReleasePartitionTask(ctx context.Context, queryCoord *QueryCoord) *relea
 		CollectionID: defaultCollectionID,
 		PartitionIDs: []UniqueID{defaultPartitionID},
 	}
-	baseTask := newBaseTask(ctx, querypb.TriggerCondition_GrpcRequest)
+	cfg := configs.NewConfig()
+	baseTask := newBaseTask(ctx, cfg, querypb.TriggerCondition_GrpcRequest)
 	releasePartitionTask := &releasePartitionTask{
 		baseTask:                 baseTask,
 		ReleasePartitionsRequest: req,
@@ -118,7 +123,8 @@ func genReleaseSegmentTask(ctx context.Context, queryCoord *QueryCoord, nodeID i
 		PartitionIDs: []UniqueID{defaultPartitionID},
 		SegmentIDs:   []UniqueID{defaultSegmentID},
 	}
-	baseTask := newBaseTask(ctx, querypb.TriggerCondition_GrpcRequest)
+	cfg := configs.NewConfig()
+	baseTask := newBaseTask(ctx, cfg, querypb.TriggerCondition_GrpcRequest)
 	releaseSegmentTask := &releaseSegmentTask{
 		baseTask:               baseTask,
 		ReleaseSegmentsRequest: req,
@@ -148,7 +154,8 @@ func genWatchDmChannelTask(ctx context.Context, queryCoord *QueryCoord, nodeID i
 			PartitionIDs: []int64{defaultPartitionID},
 		},
 	}
-	baseTask := newBaseTask(ctx, querypb.TriggerCondition_GrpcRequest)
+	cfg := configs.NewConfig()
+	baseTask := newBaseTask(ctx, cfg, querypb.TriggerCondition_GrpcRequest)
 	baseTask.taskID = 100
 	watchDmChannelTask := &watchDmChannelTask{
 		baseTask:               baseTask,
@@ -165,7 +172,7 @@ func genWatchDmChannelTask(ctx context.Context, queryCoord *QueryCoord, nodeID i
 		CollectionID: defaultCollectionID,
 		Schema:       genDefaultCollectionSchema(false),
 	}
-	baseParentTask := newBaseTask(ctx, querypb.TriggerCondition_GrpcRequest)
+	baseParentTask := newBaseTask(ctx, cfg, querypb.TriggerCondition_GrpcRequest)
 	baseParentTask.taskID = 10
 	baseParentTask.setState(taskDone)
 	parentTask := &loadCollectionTask{
@@ -205,7 +212,8 @@ func genLoadSegmentTask(ctx context.Context, queryCoord *QueryCoord, nodeID int6
 			PartitionIDs: []int64{defaultPartitionID},
 		},
 	}
-	baseTask := newBaseTask(ctx, querypb.TriggerCondition_GrpcRequest)
+	cfg := configs.NewConfig()
+	baseTask := newBaseTask(ctx, cfg, querypb.TriggerCondition_GrpcRequest)
 	baseTask.taskID = 100
 	loadSegmentTask := &loadSegmentTask{
 		baseTask:            baseTask,
@@ -222,7 +230,7 @@ func genLoadSegmentTask(ctx context.Context, queryCoord *QueryCoord, nodeID int6
 		CollectionID: defaultCollectionID,
 		Schema:       genDefaultCollectionSchema(false),
 	}
-	baseParentTask := newBaseTask(ctx, querypb.TriggerCondition_GrpcRequest)
+	baseParentTask := newBaseTask(ctx, cfg, querypb.TriggerCondition_GrpcRequest)
 	baseParentTask.taskID = 10
 	baseParentTask.setState(taskDone)
 	parentTask := &loadCollectionTask{
@@ -252,7 +260,8 @@ func genWatchQueryChannelTask(ctx context.Context, queryCoord *QueryCoord, nodeI
 		QueryChannel:       queryChannelInfo.QueryChannel,
 		QueryResultChannel: queryChannelInfo.QueryResultChannel,
 	}
-	baseTask := newBaseTask(ctx, querypb.TriggerCondition_GrpcRequest)
+	cfg := configs.NewConfig()
+	baseTask := newBaseTask(ctx, cfg, querypb.TriggerCondition_GrpcRequest)
 	baseTask.taskID = 200
 	return &watchQueryChannelTask{
 		baseTask:               baseTask,
@@ -274,7 +283,8 @@ func genWatchDeltaChannelTask(ctx context.Context, queryCoord *QueryCoord, nodeI
 			PartitionIDs: []int64{defaultPartitionID},
 		},
 	}
-	baseTask := newBaseTask(ctx, querypb.TriggerCondition_GrpcRequest)
+	cfg := configs.NewConfig()
+	baseTask := newBaseTask(ctx, cfg, querypb.TriggerCondition_GrpcRequest)
 	baseTask.taskID = 300
 	return &watchDeltaChannelTask{
 		baseTask:                  baseTask,
@@ -292,12 +302,12 @@ func waitTaskFinalState(t task, state taskState) {
 }
 
 func TestTriggerTask(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node, err := startQueryNodeServer(ctx)
+	node, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node.queryNodeID)
 
@@ -335,12 +345,12 @@ func TestTriggerTask(t *testing.T) {
 }
 
 func Test_LoadCollectionAfterLoadPartition(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node, err := startQueryNodeServer(ctx)
+	node, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node.queryNodeID)
 
@@ -366,12 +376,12 @@ func Test_LoadCollectionAfterLoadPartition(t *testing.T) {
 }
 
 func Test_RepeatLoadCollection(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node, err := startQueryNodeServer(ctx)
+	node, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node.queryNodeID)
 
@@ -398,9 +408,9 @@ func Test_RepeatLoadCollection(t *testing.T) {
 }
 
 func Test_LoadCollectionAssignTaskFail(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
 	loadCollectionTask := genLoadCollectionTask(ctx, queryCoord)
@@ -416,12 +426,12 @@ func Test_LoadCollectionAssignTaskFail(t *testing.T) {
 }
 
 func Test_LoadCollectionExecuteFail(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node, err := startQueryNodeServer(ctx)
+	node, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 
 	node.loadSegment = returnFailedResult
@@ -440,9 +450,9 @@ func Test_LoadCollectionExecuteFail(t *testing.T) {
 }
 
 func Test_LoadPartitionAssignTaskFail(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
 	loadPartitionTask := genLoadPartitionTask(ctx, queryCoord)
@@ -458,12 +468,12 @@ func Test_LoadPartitionAssignTaskFail(t *testing.T) {
 }
 
 func Test_LoadPartitionExecuteFail(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node, err := startQueryNodeServer(ctx)
+	node, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 
 	node.loadSegment = returnFailedResult
@@ -482,12 +492,12 @@ func Test_LoadPartitionExecuteFail(t *testing.T) {
 }
 
 func Test_LoadPartitionExecuteFailAfterLoadCollection(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node, err := startQueryNodeServer(ctx)
+	node, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 
 	waitQueryNodeOnline(queryCoord.cluster, node.queryNodeID)
@@ -513,12 +523,12 @@ func Test_LoadPartitionExecuteFailAfterLoadCollection(t *testing.T) {
 }
 
 func Test_ReleaseCollectionExecuteFail(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node, err := startQueryNodeServer(ctx)
+	node, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	node.releaseCollection = returnFailedResult
 
@@ -543,12 +553,12 @@ func Test_ReleaseCollectionExecuteFail(t *testing.T) {
 }
 
 func Test_ReleaseSegmentTask(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node1, err := startQueryNodeServer(ctx)
+	node1, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 
 	waitQueryNodeOnline(queryCoord.cluster, node1.queryNodeID)
@@ -563,14 +573,14 @@ func Test_ReleaseSegmentTask(t *testing.T) {
 }
 
 func Test_RescheduleDmChannel(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node1, err := startQueryNodeServer(ctx)
+	node1, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
-	node2, err := startQueryNodeServer(ctx)
+	node2, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 
 	waitQueryNodeOnline(queryCoord.cluster, node1.queryNodeID)
@@ -589,14 +599,14 @@ func Test_RescheduleDmChannel(t *testing.T) {
 }
 
 func Test_RescheduleSegment(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node1, err := startQueryNodeServer(ctx)
+	node1, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
-	node2, err := startQueryNodeServer(ctx)
+	node2, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 
 	waitQueryNodeOnline(queryCoord.cluster, node1.queryNodeID)
@@ -616,15 +626,15 @@ func Test_RescheduleSegment(t *testing.T) {
 }
 
 func Test_RescheduleSegmentEndWithFail(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node1, err := startQueryNodeServer(ctx)
+	node1, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	node1.loadSegment = returnFailedResult
-	node2, err := startQueryNodeServer(ctx)
+	node2, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	node2.loadSegment = returnFailedResult
 
@@ -643,15 +653,15 @@ func Test_RescheduleSegmentEndWithFail(t *testing.T) {
 }
 
 func Test_RescheduleDmChannelsEndWithFail(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node1, err := startQueryNodeServer(ctx)
+	node1, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	node1.watchDmChannels = returnFailedResult
-	node2, err := startQueryNodeServer(ctx)
+	node2, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	node2.watchDmChannels = returnFailedResult
 
@@ -670,12 +680,12 @@ func Test_RescheduleDmChannelsEndWithFail(t *testing.T) {
 }
 
 func Test_AssignInternalTask(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node1, err := startQueryNodeServer(ctx)
+	node1, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node1.queryNodeID)
 
@@ -707,7 +717,7 @@ func Test_AssignInternalTask(t *testing.T) {
 		loadSegmentRequests = append(loadSegmentRequests, req)
 	}
 
-	internalTasks, err := assignInternalTask(queryCoord.loopCtx, loadCollectionTask, queryCoord.meta, queryCoord.cluster, loadSegmentRequests, nil, false, nil, nil)
+	internalTasks, err := assignInternalTask(queryCoord.loopCtx, loadCollectionTask.cfg, loadCollectionTask, queryCoord.meta, queryCoord.cluster, loadSegmentRequests, nil, false, nil, nil)
 	assert.Nil(t, err)
 
 	assert.NotEqual(t, 1, len(internalTasks))
@@ -718,12 +728,12 @@ func Test_AssignInternalTask(t *testing.T) {
 }
 
 func Test_reverseSealedSegmentChangeInfo(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node1, err := startQueryNodeServer(ctx)
+	node1, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node1.queryNodeID)
 
@@ -731,7 +741,7 @@ func Test_reverseSealedSegmentChangeInfo(t *testing.T) {
 	queryCoord.scheduler.Enqueue(loadCollectionTask)
 	waitTaskFinalState(loadCollectionTask, taskExpired)
 
-	node2, err := startQueryNodeServer(ctx)
+	node2, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node2.queryNodeID)
 
@@ -753,12 +763,12 @@ func Test_reverseSealedSegmentChangeInfo(t *testing.T) {
 }
 
 func Test_handoffSegmentFail(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node1, err := startQueryNodeServer(ctx)
+	node1, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node1.queryNodeID)
 
@@ -772,7 +782,7 @@ func Test_handoffSegmentFail(t *testing.T) {
 	infos := queryCoord.meta.showSegmentInfos(defaultCollectionID, nil)
 	assert.NotEqual(t, 0, len(infos))
 	segmentID := defaultSegmentID + 4
-	baseTask := newBaseTask(ctx, querypb.TriggerCondition_Handoff)
+	baseTask := newBaseTask(ctx, cfg, querypb.TriggerCondition_Handoff)
 
 	segmentInfo := &querypb.SegmentInfo{
 		SegmentID:    segmentID,
@@ -804,12 +814,12 @@ func Test_handoffSegmentFail(t *testing.T) {
 }
 
 func TestLoadBalanceSegmentsTask(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node1, err := startQueryNodeServer(ctx)
+	node1, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node1.queryNodeID)
 
@@ -821,12 +831,12 @@ func TestLoadBalanceSegmentsTask(t *testing.T) {
 		waitTaskFinalState(loadCollectionTask, taskExpired)
 	})
 
-	node2, err := startQueryNodeServer(ctx)
+	node2, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node2.queryNodeID)
 
 	t.Run("Test LoadBalanceBySegmentID", func(t *testing.T) {
-		baseTask := newBaseTask(ctx, querypb.TriggerCondition_LoadBalance)
+		baseTask := newBaseTask(ctx, cfg, querypb.TriggerCondition_LoadBalance)
 		loadBalanceTask := &loadBalanceTask{
 			baseTask: baseTask,
 			LoadBalanceRequest: &querypb.LoadBalanceRequest{
@@ -846,7 +856,7 @@ func TestLoadBalanceSegmentsTask(t *testing.T) {
 	})
 
 	t.Run("Test LoadBalanceByNotExistSegmentID", func(t *testing.T) {
-		baseTask := newBaseTask(ctx, querypb.TriggerCondition_LoadBalance)
+		baseTask := newBaseTask(ctx, cfg, querypb.TriggerCondition_LoadBalance)
 		loadBalanceTask := &loadBalanceTask{
 			baseTask: baseTask,
 			LoadBalanceRequest: &querypb.LoadBalanceRequest{
@@ -866,7 +876,7 @@ func TestLoadBalanceSegmentsTask(t *testing.T) {
 	})
 
 	t.Run("Test LoadBalanceByNode", func(t *testing.T) {
-		baseTask := newBaseTask(ctx, querypb.TriggerCondition_LoadBalance)
+		baseTask := newBaseTask(ctx, cfg, querypb.TriggerCondition_LoadBalance)
 		loadBalanceTask := &loadBalanceTask{
 			baseTask: baseTask,
 			LoadBalanceRequest: &querypb.LoadBalanceRequest{
@@ -885,7 +895,7 @@ func TestLoadBalanceSegmentsTask(t *testing.T) {
 	})
 
 	t.Run("Test LoadBalanceWithEmptySourceNode", func(t *testing.T) {
-		baseTask := newBaseTask(ctx, querypb.TriggerCondition_LoadBalance)
+		baseTask := newBaseTask(ctx, cfg, querypb.TriggerCondition_LoadBalance)
 		loadBalanceTask := &loadBalanceTask{
 			baseTask: baseTask,
 			LoadBalanceRequest: &querypb.LoadBalanceRequest{
@@ -903,7 +913,7 @@ func TestLoadBalanceSegmentsTask(t *testing.T) {
 	})
 
 	t.Run("Test LoadBalanceByNotExistNode", func(t *testing.T) {
-		baseTask := newBaseTask(ctx, querypb.TriggerCondition_LoadBalance)
+		baseTask := newBaseTask(ctx, cfg, querypb.TriggerCondition_LoadBalance)
 		loadBalanceTask := &loadBalanceTask{
 			baseTask: baseTask,
 			LoadBalanceRequest: &querypb.LoadBalanceRequest{
@@ -935,14 +945,14 @@ func TestLoadBalanceSegmentsTask(t *testing.T) {
 }
 
 func TestLoadBalanceIndexedSegmentsTask(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 	rootCoord := queryCoord.rootCoordClient.(*rootCoordMock)
 	rootCoord.enableIndex = true
 
-	node1, err := startQueryNodeServer(ctx)
+	node1, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node1.queryNodeID)
 
@@ -952,11 +962,11 @@ func TestLoadBalanceIndexedSegmentsTask(t *testing.T) {
 	assert.Nil(t, err)
 	waitTaskFinalState(loadCollectionTask, taskExpired)
 
-	node2, err := startQueryNodeServer(ctx)
+	node2, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node2.queryNodeID)
 
-	baseTask := newBaseTask(ctx, querypb.TriggerCondition_LoadBalance)
+	baseTask := newBaseTask(ctx, cfg, querypb.TriggerCondition_LoadBalance)
 	loadBalanceTask := &loadBalanceTask{
 		baseTask: baseTask,
 		LoadBalanceRequest: &querypb.LoadBalanceRequest{
@@ -982,12 +992,12 @@ func TestLoadBalanceIndexedSegmentsTask(t *testing.T) {
 }
 
 func TestLoadBalanceIndexedSegmentsAfterNodeDown(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node1, err := startQueryNodeServer(ctx)
+	node1, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node1.queryNodeID)
 
@@ -997,7 +1007,7 @@ func TestLoadBalanceIndexedSegmentsAfterNodeDown(t *testing.T) {
 	assert.Nil(t, err)
 	waitTaskFinalState(loadCollectionTask, taskExpired)
 
-	node2, err := startQueryNodeServer(ctx)
+	node2, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node2.queryNodeID)
 
@@ -1017,12 +1027,12 @@ func TestLoadBalanceIndexedSegmentsAfterNodeDown(t *testing.T) {
 }
 
 func TestLoadBalancePartitionAfterNodeDown(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node1, err := startQueryNodeServer(ctx)
+	node1, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node1.queryNodeID)
 
@@ -1032,7 +1042,7 @@ func TestLoadBalancePartitionAfterNodeDown(t *testing.T) {
 	assert.Nil(t, err)
 	waitTaskFinalState(loadPartitionTask, taskExpired)
 
-	node2, err := startQueryNodeServer(ctx)
+	node2, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node2.queryNodeID)
 
@@ -1050,12 +1060,12 @@ func TestLoadBalancePartitionAfterNodeDown(t *testing.T) {
 }
 
 func TestLoadBalanceAndReschedulSegmentTaskAfterNodeDown(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node1, err := startQueryNodeServer(ctx)
+	node1, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node1.queryNodeID)
 
@@ -1065,7 +1075,7 @@ func TestLoadBalanceAndReschedulSegmentTaskAfterNodeDown(t *testing.T) {
 	assert.Nil(t, err)
 	waitTaskFinalState(loadCollectionTask, taskExpired)
 
-	node2, err := startQueryNodeServer(ctx)
+	node2, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	node2.loadSegment = returnFailedResult
 	waitQueryNodeOnline(queryCoord.cluster, node2.queryNodeID)
@@ -1079,7 +1089,7 @@ func TestLoadBalanceAndReschedulSegmentTaskAfterNodeDown(t *testing.T) {
 		}
 	}
 
-	node3, err := startQueryNodeServer(ctx)
+	node3, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node3.queryNodeID)
 
@@ -1103,12 +1113,12 @@ func TestLoadBalanceAndReschedulSegmentTaskAfterNodeDown(t *testing.T) {
 }
 
 func TestLoadBalanceAndRescheduleDmChannelTaskAfterNodeDown(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node1, err := startQueryNodeServer(ctx)
+	node1, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node1.queryNodeID)
 
@@ -1118,7 +1128,7 @@ func TestLoadBalanceAndRescheduleDmChannelTaskAfterNodeDown(t *testing.T) {
 	assert.Nil(t, err)
 	waitTaskFinalState(loadCollectionTask, taskExpired)
 
-	node2, err := startQueryNodeServer(ctx)
+	node2, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	node2.watchDmChannels = returnFailedResult
 	waitQueryNodeOnline(queryCoord.cluster, node2.queryNodeID)
@@ -1132,7 +1142,7 @@ func TestLoadBalanceAndRescheduleDmChannelTaskAfterNodeDown(t *testing.T) {
 		}
 	}
 
-	node3, err := startQueryNodeServer(ctx)
+	node3, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node3.queryNodeID)
 
@@ -1236,12 +1246,12 @@ func TestMergeWatchDeltaChannelInfo(t *testing.T) {
 }
 
 func TestUpdateTaskProcessWhenLoadSegment(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node1, err := startQueryNodeServer(ctx)
+	node1, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node1.queryNodeID)
 	queryCoord.meta.addCollection(defaultCollectionID, querypb.LoadType_LoadCollection, genDefaultCollectionSchema(false))
@@ -1269,12 +1279,12 @@ func TestUpdateTaskProcessWhenLoadSegment(t *testing.T) {
 }
 
 func TestUpdateTaskProcessWhenWatchDmChannel(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	ctx := context.Background()
-	queryCoord, err := startQueryCoord(ctx)
+	queryCoord, err := startQueryCoord(ctx, cfg)
 	assert.Nil(t, err)
 
-	node1, err := startQueryNodeServer(ctx)
+	node1, err := startQueryNodeServer(ctx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, node1.queryNodeID)
 	queryCoord.meta.addCollection(defaultCollectionID, querypb.LoadType_LoadCollection, genDefaultCollectionSchema(false))

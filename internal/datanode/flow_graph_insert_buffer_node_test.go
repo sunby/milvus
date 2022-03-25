@@ -23,7 +23,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -65,7 +67,8 @@ func TestFlowGraphInsertBufferNodeCreate(t *testing.T) {
 	testPath := "/test/datanode/root/meta"
 	err := clearEtcd(testPath)
 	require.NoError(t, err)
-	Params.EtcdCfg.MetaRootPath = testPath
+	cfg := configs.NewConfig()
+	cfg.Etcd.PathPrefix = testPath
 
 	Factory := &MetaFactory{}
 	collMeta := Factory.GetCollectionMeta(UniqueID(0), "coll1")
@@ -80,12 +83,12 @@ func TestFlowGraphInsertBufferNodeCreate(t *testing.T) {
 	msFactory := msgstream.NewPmsFactory()
 	m := map[string]interface{}{
 		"receiveBufSize": 1024,
-		"pulsarAddress":  Params.PulsarCfg.Address,
+		"pulsarAddress":  util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port),
 		"pulsarBufSize":  1024}
 	err = msFactory.SetParams(m)
 	assert.Nil(t, err)
 
-	fm := NewRendezvousFlushManager(&allocator{}, cm, replica, func(*segmentFlushPack) {}, emptyFlushAndDropFunc)
+	fm := NewRendezvousFlushManager(cfg, &allocator{}, cm, replica, func(*segmentFlushPack) {}, emptyFlushAndDropFunc)
 
 	flushChan := make(chan flushMsg, 100)
 
@@ -96,7 +99,7 @@ func TestFlowGraphInsertBufferNodeCreate(t *testing.T) {
 		vChannelName: "string",
 	}
 
-	iBNode, err := newInsertBufferNode(ctx, collMeta.ID, flushChan, fm, newCache(), c)
+	iBNode, err := newInsertBufferNode(ctx, cfg, collMeta.ID, flushChan, fm, newCache(), c)
 	assert.NotNil(t, iBNode)
 	require.NoError(t, err)
 
@@ -110,7 +113,7 @@ func TestFlowGraphInsertBufferNodeCreate(t *testing.T) {
 		cd:      0,
 	}
 
-	_, err = newInsertBufferNode(ctx, collMeta.ID, flushChan, fm, newCache(), c)
+	_, err = newInsertBufferNode(ctx, cfg, collMeta.ID, flushChan, fm, newCache(), c)
 	assert.Error(t, err)
 }
 
@@ -155,7 +158,8 @@ func TestFlowGraphInsertBufferNode_Operate(t *testing.T) {
 	testPath := "/test/datanode/root/meta"
 	err := clearEtcd(testPath)
 	require.NoError(t, err)
-	Params.EtcdCfg.MetaRootPath = testPath
+	cfg := configs.NewConfig()
+	cfg.Etcd.PathPrefix = testPath
 
 	Factory := &MetaFactory{}
 	collMeta := Factory.GetCollectionMeta(UniqueID(0), "coll1")
@@ -170,12 +174,12 @@ func TestFlowGraphInsertBufferNode_Operate(t *testing.T) {
 	msFactory := msgstream.NewPmsFactory()
 	m := map[string]interface{}{
 		"receiveBufSize": 1024,
-		"pulsarAddress":  Params.PulsarCfg.Address,
+		"pulsarAddress":  util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port),
 		"pulsarBufSize":  1024}
 	err = msFactory.SetParams(m)
 	assert.Nil(t, err)
 
-	fm := NewRendezvousFlushManager(NewAllocatorFactory(), cm, replica, func(*segmentFlushPack) {}, emptyFlushAndDropFunc)
+	fm := NewRendezvousFlushManager(cfg, NewAllocatorFactory(), cm, replica, func(*segmentFlushPack) {}, emptyFlushAndDropFunc)
 
 	flushChan := make(chan flushMsg, 100)
 	c := &nodeConfig{
@@ -185,7 +189,7 @@ func TestFlowGraphInsertBufferNode_Operate(t *testing.T) {
 		vChannelName: "string",
 	}
 
-	iBNode, err := newInsertBufferNode(ctx, collMeta.ID, flushChan, fm, newCache(), c)
+	iBNode, err := newInsertBufferNode(ctx, cfg, collMeta.ID, flushChan, fm, newCache(), c)
 	require.NoError(t, err)
 
 	// trigger log ts
@@ -354,7 +358,8 @@ func TestFlowGraphInsertBufferNode_AutoFlush(t *testing.T) {
 	testPath := "/test/datanode/root/meta"
 	err := clearEtcd(testPath)
 	require.NoError(t, err)
-	Params.EtcdCfg.MetaRootPath = testPath
+	cfg := configs.NewConfig()
+	cfg.Etcd.PathPrefix = testPath
 
 	Factory := &MetaFactory{}
 	collMeta := Factory.GetCollectionMeta(UniqueID(0), "coll1")
@@ -374,7 +379,7 @@ func TestFlowGraphInsertBufferNode_AutoFlush(t *testing.T) {
 	msFactory := msgstream.NewPmsFactory()
 	m := map[string]interface{}{
 		"receiveBufSize": 1024,
-		"pulsarAddress":  Params.PulsarCfg.Address,
+		"pulsarAddress":  util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port),
 		"pulsarBufSize":  1024}
 	err = msFactory.SetParams(m)
 	assert.Nil(t, err)
@@ -385,7 +390,7 @@ func TestFlowGraphInsertBufferNode_AutoFlush(t *testing.T) {
 
 	cm := storage.NewLocalChunkManager(storage.RootPath(insertNodeTestDir))
 	defer cm.RemoveWithPrefix("")
-	fm := NewRendezvousFlushManager(NewAllocatorFactory(), cm, colRep, func(pack *segmentFlushPack) {
+	fm := NewRendezvousFlushManager(cfg, NewAllocatorFactory(), cm, colRep, func(pack *segmentFlushPack) {
 		fpMut.Lock()
 		flushPacks = append(flushPacks, pack)
 		fpMut.Unlock()
@@ -404,7 +409,7 @@ func TestFlowGraphInsertBufferNode_AutoFlush(t *testing.T) {
 		allocator:    NewAllocatorFactory(),
 		vChannelName: "string",
 	}
-	iBNode, err := newInsertBufferNode(ctx, collMeta.ID, flushChan, fm, newCache(), c)
+	iBNode, err := newInsertBufferNode(ctx, cfg, collMeta.ID, flushChan, fm, newCache(), c)
 	require.NoError(t, err)
 
 	// Auto flush number of rows set to 2
@@ -415,10 +420,10 @@ func TestFlowGraphInsertBufferNode_AutoFlush(t *testing.T) {
 
 	t.Run("Pure auto flush", func(t *testing.T) {
 		// iBNode.insertBuffer.maxSize = 2
-		tmp := Params.DataNodeCfg.FlushInsertBufferSize
-		Params.DataNodeCfg.FlushInsertBufferSize = 4 * 4
+		tmp := iBNode.cfg.DataNode.InsertBufferSizeLimit
+		iBNode.cfg.DataNode.InsertBufferSizeLimit = 4 * 4
 		defer func() {
-			Params.DataNodeCfg.FlushInsertBufferSize = tmp
+			iBNode.cfg.DataNode.InsertBufferSizeLimit = tmp
 		}()
 
 		for i := range inMsg.insertMessages {
@@ -516,10 +521,10 @@ func TestFlowGraphInsertBufferNode_AutoFlush(t *testing.T) {
 	})
 
 	t.Run("Auto with manual flush", func(t *testing.T) {
-		tmp := Params.DataNodeCfg.FlushInsertBufferSize
-		Params.DataNodeCfg.FlushInsertBufferSize = 4 * 4
+		tmp := iBNode.cfg.DataNode.InsertBufferSizeLimit
+		iBNode.cfg.DataNode.InsertBufferSizeLimit = 4 * 4
 		defer func() {
-			Params.DataNodeCfg.FlushInsertBufferSize = tmp
+			iBNode.cfg.DataNode.InsertBufferSizeLimit = tmp
 		}()
 
 		fpMut.Lock()
@@ -629,7 +634,8 @@ func TestInsertBufferNode_bufferInsertMsg(t *testing.T) {
 	testPath := "/test/datanode/root/meta"
 	err := clearEtcd(testPath)
 	require.NoError(t, err)
-	Params.EtcdCfg.MetaRootPath = testPath
+	cfg := configs.NewConfig()
+	cfg.Etcd.PathPrefix = testPath
 
 	Factory := &MetaFactory{}
 	collMeta := Factory.GetCollectionMeta(UniqueID(0), "coll1")
@@ -651,12 +657,12 @@ func TestInsertBufferNode_bufferInsertMsg(t *testing.T) {
 	msFactory := msgstream.NewPmsFactory()
 	m := map[string]interface{}{
 		"receiveBufSize": 1024,
-		"pulsarAddress":  Params.PulsarCfg.Address,
+		"pulsarAddress":  util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port),
 		"pulsarBufSize":  1024}
 	err = msFactory.SetParams(m)
 	assert.Nil(t, err)
 
-	fm := NewRendezvousFlushManager(&allocator{}, cm, replica, func(*segmentFlushPack) {}, emptyFlushAndDropFunc)
+	fm := NewRendezvousFlushManager(cfg, &allocator{}, cm, replica, func(*segmentFlushPack) {}, emptyFlushAndDropFunc)
 
 	flushChan := make(chan flushMsg, 100)
 	c := &nodeConfig{
@@ -665,7 +671,7 @@ func TestInsertBufferNode_bufferInsertMsg(t *testing.T) {
 		allocator:    NewAllocatorFactory(),
 		vChannelName: "string",
 	}
-	iBNode, err := newInsertBufferNode(ctx, collMeta.ID, flushChan, fm, newCache(), c)
+	iBNode, err := newInsertBufferNode(ctx, cfg, collMeta.ID, flushChan, fm, newCache(), c)
 	require.NoError(t, err)
 
 	inMsg := genFlowGraphInsertMsg(insertChannelName)
@@ -723,7 +729,7 @@ func TestInsertBufferNode_updateSegStatesInReplica(te *testing.T) {
 }
 
 func TestInsertBufferNode_BufferData(te *testing.T) {
-	Params.DataNodeCfg.FlushInsertBufferSize = 16 * (1 << 20) // 16 MB
+	insertBufferSize := 16 * (1 << 20) // 16 MB
 
 	tests := []struct {
 		isValid bool
@@ -741,7 +747,7 @@ func TestInsertBufferNode_BufferData(te *testing.T) {
 
 	for _, test := range tests {
 		te.Run(test.description, func(t *testing.T) {
-			idata, err := newBufferData(test.indim)
+			idata, err := newBufferData(int64(insertBufferSize), test.indim)
 
 			if test.isValid {
 				assert.NoError(t, err)

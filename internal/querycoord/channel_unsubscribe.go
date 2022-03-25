@@ -26,10 +26,12 @@ import (
 	"github.com/golang/protobuf/proto"
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/configs"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 )
 
@@ -41,6 +43,7 @@ const (
 type channelUnsubscribeHandler struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
+	cfg      *configs.Config
 	kvClient *etcdkv.EtcdKV
 	factory  msgstream.Factory
 
@@ -51,11 +54,12 @@ type channelUnsubscribeHandler struct {
 }
 
 // newChannelUnsubscribeHandler create a new handler service to unsubscribe channels
-func newChannelUnsubscribeHandler(ctx context.Context, kv *etcdkv.EtcdKV, factory msgstream.Factory) (*channelUnsubscribeHandler, error) {
+func newChannelUnsubscribeHandler(ctx context.Context, cfg *configs.Config, kv *etcdkv.EtcdKV, factory msgstream.Factory) (*channelUnsubscribeHandler, error) {
 	childCtx, cancel := context.WithCancel(ctx)
 	handler := &channelUnsubscribeHandler{
 		ctx:      childCtx,
 		cancel:   cancel,
+		cfg:      cfg,
 		kvClient: kv,
 		factory:  factory,
 
@@ -132,7 +136,7 @@ func (csh *channelUnsubscribeHandler) handleChannelUnsubscribeLoop() {
 			nodeID := channelInfo.NodeID
 			for _, collectionChannels := range channelInfo.CollectionChannels {
 				collectionID := collectionChannels.CollectionID
-				subName := funcutil.GenChannelSubName(Params.CommonCfg.QueryNodeSubName, collectionID, nodeID)
+				subName := funcutil.GenChannelSubName(util.GetPath(csh.cfg, util.QueryNodeSubName), collectionID, nodeID)
 				err := unsubscribeChannels(csh.ctx, csh.factory, subName, collectionChannels.Channels)
 				if err != nil {
 					log.Debug("unsubscribe channels failed", zap.Int64("nodeID", nodeID))

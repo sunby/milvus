@@ -23,6 +23,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
+	"github.com/milvus-io/milvus/internal/util"
+
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/metrics"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
@@ -46,6 +49,7 @@ var (
 
 type timetickSync struct {
 	ctx      context.Context
+	cfg      *configs.Config
 	sourceID typeutil.UniqueID
 
 	dmlChannels   *dmlChannels // used for insert
@@ -86,11 +90,11 @@ func (c *chanTsMsg) getTimetick(channelName string) typeutil.Timestamp {
 	return c.defaultTs
 }
 
-func newTimeTickSync(ctx context.Context, sourceID int64, factory msgstream.Factory, chanMap map[typeutil.UniqueID][]string) *timetickSync {
+func newTimeTickSync(ctx context.Context, cfg *configs.Config, sourceID int64, factory msgstream.Factory, chanMap map[typeutil.UniqueID][]string) *timetickSync {
 	// initialize dml channels used for insert
-	dmlChannels := newDmlChannels(ctx, factory, Params.CommonCfg.RootCoordDml, Params.RootCoordCfg.DmlChannelNum)
-	// initialize delta channels used for delete, share Params.DmlChannelNum with dmlChannels
-	deltaChannels := newDmlChannels(ctx, factory, Params.CommonCfg.RootCoordDelta, Params.RootCoordCfg.DmlChannelNum)
+	dmlChannels := newDmlChannels(ctx, factory, util.GetPath(cfg, util.RootCoordDmlChannel), int64(cfg.DMLChannelCount))
+	// initialize delta channels used for delete, share cfg.DmlChannelNum with dmlChannels
+	deltaChannels := newDmlChannels(ctx, factory, util.GetPath(cfg, util.RootCoordDeltaChannel), int64(cfg.DMLChannelCount))
 
 	// recover physical channels for all collections
 	for collID, chanNames := range chanMap {
@@ -100,7 +104,7 @@ func newTimeTickSync(ctx context.Context, sourceID int64, factory msgstream.Fact
 		var err error
 		deltaChanNames := make([]string, len(chanNames))
 		for i, chanName := range chanNames {
-			deltaChanNames[i], err = funcutil.ConvertChannelName(chanName, Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta)
+			deltaChanNames[i], err = funcutil.ConvertChannelName(chanName, util.GetPath(cfg, util.RootCoordDmlChannel), util.GetPath(cfg, util.RootCoordDeltaChannel))
 			if err != nil {
 				log.Error("failed to convert dml channel name to delta channel name", zap.String("chanName", chanName))
 				panic("invalid dml channel name " + chanName)
@@ -112,6 +116,7 @@ func newTimeTickSync(ctx context.Context, sourceID int64, factory msgstream.Fact
 
 	return &timetickSync{
 		ctx:      ctx,
+		cfg:      cfg,
 		sourceID: sourceID,
 
 		dmlChannels:   dmlChannels,
@@ -151,7 +156,7 @@ func (t *timetickSync) sendToChannel() {
 		// give warning every 2 second if not get ttMsg from source sessions
 		if maxCnt%10 == 0 {
 			log.Warn("session idle for long time", zap.Any("idle list", idleSessionList),
-				zap.Any("idle time", Params.ProxyCfg.TimeTickInterval.Milliseconds()*maxCnt))
+				zap.Any("idle time(milliseconds)", time.Duration(int64(t.cfg.TimeTickInterval)*maxCnt)*time.Millisecond))
 		}
 		return
 	}
@@ -335,7 +340,7 @@ func (t *timetickSync) startWatch(wg *sync.WaitGroup) {
 			span := tr.ElapseSpan()
 			metrics.RootCoordSyncTimeTickLatency.Observe(float64(span.Milliseconds()))
 			// rootcoord send tt msg to all channels every 200ms by default
-			if span > Params.ProxyCfg.TimeTickInterval {
+			if span > time.Duration(t.cfg.TimeTickInterval)*time.Millisecond {
 				log.Warn("rootcoord send tt to all channels too slowly",
 					zap.Int("chanNum", len(local.chanTsMap)), zap.Int64("span", span.Milliseconds()))
 			}

@@ -27,6 +27,7 @@ import (
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/metrics"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
@@ -35,6 +36,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/milvus-io/milvus/internal/util/trace"
 	"github.com/milvus-io/milvus/internal/util/tsoutil"
@@ -65,6 +67,7 @@ type insertBufferNode struct {
 	ttMerger       *mergedTimeTickerSender
 
 	lastTimestamp Timestamp
+	cfg           *configs.Config
 }
 
 type timeTickLogger struct {
@@ -120,12 +123,12 @@ type BufferData struct {
 //   to fit in both types of vector fields
 //
 // * This need to change for string field support and multi-vector fields support.
-func newBufferData(dimension int64) (*BufferData, error) {
+func newBufferData(insertBufferSize, dimension int64) (*BufferData, error) {
 	if dimension == 0 {
 		return nil, errors.New("Invalid dimension")
 	}
 
-	limit := Params.DataNodeCfg.FlushInsertBufferSize / (dimension * 4)
+	limit := insertBufferSize / (dimension * 4)
 
 	return &BufferData{&InsertData{Data: make(map[UniqueID]storage.FieldData)}, 0, limit}, nil
 }
@@ -297,7 +300,7 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 					dropped:   false,
 				})
 
-				metrics.DataNodeAutoFlushSegmentCount.WithLabelValues(fmt.Sprint(Params.DataNodeCfg.NodeID)).Inc()
+				metrics.DataNodeAutoFlushSegmentCount.WithLabelValues(fmt.Sprint(serverID)).Inc()
 			}
 		}
 
@@ -342,13 +345,13 @@ func (ibNode *insertBufferNode) Operate(in []Msg) []Msg {
 		err := ibNode.flushManager.flushBufferData(task.buffer, task.segmentID, task.flushed, task.dropped, endPositions[0])
 		if err != nil {
 			log.Warn("failed to invoke flushBufferData", zap.Error(err))
-			metrics.DataNodeFlushSegmentCount.WithLabelValues(fmt.Sprint(Params.DataNodeCfg.NodeID), metrics.FailLabel).Inc()
+			metrics.DataNodeFlushSegmentCount.WithLabelValues(fmt.Sprint(serverID), metrics.FailLabel).Inc()
 		} else {
 			segmentsToFlush = append(segmentsToFlush, task.segmentID)
 			ibNode.insertBuffer.Delete(task.segmentID)
-			metrics.DataNodeFlushSegmentCount.WithLabelValues(fmt.Sprint(Params.DataNodeCfg.NodeID), metrics.SuccessLabel).Inc()
+			metrics.DataNodeFlushSegmentCount.WithLabelValues(fmt.Sprint(serverID), metrics.SuccessLabel).Inc()
 		}
-		metrics.DataNodeFlushSegmentCount.WithLabelValues(fmt.Sprint(Params.DataNodeCfg.NodeID), metrics.TotalLabel).Inc()
+		metrics.DataNodeFlushSegmentCount.WithLabelValues(fmt.Sprint(serverID), metrics.TotalLabel).Inc()
 	}
 
 	if err := ibNode.writeHardTimeTick(fgMsg.timeRange.timestampMax, seg2Upload); err != nil {
@@ -445,7 +448,7 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 		}
 	}
 
-	newbd, err := newBufferData(int64(dimension))
+	newbd, err := newBufferData(int64(ibNode.cfg.DataNode.InsertBufferSizeLimit), int64(dimension))
 	if err != nil {
 		return err
 	}
@@ -472,7 +475,7 @@ func (ibNode *insertBufferNode) bufferInsertMsg(msg *msgstream.InsertMsg, endPos
 
 	// update buffer size
 	buffer.updateSize(int64(msg.NRows()))
-	metrics.DataNodeConsumeMsgRowsCount.WithLabelValues(fmt.Sprint(Params.DataNodeCfg.NodeID), metrics.InsertLabel).Add(float64(len(msg.RowData)))
+	metrics.DataNodeConsumeMsgRowsCount.WithLabelValues(fmt.Sprint(serverID), metrics.InsertLabel).Add(float64(len(msg.RowData)))
 
 	// store in buffer
 	ibNode.insertBuffer.Store(currentSegID, buffer)
@@ -493,7 +496,7 @@ func (ibNode *insertBufferNode) getCollectionandPartitionIDbySegID(segmentID Uni
 	return ibNode.replica.getCollectionAndPartitionID(segmentID)
 }
 
-func newInsertBufferNode(ctx context.Context, collID UniqueID, flushCh <-chan flushMsg, fm flushManager,
+func newInsertBufferNode(ctx context.Context, cfg *configs.Config, collID UniqueID, flushCh <-chan flushMsg, fm flushManager,
 	flushingSegCache *Cache, config *nodeConfig) (*insertBufferNode, error) {
 
 	baseNode := BaseNode{}
@@ -505,9 +508,9 @@ func newInsertBufferNode(ctx context.Context, collID UniqueID, flushCh <-chan fl
 	if err != nil {
 		return nil, err
 	}
-	wTt.AsProducer([]string{Params.CommonCfg.DataCoordTimeTick})
-	metrics.DataNodeNumProducers.WithLabelValues(fmt.Sprint(Params.DataNodeCfg.NodeID)).Inc()
-	log.Debug("datanode AsProducer", zap.String("TimeTickChannelName", Params.CommonCfg.DataCoordTimeTick))
+	wTt.AsProducer([]string{util.GetPath(cfg, util.DataCoordTimeTickChannel)})
+	metrics.DataNodeNumProducers.WithLabelValues(fmt.Sprint(serverID)).Inc()
+	log.Debug("datanode AsProducer", zap.String("TimeTickChannelName", util.GetPath(cfg, util.DataCoordTimeTickChannel)))
 	var wTtMsgStream msgstream.MsgStream = wTt
 	wTtMsgStream.Start()
 
@@ -520,7 +523,7 @@ func newInsertBufferNode(ctx context.Context, collID UniqueID, flushCh <-chan fl
 				continue
 			}
 			stats = append(stats, stat)
-			metrics.DataNodeSegmentRowsCount.WithLabelValues(fmt.Sprint(Params.DataNodeCfg.NodeID)).Add(float64(stat.NumRows))
+			metrics.DataNodeSegmentRowsCount.WithLabelValues(fmt.Sprint(serverID)).Add(float64(stat.NumRows))
 		}
 		msgPack := msgstream.MsgPack{}
 		timeTickMsg := msgstream.DataNodeTtMsg{
@@ -543,7 +546,7 @@ func newInsertBufferNode(ctx context.Context, collID UniqueID, flushCh <-chan fl
 		msgPack.Msgs = append(msgPack.Msgs, &timeTickMsg)
 		pt, _ := tsoutil.ParseHybridTs(ts)
 		pChan := funcutil.ToPhysicalChannel(config.vChannelName)
-		metrics.DataNodeTimeSync.WithLabelValues(fmt.Sprint(Params.DataNodeCfg.NodeID), pChan).Set(float64(pt))
+		metrics.DataNodeTimeSync.WithLabelValues(fmt.Sprint(serverID), pChan).Set(float64(pt))
 		return wTtMsgStream.Produce(&msgPack)
 	})
 
@@ -562,5 +565,6 @@ func newInsertBufferNode(ctx context.Context, collID UniqueID, flushCh <-chan fl
 		channelName: config.vChannelName,
 		ttMerger:    mt,
 		ttLogger:    &timeTickLogger{vChannelName: config.vChannelName},
+		cfg:         cfg,
 	}, nil
 }

@@ -22,10 +22,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/kv"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
+	"github.com/milvus-io/milvus/internal/util"
 	"go.uber.org/zap"
 	"stathat.com/c/consistent"
 )
@@ -47,6 +49,7 @@ type ChannelManager struct {
 	reassignPolicy   ChannelReassignPolicy
 	bgChecker        ChannelBGChecker
 	msgstreamFactory msgstream.Factory
+	cfg              *configs.Config
 }
 
 type channel struct {
@@ -73,12 +76,14 @@ func withMsgstreamFactory(f msgstream.Factory) ChannelManagerOpt {
 func NewChannelManager(
 	kv kv.TxnKV,
 	h Handler,
+	cfg *configs.Config,
 	options ...ChannelManagerOpt,
 ) (*ChannelManager, error) {
 	c := &ChannelManager{
 		h:       h,
+		cfg:     cfg,
 		factory: NewChannelPolicyFactoryV1(kv),
-		store:   NewChannelStore(kv),
+		store:   NewChannelStore(cfg, kv),
 	}
 
 	if err := c.store.Reload(); err != nil {
@@ -279,7 +284,7 @@ func (c *ChannelManager) unsubAttempt(ncInfo *NodeChannelInfo) {
 
 	nodeID := ncInfo.NodeID
 	for _, ch := range ncInfo.Channels {
-		subName := buildSubName(ch.CollectionID, nodeID)
+		subName := buildSubName(util.GetPath(c.cfg, util.DataCoordSubName), ch.CollectionID, nodeID)
 		err := c.unsubscribe(subName, ch.Name)
 		if err != nil {
 			log.Warn("failed to unsubscribe topic", zap.String("subscription name", subName), zap.String("channel name", ch.Name))
@@ -288,8 +293,8 @@ func (c *ChannelManager) unsubAttempt(ncInfo *NodeChannelInfo) {
 }
 
 // buildSubName generates a subscription name by concatenating DataNodeSubName, node ID and collection ID.
-func buildSubName(collectionID int64, nodeID int64) string {
-	return fmt.Sprintf("%s-%d-%d", Params.CommonCfg.DataNodeSubName, nodeID, collectionID)
+func buildSubName(subName string, collectionID int64, nodeID int64) string {
+	return fmt.Sprintf("%s-%d-%d", subName, nodeID, collectionID)
 }
 
 func (c *ChannelManager) unsubscribe(subName string, channel string) error {

@@ -21,6 +21,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
+
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
@@ -28,11 +30,10 @@ import (
 )
 
 func TestProxyClientManager_GetProxyClients(t *testing.T) {
-	Params.Init()
-
-	core, err := NewCore(context.Background(), nil)
+	cfg := configs.NewConfig()
+	core, err := NewCore(context.Background(), cfg, nil)
 	assert.Nil(t, err)
-	cli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cli, err := etcd.GetEtcdClient(cfg)
 	defer cli.Close()
 	assert.Nil(t, err)
 	core.etcdCli = cli
@@ -55,11 +56,10 @@ func TestProxyClientManager_GetProxyClients(t *testing.T) {
 }
 
 func TestProxyClientManager_AddProxyClient(t *testing.T) {
-	Params.Init()
-
-	core, err := NewCore(context.Background(), nil)
+	cfg := configs.NewConfig()
+	core, err := NewCore(context.Background(), cfg, nil)
 	assert.Nil(t, err)
-	cli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer cli.Close()
 	core.etcdCli = cli
@@ -81,12 +81,11 @@ func TestProxyClientManager_AddProxyClient(t *testing.T) {
 }
 
 func TestProxyClientManager_InvalidateCollectionMetaCache(t *testing.T) {
-	Params.Init()
 	ctx := context.Background()
-
-	core, err := NewCore(ctx, nil)
+	cfg := configs.NewConfig()
+	core, err := NewCore(ctx, cfg, nil)
 	assert.Nil(t, err)
-	cli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer cli.Close()
 	core.etcdCli = cli
@@ -112,12 +111,12 @@ func TestProxyClientManager_InvalidateCollectionMetaCache(t *testing.T) {
 }
 
 func TestProxyClientManager_ReleaseDQLMessageStream(t *testing.T) {
-	Params.Init()
 	ctx := context.Background()
+	cfg := configs.NewConfig()
 
-	core, err := NewCore(ctx, nil)
+	core, err := NewCore(ctx, cfg, nil)
 	assert.Nil(t, err)
-	cli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer cli.Close()
 	core.etcdCli = cli

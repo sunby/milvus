@@ -28,6 +28,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/kv"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/metrics"
@@ -96,6 +97,7 @@ type Meta interface {
 type MetaReplica struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
+	cfg         *configs.Config
 	client      kv.MetaKv // client of a reliable kv service, i.e. etcd client
 	msFactory   msgstream.Factory
 	idAllocator func() (UniqueID, error)
@@ -116,7 +118,7 @@ type MetaReplica struct {
 	//partitionStates map[UniqueID]*querypb.PartitionStates
 }
 
-func newMeta(ctx context.Context, kv kv.MetaKv, factory msgstream.Factory, idAllocator func() (UniqueID, error)) (Meta, error) {
+func newMeta(ctx context.Context, cfg *configs.Config, kv kv.MetaKv, factory msgstream.Factory, idAllocator func() (UniqueID, error)) (Meta, error) {
 	childCtx, cancel := context.WithCancel(ctx)
 	collectionInfos := make(map[UniqueID]*querypb.CollectionInfo)
 	queryChannelInfos := make(map[UniqueID]*querypb.QueryChannelInfo)
@@ -127,6 +129,7 @@ func newMeta(ctx context.Context, kv kv.MetaKv, factory msgstream.Factory, idAll
 	m := &MetaReplica{
 		ctx:         childCtx,
 		cancel:      cancel,
+		cfg:         cfg,
 		client:      kv,
 		msFactory:   factory,
 		idAllocator: idAllocator,
@@ -784,8 +787,8 @@ func (m *MetaReplica) createQueryChannel(collectionID UniqueID) *querypb.QueryCh
 	// all collection use the same query channel
 	colIDForAssignChannel := UniqueID(0)
 
-	searchPrefix := Params.CommonCfg.QueryCoordSearch
-	searchResultPrefix := Params.CommonCfg.QueryCoordSearchResult
+	searchPrefix := util.GetPath(m.cfg, util.QueryCoordSearchChannel)
+	searchResultPrefix := util.GetPath(m.cfg, util.QueryCoordSearchResultChannel)
 	allocatedQueryChannel := searchPrefix + "-" + strconv.FormatInt(colIDForAssignChannel, 10)
 	allocatedQueryResultChannel := searchResultPrefix + "-" + strconv.FormatInt(colIDForAssignChannel, 10)
 	log.Debug("query coordinator create query channel", zap.String("queryChannelName", allocatedQueryChannel), zap.String("queryResultChannelName", allocatedQueryResultChannel))

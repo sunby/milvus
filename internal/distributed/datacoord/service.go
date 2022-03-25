@@ -25,6 +25,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
+
 	ot "github.com/grpc-ecosystem/go-grpc-middleware/tracing/opentracing"
 	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/milvus-io/milvus/internal/datacoord"
@@ -89,7 +91,8 @@ func (s *Server) init() error {
 	datacoord.Params.DataCoordCfg.Port = Params.Port
 	datacoord.Params.DataCoordCfg.Address = Params.GetAddress()
 
-	etcdCli, err := etcd.GetEtcdClient(&datacoord.Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	if err != nil {
 		log.Debug("DataCoord connect to etcd failed", zap.Error(err))
 		return err

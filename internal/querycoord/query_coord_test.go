@@ -31,11 +31,13 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/milvus-io/milvus/configs"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"go.uber.org/zap"
@@ -43,30 +45,24 @@ import (
 
 var queryCoordTestDir = "/tmp/milvus_test/query_coord"
 
-func setup() {
-	Params.Init()
-}
-
-func refreshParams() {
+// just keep the logic before replacing config module
+func refreshParams() *configs.Config {
 	rand.Seed(time.Now().UnixNano())
 	suffix := "-test-query-Coord" + strconv.FormatInt(rand.Int63(), 10)
-	Params.CommonCfg.QueryNodeStats = Params.CommonCfg.QueryNodeStats + suffix
-	Params.CommonCfg.QueryCoordTimeTick = Params.CommonCfg.QueryCoordTimeTick + suffix
-	Params.EtcdCfg.MetaRootPath = Params.EtcdCfg.MetaRootPath + suffix
-	Params.CommonCfg.RootCoordDml = "Dml"
-	Params.CommonCfg.RootCoordDelta = "delta"
+	cfg := configs.NewConfig()
+	cfg.Pulsar.ChannelPrefix += suffix
+	cfg.Etcd.PathPrefix += suffix
 	GlobalSegmentInfos = make(map[UniqueID]*querypb.SegmentInfo)
+	return cfg
 }
 
 func TestMain(m *testing.M) {
-	setup()
-	//refreshChannelNames()
 	exitCode := m.Run()
 	os.Exit(exitCode)
 }
 
-func NewQueryCoordTest(ctx context.Context, factory msgstream.Factory) (*QueryCoord, error) {
-	queryCoord, err := NewQueryCoord(ctx, factory)
+func NewQueryCoordTest(ctx context.Context, cfg *configs.Config, factory msgstream.Factory) (*QueryCoord, error) {
+	queryCoord, err := NewQueryCoord(ctx, cfg, factory)
 	if err != nil {
 		return nil, err
 	}
@@ -74,10 +70,10 @@ func NewQueryCoordTest(ctx context.Context, factory msgstream.Factory) (*QueryCo
 	return queryCoord, nil
 }
 
-func startQueryCoord(ctx context.Context) (*QueryCoord, error) {
+func startQueryCoord(ctx context.Context, cfg *configs.Config) (*QueryCoord, error) {
 	factory := msgstream.NewPmsFactory()
 
-	coord, err := NewQueryCoordTest(ctx, factory)
+	coord, err := NewQueryCoordTest(ctx, cfg, factory)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +91,7 @@ func startQueryCoord(ctx context.Context) (*QueryCoord, error) {
 	coord.SetRootCoord(rootCoord)
 	coord.SetDataCoord(dataCoord)
 	coord.SetIndexCoord(indexCoord)
-	etcd, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcd, err := etcd.GetEtcdClient(configs.NewConfig())
 	if err != nil {
 		return nil, err
 	}
@@ -120,10 +116,10 @@ func createDefaultPartition(ctx context.Context, queryCoord *QueryCoord) error {
 	return err
 }
 
-func startUnHealthyQueryCoord(ctx context.Context) (*QueryCoord, error) {
+func startUnHealthyQueryCoord(ctx context.Context, cfg *configs.Config) (*QueryCoord, error) {
 	factory := msgstream.NewPmsFactory()
 
-	coord, err := NewQueryCoordTest(ctx, factory)
+	coord, err := NewQueryCoordTest(ctx, cfg, factory)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +131,7 @@ func startUnHealthyQueryCoord(ctx context.Context) (*QueryCoord, error) {
 
 	coord.SetRootCoord(rootCoord)
 	coord.SetDataCoord(dataCoord)
-	etcd, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcd, err := etcd.GetEtcdClient(configs.NewConfig())
 	if err != nil {
 		return nil, err
 	}
@@ -154,12 +150,13 @@ func startUnHealthyQueryCoord(ctx context.Context) (*QueryCoord, error) {
 
 func TestWatchNodeLoop(t *testing.T) {
 	baseCtx := context.Background()
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	t.Run("Test OfflineNodes", func(t *testing.T) {
-		refreshParams()
+		cfg := refreshParams()
 
-		kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
+		kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
 
 		kvs := make(map[string]string)
 		session := &sessionutil.Session{
@@ -182,7 +179,7 @@ func TestWatchNodeLoop(t *testing.T) {
 		err = kv.MultiSave(kvs)
 		assert.Nil(t, err)
 
-		queryCoord, err := startQueryCoord(baseCtx)
+		queryCoord, err := startQueryCoord(baseCtx, cfg)
 		assert.Nil(t, err)
 
 		for {
@@ -206,8 +203,8 @@ func TestWatchNodeLoop(t *testing.T) {
 	})
 
 	t.Run("Test RegisterNewNode", func(t *testing.T) {
-		refreshParams()
-		queryCoord, err := startQueryCoord(baseCtx)
+		cfg := refreshParams()
+		queryCoord, err := startQueryCoord(baseCtx, cfg)
 		assert.Nil(t, err)
 
 		queryNode1, err := startQueryNodeServer(baseCtx)
@@ -223,11 +220,11 @@ func TestWatchNodeLoop(t *testing.T) {
 	})
 
 	t.Run("Test RemoveNode", func(t *testing.T) {
-		refreshParams()
+		cfg := refreshParams()
 		queryNode1, err := startQueryNodeServer(baseCtx)
 		assert.Nil(t, err)
 
-		queryCoord, err := startQueryCoord(baseCtx)
+		queryCoord, err := startQueryCoord(baseCtx, cfg)
 		assert.Nil(t, err)
 
 		nodeID := queryNode1.queryNodeID
@@ -286,10 +283,10 @@ func TestHandleNodeEventClosed(t *testing.T) {
 }
 
 func TestHandoffSegmentLoop(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	baseCtx := context.Background()
 
-	queryCoord, err := startQueryCoord(baseCtx)
+	queryCoord, err := startQueryCoord(baseCtx, cfg)
 	assert.Nil(t, err)
 	rootCoord := queryCoord.rootCoordClient.(*rootCoordMock)
 	rootCoord.enableIndex = true
@@ -325,7 +322,7 @@ func TestHandoffSegmentLoop(t *testing.T) {
 	waitTaskFinalState(loadPartitionTask, taskExpired)
 
 	t.Run("Test partitionNotLoaded", func(t *testing.T) {
-		baseTask := newBaseTask(baseCtx, querypb.TriggerCondition_Handoff)
+		baseTask := newBaseTask(baseCtx, cfg, querypb.TriggerCondition_Handoff)
 		segmentInfo := &querypb.SegmentInfo{
 			SegmentID:    defaultSegmentID,
 			CollectionID: defaultCollectionID,
@@ -361,7 +358,7 @@ func TestHandoffSegmentLoop(t *testing.T) {
 		infos := queryCoord.meta.showSegmentInfos(defaultCollectionID, nil)
 		assert.NotEqual(t, 0, len(infos))
 		segmentID := defaultSegmentID + 4
-		baseTask := newBaseTask(baseCtx, querypb.TriggerCondition_Handoff)
+		baseTask := newBaseTask(baseCtx, cfg, querypb.TriggerCondition_Handoff)
 
 		segmentInfo := &querypb.SegmentInfo{
 			SegmentID:    segmentID,
@@ -389,7 +386,7 @@ func TestHandoffSegmentLoop(t *testing.T) {
 	})
 
 	t.Run("Test binlogNotExist", func(t *testing.T) {
-		baseTask := newBaseTask(baseCtx, querypb.TriggerCondition_Handoff)
+		baseTask := newBaseTask(baseCtx, cfg, querypb.TriggerCondition_Handoff)
 		segmentInfo := &querypb.SegmentInfo{
 			SegmentID:    defaultSegmentID + 100,
 			CollectionID: defaultCollectionID,
@@ -416,7 +413,7 @@ func TestHandoffSegmentLoop(t *testing.T) {
 	})
 
 	t.Run("Test sealedSegmentExist", func(t *testing.T) {
-		baseTask := newBaseTask(baseCtx, querypb.TriggerCondition_Handoff)
+		baseTask := newBaseTask(baseCtx, cfg, querypb.TriggerCondition_Handoff)
 		segmentInfo := &querypb.SegmentInfo{
 			SegmentID:    defaultSegmentID,
 			CollectionID: defaultCollectionID,
@@ -446,7 +443,7 @@ func TestHandoffSegmentLoop(t *testing.T) {
 		infos := queryCoord.meta.showSegmentInfos(defaultCollectionID, nil)
 		assert.NotEqual(t, 0, len(infos))
 		segmentID := defaultSegmentID + 5
-		baseTask := newBaseTask(baseCtx, querypb.TriggerCondition_Handoff)
+		baseTask := newBaseTask(baseCtx, cfg, querypb.TriggerCondition_Handoff)
 
 		segmentInfo := &querypb.SegmentInfo{
 			SegmentID:      segmentID,
@@ -485,7 +482,7 @@ func TestHandoffSegmentLoop(t *testing.T) {
 		infos := queryCoord.meta.showSegmentInfos(defaultCollectionID, nil)
 		assert.NotEqual(t, 0, len(infos))
 		segmentID := defaultSegmentID + 6
-		baseTask := newBaseTask(baseCtx, querypb.TriggerCondition_Handoff)
+		baseTask := newBaseTask(baseCtx, cfg, querypb.TriggerCondition_Handoff)
 
 		segmentInfo := &querypb.SegmentInfo{
 			SegmentID:      segmentID,
@@ -526,7 +523,7 @@ func TestHandoffSegmentLoop(t *testing.T) {
 	waitTaskFinalState(releasePartitionTask, taskExpired)
 
 	t.Run("Test handoffReleasedPartition", func(t *testing.T) {
-		baseTask := newBaseTask(baseCtx, querypb.TriggerCondition_Handoff)
+		baseTask := newBaseTask(baseCtx, cfg, querypb.TriggerCondition_Handoff)
 		segmentInfo := &querypb.SegmentInfo{
 			SegmentID:    defaultSegmentID,
 			CollectionID: defaultCollectionID,
@@ -558,11 +555,11 @@ func TestHandoffSegmentLoop(t *testing.T) {
 }
 
 func TestLoadBalanceSegmentLoop(t *testing.T) {
-	refreshParams()
-	Params.QueryCoordCfg.BalanceIntervalSeconds = 10
+	cfg := refreshParams()
+	cfg.QueryCoord.BalanceInterval = 10
 	baseCtx := context.Background()
 
-	queryCoord, err := startQueryCoord(baseCtx)
+	queryCoord, err := startQueryCoord(baseCtx, cfg)
 	assert.Nil(t, err)
 	queryCoord.cluster.(*queryNodeCluster).segmentAllocator = shuffleSegmentsToQueryNode
 
@@ -585,7 +582,7 @@ func TestLoadBalanceSegmentLoop(t *testing.T) {
 			PartitionIDs: []UniqueID{partitionID},
 			Schema:       genDefaultCollectionSchema(false),
 		}
-		baseTask := newBaseTask(baseCtx, querypb.TriggerCondition_GrpcRequest)
+		baseTask := newBaseTask(baseCtx, cfg, querypb.TriggerCondition_GrpcRequest)
 		loadPartitionTask := &loadPartitionTask{
 			baseTask:              baseTask,
 			LoadPartitionsRequest: req,
@@ -598,7 +595,7 @@ func TestLoadBalanceSegmentLoop(t *testing.T) {
 		waitTaskFinalState(loadPartitionTask, taskExpired)
 		nodeInfo, err := queryCoord.cluster.getNodeInfoByID(queryNode1.queryNodeID)
 		assert.Nil(t, err)
-		if nodeInfo.(*queryNode).memUsageRate >= Params.QueryCoordCfg.OverloadedMemoryThresholdPercentage {
+		if nodeInfo.(*queryNode).memUsageRate >= cfg.QueryCoord.MemoryUsageLimitRatio {
 			break
 		}
 		partitionID++

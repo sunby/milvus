@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/util/etcd"
@@ -32,7 +33,7 @@ func TestFlowGraphManager(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(configs.NewConfig())
 	assert.Nil(t, err)
 	defer etcdCli.Close()
 

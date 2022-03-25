@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
+	"github.com/milvus-io/milvus/internal/util"
 
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 
@@ -46,7 +47,7 @@ func getSystemInfoMetrics(
 
 	identifierMap := make(map[string]int)
 
-	proxyRoleName := metricsinfo.ConstructComponentName(typeutil.ProxyRole, Params.ProxyCfg.ProxyID)
+	proxyRoleName := metricsinfo.ConstructComponentName(typeutil.ProxyRole, node.session.ServerID)
 	identifierMap[proxyRoleName] = int(node.session.ServerID)
 
 	proxyTopologyNode := metricsinfo.SystemTopologyNode{
@@ -67,14 +68,14 @@ func getSystemInfoMetrics(
 					DiskUsage:    metricsinfo.GetDiskUsage(),
 				},
 				SystemInfo:  metricsinfo.DeployMetrics{},
-				CreatedTime: Params.ProxyCfg.CreatedTime.String(),
-				UpdatedTime: Params.ProxyCfg.UpdatedTime.String(),
+				CreatedTime: node.createdTime.String(),
+				UpdatedTime: node.updatedTime.String(),
 				Type:        typeutil.ProxyRole,
 				ID:          node.session.ServerID,
 			},
 			SystemConfigurations: metricsinfo.ProxyConfiguration{
-				DefaultPartitionName: Params.CommonCfg.DefaultPartitionName,
-				DefaultIndexName:     Params.CommonCfg.DefaultIndexName,
+				DefaultPartitionName: util.DefaultPartitionName,
+				DefaultIndexName:     util.DefaultIndexName,
 			},
 		},
 	}
@@ -424,7 +425,7 @@ func getSystemInfoMetrics(
 				Reason:    err.Error(),
 			},
 			Response:      "",
-			ComponentName: metricsinfo.ConstructComponentName(typeutil.ProxyRole, Params.ProxyCfg.ProxyID),
+			ComponentName: metricsinfo.ConstructComponentName(typeutil.ProxyRole, node.session.ServerID),
 		}, nil
 	}
 
@@ -434,6 +435,6 @@ func getSystemInfoMetrics(
 			Reason:    "",
 		},
 		Response:      resp,
-		ComponentName: metricsinfo.ConstructComponentName(typeutil.ProxyRole, Params.ProxyCfg.ProxyID),
+		ComponentName: metricsinfo.ConstructComponentName(typeutil.ProxyRole, node.session.ServerID),
 	}, nil
 }

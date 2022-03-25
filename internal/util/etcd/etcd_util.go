@@ -21,8 +21,8 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/log"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/embed"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v3client"
@@ -32,29 +32,29 @@ import (
 var EtcdServer *embed.Etcd
 
 // InitEtcdServer initializes embedded etcd server singleton.
-func InitEtcdServer(etcdCfg *paramtable.EtcdConfig) error {
-	if etcdCfg.UseEmbedEtcd {
-		path := etcdCfg.ConfigPath
-		log.Info("Setting Etcd config", zap.String("path", path), zap.String("data", etcdCfg.DataDir))
-		var cfg *embed.Config
-		if len(path) > 0 {
-			cfgFromFile, err := embed.ConfigFromFile(path)
+func InitEtcdServer(cfg *configs.Config) error {
+	if cfg.Etcd.UseEmbed {
+		cfgPath := cfg.Etcd.ConfigPath
+		log.Info("initialize embedded etcd", zap.String("configPath", cfgPath), zap.String("dataPath", cfg.Etcd.DataPath))
+		var etcdCfg *embed.Config
+		var err error
+		if len(cfgPath) > 0 {
+			etcdCfg, err = embed.ConfigFromFile(cfgPath)
 			if err != nil {
 				return err
 			}
-			cfg = cfgFromFile
 		} else {
-			cfg = embed.NewConfig()
+			etcdCfg = embed.NewConfig()
 		}
-		cfg.Dir = etcdCfg.DataDir
-		cfg.LogOutputs = []string{etcdCfg.EtcdLogPath}
-		cfg.LogLevel = etcdCfg.EtcdLogLevel
-		e, err := embed.StartEtcd(cfg)
+		etcdCfg.Dir = cfg.Etcd.DataPath
+		etcdCfg.LogOutputs = []string{} // TODO: add config in Etcd
+		etcdCfg.LogLevel = cfg.Etcd.LogLevel
+
+		EtcdServer, err = embed.StartEtcd(etcdCfg)
 		if err != nil {
 			return err
 		}
-		EtcdServer = e
-		log.Info("finish init embedded etcd")
+		log.Info("finish to initialize embedded etcd")
 	}
 	return nil
 }
@@ -67,11 +67,11 @@ func StopEtcdServer() {
 }
 
 // GetEtcdClient returns etcd client
-func GetEtcdClient(cfg *paramtable.EtcdConfig) (*clientv3.Client, error) {
-	if cfg.UseEmbedEtcd {
+func GetEtcdClient(cfg *configs.Config) (*clientv3.Client, error) {
+	if cfg.Etcd.UseEmbed {
 		return GetEmbedEtcdClient()
 	}
-	return GetRemoteEtcdClient(cfg.Endpoints)
+	return GetRemoteEtcdClient(cfg.Etcd.Endpoints)
 }
 
 // GetEmbedEtcdClient returns client of embed etcd server

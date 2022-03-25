@@ -21,3 +21,80 @@ const (
 	SegmentMetaPrefix    = "queryCoord-segmentMeta"
 	ChangeInfoMetaPrefix = "queryCoord-sealedSegmentChangeInfo"
 )
+
+const (
+	// pulsar related
+	RootCoordTimeTickChannelName      = "rootcoord-timetick"
+	RootCoordStatisticsChannelName    = "rootcoord-statistics"
+	RootCoordDmlChannelName           = "rootcoord-dml"
+	RootCoordDeltaChannelName         = "rootcoord-delta"
+	QueryCoordTimeTickChannelName     = "queryTimeTick"
+	QueryCoordSearchChannelName       = "search"
+	QueryCoordSearchResultChannelName = "searchResult"
+	QueryNodeSubscribeName            = "queryNode"
+	QueryNodeStatsChannelName         = "query-node-stats"
+	DataCoordTimeTickChannelName      = "datacoord-timetick-channel"
+	DataCoordSubscribeName            = "dataCoord"
+	DataCoordSegmentInfoChannelName   = "segment-info-channel"
+	DataNodeSubscribeName             = "dataNode"
+
+	// etcd related
+	EtcdMetaRootPath = "meta"
+	EtcdKvRootPath   = "kv"
+
+	// global
+	DefaultPartitionName = "_default"
+	DefaultIndexName     = "_default_idx"
+
+	// Minio
+	IndexStorageRootPath = "index_files"
+	DeltaBinlogRootPath  = "delta_log"
+	InsertBinlogRootPath = "insert_log"
+	StatsBinlogRootPath  = "stats_log"
+)
+
+type pathType int
+
+const (
+	EtcdMeta pathType = iota
+	EtcdKv
+	RootCoordTimeTickChannel
+	RootCoordStatsChannel
+	RootCoordDmlChannel
+	RootCoordDeltaChannel
+	QueryCoordTimeTickChannel
+	QueryCoordSearchChannel
+	QueryCoordSearchResultChannel
+	QueryNodeSubName
+	QueryNodeStatsChannel
+	IndexStorageRoot
+	DataCoordTimeTickChannel
+	DataCoordSubName
+	DataCoordSegmentInfoChannel
+	DataNodeSubName
+	DeltaBinlogRoot
+	InsertBinlogRoot
+	StatsBinlogRoot
+)
+
+var pathMap = map[pathType]string{
+	EtcdMeta:                      EtcdMetaRootPath,
+	EtcdKv:                        EtcdKvRootPath,
+	RootCoordTimeTickChannel:      RootCoordTimeTickChannelName,
+	RootCoordStatsChannel:         RootCoordStatisticsChannelName,
+	RootCoordDmlChannel:           RootCoordDmlChannelName,
+	RootCoordDeltaChannel:         RootCoordDeltaChannelName,
+	QueryCoordTimeTickChannel:     QueryCoordTimeTickChannelName,
+	QueryCoordSearchChannel:       QueryCoordSearchChannelName,
+	QueryCoordSearchResultChannel: QueryCoordSearchResultChannelName,
+	QueryNodeSubName:              QueryNodeSubscribeName,
+	QueryNodeStatsChannel:         QueryNodeStatsChannelName,
+	IndexStorageRoot:              IndexStorageRootPath,
+	DataCoordTimeTickChannel:      DataCoordTimeTickChannelName,
+	DataCoordSubName:              DataCoordSubscribeName,
+	DataCoordSegmentInfoChannel:   DataCoordSegmentInfoChannelName,
+	DataNodeSubName:               DataCoordSubscribeName,
+	DeltaBinlogRoot:               DeltaBinlogRootPath,
+	InsertBinlogRoot:              InsertBinlogRootPath,
+	StatsBinlogRoot:               StatsBinlogRootPath,
+}

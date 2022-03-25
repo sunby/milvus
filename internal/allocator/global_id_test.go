@@ -19,6 +19,8 @@ package allocator
 import (
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
+
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/milvus-io/milvus/internal/util/tsoutil"
@@ -31,7 +33,8 @@ var Params paramtable.ComponentParam
 
 func TestGlobalTSOAllocator_All(t *testing.T) {
 	Params.Init()
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.NoError(t, err)
 	defer etcdCli.Close()
 	etcdKV := tsoutil.NewTSOKVBase(etcdCli, "/test/root/kv", "gidTest")

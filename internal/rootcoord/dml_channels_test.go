@@ -22,6 +22,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
+	"github.com/milvus-io/milvus/internal/util"
+
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
 	"github.com/milvus-io/milvus/internal/mq/msgstream/mqwrapper"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
@@ -39,10 +42,10 @@ func TestDmlChannels(t *testing.T) {
 	defer cancel()
 
 	factory := msgstream.NewPmsFactory()
-	Params.Init()
-
+	cfg := configs.NewConfig()
+	pulsarAddress := util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port)
 	m := map[string]interface{}{
-		"pulsarAddress":  Params.PulsarCfg.Address,
+		"pulsarAddress":  pulsarAddress,
 		"receiveBufSize": 1024,
 		"pulsarBufSize":  1024}
 	err := factory.SetParams(m)

@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/kv"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"go.uber.org/zap/zapcore"
@@ -107,6 +108,7 @@ var _ RWChannelStore = (*ChannelStore)(nil)
 type ChannelStore struct {
 	store        kv.TxnKV                   // A kv store with (NodeChannelKey) -> (ChannelWatchInfos) information.
 	channelsInfo map[int64]*NodeChannelInfo // A map of (nodeID) -> (NodeChannelInfo).
+	cfg          *configs.Config
 }
 
 // NodeChannelInfo stores the nodeID and its channels.
@@ -116,8 +118,9 @@ type NodeChannelInfo struct {
 }
 
 // NewChannelStore creates and returns a new ChannelStore.
-func NewChannelStore(kv kv.TxnKV) *ChannelStore {
+func NewChannelStore(cfg *configs.Config, kv kv.TxnKV) *ChannelStore {
 	c := &ChannelStore{
+		cfg:          cfg,
 		store:        kv,
 		channelsInfo: make(map[int64]*NodeChannelInfo),
 	}
@@ -130,7 +133,7 @@ func NewChannelStore(kv kv.TxnKV) *ChannelStore {
 
 // Reload restores the buffer channels and node-channels mapping from kv.
 func (c *ChannelStore) Reload() error {
-	keys, values, err := c.store.LoadWithPrefix(Params.DataCoordCfg.ChannelWatchSubPath)
+	keys, values, err := c.store.LoadWithPrefix(c.cfg.DataCoord.ChannelWatchPath)
 	if err != nil {
 		return err
 	}
@@ -316,7 +319,7 @@ func (c *ChannelStore) GetNodes() []int64 {
 
 // remove deletes kv pairs from the kv store where keys have given nodeID as prefix.
 func (c *ChannelStore) remove(nodeID int64) error {
-	k := buildKeyPrefix(nodeID)
+	k := buildKeyPrefix(c.cfg.DataCoord.ChannelWatchPath, nodeID)
 	return c.store.RemoveWithPrefix(k)
 }
 
@@ -326,7 +329,7 @@ func (c *ChannelStore) txn(opSet ChannelOpSet) error {
 	var removals []string
 	for _, op := range opSet {
 		for i, ch := range op.Channels {
-			k := buildNodeChannelKey(op.NodeID, ch.Name)
+			k := buildNodeChannelKey(c.cfg.DataCoord.ChannelWatchPath, op.NodeID, ch.Name)
 			switch op.Type {
 			case Add:
 				info, err := proto.Marshal(op.ChannelWatchInfos[i])
@@ -345,13 +348,13 @@ func (c *ChannelStore) txn(opSet ChannelOpSet) error {
 }
 
 // buildNodeChannelKey generates a key for kv store, where the key is a concatenation of ChannelWatchSubPath, nodeID and channel name.
-func buildNodeChannelKey(nodeID int64, chName string) string {
-	return fmt.Sprintf("%s%s%d%s%s", Params.DataCoordCfg.ChannelWatchSubPath, delimiter, nodeID, delimiter, chName)
+func buildNodeChannelKey(channelWatchPath string, nodeID int64, chName string) string {
+	return fmt.Sprintf("%s%s%d%s%s", channelWatchPath, delimiter, nodeID, delimiter, chName)
 }
 
 // buildKeyPrefix generates a key *prefix* for kv store, where the key prefix is a concatenation of ChannelWatchSubPath and nodeID.
-func buildKeyPrefix(nodeID int64) string {
-	return fmt.Sprintf("%s%s%d", Params.DataCoordCfg.ChannelWatchSubPath, delimiter, nodeID)
+func buildKeyPrefix(channelWatchPath string, nodeID int64) string {
+	return fmt.Sprintf("%s%s%d", channelWatchPath, delimiter, nodeID)
 }
 
 // parseNodeKey validates a given node key, then extracts and returns the corresponding node id on success.

@@ -66,14 +66,14 @@ func FailResponse(status *commonpb.Status, reason string) {
 	status.Reason = reason
 }
 
-func getTimetravelReverseTime(ctx context.Context, allocator allocator) (*timetravel, error) {
+func getTimetravelReverseTime(ctx context.Context, retentionInSeconds uint64, allocator allocator) (*timetravel, error) {
 	ts, err := allocator.allocTimestamp(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	pts, _ := tsoutil.ParseTS(ts)
-	ttpts := pts.Add(-time.Duration(Params.CommonCfg.RetentionDuration) * time.Second)
+	ttpts := pts.Add(-time.Duration(retentionInSeconds) * time.Second)
 	tt := tsoutil.ComposeTS(ttpts.UnixNano()/int64(time.Millisecond), 0)
 	return &timetravel{tt}, nil
 }

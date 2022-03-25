@@ -26,6 +26,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
+
 	ot "github.com/grpc-ecosystem/go-grpc-middleware/tracing/opentracing"
 	dn "github.com/milvus-io/milvus/internal/datanode"
 	dcc "github.com/milvus-io/milvus/internal/distributed/datacoord/client"
@@ -225,7 +227,8 @@ func (s *Server) init() error {
 	dn.Params.DataNodeCfg.Port = Params.Port
 	dn.Params.DataNodeCfg.IP = Params.IP
 
-	etcdCli, err := etcd.GetEtcdClient(&dn.Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	if err != nil {
 		log.Debug("DataNode connect to etcd failed", zap.Error(err))
 		return err

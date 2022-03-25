@@ -21,15 +21,16 @@ import (
 	"sort"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 	"github.com/milvus-io/milvus/internal/util/tsoutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
-type calUpperLimitPolicy func(schema *schemapb.CollectionSchema) (int, error)
+type calUpperLimitPolicy func(cfg *configs.Config, schema *schemapb.CollectionSchema) (int, error)
 
-func calBySchemaPolicy(schema *schemapb.CollectionSchema) (int, error) {
+func calBySchemaPolicy(cfg *configs.Config, schema *schemapb.CollectionSchema) (int, error) {
 	if schema == nil {
 		return -1, errors.New("nil schema")
 	}
@@ -41,7 +42,7 @@ func calBySchemaPolicy(schema *schemapb.CollectionSchema) (int, error) {
 	if sizePerRecord == 0 {
 		return -1, errors.New("zero size record schema found")
 	}
-	threshold := Params.DataCoordCfg.SegmentMaxSize * 1024 * 1024
+	threshold := float64(cfg.SegmentMaxSizeInMB) * 1024 * 1024
 	return int(threshold / float64(sizePerRecord)), nil
 }
 

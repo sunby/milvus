@@ -25,6 +25,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
+
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -149,7 +151,8 @@ func (s *Server) init() error {
 		return err
 	}
 
-	etcdCli, err := etcd.GetEtcdClient(&indexnode.Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	if err != nil {
 		log.Debug("IndexNode connect to etcd failed", zap.Error(err))
 		return err

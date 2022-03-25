@@ -24,6 +24,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
+
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 	"github.com/stretchr/testify/assert"
@@ -33,11 +35,10 @@ func TestMetaSnapshot(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	randVal := rand.Int()
 
-	Params.Init()
 	rootPath := fmt.Sprintf("/test/meta/%d", randVal)
 	tsKey := "timestamp"
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(configs.NewConfig())
 	assert.Nil(t, err)
 	defer etcdCli.Close()
 
@@ -172,12 +173,11 @@ func TestGetRevOnEtcd(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	randVal := rand.Int()
 
-	Params.Init()
 	rootPath := fmt.Sprintf("/test/meta/%d", randVal)
 	tsKey := "timestamp"
 	key := path.Join(rootPath, tsKey)
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(configs.NewConfig())
 	assert.Nil(t, err)
 	defer etcdCli.Close()
 
@@ -217,11 +217,10 @@ func TestLoad(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	randVal := rand.Int()
 
-	Params.Init()
 	rootPath := fmt.Sprintf("/test/meta/%d", randVal)
 	tsKey := "timestamp"
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(configs.NewConfig())
 	assert.Nil(t, err)
 	defer etcdCli.Close()
 
@@ -265,11 +264,10 @@ func TestMultiSave(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	randVal := rand.Int()
 
-	Params.Init()
 	rootPath := fmt.Sprintf("/test/meta/%d", randVal)
 	tsKey := "timestamp"
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(configs.NewConfig())
 	assert.Nil(t, err)
 	defer etcdCli.Close()
 
@@ -329,11 +327,10 @@ func TestMultiSaveAndRemoveWithPrefix(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	randVal := rand.Int()
 
-	Params.Init()
 	rootPath := fmt.Sprintf("/test/meta/%d", randVal)
 	tsKey := "timestamp"
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(configs.NewConfig())
 	assert.Nil(t, err)
 	defer etcdCli.Close()
 
@@ -407,11 +404,10 @@ func TestTsBackward(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	randVal := rand.Int()
 
-	Params.Init()
 	rootPath := fmt.Sprintf("/test/meta/%d", randVal)
 	tsKey := "timestamp"
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(configs.NewConfig())
 	assert.Nil(t, err)
 	defer etcdCli.Close()
 
@@ -434,11 +430,10 @@ func TestFix7150(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	randVal := rand.Int()
 
-	Params.Init()
 	rootPath := fmt.Sprintf("/test/meta/%d", randVal)
 	tsKey := "timestamp"
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(configs.NewConfig())
 	assert.Nil(t, err)
 	defer etcdCli.Close()
 

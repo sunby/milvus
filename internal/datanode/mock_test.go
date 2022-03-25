@@ -26,6 +26,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
+
 	"go.uber.org/zap"
 
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
@@ -109,7 +111,8 @@ func makeNewChannelNames(names []string, suffix string) []string {
 }
 
 func clearEtcd(rootPath string) error {
-	client, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	client, err := etcd.GetEtcdClient(cfg)
 	if err != nil {
 		return err
 	}

@@ -27,6 +27,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/indexnode"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
@@ -611,18 +612,20 @@ func genSimpleCollectionMeta() *etcdpb.CollectionMeta {
 // ---------- unittest util functions ----------
 // functions of third-party
 func genEtcdKV() (*etcdkv.EtcdKV, error) {
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	if err != nil {
 		return nil, err
 	}
-	etcdKV := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
+	etcdKV := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
 	return etcdKV, nil
 }
 
 func genFactory() (msgstream.Factory, error) {
 	const receiveBufSize = 1024
+	cfg := configs.NewConfig()
 
-	pulsarURL := Params.PulsarCfg.Address
+	pulsarURL := util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port)
 	msFactory := msgstream.NewPmsFactory()
 	m := map[string]interface{}{
 		"receiveBufSize": receiveBufSize,
@@ -663,33 +666,34 @@ func genQueryMsgStream(ctx context.Context) (msgstream.MsgStream, error) {
 }
 
 func genLocalChunkManager() (storage.ChunkManager, error) {
-	p := Params.LoadWithDefault("storage.path", "/tmp/milvus/data")
-	lcm := storage.NewLocalChunkManager(storage.RootPath(p))
+	cfg := configs.NewConfig()
+	lcm := storage.NewLocalChunkManager(storage.RootPath(cfg.LocalStorage.Path))
 	return lcm, nil
 }
 
 func genRemoteChunkManager(ctx context.Context) (storage.ChunkManager, error) {
+	cfg := configs.NewConfig()
 	return storage.NewMinioChunkManager(
 		ctx,
-		storage.Address(Params.MinioCfg.Address),
-		storage.AccessKeyID(Params.MinioCfg.AccessKeyID),
-		storage.SecretAccessKeyID(Params.MinioCfg.SecretAccessKey),
-		storage.UseSSL(Params.MinioCfg.UseSSL),
-		storage.BucketName(Params.MinioCfg.BucketName),
+		storage.Address(fmt.Sprintf("%s:%d", cfg.Minio.Address, cfg.Minio.Port)),
+		storage.AccessKeyID(cfg.Minio.AccessKeyID),
+		storage.SecretAccessKeyID(cfg.Minio.SecretAccessKey),
+		storage.UseSSL(cfg.Minio.UseSSL),
+		storage.BucketName(cfg.Minio.BucketName),
 		storage.CreateBucket(true))
 }
 
 func genVectorChunkManager(ctx context.Context) (*storage.VectorChunkManager, error) {
-	p := Params.LoadWithDefault("storage.path", "/tmp/milvus/data")
-	lcm := storage.NewLocalChunkManager(storage.RootPath(p))
+	cfg := configs.NewConfig()
+	lcm := storage.NewLocalChunkManager(storage.RootPath(cfg.LocalStorage.Path))
 
 	rcm, err := storage.NewMinioChunkManager(
 		ctx,
-		storage.Address(Params.MinioCfg.Address),
-		storage.AccessKeyID(Params.MinioCfg.AccessKeyID),
-		storage.SecretAccessKeyID(Params.MinioCfg.SecretAccessKey),
-		storage.UseSSL(Params.MinioCfg.UseSSL),
-		storage.BucketName(Params.MinioCfg.BucketName),
+		storage.Address(fmt.Sprintf("%s:%d", cfg.Minio.Address, cfg.Minio.Port)),
+		storage.AccessKeyID(cfg.Minio.AccessKeyID),
+		storage.SecretAccessKeyID(cfg.Minio.SecretAccessKey),
+		storage.UseSSL(cfg.Minio.UseSSL),
+		storage.BucketName(cfg.Minio.BucketName),
 		storage.CreateBucket(true))
 
 	if err != nil {
@@ -1631,11 +1635,11 @@ func initConsumer(ctx context.Context, queryResultChannel Channel) (msgstream.Ms
 
 func genSimpleChangeInfo() *querypb.SealedSegmentsChangeInfo {
 	changeInfo := &querypb.SegmentChangeInfo{
-		OnlineNodeID: Params.QueryNodeCfg.QueryNodeID,
+		OnlineNodeID: queryNodeID,
 		OnlineSegments: []*querypb.SegmentInfo{
 			genSimpleSegmentInfo(),
 		},
-		OfflineNodeID: Params.QueryNodeCfg.QueryNodeID + 1,
+		OfflineNodeID: queryNodeID + 1,
 		OfflineSegments: []*querypb.SegmentInfo{
 			genSimpleSegmentInfo(),
 		},
@@ -1659,15 +1663,16 @@ func saveChangeInfo(key string, value string) error {
 }
 
 func genSimpleQueryNodeWithMQFactory(ctx context.Context, fac msgstream.Factory) (*QueryNode, error) {
-	node := NewQueryNode(ctx, fac)
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	node := NewQueryNode(ctx, cfg, fac)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	if err != nil {
 		return nil, err
 	}
 	node.etcdCli = etcdCli
 	node.initSession()
 
-	etcdKV := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
+	etcdKV := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
 	node.etcdKV = etcdKV
 
 	node.tSafeReplica = newTSafeReplica()
@@ -1681,7 +1686,7 @@ func genSimpleQueryNodeWithMQFactory(ctx context.Context, fac msgstream.Factory)
 	if err != nil {
 		return nil, err
 	}
-	node.dataSyncService = newDataSyncService(node.queryNodeLoopCtx, streaming.replica, historical.replica, node.tSafeReplica, node.msFactory)
+	node.dataSyncService = newDataSyncService(node.queryNodeLoopCtx, node.cfg, streaming.replica, historical.replica, node.tSafeReplica, node.msFactory)
 
 	node.streaming = streaming
 	node.historical = historical
@@ -1695,7 +1700,7 @@ func genSimpleQueryNodeWithMQFactory(ctx context.Context, fac msgstream.Factory)
 	// start task scheduler
 	go node.scheduler.Start()
 
-	qs := newQueryService(ctx, node.historical, node.streaming, node.msFactory)
+	qs := newQueryService(ctx, cfg, node.historical, node.streaming, node.msFactory)
 	defer qs.close()
 	node.queryService = qs
 

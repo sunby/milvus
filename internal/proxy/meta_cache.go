@@ -106,7 +106,7 @@ func (m *MetaCache) GetCollectionID(ctx context.Context, collectionName string) 
 	collInfo, ok := m.collInfo[collectionName]
 
 	if !ok {
-		metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(Params.ProxyCfg.ProxyID, 10), "GeCollectionID", metrics.CacheMissLabel).Inc()
+		metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(ServerID, 10), "GeCollectionID", metrics.CacheMissLabel).Inc()
 		tr := timerecord.NewTimeRecorder("UpdateCache")
 		m.mu.RUnlock()
 		coll, err := m.describeCollection(ctx, collectionName)
@@ -116,12 +116,12 @@ func (m *MetaCache) GetCollectionID(ctx context.Context, collectionName string) 
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		m.updateCollection(coll, collectionName)
-		metrics.ProxyUpdateCacheLatency.WithLabelValues(strconv.FormatInt(Params.ProxyCfg.ProxyID, 10)).Observe(float64(tr.ElapseSpan().Milliseconds()))
+		metrics.ProxyUpdateCacheLatency.WithLabelValues(strconv.FormatInt(ServerID, 10)).Observe(float64(tr.ElapseSpan().Milliseconds()))
 		collInfo = m.collInfo[collectionName]
 		return collInfo.collID, nil
 	}
 	defer m.mu.RUnlock()
-	metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(Params.ProxyCfg.ProxyID, 10), "GetCollectionID", metrics.CacheHitLabel).Inc()
+	metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(ServerID, 10), "GetCollectionID", metrics.CacheHitLabel).Inc()
 
 	return collInfo.collID, nil
 }
@@ -136,7 +136,7 @@ func (m *MetaCache) GetCollectionInfo(ctx context.Context, collectionName string
 
 	if !ok {
 		tr := timerecord.NewTimeRecorder("UpdateCache")
-		metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(Params.ProxyCfg.ProxyID, 10), "GetCollectionInfo", metrics.CacheMissLabel).Inc()
+		metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(ServerID, 10), "GetCollectionInfo", metrics.CacheMissLabel).Inc()
 		coll, err := m.describeCollection(ctx, collectionName)
 		if err != nil {
 			return nil, err
@@ -145,9 +145,9 @@ func (m *MetaCache) GetCollectionInfo(ctx context.Context, collectionName string
 		defer m.mu.Unlock()
 		m.updateCollection(coll, collectionName)
 		collInfo = m.collInfo[collectionName]
-		metrics.ProxyUpdateCacheLatency.WithLabelValues(strconv.FormatInt(Params.ProxyCfg.ProxyID, 10)).Observe(float64(tr.ElapseSpan().Milliseconds()))
+		metrics.ProxyUpdateCacheLatency.WithLabelValues(strconv.FormatInt(ServerID, 10)).Observe(float64(tr.ElapseSpan().Milliseconds()))
 	}
-	metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(Params.ProxyCfg.ProxyID, 10), "GetCollectionInfo", metrics.CacheHitLabel).Inc()
+	metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(ServerID, 10), "GetCollectionInfo", metrics.CacheHitLabel).Inc()
 	return &collectionInfo{
 		collID:              collInfo.collID,
 		schema:              collInfo.schema,
@@ -162,7 +162,7 @@ func (m *MetaCache) GetCollectionSchema(ctx context.Context, collectionName stri
 	collInfo, ok := m.collInfo[collectionName]
 
 	if !ok {
-		metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(Params.ProxyCfg.ProxyID, 10), "GetCollectionSchema", metrics.CacheMissLabel).Inc()
+		metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(ServerID, 10), "GetCollectionSchema", metrics.CacheMissLabel).Inc()
 		tr := timerecord.NewTimeRecorder("UpdateCache")
 		m.mu.RUnlock()
 		coll, err := m.describeCollection(ctx, collectionName)
@@ -176,14 +176,14 @@ func (m *MetaCache) GetCollectionSchema(ctx context.Context, collectionName stri
 		defer m.mu.Unlock()
 		m.updateCollection(coll, collectionName)
 		collInfo = m.collInfo[collectionName]
-		metrics.ProxyUpdateCacheLatency.WithLabelValues(strconv.FormatInt(Params.ProxyCfg.ProxyID, 10)).Observe(float64(tr.ElapseSpan().Milliseconds()))
+		metrics.ProxyUpdateCacheLatency.WithLabelValues(strconv.FormatInt(ServerID, 10)).Observe(float64(tr.ElapseSpan().Milliseconds()))
 		log.Debug("Reload collection from root coordinator ",
 			zap.String("collection name ", collectionName),
 			zap.Any("time (milliseconds) take ", tr.ElapseSpan().Milliseconds()))
 		return collInfo.schema, nil
 	}
 	defer m.mu.RUnlock()
-	metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(Params.ProxyCfg.ProxyID, 10), "GetCollectionSchema", metrics.CacheHitLabel).Inc()
+	metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(ServerID, 10), "GetCollectionSchema", metrics.CacheHitLabel).Inc()
 
 	return collInfo.schema, nil
 }
@@ -223,7 +223,7 @@ func (m *MetaCache) GetPartitions(ctx context.Context, collectionName string) (m
 
 	if collInfo.partInfo == nil || len(collInfo.partInfo) == 0 {
 		tr := timerecord.NewTimeRecorder("UpdateCache")
-		metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(Params.ProxyCfg.ProxyID, 10), "GetPartitions", metrics.CacheMissLabel).Inc()
+		metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(ServerID, 10), "GetPartitions", metrics.CacheMissLabel).Inc()
 		m.mu.RUnlock()
 
 		partitions, err := m.showPartitions(ctx, collectionName)
@@ -238,7 +238,7 @@ func (m *MetaCache) GetPartitions(ctx context.Context, collectionName string) (m
 		if err != nil {
 			return nil, err
 		}
-		metrics.ProxyUpdateCacheLatency.WithLabelValues(strconv.FormatInt(Params.ProxyCfg.ProxyID, 10)).Observe(float64(tr.ElapseSpan().Milliseconds()))
+		metrics.ProxyUpdateCacheLatency.WithLabelValues(strconv.FormatInt(ServerID, 10)).Observe(float64(tr.ElapseSpan().Milliseconds()))
 		log.Debug("proxy", zap.Any("GetPartitions:partitions after update", partitions), zap.Any("collectionName", collectionName))
 		ret := make(map[string]typeutil.UniqueID)
 		partInfo := m.collInfo[collectionName].partInfo
@@ -249,7 +249,7 @@ func (m *MetaCache) GetPartitions(ctx context.Context, collectionName string) (m
 
 	}
 	defer m.mu.RUnlock()
-	metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(Params.ProxyCfg.ProxyID, 10), "GetPartitions", metrics.CacheHitLabel).Inc()
+	metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(ServerID, 10), "GetPartitions", metrics.CacheHitLabel).Inc()
 
 	ret := make(map[string]typeutil.UniqueID)
 	partInfo := m.collInfo[collectionName].partInfo
@@ -280,7 +280,7 @@ func (m *MetaCache) GetPartitionInfo(ctx context.Context, collectionName string,
 
 	if !ok {
 		tr := timerecord.NewTimeRecorder("UpdateCache")
-		metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(Params.ProxyCfg.ProxyID, 10), "GetPartitionInfo", metrics.CacheMissLabel).Inc()
+		metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(ServerID, 10), "GetPartitionInfo", metrics.CacheMissLabel).Inc()
 		partitions, err := m.showPartitions(ctx, collectionName)
 		if err != nil {
 			return nil, err
@@ -292,14 +292,14 @@ func (m *MetaCache) GetPartitionInfo(ctx context.Context, collectionName string,
 		if err != nil {
 			return nil, err
 		}
-		metrics.ProxyUpdateCacheLatency.WithLabelValues(strconv.FormatInt(Params.ProxyCfg.ProxyID, 10)).Observe(float64(tr.ElapseSpan().Milliseconds()))
+		metrics.ProxyUpdateCacheLatency.WithLabelValues(strconv.FormatInt(ServerID, 10)).Observe(float64(tr.ElapseSpan().Milliseconds()))
 		log.Debug("proxy", zap.Any("GetPartitionID:partitions after update", partitions), zap.Any("collectionName", collectionName))
 		partInfo, ok = m.collInfo[collectionName].partInfo[partitionName]
 		if !ok {
 			return nil, fmt.Errorf("partitionID of partitionName:%s can not be find", partitionName)
 		}
 	}
-	metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(Params.ProxyCfg.ProxyID, 10), "GetPartitionInfo", metrics.CacheHitLabel).Inc()
+	metrics.ProxyCacheHitCounter.WithLabelValues(strconv.FormatInt(ServerID, 10), "GetPartitionInfo", metrics.CacheHitLabel).Inc()
 	return &partitionInfo{
 		partitionID:         partInfo.partitionID,
 		createdTimestamp:    partInfo.createdTimestamp,

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/metrics"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
@@ -49,6 +50,7 @@ type dataSyncService struct {
 	flushManager     flushManager // flush manager handles flush process
 	chunkManager     storage.ChunkManager
 	compactor        *compactionExecutor // reference to compaction executor
+	cfg              *configs.Config
 }
 
 func newDataSyncService(ctx context.Context,
@@ -62,6 +64,7 @@ func newDataSyncService(ctx context.Context,
 	flushingSegCache *Cache,
 	chunkManager storage.ChunkManager,
 	compactor *compactionExecutor,
+	cfg *configs.Config,
 ) (*dataSyncService, error) {
 
 	if replica == nil {
@@ -85,6 +88,7 @@ func newDataSyncService(ctx context.Context,
 		flushingSegCache: flushingSegCache,
 		chunkManager:     chunkManager,
 		compactor:        compactor,
+		cfg:              cfg,
 	}
 
 	if err := service.initNodes(vchan); err != nil {
@@ -109,8 +113,8 @@ type nodeConfig struct {
 	parallelConfig
 }
 
-func newParallelConfig() parallelConfig {
-	return parallelConfig{Params.DataNodeCfg.FlowGraphMaxQueueLength, Params.DataNodeCfg.FlowGraphMaxParallelism}
+func newParallelConfig(cfg *configs.Config) parallelConfig {
+	return parallelConfig{int32(cfg.FlowGraph.QueueLengthLimit), int32(cfg.FlowGraph.ParallelismLimit)}
 }
 
 // start starts the flowgraph in datasyncservice
@@ -130,8 +134,8 @@ func (dsService *dataSyncService) close() {
 		log.Info("dataSyncService closing flowgraph", zap.Int64("collectionID", dsService.collectionID),
 			zap.String("vChanName", dsService.vchannelName))
 		dsService.fg.Close()
-		metrics.DataNodeNumConsumers.WithLabelValues(fmt.Sprint(Params.DataNodeCfg.NodeID)).Dec()
-		metrics.DataNodeNumProducers.WithLabelValues(fmt.Sprint(Params.DataNodeCfg.NodeID)).Sub(2) // timeTickChannel + deltaChannel
+		metrics.DataNodeNumConsumers.WithLabelValues(fmt.Sprint(serverID)).Dec()
+		metrics.DataNodeNumProducers.WithLabelValues(fmt.Sprint(serverID)).Sub(2) // timeTickChannel + deltaChannel
 	}
 
 	dsService.cancelFn()
@@ -142,7 +146,7 @@ func (dsService *dataSyncService) close() {
 func (dsService *dataSyncService) initNodes(vchanInfo *datapb.VchannelInfo) error {
 	dsService.fg = flowgraph.NewTimeTickedFlowGraph(dsService.ctx)
 	// initialize flush manager for DataSync Service
-	dsService.flushManager = NewRendezvousFlushManager(dsService.idAllocator, dsService.chunkManager, dsService.replica,
+	dsService.flushManager = NewRendezvousFlushManager(dsService.cfg, dsService.idAllocator, dsService.chunkManager, dsService.replica,
 		flushNotifyFunc(dsService), dropVirtualChannelFunc(dsService))
 
 	// recover segment checkpoints
@@ -206,20 +210,21 @@ func (dsService *dataSyncService) initNodes(vchanInfo *datapb.VchannelInfo) erro
 		replica:      dsService.replica,
 		allocator:    dsService.idAllocator,
 
-		parallelConfig: newParallelConfig(),
+		parallelConfig: newParallelConfig(dsService.cfg),
 	}
 
 	var err error
 	var dmStreamNode Node
-	dmStreamNode, err = newDmInputNode(dsService.ctx, vchanInfo.GetSeekPosition(), c)
+	dmStreamNode, err = newDmInputNode(dsService.ctx, dsService.cfg, vchanInfo.GetSeekPosition(), c)
 	if err != nil {
 		return err
 	}
 
-	var ddNode Node = newDDNode(dsService.ctx, dsService.collectionID, vchanInfo, dsService.msFactory, dsService.compactor)
+	var ddNode Node = newDDNode(dsService.ctx, dsService.cfg, dsService.collectionID, vchanInfo, dsService.msFactory, dsService.compactor)
 	var insertBufferNode Node
 	insertBufferNode, err = newInsertBufferNode(
 		dsService.ctx,
+		dsService.cfg,
 		dsService.collectionID,
 		dsService.flushCh,
 		dsService.flushManager,

@@ -45,6 +45,7 @@ import (
 	"unsafe"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/milvus-io/milvus/configs"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
@@ -117,16 +118,22 @@ type QueryNode struct {
 
 	chunkManager storage.ChunkManager
 	etcdKV       *etcdkv.EtcdKV
+	cfg          *configs.Config
+	port         int
+
+	createdTime time.Time
+	updatedTime time.Time
 }
 
 // NewQueryNode will return a QueryNode with abnormal state.
-func NewQueryNode(ctx context.Context, factory msgstream.Factory) *QueryNode {
+func NewQueryNode(ctx context.Context, cfg *configs.Config, factory msgstream.Factory) *QueryNode {
 	ctx1, cancel := context.WithCancel(ctx)
 	node := &QueryNode{
 		queryNodeLoopCtx:    ctx1,
 		queryNodeLoopCancel: cancel,
 		queryService:        nil,
 		msFactory:           factory,
+		cfg:                 cfg,
 	}
 
 	node.scheduler = newTaskScheduler(ctx1)
@@ -136,14 +143,14 @@ func NewQueryNode(ctx context.Context, factory msgstream.Factory) *QueryNode {
 }
 
 func (node *QueryNode) initSession() error {
-	node.session = sessionutil.NewSession(node.queryNodeLoopCtx, Params.EtcdCfg.MetaRootPath, node.etcdCli)
+	node.session = sessionutil.NewSession(node.queryNodeLoopCtx, util.GetPath(node.cfg, util.EtcdMeta), node.etcdCli)
 	if node.session == nil {
 		return fmt.Errorf("session is nil, the etcd client connection may have failed")
 	}
-	node.session.Init(typeutil.QueryNodeRole, Params.QueryNodeCfg.QueryNodeIP+":"+strconv.FormatInt(Params.QueryNodeCfg.QueryNodePort, 10), false, true)
-	Params.QueryNodeCfg.QueryNodeID = node.session.ServerID
-	Params.SetLogger(Params.QueryNodeCfg.QueryNodeID)
-	log.Debug("QueryNode", zap.Int64("nodeID", Params.QueryNodeCfg.QueryNodeID), zap.String("node address", node.session.Address))
+	addr := fmt.Sprintf("%s:%d", node.cfg.AdvertiseAddress, node.port)
+	node.session.Init(typeutil.QueryNodeRole, addr, false, true)
+	queryNodeID = node.session.ServerID
+	log.Debug("QueryNode", zap.Int64("nodeID", queryNodeID), zap.String("node address", node.session.Address))
 	return nil
 }
 
@@ -165,7 +172,6 @@ func (node *QueryNode) Register() error {
 	})
 
 	//TODO Reset the logger
-	//Params.initLogCfg()
 	return nil
 }
 
@@ -174,13 +180,13 @@ func (node *QueryNode) InitSegcore() {
 	C.SegcoreInit()
 
 	// override segcore chunk size
-	cChunkRows := C.int64_t(Params.QueryNodeCfg.ChunkRows)
+	cChunkRows := C.int64_t(node.cfg.QueryNode.SegcoreChunkRows)
 	C.SegcoreSetChunkRows(cChunkRows)
 
 	// override segcore SIMD type
-	cSimdType := C.CString(Params.CommonCfg.SimdType)
+	cSimdType := C.CString(node.cfg.SIMDType)
 	cRealSimdType := C.SegcoreSetSimdType(cSimdType)
-	Params.CommonCfg.SimdType = C.GoString(cRealSimdType)
+	node.cfg.SIMDType = C.GoString(cRealSimdType)
 	C.free(unsafe.Pointer(cRealSimdType))
 	C.free(unsafe.Pointer(cSimdType))
 }
@@ -264,7 +270,7 @@ func (node *QueryNode) Init() error {
 	var initError error = nil
 	node.initOnce.Do(func() {
 		//ctx := context.Background()
-		log.Debug("QueryNode session info", zap.String("metaPath", Params.EtcdCfg.MetaRootPath))
+		log.Debug("QueryNode session info", zap.String("metaPath", util.GetPath(node.cfg, util.EtcdMeta)))
 		err := node.initSession()
 		if err != nil {
 			log.Error("QueryNode init session failed", zap.Error(err))
@@ -273,11 +279,11 @@ func (node *QueryNode) Init() error {
 		}
 
 		node.chunkManager, err = storage.NewMinioChunkManager(node.queryNodeLoopCtx,
-			storage.Address(Params.MinioCfg.Address),
-			storage.AccessKeyID(Params.MinioCfg.AccessKeyID),
-			storage.SecretAccessKeyID(Params.MinioCfg.SecretAccessKey),
-			storage.UseSSL(Params.MinioCfg.UseSSL),
-			storage.BucketName(Params.MinioCfg.BucketName),
+			storage.Address(fmt.Sprintf("%s:%d", node.cfg.Minio.Address, node.cfg.Minio.Port)),
+			storage.AccessKeyID(node.cfg.Minio.AccessKeyID),
+			storage.SecretAccessKeyID(node.cfg.Minio.SecretAccessKey),
+			storage.UseSSL(node.cfg.Minio.UseSSL),
+			storage.BucketName(node.cfg.Minio.BucketName),
 			storage.CreateBucket(true))
 
 		if err != nil {
@@ -286,8 +292,8 @@ func (node *QueryNode) Init() error {
 			return
 		}
 
-		node.etcdKV = etcdkv.NewEtcdKV(node.etcdCli, Params.EtcdCfg.MetaRootPath)
-		log.Debug("queryNode try to connect etcd success", zap.Any("MetaRootPath", Params.EtcdCfg.MetaRootPath))
+		node.etcdKV = etcdkv.NewEtcdKV(node.etcdCli, util.GetPath(node.cfg, util.EtcdMeta))
+		log.Debug("queryNode try to connect etcd success", zap.Any("MetaRootPath", util.GetPath(node.cfg, util.EtcdMeta)))
 		node.tSafeReplica = newTSafeReplica()
 
 		streamingReplica := newCollectionReplica(node.etcdKV)
@@ -311,8 +317,7 @@ func (node *QueryNode) Init() error {
 			node.chunkManager,
 			node.msFactory)
 
-		//node.statsService = newStatsService(node.queryNodeLoopCtx, node.historical.replica, node.msFactory)
-		node.dataSyncService = newDataSyncService(node.queryNodeLoopCtx, streamingReplica, historicalReplica, node.tSafeReplica, node.msFactory)
+		node.dataSyncService = newDataSyncService(node.queryNodeLoopCtx, node.cfg, streamingReplica, historicalReplica, node.tSafeReplica, node.msFactory)
 
 		node.InitSegcore()
 
@@ -320,9 +325,9 @@ func (node *QueryNode) Init() error {
 		node.sessionManager = NewSessionManager(withSessionCreator(defaultSessionCreator()))
 
 		log.Debug("query node init successfully",
-			zap.Any("queryNodeID", Params.QueryNodeCfg.QueryNodeID),
-			zap.Any("IP", Params.QueryNodeCfg.QueryNodeIP),
-			zap.Any("Port", Params.QueryNodeCfg.QueryNodePort),
+			zap.Any("queryNodeID", queryNodeID),
+			zap.Any("IP", node.cfg.AdvertiseAddress),
+			zap.Any("Port", node.port),
 		)
 	})
 
@@ -333,7 +338,7 @@ func (node *QueryNode) Init() error {
 func (node *QueryNode) Start() error {
 	var err error
 	m := map[string]interface{}{
-		"PulsarAddress":  Params.PulsarCfg.Address,
+		"PulsarAddress":  util.CreatePulsarAddress(node.cfg.Pulsar.Address, node.cfg.Pulsar.Port),
 		"ReceiveBufSize": 1024,
 		"PulsarBufSize":  1024}
 	err = node.msFactory.SetParams(m)
@@ -364,14 +369,14 @@ func (node *QueryNode) Start() error {
 	node.wg.Add(1)
 	go node.watchService(node.queryNodeLoopCtx)
 
-	Params.QueryNodeCfg.CreatedTime = time.Now()
-	Params.QueryNodeCfg.UpdatedTime = time.Now()
+	node.createdTime = time.Now()
+	node.updatedTime = time.Now()
 
 	node.UpdateStateCode(internalpb.StateCode_Healthy)
 	log.Debug("query node start successfully",
-		zap.Any("queryNodeID", Params.QueryNodeCfg.QueryNodeID),
-		zap.Any("IP", Params.QueryNodeCfg.QueryNodeIP),
-		zap.Any("Port", Params.QueryNodeCfg.QueryNodePort),
+		zap.Any("queryNodeID", queryNodeID),
+		zap.Any("IP", node.cfg.AdvertiseAddress),
+		zap.Any("Port", node.port),
 	)
 	return nil
 }
@@ -465,7 +470,7 @@ func (node *QueryNode) waitChangeInfo(segmentChangeInfos *querypb.SealedSegments
 						canDoLoadBalance = false
 						break
 					}
-					if info.OnlineNodeID == Params.QueryNodeCfg.QueryNodeID && !qc.globalSegmentManager.hasGlobalSealedSegment(segmentInfo.SegmentID) {
+					if info.OnlineNodeID == queryNodeID && !qc.globalSegmentManager.hasGlobalSealedSegment(segmentInfo.SegmentID) {
 						canDoLoadBalance = false
 						break
 					}
@@ -479,7 +484,7 @@ func (node *QueryNode) waitChangeInfo(segmentChangeInfos *querypb.SealedSegments
 						canDoLoadBalance = false
 						break
 					}
-					if info.OfflineNodeID == Params.QueryNodeCfg.QueryNodeID && qc.globalSegmentManager.hasGlobalSealedSegment(segmentInfo.SegmentID) {
+					if info.OfflineNodeID == queryNodeID && qc.globalSegmentManager.hasGlobalSealedSegment(segmentInfo.SegmentID) {
 						canDoLoadBalance = false
 						break
 					}
@@ -529,7 +534,7 @@ func (node *QueryNode) removeSegments(segmentChangeInfos *querypb.SealedSegments
 		// For offline segments:
 		for _, segmentInfo := range info.OfflineSegments {
 			// load balance or compaction, remove old sealed segments.
-			if info.OfflineNodeID == Params.QueryNodeCfg.QueryNodeID {
+			if info.OfflineNodeID == queryNodeID {
 				err := node.historical.replica.removeSegment(segmentInfo.SegmentID)
 				if err != nil {
 					return err
@@ -543,3 +548,5 @@ func (node *QueryNode) removeSegments(segmentChangeInfos *querypb.SealedSegments
 	}
 	return nil
 }
+
+var queryNodeID int64

@@ -21,6 +21,9 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/milvus-io/milvus/internal/metrics"
+	"github.com/milvus-io/milvus/internal/util"
+
 	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/log"
@@ -149,7 +152,7 @@ func (t *CreateCollectionReqTask) Execute(ctx context.Context) error {
 		chanNames[i] = funcutil.ToPhysicalChannel(vchanNames[i])
 
 		deltaChanNames[i] = t.core.chanTimeTick.getDeltaChannelName()
-		deltaChanName, err1 := funcutil.ConvertChannelName(chanNames[i], Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta)
+		deltaChanName, err1 := funcutil.ConvertChannelName(chanNames[i], util.GetPath(t.core.cfg, util.RootCoordDmlChannel), util.GetPath(t.core.cfg, util.RootCoordDeltaChannel))
 		if err1 != nil || deltaChanName != deltaChanNames[i] {
 			return fmt.Errorf("dmlChanName %s and deltaChanName %s mis-match", chanNames[i], deltaChanNames[i])
 		}
@@ -159,7 +162,7 @@ func (t *CreateCollectionReqTask) Execute(ctx context.Context) error {
 		ID:                         collID,
 		Schema:                     &schema,
 		PartitionIDs:               []typeutil.UniqueID{partID},
-		PartitionNames:             []string{Params.CommonCfg.DefaultPartitionName},
+		PartitionNames:             []string{util.DefaultPartitionName},
 		FieldIndexes:               make([]*etcdpb.FieldIndexInfo, 0, 16),
 		VirtualChannelNames:        vchanNames,
 		PhysicalChannelNames:       chanNames,
@@ -181,7 +184,7 @@ func (t *CreateCollectionReqTask) Execute(ctx context.Context) error {
 		Base:                 t.Req.Base,
 		DbName:               t.Req.DbName,
 		CollectionName:       t.Req.CollectionName,
-		PartitionName:        Params.CommonCfg.DefaultPartitionName,
+		PartitionName:        util.DefaultPartitionName,
 		DbID:                 0, //TODO,not used
 		CollectionID:         collID,
 		PartitionID:          partID,
@@ -363,7 +366,7 @@ func (t *DropCollectionReqTask) Execute(ctx context.Context) error {
 		// remove delta channels
 		deltaChanNames := make([]string, len(collMeta.PhysicalChannelNames))
 		for i, chanName := range collMeta.PhysicalChannelNames {
-			if deltaChanNames[i], err = funcutil.ConvertChannelName(chanName, Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta); err != nil {
+			if deltaChanNames[i], err = funcutil.ConvertChannelName(chanName, util.GetPath(t.core.cfg, util.RootCoordDmlChannel), util.GetPath(t.core.cfg, util.RootCoordDeltaChannel)); err != nil {
 				return err
 			}
 		}
@@ -845,7 +848,7 @@ func (t *CreateIndexReqTask) Execute(ctx context.Context) error {
 	if t.Type() != commonpb.MsgType_CreateIndex {
 		return fmt.Errorf("create index, msg type = %s", commonpb.MsgType_name[int32(t.Type())])
 	}
-	indexName := Params.CommonCfg.DefaultIndexName //TODO, get name from request
+	indexName := util.DefaultIndexName //TODO, get name from request
 	indexID, _, err := t.core.IDAllocator(1)
 	log.Debug("RootCoord CreateIndexReqTask", zap.Any("indexID", indexID), zap.Error(err))
 	if err != nil {

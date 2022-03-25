@@ -27,16 +27,17 @@ import (
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 )
 
 func Test_HandlerReloadFromKV(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	baseCtx, cancel := context.WithCancel(context.Background())
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer etcdCli.Close()
-	kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
+	kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
 
 	channelInfoKey := fmt.Sprintf("%s/%d", unsubscribeChannelInfoPrefix, defaultQueryNodeID)
 	unsubscribeChannelInfo := &querypb.UnsubscribeChannelInfo{
@@ -49,7 +50,7 @@ func Test_HandlerReloadFromKV(t *testing.T) {
 	assert.Nil(t, err)
 
 	factory := msgstream.NewPmsFactory()
-	handler, err := newChannelUnsubscribeHandler(baseCtx, kv, factory)
+	handler, err := newChannelUnsubscribeHandler(baseCtx, cfg, kv, factory)
 	assert.Nil(t, err)
 	assert.Equal(t, 1, len(handler.downNodeChan))
 
@@ -57,14 +58,14 @@ func Test_HandlerReloadFromKV(t *testing.T) {
 }
 
 func Test_AddUnsubscribeChannelInfo(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	baseCtx, cancel := context.WithCancel(context.Background())
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer etcdCli.Close()
-	kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
+	kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
 	factory := msgstream.NewPmsFactory()
-	handler, err := newChannelUnsubscribeHandler(baseCtx, kv, factory)
+	handler, err := newChannelUnsubscribeHandler(baseCtx, cfg, kv, factory)
 	assert.Nil(t, err)
 
 	collectionChannels := &querypb.UnsubscribeChannels{
@@ -89,19 +90,19 @@ func Test_AddUnsubscribeChannelInfo(t *testing.T) {
 }
 
 func Test_HandleChannelUnsubscribeLoop(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	baseCtx, cancel := context.WithCancel(context.Background())
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer etcdCli.Close()
-	kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
+	kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
 	factory := msgstream.NewPmsFactory()
 	m := map[string]interface{}{
-		"PulsarAddress":  Params.PulsarCfg.Address,
+		"PulsarAddress":  util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port),
 		"ReceiveBufSize": 1024,
 		"PulsarBufSize":  1024}
 	factory.SetParams(m)
-	handler, err := newChannelUnsubscribeHandler(baseCtx, kv, factory)
+	handler, err := newChannelUnsubscribeHandler(baseCtx, cfg, kv, factory)
 	assert.Nil(t, err)
 
 	collectionChannels := &querypb.UnsubscribeChannels{

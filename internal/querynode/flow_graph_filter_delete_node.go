@@ -22,6 +22,7 @@ import (
 	"github.com/opentracing/opentracing-go"
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
@@ -116,14 +117,10 @@ func (fddNode *filterDeleteNode) filterInvalidDeleteMessage(msg *msgstream.Delet
 }
 
 // newFilteredDeleteNode returns a new filterDeleteNode
-func newFilteredDeleteNode(replica ReplicaInterface, collectionID UniqueID) *filterDeleteNode {
-
-	maxQueueLength := Params.QueryNodeCfg.FlowGraphMaxQueueLength
-	maxParallelism := Params.QueryNodeCfg.FlowGraphMaxParallelism
-
+func newFilteredDeleteNode(cfg *configs.Config, replica ReplicaInterface, collectionID UniqueID) *filterDeleteNode {
 	baseNode := baseNode{}
-	baseNode.SetMaxQueueLength(maxQueueLength)
-	baseNode.SetMaxParallelism(maxParallelism)
+	baseNode.SetMaxQueueLength(int32(cfg.FlowGraph.QueueLengthLimit))
+	baseNode.SetMaxParallelism(int32(cfg.FlowGraph.ParallelismLimit))
 
 	return &filterDeleteNode{
 		baseNode:     baseNode,

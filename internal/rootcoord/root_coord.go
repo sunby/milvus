@@ -29,6 +29,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
+	"github.com/milvus-io/milvus/internal/util"
+
 	"github.com/milvus-io/milvus/internal/util/timerecord"
 
 	"github.com/golang/protobuf/proto"
@@ -52,7 +55,6 @@ import (
 	"github.com/milvus-io/milvus/internal/tso"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/milvus-io/milvus/internal/util/retry"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/trace"
@@ -82,8 +84,6 @@ func metricProxy(v int64) string {
 	return fmt.Sprintf("client_%d", v)
 }
 
-var Params paramtable.ComponentParam
-
 // Core root coordinator core
 type Core struct {
 	MetaTable *MetaTable
@@ -99,6 +99,7 @@ type Core struct {
 	//inner members
 	ctx     context.Context
 	cancel  context.CancelFunc
+	cfg     *configs.Config
 	wg      sync.WaitGroup
 	etcdCli *clientv3.Client
 	kvBase  kv.TxnKV //*etcdkv.EtcdKV
@@ -167,17 +168,21 @@ type Core struct {
 	session *sessionutil.Session
 
 	msFactory ms.Factory
+
+	CreatedTime time.Time
+	UpdatedTime time.Time
 }
 
 // --------------------- function --------------------------
 
 // NewCore creates a new rootcoord core
-func NewCore(c context.Context, factory ms.Factory) (*Core, error) {
+func NewCore(c context.Context, cfg *configs.Config, factory ms.Factory) (*Core, error) {
 	ctx, cancel := context.WithCancel(c)
 	rand.Seed(time.Now().UnixNano())
 	core := &Core{
 		ctx:       ctx,
 		cancel:    cancel,
+		cfg:       cfg,
 		ddlLock:   sync.Mutex{},
 		msFactory: factory,
 	}
@@ -277,7 +282,7 @@ func (c *Core) checkInit() error {
 
 func (c *Core) startTimeTickLoop() {
 	defer c.wg.Done()
-	ticker := time.NewTicker(Params.ProxyCfg.TimeTickInterval)
+	ticker := time.NewTicker(time.Duration(c.cfg.TimeTickInterval) * time.Millisecond)
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -439,21 +444,9 @@ func (c *Core) getSegments(ctx context.Context, collID typeutil.UniqueID) (map[t
 }
 
 func (c *Core) setMsgStreams() error {
-	if Params.PulsarCfg.Address == "" {
-		return fmt.Errorf("pulsar address is empty")
-	}
-	if Params.CommonCfg.RootCoordSubName == "" {
-		return fmt.Errorf("RootCoordSubName is empty")
-	}
-
-	// rootcoord time tick channel
-	if Params.CommonCfg.RootCoordTimeTick == "" {
-		return fmt.Errorf("timeTickChannel is empty")
-	}
 	timeTickStream, _ := c.msFactory.NewMsgStream(c.ctx)
-	metrics.RootCoordNumOfMsgStream.Inc()
-	timeTickStream.AsProducer([]string{Params.CommonCfg.RootCoordTimeTick})
-	log.Debug("RootCoord register timetick producer success", zap.String("channel name", Params.CommonCfg.RootCoordTimeTick))
+	timeTickStream.AsProducer([]string{util.GetPath(c.cfg, util.RootCoordTimeTickChannel)})
+	log.Debug("RootCoord register timetick producer success", zap.String("channel name", util.GetPath(c.cfg, util.RootCoordTimeTickChannel)))
 
 	c.SendTimeTick = func(t typeutil.Timestamp, reason string) error {
 		msgPack := ms.MsgPack{}
@@ -866,7 +859,7 @@ func (c *Core) BuildIndex(ctx context.Context, segID typeutil.UniqueID, field *s
 		return 0, err
 	}
 	var bldID typeutil.UniqueID
-	if rows < Params.RootCoordCfg.MinSegmentSizeToEnableIndex {
+	if rows < int64(c.cfg.EnableIndexMinSegmentSize) {
 		log.Debug("num of rows is less than MinSegmentSizeToEnableIndex", zap.Int64("num rows", rows))
 	} else {
 		binlogs, err := c.CallGetBinlogFilePathsService(ctx, segID, field.FieldID)
@@ -944,12 +937,12 @@ func (c *Core) SetEtcdClient(etcdClient *clientv3.Client) {
 }
 
 func (c *Core) initSession() error {
-	c.session = sessionutil.NewSession(c.ctx, Params.EtcdCfg.MetaRootPath, c.etcdCli)
+	c.session = sessionutil.NewSession(c.ctx, util.GetPath(c.cfg, util.EtcdMeta), c.etcdCli)
 	if c.session == nil {
 		return fmt.Errorf("session is nil, the etcd client connection may have failed")
 	}
-	c.session.Init(typeutil.RootCoordRole, Params.RootCoordCfg.Address, true, true)
-	Params.SetLogger(c.session.ServerID)
+	addr := fmt.Sprintf("%s:%d", c.cfg.AdvertiseAddress, c.cfg.RootCoord.Port)
+	c.session.Init(typeutil.RootCoordRole, addr, true, true)
 	return nil
 }
 
@@ -968,36 +961,36 @@ func (c *Core) Init() error {
 			return
 		}
 		connectEtcdFn := func() error {
-			if c.kvBase, initError = c.kvBaseCreate(Params.EtcdCfg.KvRootPath); initError != nil {
+			if c.kvBase, initError = c.kvBaseCreate(util.GetPath(c.cfg, util.EtcdKv)); initError != nil {
 				log.Error("RootCoord failed to new EtcdKV", zap.Any("reason", initError))
 				return initError
 			}
 			var metaKV kv.TxnKV
-			metaKV, initError = c.kvBaseCreate(Params.EtcdCfg.MetaRootPath)
+			metaKV, initError = c.kvBaseCreate(util.GetPath(c.cfg, util.EtcdMeta))
 			if initError != nil {
 				log.Error("RootCoord failed to new EtcdKV", zap.Any("reason", initError))
 				return initError
 			}
 			var ss *suffixSnapshot
-			if ss, initError = newSuffixSnapshot(metaKV, "_ts", Params.EtcdCfg.MetaRootPath, "snapshots"); initError != nil {
+			if ss, initError = newSuffixSnapshot(metaKV, "_ts", util.GetPath(c.cfg, util.EtcdMeta), "snapshots"); initError != nil {
 				log.Error("RootCoord failed to new suffixSnapshot", zap.Error(initError))
 				return initError
 			}
-			if c.MetaTable, initError = NewMetaTable(metaKV, ss); initError != nil {
+			if c.MetaTable, initError = NewMetaTable(c.cfg, metaKV, ss); initError != nil {
 				log.Error("RootCoord failed to new MetaTable", zap.Any("reason", initError))
 				return initError
 			}
 
 			return nil
 		}
-		log.Debug("RootCoord, Connecting to Etcd", zap.String("kv root", Params.EtcdCfg.KvRootPath), zap.String("meta root", Params.EtcdCfg.MetaRootPath))
+		log.Debug("RootCoord, Connecting to Etcd", zap.String("kv root", util.GetPath(c.cfg, util.EtcdKv)), zap.String("meta root", util.GetPath(c.cfg, util.EtcdMeta)))
 		err := retry.Do(c.ctx, connectEtcdFn, retry.Attempts(300))
 		if err != nil {
 			return
 		}
 
 		log.Debug("RootCoord, Setting TSO and ID Allocator")
-		kv := tsoutil.NewTSOKVBase(c.etcdCli, Params.EtcdCfg.KvRootPath, "gid")
+		kv := tsoutil.NewTSOKVBase(c.etcdCli, util.GetPath(c.cfg, util.EtcdKv), "gid")
 		idAllocator := allocator.NewGlobalIDAllocator("idTimestamp", kv)
 		if initError = idAllocator.Initialize(); initError != nil {
 			return
@@ -1009,7 +1002,7 @@ func (c *Core) Init() error {
 			return idAllocator.UpdateID()
 		}
 
-		kv = tsoutil.NewTSOKVBase(c.etcdCli, Params.EtcdCfg.KvRootPath, "tso")
+		kv = tsoutil.NewTSOKVBase(c.etcdCli, util.GetPath(c.cfg, util.EtcdKv), "tso")
 		tsoAllocator := tso.NewGlobalTSOAllocator("timestamp", kv)
 		if initError = tsoAllocator.Initialize(); initError != nil {
 			return
@@ -1025,7 +1018,7 @@ func (c *Core) Init() error {
 		}
 
 		m := map[string]interface{}{
-			"PulsarAddress":  Params.PulsarCfg.Address,
+			"PulsarAddress":  util.CreatePulsarAddress(c.cfg.Pulsar.Address, c.cfg.Pulsar.Port),
 			"ReceiveBufSize": 1024,
 			"PulsarBufSize":  1024}
 		if initError = c.msFactory.SetParams(m); initError != nil {
@@ -1033,13 +1026,14 @@ func (c *Core) Init() error {
 		}
 
 		chanMap := c.MetaTable.ListCollectionPhysicalChannels()
-		c.chanTimeTick = newTimeTickSync(c.ctx, c.session.ServerID, c.msFactory, chanMap)
+		c.chanTimeTick = newTimeTickSync(c.ctx, c.cfg, c.session.ServerID, c.msFactory, chanMap)
 		c.chanTimeTick.addSession(c.session)
 		c.proxyClientManager = newProxyClientManager(c)
 
 		log.Debug("RootCoord, set proxy manager")
 		c.proxyManager = newProxyManager(
 			c.ctx,
+			c.cfg,
 			c.etcdCli,
 			c.chanTimeTick.initSessions,
 			c.proxyClientManager.GetProxyClients,
@@ -1189,7 +1183,7 @@ func (c *Core) Start() error {
 	}
 
 	log.Debug(typeutil.RootCoordRole, zap.Int64("node id", c.session.ServerID))
-	log.Debug(typeutil.RootCoordRole, zap.String("time tick channel name", Params.CommonCfg.RootCoordTimeTick))
+	log.Debug(typeutil.RootCoordRole, zap.String("time tick channel name", util.GetPath(c.cfg, util.RootCoordTimeTickChannel)))
 
 	c.startOnce.Do(func() {
 		if err := c.proxyManager.WatchProxy(); err != nil {
@@ -1206,8 +1200,8 @@ func (c *Core) Start() error {
 		go c.tsLoop()
 		go c.chanTimeTick.startWatch(&c.wg)
 		go c.checkFlushedSegmentsLoop()
-		Params.RootCoordCfg.CreatedTime = time.Now()
-		Params.RootCoordCfg.UpdatedTime = time.Now()
+		c.CreatedTime = time.Now()
+		c.UpdatedTime = time.Now()
 	})
 
 	return nil
@@ -1264,7 +1258,7 @@ func (c *Core) GetTimeTickChannel(ctx context.Context) (*milvuspb.StringResponse
 			ErrorCode: commonpb.ErrorCode_Success,
 			Reason:    "",
 		},
-		Value: Params.CommonCfg.RootCoordTimeTick,
+		Value: util.GetPath(c.cfg, util.RootCoordTimeTickChannel),
 	}, nil
 }
 
@@ -1275,7 +1269,7 @@ func (c *Core) GetStatisticsChannel(ctx context.Context) (*milvuspb.StringRespon
 			ErrorCode: commonpb.ErrorCode_Success,
 			Reason:    "",
 		},
-		Value: Params.CommonCfg.RootCoordStatistics,
+		Value: util.GetPath(c.cfg, util.RootCoordStatsChannel),
 	}, nil
 }
 

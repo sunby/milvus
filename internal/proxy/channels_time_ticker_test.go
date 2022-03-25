@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
@@ -63,7 +64,7 @@ func TestChannelsTimeTickerImpl_start(t *testing.T) {
 	tso := newMockTsoAllocator()
 	ctx := context.Background()
 
-	ticker := newChannelsTimeTicker(ctx, interval, pchans, newGetStatisticsFunc(pchans), tso)
+	ticker := newChannelsTimeTicker(ctx, configs.NewConfig(), interval, pchans, newGetStatisticsFunc(pchans), tso)
 	err := ticker.start()
 	assert.Equal(t, nil, err)
 
@@ -85,7 +86,7 @@ func TestChannelsTimeTickerImpl_close(t *testing.T) {
 	tso := newMockTsoAllocator()
 	ctx := context.Background()
 
-	ticker := newChannelsTimeTicker(ctx, interval, pchans, newGetStatisticsFunc(pchans), tso)
+	ticker := newChannelsTimeTicker(ctx, configs.NewConfig(), interval, pchans, newGetStatisticsFunc(pchans), tso)
 	err := ticker.start()
 	assert.Equal(t, nil, err)
 
@@ -107,7 +108,7 @@ func TestChannelsTimeTickerImpl_getLastTick(t *testing.T) {
 	tso := newMockTsoAllocator()
 	ctx := context.Background()
 
-	ticker := newChannelsTimeTicker(ctx, interval, pchans, newGetStatisticsFunc(pchans), tso)
+	ticker := newChannelsTimeTicker(ctx, configs.NewConfig(), interval, pchans, newGetStatisticsFunc(pchans), tso)
 	err := ticker.start()
 	assert.Equal(t, nil, err)
 
@@ -154,7 +155,7 @@ func TestChannelsTimeTickerImpl_getMinTsStatistics(t *testing.T) {
 	tso := newMockTsoAllocator()
 	ctx := context.Background()
 
-	ticker := newChannelsTimeTicker(ctx, interval, pchans, newGetStatisticsFunc(pchans), tso)
+	ticker := newChannelsTimeTicker(ctx, configs.NewConfig(), interval, pchans, newGetStatisticsFunc(pchans), tso)
 	err := ticker.start()
 	assert.Equal(t, nil, err)
 
@@ -201,7 +202,7 @@ func TestChannelsTimeTickerImpl_getMinTick(t *testing.T) {
 	tso := newMockTsoAllocator()
 	ctx := context.Background()
 
-	ticker := newChannelsTimeTicker(ctx, interval, pchans, newGetStatisticsFunc(pchans), tso)
+	ticker := newChannelsTimeTicker(ctx, configs.NewConfig(), interval, pchans, newGetStatisticsFunc(pchans), tso)
 	err := ticker.start()
 	assert.Equal(t, nil, err)
 

@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/metrics"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
@@ -79,8 +80,9 @@ type compactionTask struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	wg sync.WaitGroup
-	tr *timerecord.TimeRecorder
+	wg  sync.WaitGroup
+	tr  *timerecord.TimeRecorder
+	cfg *configs.Config
 }
 
 // check if compactionTask implements compactor
@@ -88,6 +90,7 @@ var _ compactor = (*compactionTask)(nil)
 
 func newCompactionTask(
 	ctx context.Context,
+	cfg *configs.Config,
 	dl downloader,
 	ul uploader,
 	replica Replica,
@@ -100,6 +103,7 @@ func newCompactionTask(
 	return &compactionTask{
 		ctx:    ctx1,
 		cancel: cancel,
+		cfg:    cfg,
 
 		downloader:         dl,
 		uploader:           ul,
@@ -261,7 +265,7 @@ func (t *compactionTask) merge(mergeItr iterator, delta map[UniqueID]Timestamp, 
 
 	// calculate numRows from rowID field, fieldID 0
 	numRows := int64(len(fID2Content[0]))
-	maxRowsPerBinlog = int(Params.DataNodeCfg.FlushInsertBufferSize / (int64(dim) * 4))
+	maxRowsPerBinlog = int(int64(t.cfg.DataNode.InsertBufferSizeLimit) / (int64(dim) * 4))
 	numBinlogs = int(numRows) / maxRowsPerBinlog
 	if int(numRows)%maxRowsPerBinlog != 0 {
 		numBinlogs++
@@ -545,7 +549,7 @@ func (t *compactionTask) compact() error {
 	)
 
 	log.Info("overall elapse in ms", zap.Int64("planID", t.plan.GetPlanID()), zap.Any("elapse", nano2Milli(time.Since(compactStart))))
-	metrics.DataNodeCompactionLatency.WithLabelValues(fmt.Sprint(Params.DataNodeCfg.NodeID)).Observe(float64(t.tr.ElapseSpan().Milliseconds()))
+	metrics.DataNodeCompactionLatency.WithLabelValues(fmt.Sprint(serverID)).Observe(float64(t.tr.ElapseSpan().Milliseconds()))
 
 	return nil
 }
@@ -732,11 +736,11 @@ func (t *compactionTask) GetCurrentTime() typeutil.Timestamp {
 func (t *compactionTask) isExpiredEntity(ts, now Timestamp) bool {
 	const MaxEntityExpiration = 9223372036 // the value was setup by math.MaxInt64 / time.Second
 	// Check calculable range of milvus config value
-	if Params.DataCoordCfg.CompactionEntityExpiration > MaxEntityExpiration {
+	if t.cfg.Compaction.EntityExpiration > MaxEntityExpiration {
 		return false
 	}
 
-	duration := time.Duration(Params.DataCoordCfg.CompactionEntityExpiration) * time.Second
+	duration := time.Duration(t.cfg.Compaction.EntityExpiration) * time.Second
 	// Prevent from duration overflow value
 	if duration < 0 {
 		return false

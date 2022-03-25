@@ -23,6 +23,9 @@ import (
 	"path"
 	"sync"
 
+	"github.com/milvus-io/milvus/configs"
+	"github.com/milvus-io/milvus/internal/util"
+
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/metrics"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
@@ -36,6 +39,7 @@ import (
 type proxyManager struct {
 	ctx              context.Context
 	cancel           context.CancelFunc
+	cfg              *configs.Config
 	lock             sync.Mutex
 	etcdCli          *clientv3.Client
 	initSessionsFunc []func([]*sessionutil.Session)
@@ -46,11 +50,12 @@ type proxyManager struct {
 // newProxyManager helper function to create a proxyManager
 // etcdEndpoints is the address list of etcd
 // fns are the custom getSessions function list
-func newProxyManager(ctx context.Context, client *clientv3.Client, fns ...func([]*sessionutil.Session)) *proxyManager {
+func newProxyManager(ctx context.Context, cfg *configs.Config, client *clientv3.Client, fns ...func([]*sessionutil.Session)) *proxyManager {
 	ctx2, cancel2 := context.WithCancel(ctx)
 	p := &proxyManager{
 		ctx:     ctx2,
 		cancel:  cancel2,
+		cfg:     cfg,
 		lock:    sync.Mutex{},
 		etcdCli: client,
 	}
@@ -88,7 +93,7 @@ func (p *proxyManager) WatchProxy() error {
 
 	eventCh := p.etcdCli.Watch(
 		p.ctx,
-		path.Join(Params.EtcdCfg.MetaRootPath, sessionutil.DefaultServiceRoot, typeutil.ProxyRole),
+		path.Join(util.GetPath(p.cfg, util.EtcdMeta), sessionutil.DefaultServiceRoot, typeutil.ProxyRole),
 		clientv3.WithPrefix(),
 		clientv3.WithCreatedNotify(),
 		clientv3.WithPrevKV(),
@@ -168,7 +173,7 @@ func (p *proxyManager) parseSession(value []byte) (*sessionutil.Session, error) 
 func (p *proxyManager) getSessionsOnEtcd(ctx context.Context) ([]*sessionutil.Session, int64, error) {
 	resp, err := p.etcdCli.Get(
 		ctx,
-		path.Join(Params.EtcdCfg.MetaRootPath, sessionutil.DefaultServiceRoot, typeutil.ProxyRole),
+		path.Join(util.GetPath(p.cfg, util.EtcdMeta), sessionutil.DefaultServiceRoot, typeutil.ProxyRole),
 		clientv3.WithPrefix(),
 		clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend),
 	)
@@ -195,12 +200,12 @@ func (p *proxyManager) Stop() {
 }
 
 // listProxyInEtcd helper function lists proxy in etcd
-func listProxyInEtcd(ctx context.Context, cli *clientv3.Client) (map[int64]*sessionutil.Session, error) {
+func listProxyInEtcd(ctx context.Context, cfg *configs.Config, cli *clientv3.Client) (map[int64]*sessionutil.Session, error) {
 	ctx2, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
 	resp, err := cli.Get(
 		ctx2,
-		path.Join(Params.EtcdCfg.MetaRootPath, sessionutil.DefaultServiceRoot, typeutil.ProxyRole),
+		path.Join(util.GetPath(cfg, util.EtcdMeta), sessionutil.DefaultServiceRoot, typeutil.ProxyRole),
 		clientv3.WithPrefix(),
 		clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend),
 	)

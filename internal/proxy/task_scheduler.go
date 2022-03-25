@@ -22,7 +22,9 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 
 	"github.com/milvus-io/milvus/internal/util/funcutil"
@@ -205,14 +207,14 @@ func (queue *baseTaskQueue) getMaxTaskNum() int64 {
 	return queue.maxTaskNum
 }
 
-func newBaseTaskQueue(tsoAllocatorIns tsoAllocator, idAllocatorIns idAllocatorInterface) *baseTaskQueue {
+func newBaseTaskQueue(cfg *configs.Config, tsoAllocatorIns tsoAllocator, idAllocatorIns idAllocatorInterface) *baseTaskQueue {
 	return &baseTaskQueue{
 		unissuedTasks:   list.New(),
 		activeTasks:     make(map[UniqueID]task),
 		utLock:          sync.RWMutex{},
 		atLock:          sync.RWMutex{},
-		maxTaskNum:      Params.ProxyCfg.MaxTaskNum,
-		utBufChan:       make(chan int, Params.ProxyCfg.MaxTaskNum),
+		maxTaskNum:      int64(cfg.Proxy.MaxTaskCount),
+		utBufChan:       make(chan int, cfg.Proxy.MaxTaskCount),
 		tsoAllocatorIns: tsoAllocatorIns,
 		idAllocatorIns:  idAllocatorIns,
 	}
@@ -355,22 +357,22 @@ func (queue *ddTaskQueue) Enqueue(t task) error {
 	return queue.baseTaskQueue.Enqueue(t)
 }
 
-func newDdTaskQueue(tsoAllocatorIns tsoAllocator, idAllocatorIns idAllocatorInterface) *ddTaskQueue {
+func newDdTaskQueue(cfg *configs.Config, tsoAllocatorIns tsoAllocator, idAllocatorIns idAllocatorInterface) *ddTaskQueue {
 	return &ddTaskQueue{
-		baseTaskQueue: newBaseTaskQueue(tsoAllocatorIns, idAllocatorIns),
+		baseTaskQueue: newBaseTaskQueue(cfg, tsoAllocatorIns, idAllocatorIns),
 	}
 }
 
-func newDmTaskQueue(tsoAllocatorIns tsoAllocator, idAllocatorIns idAllocatorInterface) *dmTaskQueue {
+func newDmTaskQueue(cfg *configs.Config, tsoAllocatorIns tsoAllocator, idAllocatorIns idAllocatorInterface) *dmTaskQueue {
 	return &dmTaskQueue{
-		baseTaskQueue:        newBaseTaskQueue(tsoAllocatorIns, idAllocatorIns),
+		baseTaskQueue:        newBaseTaskQueue(cfg, tsoAllocatorIns, idAllocatorIns),
 		pChanStatisticsInfos: make(map[pChan]*pChanStatInfo),
 	}
 }
 
-func newDqTaskQueue(tsoAllocatorIns tsoAllocator, idAllocatorIns idAllocatorInterface) *dqTaskQueue {
+func newDqTaskQueue(cfg *configs.Config, tsoAllocatorIns tsoAllocator, idAllocatorIns idAllocatorInterface) *dqTaskQueue {
 	return &dqTaskQueue{
-		baseTaskQueue: newBaseTaskQueue(tsoAllocatorIns, idAllocatorIns),
+		baseTaskQueue: newBaseTaskQueue(cfg, tsoAllocatorIns, idAllocatorIns),
 	}
 }
 
@@ -384,6 +386,7 @@ type taskScheduler struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	cfg       *configs.Config
 	msFactory msgstream.Factory
 
 	searchResultCh   chan *internalpb.SearchResults
@@ -404,7 +407,9 @@ func schedOptWithRetrieveResultCh(ch chan *internalpb.RetrieveResults) schedOpt 
 	}
 }
 
-func newTaskScheduler(ctx context.Context,
+func newTaskScheduler(
+	ctx context.Context,
+	cfg *configs.Config,
 	idAllocatorIns idAllocatorInterface,
 	tsoAllocatorIns tsoAllocator,
 	factory msgstream.Factory,
@@ -413,12 +418,13 @@ func newTaskScheduler(ctx context.Context,
 	ctx1, cancel := context.WithCancel(ctx)
 	s := &taskScheduler{
 		ctx:       ctx1,
+		cfg:       cfg,
 		cancel:    cancel,
 		msFactory: factory,
 	}
-	s.ddQueue = newDdTaskQueue(tsoAllocatorIns, idAllocatorIns)
-	s.dmQueue = newDmTaskQueue(tsoAllocatorIns, idAllocatorIns)
-	s.dqQueue = newDqTaskQueue(tsoAllocatorIns, idAllocatorIns)
+	s.ddQueue = newDdTaskQueue(cfg, tsoAllocatorIns, idAllocatorIns)
+	s.dmQueue = newDmTaskQueue(cfg, tsoAllocatorIns, idAllocatorIns)
+	s.dqQueue = newDqTaskQueue(cfg, tsoAllocatorIns, idAllocatorIns)
 
 	for _, opt := range opts {
 		opt(s)
@@ -659,9 +665,11 @@ func (sched *taskScheduler) collectionResultLoopV2() {
 	defer sched.wg.Done()
 
 	searchResultBufs := make(map[UniqueID]*searchResultBuf)
-	searchResultBufFlags := newIDCache(Params.ProxyCfg.BufFlagExpireTime, Params.ProxyCfg.BufFlagCleanupInterval) // if value is true, we can ignore searchResult
+	expireTime := time.Duration(sched.cfg.Proxy.BufFlagExpireTimeInSecond) * time.Second
+	interval := time.Duration(sched.cfg.Proxy.BufFlagCleanupIntervalInSecond) * time.Second
+	searchResultBufFlags := newIDCache(expireTime, interval) // if value is true, we can ignore searchResult
 	queryResultBufs := make(map[UniqueID]*queryResultBuf)
-	queryResultBufFlags := newIDCache(Params.ProxyCfg.BufFlagExpireTime, Params.ProxyCfg.BufFlagCleanupInterval) // if value is true, we can ignore queryResult
+	queryResultBufFlags := newIDCache(expireTime, interval) // if value is true, we can ignore queryResult
 
 	processSearchResult := func(results *internalpb.SearchResults) error {
 		reqID := results.Base.MsgID

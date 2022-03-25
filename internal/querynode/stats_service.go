@@ -20,15 +20,18 @@ import (
 	"context"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
+	"github.com/milvus-io/milvus/internal/util"
 	"go.uber.org/zap"
 )
 
 type statsService struct {
 	ctx context.Context
+	cfg *configs.Config
 
 	replica ReplicaInterface
 
@@ -36,10 +39,11 @@ type statsService struct {
 	msFactory   msgstream.Factory
 }
 
-func newStatsService(ctx context.Context, replica ReplicaInterface, factory msgstream.Factory) *statsService {
+func newStatsService(ctx context.Context, cfg *configs.Config, replica ReplicaInterface, factory msgstream.Factory) *statsService {
 
 	return &statsService{
 		ctx:         ctx,
+		cfg:         cfg,
 		replica:     replica,
 		statsStream: nil,
 		msFactory:   factory,
@@ -47,10 +51,10 @@ func newStatsService(ctx context.Context, replica ReplicaInterface, factory msgs
 }
 
 func (sService *statsService) start() {
-	sleepTimeInterval := Params.QueryNodeCfg.StatsPublishInterval
+	sleepTimeInterval := sService.cfg.QueryNode.StatsPublishInterval
 
 	// start pulsar
-	producerChannels := []string{Params.CommonCfg.QueryNodeStats}
+	producerChannels := []string{util.GetPath(sService.cfg, util.QueryNodeStatsChannel)}
 
 	statsStream, _ := sService.msFactory.NewMsgStream(sService.ctx)
 	statsStream.AsProducer(producerChannels)
@@ -85,7 +89,7 @@ func (sService *statsService) publicStatistic(fieldStats []*internalpb.FieldStat
 	queryNodeStats := internalpb.QueryNodeStats{
 		Base: &commonpb.MsgBase{
 			MsgType:  commonpb.MsgType_QueryNodeStats,
-			SourceID: Params.QueryNodeCfg.QueryNodeID,
+			SourceID: queryNodeID,
 		},
 		SegStats:   segStats,
 		FieldStats: fieldStats,

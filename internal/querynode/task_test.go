@@ -611,34 +611,6 @@ func TestTask_loadSegmentsTask(t *testing.T) {
 		err = task.Execute(ctx)
 		assert.Error(t, err)
 	})
-
-	t.Run("test OOM", func(t *testing.T) {
-		node, err := genSimpleQueryNode(ctx)
-		assert.NoError(t, err)
-
-		totalRAM := Params.QueryNodeCfg.CacheSize * 1024 * 1024 * 1024
-
-		col, err := node.historical.replica.getCollectionByID(defaultCollectionID)
-		assert.NoError(t, err)
-
-		sizePerRecord, err := typeutil.EstimateSizePerRecord(col.schema)
-		assert.NoError(t, err)
-
-		task := loadSegmentsTask{
-			req:  genLoadEmptySegmentsRequest(),
-			node: node,
-		}
-		task.req.Infos = []*querypb.SegmentLoadInfo{
-			{
-				SegmentID:    defaultSegmentID,
-				PartitionID:  defaultPartitionID,
-				CollectionID: defaultCollectionID,
-				NumOfRows:    totalRAM / int64(sizePerRecord),
-			},
-		}
-		err = task.Execute(ctx)
-		assert.Error(t, err)
-	})
 }
 
 func TestTask_releaseCollectionTask(t *testing.T) {

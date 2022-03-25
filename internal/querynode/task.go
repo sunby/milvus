@@ -32,6 +32,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	queryPb "github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 )
 
@@ -158,10 +159,10 @@ func (r *addQueryChannelTask) Execute(ctx context.Context) error {
 		return err
 	}
 	consumeChannels := []string{r.req.QueryChannel}
-	consumeSubName := funcutil.GenChannelSubName(Params.CommonCfg.QueryNodeSubName, collectionID, Params.QueryNodeCfg.QueryNodeID)
+	consumeSubName := funcutil.GenChannelSubName(util.GetPath(r.node.cfg, util.QueryNodeSubName), collectionID, queryNodeID)
 
 	sc.queryMsgStream.AsConsumer(consumeChannels, consumeSubName)
-	metrics.QueryNodeNumConsumers.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Inc()
+	metrics.QueryNodeNumConsumers.WithLabelValues(fmt.Sprint(queryNodeID)).Inc()
 	if r.req.SeekPosition == nil || len(r.req.SeekPosition.MsgID) == 0 {
 		// as consumer
 		log.Debug("QueryNode AsConsumer", zap.Strings("channels", consumeChannels), zap.String("sub name", consumeSubName))
@@ -326,7 +327,7 @@ func (w *watchDmChannelsTask) Execute(ctx context.Context) error {
 		}
 	}()
 
-	consumeSubName := funcutil.GenChannelSubName(Params.CommonCfg.QueryNodeSubName, collectionID, Params.QueryNodeCfg.QueryNodeID)
+	consumeSubName := funcutil.GenChannelSubName(util.GetPath(w.node.cfg, util.QueryNodeSubName), collectionID, queryNodeID)
 
 	// group channels by to seeking or consuming
 	channel2SeekPosition := make(map[string]*internalpb.MsgPosition)
@@ -549,7 +550,7 @@ func (w *watchDeltaChannelsTask) Execute(ctx context.Context) error {
 		log.Warn("watchDeltaChannel, add flowGraph for deltaChannel failed", zap.Int64("collectionID", collectionID), zap.Strings("vDeltaChannels", vDeltaChannels), zap.Error(err))
 		return err
 	}
-	consumeSubName := funcutil.GenChannelSubName(Params.CommonCfg.QueryNodeSubName, collectionID, Params.QueryNodeCfg.QueryNodeID)
+	consumeSubName := funcutil.GenChannelSubName(util.GetPath(w.node.cfg, util.QueryNodeSubName), collectionID, queryNodeID)
 	// channels as consumer
 	for channel, fg := range channel2FlowGraph {
 		// use pChannel to consume

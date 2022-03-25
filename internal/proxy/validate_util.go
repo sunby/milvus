@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
@@ -56,10 +57,11 @@ func validateCollectionNameOrAlias(entity, entityType string) error {
 		return fmt.Errorf("collection %s should not be empty", entityType)
 	}
 
+	cfg := configs.GetGlobalConfig()
 	invalidMsg := fmt.Sprintf("Invalid collection %s: %s. ", entityType, entity)
-	if int64(len(entity)) > Params.ProxyCfg.MaxNameLength {
+	if len(entity) > int(cfg.NameLengthLimit) {
 		msg := invalidMsg + fmt.Sprintf("The length of a collection %s must be less than ", entityType) +
-			strconv.FormatInt(Params.ProxyCfg.MaxNameLength, 10) + " characters."
+			strconv.FormatInt(int64(cfg.NameLengthLimit), 10) + " characters."
 		return errors.New(msg)
 	}
 
@@ -97,9 +99,10 @@ func validatePartitionTag(partitionTag string, strictCheck bool) error {
 		return errors.New(msg)
 	}
 
-	if int64(len(partitionTag)) > Params.ProxyCfg.MaxNameLength {
-		msg := invalidMsg + "The length of a partition tag must be less than " +
-			strconv.FormatInt(Params.ProxyCfg.MaxNameLength, 10) + " characters."
+	cfg := configs.GetGlobalConfig()
+	if len(partitionTag) > int(cfg.NameLengthLimit) {
+		msg := invalidMsg + "" +
+			strconv.FormatInt(int64(cfg.NameLengthLimit), 10) + " characters."
 		return errors.New(msg)
 	}
 
@@ -130,10 +133,11 @@ func validateFieldName(fieldName string) error {
 		return errors.New("field name should not be empty")
 	}
 
+	cfg := configs.GetGlobalConfig()
 	invalidMsg := "Invalid field name: " + fieldName + ". "
-	if int64(len(fieldName)) > Params.ProxyCfg.MaxNameLength {
+	if len(fieldName) > int(cfg.NameLengthLimit) {
 		msg := invalidMsg + "The length of a field name must be less than " +
-			strconv.FormatInt(Params.ProxyCfg.MaxNameLength, 10) + " characters."
+			strconv.FormatInt(int64(cfg.NameLengthLimit), 10) + " characters."
 		return errors.New(msg)
 	}
 
@@ -155,8 +159,9 @@ func validateFieldName(fieldName string) error {
 }
 
 func validateDimension(dim int64, isBinary bool) error {
-	if dim <= 0 || dim > Params.ProxyCfg.MaxDimension {
-		return fmt.Errorf("invalid dimension: %d. should be in range 1 ~ %d", dim, Params.ProxyCfg.MaxDimension)
+	cfg := configs.GetGlobalConfig()
+	if dim <= 0 || dim > int64(cfg.DimensionLimit) {
+		return fmt.Errorf("invalid dimension: %d. should be in range 1 ~ %d", dim, cfg.DimensionLimit)
 	}
 	if isBinary && dim%8 != 0 {
 		return fmt.Errorf("invalid dimension: %d. should be multiple of 8. ", dim)

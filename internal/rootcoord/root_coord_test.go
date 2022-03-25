@@ -27,6 +27,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
+	"github.com/milvus-io/milvus/internal/util"
+
 	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/kv"
@@ -57,7 +60,10 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-const TestDMLChannelNum = 32
+const (
+	TestDMLChannelNum    = 32
+	TestSubscriptionName = "test-sub"
+)
 
 type proxyMock struct {
 	types.Proxy
@@ -94,9 +100,8 @@ func (p *proxyMock) ReleaseDQLMessageStream(ctx context.Context, request *proxyp
 
 type dataMock struct {
 	types.DataCoord
-	randVal int
-	mu      sync.Mutex
-	segs    []typeutil.UniqueID
+	mu   sync.Mutex
+	segs []typeutil.UniqueID
 }
 
 func (d *dataMock) Init() error {
@@ -138,7 +143,7 @@ func (d *dataMock) GetSegmentInfo(ctx context.Context, req *datapb.GetSegmentInf
 		},
 		Infos: []*datapb.SegmentInfo{
 			{
-				NumOfRows: Params.RootCoordCfg.MinSegmentSizeToEnableIndex,
+				NumOfRows: 1024,
 				State:     commonpb.SegmentState_Flushed,
 			},
 		},
@@ -346,7 +351,7 @@ func createCollectionInMeta(dbName, collName string, core *Core, shardsNum int32
 		ID:                         collID,
 		Schema:                     &schema,
 		PartitionIDs:               []typeutil.UniqueID{partID},
-		PartitionNames:             []string{Params.CommonCfg.DefaultPartitionName},
+		PartitionNames:             []string{util.DefaultIndexName},
 		FieldIndexes:               make([]*etcdpb.FieldIndexInfo, 0, 16),
 		VirtualChannelNames:        vchanNames,
 		PhysicalChannelNames:       chanNames,
@@ -371,7 +376,7 @@ func createCollectionInMeta(dbName, collName string, core *Core, shardsNum int32
 		Base:                 t.Base,
 		DbName:               t.DbName,
 		CollectionName:       t.CollectionName,
-		PartitionName:        Params.CommonCfg.DefaultPartitionName,
+		PartitionName:        util.DefaultIndexName,
 		DbID:                 0, //TODO,not used
 		CollectionID:         collID,
 		PartitionID:          partID,
@@ -433,38 +438,30 @@ func TestRootCoordInit(t *testing.T) {
 	defer cancel()
 
 	coreFactory := msgstream.NewPmsFactory()
-	Params.Init()
-	Params.RootCoordCfg.DmlChannelNum = TestDMLChannelNum
-
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	cfg.AdvertiseAddress = "127.0.0.1"
+	cfg.DMLChannelCount = TestDMLChannelNum
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.NoError(t, err)
 	defer etcdCli.Close()
 
-	core, err := NewCore(ctx, coreFactory)
+	core, err := NewCore(ctx, cfg, coreFactory)
 	require.Nil(t, err)
 	assert.Nil(t, err)
 	core.SetEtcdClient(etcdCli)
-	randVal := rand.Int()
-
-	Params.EtcdCfg.MetaRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.MetaRootPath)
-	Params.EtcdCfg.KvRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.KvRootPath)
 
 	err = core.Init()
 	assert.Nil(t, err)
 	core.session.TriggerKill = false
 	err = core.Register()
 	assert.Nil(t, err)
+	assert.NoError(t, core.Stop())
 
 	// inject kvBaseCreate fail
-	core, err = NewCore(ctx, coreFactory)
+	core, err = NewCore(ctx, cfg, coreFactory)
 	core.SetEtcdClient(etcdCli)
 	require.Nil(t, err)
 	assert.Nil(t, err)
-	randVal = rand.Int()
-
-	Params.EtcdCfg.MetaRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.MetaRootPath)
-	Params.EtcdCfg.KvRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.KvRootPath)
-
 	core.kvBaseCreate = func(string) (kv.TxnKV, error) {
 		return nil, retry.Unrecoverable(errors.New("injected"))
 	}
@@ -474,19 +471,16 @@ func TestRootCoordInit(t *testing.T) {
 	core.session.TriggerKill = false
 	err = core.Register()
 	assert.Nil(t, err)
+	assert.NoError(t, core.Stop())
 
 	// inject metaKV create fail
-	core, err = NewCore(ctx, coreFactory)
+	core, err = NewCore(ctx, cfg, coreFactory)
 	core.SetEtcdClient(etcdCli)
 	require.Nil(t, err)
 	assert.Nil(t, err)
-	randVal = rand.Int()
-
-	Params.EtcdCfg.MetaRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.MetaRootPath)
-	Params.EtcdCfg.KvRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.KvRootPath)
 
 	core.kvBaseCreate = func(root string) (kv.TxnKV, error) {
-		if root == Params.EtcdCfg.MetaRootPath {
+		if root == util.GetPath(cfg, util.EtcdMeta) {
 			return nil, retry.Unrecoverable(errors.New("injected"))
 		}
 		return memkv.NewMemoryKV(), nil
@@ -497,16 +491,13 @@ func TestRootCoordInit(t *testing.T) {
 	core.session.TriggerKill = false
 	err = core.Register()
 	assert.Nil(t, err)
+	assert.NoError(t, core.Stop())
 
 	// inject newSuffixSnapshot failure
-	core, err = NewCore(ctx, coreFactory)
+	core, err = NewCore(ctx, cfg, coreFactory)
 	core.SetEtcdClient(etcdCli)
 	require.Nil(t, err)
 	assert.Nil(t, err)
-	randVal = rand.Int()
-
-	Params.EtcdCfg.MetaRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.MetaRootPath)
-	Params.EtcdCfg.KvRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.KvRootPath)
 
 	core.kvBaseCreate = func(string) (kv.TxnKV, error) {
 		return nil, nil
@@ -517,17 +508,13 @@ func TestRootCoordInit(t *testing.T) {
 	core.session.TriggerKill = false
 	err = core.Register()
 	assert.Nil(t, err)
+	assert.NoError(t, core.Stop())
 
 	// inject newMetaTable failure
-	core, err = NewCore(ctx, coreFactory)
+	core, err = NewCore(ctx, cfg, coreFactory)
 	core.SetEtcdClient(etcdCli)
 	require.Nil(t, err)
 	assert.Nil(t, err)
-	randVal = rand.Int()
-
-	Params.EtcdCfg.MetaRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.MetaRootPath)
-	Params.EtcdCfg.KvRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.KvRootPath)
-
 	core.kvBaseCreate = func(string) (kv.TxnKV, error) {
 		kv := memkv.NewMemoryKV()
 		return &loadPrefixFailKV{TxnKV: kv}, nil
@@ -538,7 +525,7 @@ func TestRootCoordInit(t *testing.T) {
 	core.session.TriggerKill = false
 	err = core.Register()
 	assert.Nil(t, err)
-
+	assert.NoError(t, core.Stop())
 }
 
 func TestRootCoord(t *testing.T) {
@@ -555,24 +542,22 @@ func TestRootCoord(t *testing.T) {
 	defer cancel()
 
 	coreFactory := msgstream.NewPmsFactory()
-	Params.Init()
-	Params.RootCoordCfg.DmlChannelNum = TestDMLChannelNum
-	core, err := NewCore(ctx, coreFactory)
-	assert.Nil(t, err)
-	randVal := rand.Int()
-	Params.CommonCfg.RootCoordTimeTick = fmt.Sprintf("rootcoord-time-tick-%d", randVal)
-	Params.CommonCfg.RootCoordStatistics = fmt.Sprintf("rootcoord-statistics-%d", randVal)
-	Params.EtcdCfg.MetaRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.MetaRootPath)
-	Params.EtcdCfg.KvRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.KvRootPath)
-	Params.CommonCfg.RootCoordSubName = fmt.Sprintf("subname-%d", randVal)
-	Params.CommonCfg.RootCoordDml = fmt.Sprintf("rootcoord-dml-test-%d", randVal)
-	Params.CommonCfg.RootCoordDelta = fmt.Sprintf("rootcoord-delta-test-%d", randVal)
+	cfg := configs.NewConfig()
+	cfg.DMLChannelCount = TestDMLChannelNum
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	// weird, just follow the logic when refactoring the code
+	randVal := rand.Int()
+	cfg.Etcd.PathPrefix = fmt.Sprintf("by-dev-%d-", randVal)
+	cfg.Pulsar.ChannelPrefix = fmt.Sprintf("by-dev-%d-", randVal)
+
+	core, err := NewCore(ctx, cfg, coreFactory)
+	assert.Nil(t, err)
+
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.NoError(t, err)
 	defer etcdCli.Close()
 
-	sessKey := path.Join(Params.EtcdCfg.MetaRootPath, sessionutil.DefaultServiceRoot)
+	sessKey := path.Join(util.GetPath(cfg, util.EtcdMeta), sessionutil.DefaultServiceRoot)
 	_, err = etcdCli.Delete(ctx, sessKey, clientv3.WithPrefix())
 	assert.Nil(t, err)
 	defer func() {
@@ -596,7 +581,7 @@ func TestRootCoord(t *testing.T) {
 		return pnm, nil
 	}
 
-	dm := &dataMock{randVal: randVal}
+	dm := &dataMock{}
 	err = core.SetDataCoord(ctx, dm)
 	assert.Nil(t, err)
 
@@ -620,14 +605,14 @@ func TestRootCoord(t *testing.T) {
 	tmpFactory := msgstream.NewPmsFactory()
 
 	m := map[string]interface{}{
-		"pulsarAddress":  Params.PulsarCfg.Address,
+		"pulsarAddress":  util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port),
 		"receiveBufSize": 1024,
 		"pulsarBufSize":  1024}
 	err = tmpFactory.SetParams(m)
 	assert.Nil(t, err)
 
 	timeTickStream, _ := tmpFactory.NewMsgStream(ctx)
-	timeTickStream.AsConsumer([]string{Params.CommonCfg.RootCoordTimeTick}, Params.CommonCfg.RootCoordSubName)
+	timeTickStream.AsConsumer([]string{util.GetPath(cfg, util.RootCoordTimeTickChannel)}, TestSubscriptionName)
 	timeTickStream.Start()
 
 	dmlStream, _ := tmpFactory.NewMsgStream(ctx)
@@ -657,7 +642,6 @@ func TestRootCoord(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	shardsNum := int32(8)
 
-	fmt.Printf("hello world2")
 	var wg sync.WaitGroup
 	wg.Add(1)
 	t.Run("time tick", func(t *testing.T) {
@@ -724,7 +708,7 @@ func TestRootCoord(t *testing.T) {
 
 		createMeta, err := core.MetaTable.GetCollectionByName(collName, 0)
 		assert.Nil(t, err)
-		dmlStream.AsConsumer([]string{createMeta.PhysicalChannelNames[0]}, Params.CommonCfg.RootCoordSubName)
+		dmlStream.AsConsumer([]string{createMeta.PhysicalChannelNames[0]}, TestSubscriptionName)
 		dmlStream.Start()
 
 		pChanMap := core.MetaTable.ListCollectionPhysicalChannels()
@@ -1072,7 +1056,7 @@ func TestRootCoord(t *testing.T) {
 		assert.Equal(t, 1, len(collMeta.FieldIndexes))
 		idxMeta, err := core.MetaTable.GetIndexByID(collMeta.FieldIndexes[0].IndexID)
 		assert.Nil(t, err)
-		assert.Equal(t, Params.CommonCfg.DefaultIndexName, idxMeta.IndexName)
+		assert.Equal(t, util.DefaultIndexName, idxMeta.IndexName)
 
 		req.FieldName = "no field"
 		rsp, err = core.CreateIndex(ctx, req)
@@ -1121,7 +1105,7 @@ func TestRootCoord(t *testing.T) {
 		assert.Nil(t, err)
 		assert.Equal(t, commonpb.ErrorCode_Success, rsp.Status.ErrorCode)
 		assert.Equal(t, 1, len(rsp.IndexDescriptions))
-		assert.Equal(t, Params.CommonCfg.DefaultIndexName, rsp.IndexDescriptions[0].IndexName)
+		assert.Equal(t, util.DefaultIndexName, rsp.IndexDescriptions[0].IndexName)
 		assert.Equal(t, "vector", rsp.IndexDescriptions[0].FieldName)
 	})
 
@@ -1183,7 +1167,7 @@ func TestRootCoord(t *testing.T) {
 		assert.Nil(t, err)
 		assert.Equal(t, commonpb.ErrorCode_Success, rsp.Status.ErrorCode)
 		assert.Equal(t, 1, len(rsp.IndexDescriptions))
-		assert.Equal(t, Params.CommonCfg.DefaultIndexName, rsp.IndexDescriptions[0].IndexName)
+		assert.Equal(t, util.DefaultIndexName, rsp.IndexDescriptions[0].IndexName)
 	})
 
 	wg.Add(1)
@@ -1224,11 +1208,11 @@ func TestRootCoord(t *testing.T) {
 
 		idxMeta, err := core.MetaTable.GetIndexByID(collMeta.FieldIndexes[1].IndexID)
 		assert.Nil(t, err)
-		assert.Equal(t, Params.CommonCfg.DefaultIndexName, idxMeta.IndexName)
+		assert.Equal(t, util.DefaultIndexName, idxMeta.IndexName)
 
 		idxMeta, err = core.MetaTable.GetIndexByID(collMeta.FieldIndexes[0].IndexID)
 		assert.Nil(t, err)
-		assert.Equal(t, Params.CommonCfg.DefaultIndexName+"_bak", idxMeta.IndexName)
+		assert.Equal(t, util.DefaultIndexName+"_bak", idxMeta.IndexName)
 
 	})
 
@@ -1245,9 +1229,9 @@ func TestRootCoord(t *testing.T) {
 			DbName:         "",
 			CollectionName: collName,
 			FieldName:      "vector",
-			IndexName:      Params.CommonCfg.DefaultIndexName,
+			IndexName:      util.DefaultIndexName,
 		}
-		_, idx, err := core.MetaTable.GetIndexByName(collName, Params.CommonCfg.DefaultIndexName)
+		_, idx, err := core.MetaTable.GetIndexByName(collName, util.DefaultIndexName)
 		assert.Nil(t, err)
 		assert.Equal(t, 1, len(idx))
 
@@ -1260,7 +1244,7 @@ func TestRootCoord(t *testing.T) {
 		assert.Equal(t, idx[0].IndexID, im.idxDropID[0])
 		im.mutex.Unlock()
 
-		_, idx, err = core.MetaTable.GetIndexByName(collName, Params.CommonCfg.DefaultIndexName)
+		_, idx, err = core.MetaTable.GetIndexByName(collName, util.DefaultIndexName)
 		assert.Nil(t, err)
 		assert.Equal(t, 0, len(idx))
 	})
@@ -1290,7 +1274,7 @@ func TestRootCoord(t *testing.T) {
 		assert.Equal(t, 1, len(collMeta.PartitionIDs))
 		partName, err := core.MetaTable.GetPartitionNameByID(collMeta.ID, collMeta.PartitionIDs[0], 0)
 		assert.Nil(t, err)
-		assert.Equal(t, Params.CommonCfg.DefaultPartitionName, partName)
+		assert.Equal(t, util.DefaultPartitionName, partName)
 
 		msgs := getNotTtMsg(ctx, 1, dmlStream.Chan())
 		assert.Equal(t, 1, len(msgs))
@@ -2301,24 +2285,22 @@ func TestRootCoord2(t *testing.T) {
 	defer cancel()
 
 	msFactory := msgstream.NewPmsFactory()
-	Params.Init()
-	Params.RootCoordCfg.DmlChannelNum = TestDMLChannelNum
-	core, err := NewCore(ctx, msFactory)
+	cfg := configs.NewConfig()
+	cfg.AdvertiseAddress = "127.0.0.1"
+	cfg.DMLChannelCount = TestDMLChannelNum
+	// weird, just follow the logic when refactoring the code
+	randVal := rand.Int()
+	cfg.Etcd.PathPrefix = fmt.Sprintf("by-dev-%d-", randVal)
+	cfg.Pulsar.ChannelPrefix = fmt.Sprintf("by-dev-%d-", randVal)
+
+	core, err := NewCore(ctx, cfg, msFactory)
+
 	assert.Nil(t, err)
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer etcdCli.Close()
-
-	randVal := rand.Int()
-
-	Params.CommonCfg.RootCoordTimeTick = fmt.Sprintf("rootcoord-time-tick-%d", randVal)
-	Params.CommonCfg.RootCoordStatistics = fmt.Sprintf("rootcoord-statistics-%d", randVal)
-	Params.EtcdCfg.MetaRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.MetaRootPath)
-	Params.EtcdCfg.KvRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.KvRootPath)
-	Params.CommonCfg.RootCoordSubName = fmt.Sprintf("subname-%d", randVal)
-
-	dm := &dataMock{randVal: randVal}
+	dm := &dataMock{}
 	err = core.SetDataCoord(ctx, dm)
 	assert.Nil(t, err)
 
@@ -2355,14 +2337,14 @@ func TestRootCoord2(t *testing.T) {
 	assert.Nil(t, err)
 
 	m := map[string]interface{}{
+		"pulsarAddress":  util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port),
 		"receiveBufSize": 1024,
-		"pulsarAddress":  Params.PulsarCfg.Address,
 		"pulsarBufSize":  1024}
 	err = msFactory.SetParams(m)
 	assert.Nil(t, err)
 
 	timeTickStream, _ := msFactory.NewMsgStream(ctx)
-	timeTickStream.AsConsumer([]string{Params.CommonCfg.RootCoordTimeTick}, Params.CommonCfg.RootCoordSubName)
+	timeTickStream.AsConsumer([]string{util.GetPath(cfg, util.RootCoordTimeTickChannel)}, TestSubscriptionName)
 	timeTickStream.Start()
 
 	time.Sleep(100 * time.Millisecond)
@@ -2405,7 +2387,7 @@ func TestRootCoord2(t *testing.T) {
 		collInfo, err := core.MetaTable.GetCollectionByName(collName, 0)
 		assert.Nil(t, err)
 		dmlStream, _ := msFactory.NewMsgStream(ctx)
-		dmlStream.AsConsumer([]string{collInfo.PhysicalChannelNames[0]}, Params.CommonCfg.RootCoordSubName)
+		dmlStream.AsConsumer([]string{collInfo.PhysicalChannelNames[0]}, TestSubscriptionName)
 		dmlStream.Start()
 
 		msgs := getNotTtMsg(ctx, 1, dmlStream.Chan())
@@ -2446,7 +2428,8 @@ func TestRootCoord2(t *testing.T) {
 }
 
 func TestCheckInit(t *testing.T) {
-	c, err := NewCore(context.Background(), nil)
+	cfg := configs.NewConfig()
+	c, err := NewCore(context.Background(), cfg, nil)
 	assert.Nil(t, err)
 
 	err = c.Start()
@@ -2584,19 +2567,18 @@ func TestCheckFlushedSegments(t *testing.T) {
 	defer cancel()
 
 	msFactory := msgstream.NewPmsFactory()
-	Params.Init()
-	Params.RootCoordCfg.DmlChannelNum = TestDMLChannelNum
-	core, err := NewCore(ctx, msFactory)
-	assert.Nil(t, err)
+	cfg := configs.NewConfig()
+	cfg.DMLChannelCount = TestDMLChannelNum
+
+	// weird, just follow the logic when refactoring the code
 	randVal := rand.Int()
+	cfg.Etcd.PathPrefix = fmt.Sprintf("by-dev-%d-", randVal)
+	cfg.Pulsar.ChannelPrefix = fmt.Sprintf("by-dev-%d-", randVal)
 
-	Params.CommonCfg.RootCoordTimeTick = fmt.Sprintf("rootcoord-time-tick-%d", randVal)
-	Params.CommonCfg.RootCoordStatistics = fmt.Sprintf("rootcoord-statistics-%d", randVal)
-	Params.EtcdCfg.MetaRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.MetaRootPath)
-	Params.EtcdCfg.KvRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.KvRootPath)
-	Params.CommonCfg.RootCoordSubName = fmt.Sprintf("subname-%d", randVal)
+	core, err := NewCore(ctx, cfg, msFactory)
+	assert.Nil(t, err)
 
-	dm := &dataMock{randVal: randVal}
+	dm := &dataMock{}
 	err = core.SetDataCoord(ctx, dm)
 	assert.Nil(t, err)
 
@@ -2621,7 +2603,7 @@ func TestCheckFlushedSegments(t *testing.T) {
 		return nil, nil
 	}
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer etcdCli.Close()
 	core.SetEtcdClient(etcdCli)
@@ -2636,14 +2618,14 @@ func TestCheckFlushedSegments(t *testing.T) {
 	assert.Nil(t, err)
 
 	m := map[string]interface{}{
+		"pulsarAddress":  util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port),
 		"receiveBufSize": 1024,
-		"pulsarAddress":  Params.PulsarCfg.Address,
 		"pulsarBufSize":  1024}
 	err = msFactory.SetParams(m)
 	assert.Nil(t, err)
 
 	timeTickStream, _ := msFactory.NewMsgStream(ctx)
-	timeTickStream.AsConsumer([]string{Params.CommonCfg.RootCoordTimeTick}, Params.CommonCfg.RootCoordSubName)
+	timeTickStream.AsConsumer([]string{util.GetPath(cfg, util.RootCoordTimeTickChannel)}, TestSubscriptionName)
 	timeTickStream.Start()
 
 	time.Sleep(100 * time.Millisecond)
@@ -2750,19 +2732,12 @@ func TestRootCoord_CheckZeroShardsNum(t *testing.T) {
 	defer cancel()
 
 	msFactory := msgstream.NewPmsFactory()
-	Params.Init()
-	Params.RootCoordCfg.DmlChannelNum = TestDMLChannelNum
-
-	core, err := NewCore(ctx, msFactory)
+	cfg := configs.NewConfig()
+	cfg.DMLChannelCount = TestDMLChannelNum
+	core, err := NewCore(ctx, cfg, msFactory)
 	assert.Nil(t, err)
-	randVal := rand.Int()
-	Params.CommonCfg.RootCoordTimeTick = fmt.Sprintf("rootcoord-time-tick-%d", randVal)
-	Params.CommonCfg.RootCoordStatistics = fmt.Sprintf("rootcoord-statistics-%d", randVal)
-	Params.EtcdCfg.MetaRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.MetaRootPath)
-	Params.EtcdCfg.KvRootPath = fmt.Sprintf("/%d/%s", randVal, Params.EtcdCfg.KvRootPath)
-	Params.CommonCfg.RootCoordSubName = fmt.Sprintf("subname-%d", randVal)
 
-	dm := &dataMock{randVal: randVal}
+	dm := &dataMock{}
 	err = core.SetDataCoord(ctx, dm)
 	assert.Nil(t, err)
 
@@ -2787,7 +2762,7 @@ func TestRootCoord_CheckZeroShardsNum(t *testing.T) {
 		return nil, nil
 	}
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.NoError(t, err)
 	defer etcdCli.Close()
 
@@ -2803,14 +2778,14 @@ func TestRootCoord_CheckZeroShardsNum(t *testing.T) {
 	assert.Nil(t, err)
 
 	m := map[string]interface{}{
+		"pulsarAddress":  util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port),
 		"receiveBufSize": 1024,
-		"pulsarAddress":  Params.PulsarCfg.Address,
 		"pulsarBufSize":  1024}
 	err = msFactory.SetParams(m)
 	assert.Nil(t, err)
 
 	timeTickStream, _ := msFactory.NewMsgStream(ctx)
-	timeTickStream.AsConsumer([]string{Params.CommonCfg.RootCoordTimeTick}, Params.CommonCfg.RootCoordSubName)
+	timeTickStream.AsConsumer([]string{util.GetPath(cfg, util.RootCoordTimeTickChannel)}, TestSubscriptionName)
 	timeTickStream.Start()
 
 	time.Sleep(100 * time.Millisecond)

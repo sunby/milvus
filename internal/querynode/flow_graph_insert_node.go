@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 
 	"github.com/opentracing/opentracing-go"
@@ -452,13 +453,10 @@ func getPKsFromColumnBasedInsertMsg(msg *msgstream.InsertMsg, schema *schemapb.C
 }
 
 // newInsertNode returns a new insertNode
-func newInsertNode(streamingReplica ReplicaInterface) *insertNode {
-	maxQueueLength := Params.QueryNodeCfg.FlowGraphMaxQueueLength
-	maxParallelism := Params.QueryNodeCfg.FlowGraphMaxParallelism
-
+func newInsertNode(cfg *configs.Config, streamingReplica ReplicaInterface) *insertNode {
 	baseNode := baseNode{}
-	baseNode.SetMaxQueueLength(maxQueueLength)
-	baseNode.SetMaxParallelism(maxParallelism)
+	baseNode.SetMaxQueueLength(int32(cfg.FlowGraph.QueueLengthLimit))
+	baseNode.SetMaxParallelism(int32(cfg.FlowGraph.ParallelismLimit))
 
 	return &insertNode{
 		baseNode:         baseNode,

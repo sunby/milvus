@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
@@ -32,11 +33,11 @@ import (
 )
 
 func TestIndexNodeMock(t *testing.T) {
-	Params.Init()
 	inm := Mock{
 		Build: true,
 	}
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.NoError(t, err)
 	inm.SetEtcdClient(etcdCli)
 	defer etcdCli.Close()
@@ -154,7 +155,8 @@ func TestIndexNodeMockFiled(t *testing.T) {
 		Build:   true,
 		Err:     false,
 	}
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.NoError(t, err)
 	inm.SetEtcdClient(etcdCli)
 	defer etcdCli.Close()

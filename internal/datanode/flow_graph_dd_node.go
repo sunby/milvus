@@ -22,12 +22,14 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/metrics"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/flowgraph"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/milvus-io/milvus/internal/util/trace"
@@ -243,7 +245,7 @@ func (ddn *ddNode) sendDeltaTimeTick(ts Timestamp) error {
 			MsgType:   commonpb.MsgType_TimeTick,
 			MsgID:     0,
 			Timestamp: ts,
-			SourceID:  Params.DataNodeCfg.NodeID,
+			SourceID:  serverID,
 		},
 	}
 	timeTickMsg := &msgstream.TimeTickMsg{
@@ -264,11 +266,11 @@ func (ddn *ddNode) Close() {
 	}
 }
 
-func newDDNode(ctx context.Context, collID UniqueID, vchanInfo *datapb.VchannelInfo,
+func newDDNode(ctx context.Context, cfg *configs.Config, collID UniqueID, vchanInfo *datapb.VchannelInfo,
 	msFactory msgstream.Factory, compactor *compactionExecutor) *ddNode {
 	baseNode := BaseNode{}
-	baseNode.SetMaxQueueLength(Params.DataNodeCfg.FlowGraphMaxQueueLength)
-	baseNode.SetMaxParallelism(Params.DataNodeCfg.FlowGraphMaxParallelism)
+	baseNode.SetMaxQueueLength(int32(cfg.FlowGraph.QueueLengthLimit))
+	baseNode.SetMaxParallelism(int32(cfg.FlowGraph.ParallelismLimit))
 
 	fs := make([]*datapb.SegmentInfo, 0, len(vchanInfo.GetFlushedSegments()))
 	fs = append(fs, vchanInfo.GetFlushedSegments()...)
@@ -283,7 +285,7 @@ func newDDNode(ctx context.Context, collID UniqueID, vchanInfo *datapb.VchannelI
 		return nil
 	}
 	pChannelName := funcutil.ToPhysicalChannel(vchanInfo.ChannelName)
-	deltaChannelName, err := funcutil.ConvertChannelName(pChannelName, Params.CommonCfg.RootCoordDml, Params.CommonCfg.RootCoordDelta)
+	deltaChannelName, err := funcutil.ConvertChannelName(pChannelName, util.GetPath(cfg, util.RootCoordDmlChannel), util.GetPath(cfg, util.RootCoordDeltaChannel))
 	if err != nil {
 		log.Error(err.Error())
 		return nil
@@ -291,7 +293,7 @@ func newDDNode(ctx context.Context, collID UniqueID, vchanInfo *datapb.VchannelI
 
 	deltaStream.SetRepackFunc(msgstream.DefaultRepackFunc)
 	deltaStream.AsProducer([]string{deltaChannelName})
-	metrics.DataNodeNumProducers.WithLabelValues(fmt.Sprint(Params.DataNodeCfg.NodeID)).Inc()
+	metrics.DataNodeNumProducers.WithLabelValues(fmt.Sprint(serverID)).Inc()
 	log.Debug("datanode AsProducer", zap.String("DeltaChannelName", deltaChannelName))
 	var deltaMsgStream msgstream.MsgStream = deltaStream
 	deltaMsgStream.Start()

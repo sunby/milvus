@@ -26,7 +26,7 @@ import (
 
 func TestReload(t *testing.T) {
 	t.Run("test reload with data", func(t *testing.T) {
-		Params.Init()
+		
 		kv := memkv.NewMemoryKV()
 		hash := consistent.New()
 		cm, err := NewChannelManager(kv, newMockHandler(), withFactory(NewConsistentHashChannelPolicyFactory(hash)))

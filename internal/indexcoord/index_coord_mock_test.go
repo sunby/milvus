@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
@@ -29,10 +30,11 @@ import (
 )
 
 func TestIndexCoordMock(t *testing.T) {
-	Params.Init()
+	()
 	icm := Mock{}
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	icm.SetEtcdClient(etcdCli)
 	defer etcdCli.Close()

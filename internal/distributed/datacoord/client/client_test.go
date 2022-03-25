@@ -21,7 +21,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/milvus-io/milvus/internal/proxy"
+	"github.com/milvus-io/milvus/configs"
+
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/mock"
 	"github.com/stretchr/testify/assert"
@@ -29,12 +31,11 @@ import (
 )
 
 func Test_NewClient(t *testing.T) {
-	proxy.Params.InitOnce()
-
 	ctx := context.Background()
-	etcdCli, err := etcd.GetEtcdClient(&proxy.Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
-	client, err := NewClient(ctx, proxy.Params.EtcdCfg.MetaRootPath, etcdCli)
+	client, err := NewClient(ctx, util.GetPath(cfg, util.EtcdMeta), etcdCli)
 	assert.Nil(t, err)
 	assert.NotNil(t, client)
 

@@ -22,7 +22,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/kv"
+
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/paramtable"
@@ -40,9 +42,10 @@ func TestMain(m *testing.M) {
 }
 
 func TestEtcdKV_Load(te *testing.T) {
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
-	defer etcdCli.Close()
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.NoError(te, err)
+	defer etcdCli.Close()
 	te.Run("EtcdKV SaveAndLoad", func(t *testing.T) {
 		rootPath := "/etcd/test/root/saveandload"
 		etcdKV := etcdkv.NewEtcdKV(etcdCli, rootPath)

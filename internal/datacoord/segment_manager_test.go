@@ -32,7 +32,7 @@ import (
 
 func TestManagerOptions(t *testing.T) {
 	//	ctx := context.Background()
-	Params.Init()
+
 	mockAllocator := newMockAllocator()
 	meta, err := newMemoryMeta(mockAllocator)
 	assert.Nil(t, err)
@@ -93,7 +93,7 @@ func TestManagerOptions(t *testing.T) {
 
 func TestAllocSegment(t *testing.T) {
 	ctx := context.Background()
-	Params.Init()
+
 	mockAllocator := newMockAllocator()
 	meta, err := newMemoryMeta(mockAllocator)
 	assert.Nil(t, err)
@@ -123,7 +123,7 @@ func TestAllocSegment(t *testing.T) {
 
 func TestLoadSegmentsFromMeta(t *testing.T) {
 	ctx := context.Background()
-	Params.Init()
+
 	mockAllocator := newMockAllocator()
 	meta, err := newMemoryMeta(mockAllocator)
 	assert.Nil(t, err)
@@ -173,7 +173,7 @@ func TestLoadSegmentsFromMeta(t *testing.T) {
 }
 
 func TestSaveSegmentsToMeta(t *testing.T) {
-	Params.Init()
+
 	mockAllocator := newMockAllocator()
 	meta, err := newMemoryMeta(mockAllocator)
 	assert.Nil(t, err)
@@ -195,7 +195,7 @@ func TestSaveSegmentsToMeta(t *testing.T) {
 }
 
 func TestDropSegment(t *testing.T) {
-	Params.Init()
+
 	mockAllocator := newMockAllocator()
 	meta, err := newMemoryMeta(mockAllocator)
 	assert.Nil(t, err)
@@ -218,7 +218,7 @@ func TestDropSegment(t *testing.T) {
 }
 
 func TestAllocRowsLargerThanOneSegment(t *testing.T) {
-	Params.Init()
+
 	mockAllocator := newMockAllocator()
 	meta, err := newMemoryMeta(mockAllocator)
 	assert.Nil(t, err)
@@ -240,7 +240,7 @@ func TestAllocRowsLargerThanOneSegment(t *testing.T) {
 }
 
 func TestExpireAllocation(t *testing.T) {
-	Params.Init()
+
 	mockAllocator := newMockAllocator()
 	meta, err := newMemoryMeta(mockAllocator)
 	assert.Nil(t, err)
@@ -283,7 +283,7 @@ func TestExpireAllocation(t *testing.T) {
 
 func TestGetFlushableSegments(t *testing.T) {
 	t.Run("get flushable segments between small interval", func(t *testing.T) {
-		Params.Init()
+
 		mockAllocator := newMockAllocator()
 		meta, err := newMemoryMeta(mockAllocator)
 		assert.Nil(t, err)
@@ -323,7 +323,7 @@ func TestGetFlushableSegments(t *testing.T) {
 
 func TestTryToSealSegment(t *testing.T) {
 	t.Run("normal seal with segment policies", func(t *testing.T) {
-		Params.Init()
+
 		mockAllocator := newMockAllocator()
 		meta, err := newMemoryMeta(mockAllocator)
 		assert.Nil(t, err)
@@ -348,7 +348,7 @@ func TestTryToSealSegment(t *testing.T) {
 	})
 
 	t.Run("normal seal with channel seal policies", func(t *testing.T) {
-		Params.Init()
+
 		mockAllocator := newMockAllocator()
 		meta, err := newMemoryMeta(mockAllocator)
 		assert.Nil(t, err)
@@ -373,7 +373,7 @@ func TestTryToSealSegment(t *testing.T) {
 	})
 
 	t.Run("normal seal with both segment & channel seal policy", func(t *testing.T) {
-		Params.Init()
+
 		mockAllocator := newMockAllocator()
 		meta, err := newMemoryMeta(mockAllocator)
 		assert.Nil(t, err)
@@ -400,7 +400,7 @@ func TestTryToSealSegment(t *testing.T) {
 	})
 
 	t.Run("seal with segment policy with kv fails", func(t *testing.T) {
-		Params.Init()
+
 		mockAllocator := newMockAllocator()
 		memoryKV := memkv.NewMemoryKV()
 		fkv := &saveFailKV{TxnKV: memoryKV}
@@ -426,7 +426,7 @@ func TestTryToSealSegment(t *testing.T) {
 	})
 
 	t.Run("seal with channel policy with kv fails", func(t *testing.T) {
-		Params.Init()
+
 		mockAllocator := newMockAllocator()
 		memoryKV := memkv.NewMemoryKV()
 		fkv := &saveFailKV{TxnKV: memoryKV}

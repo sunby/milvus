@@ -19,6 +19,8 @@ package rootcoord
 import (
 	"bytes"
 	"fmt"
+	"github.com/milvus-io/milvus/configs"
+	"github.com/milvus-io/milvus/internal/util"
 	"path"
 	"strconv"
 	"sync"
@@ -80,6 +82,7 @@ const (
 
 // MetaTable store all rootcoord meta info
 type MetaTable struct {
+	cfg             *configs.Config
 	txn             kv.TxnKV                                                        // client of a reliable txnkv service, i.e. etcd client
 	snapshot        kv.SnapShotKV                                                   // client of a reliable snapshotkv service, i.e. etcd client
 	tenantID2Meta   map[typeutil.UniqueID]pb.TenantMeta                             // tenant id to tenant meta
@@ -98,8 +101,9 @@ type MetaTable struct {
 
 // NewMetaTable creates meta table for rootcoord, which stores all in-memory information
 // for collection, partition, segment, index etc.
-func NewMetaTable(txn kv.TxnKV, snap kv.SnapShotKV) (*MetaTable, error) {
+func NewMetaTable(cfg *configs.Config, txn kv.TxnKV, snap kv.SnapShotKV) (*MetaTable, error) {
 	mt := &MetaTable{
+		cfg:        cfg,
 		txn:        txn,
 		snapshot:   snap,
 		tenantLock: sync.RWMutex{},
@@ -573,8 +577,8 @@ func (mt *MetaTable) AddPartition(collID typeutil.UniqueID, partitionName string
 	}
 
 	// number of partition tags (except _default) should be limited to 4096 by default
-	if int64(len(coll.PartitionIDs)) >= Params.RootCoordCfg.MaxPartitionNum {
-		return fmt.Errorf("maximum partition's number should be limit to %d", Params.RootCoordCfg.MaxPartitionNum)
+	if len(coll.PartitionIDs) >= int(mt.cfg.PartitionCountLimit) {
+		return fmt.Errorf("maximum partition's number should be limit to %d", mt.cfg.PartitionCountLimit)
 	}
 
 	if len(coll.PartitionIDs) != len(coll.PartitionNames) {
@@ -715,7 +719,7 @@ func (mt *MetaTable) DeletePartition(collID typeutil.UniqueID, partitionName str
 	mt.ddLock.Lock()
 	defer mt.ddLock.Unlock()
 
-	if partitionName == Params.CommonCfg.DefaultPartitionName {
+	if partitionName == util.DefaultPartitionName {
 		return 0, fmt.Errorf("default partition cannot be deleted")
 	}
 
@@ -954,7 +958,7 @@ func (mt *MetaTable) GetSegmentIndexInfoByID(segID typeutil.UniqueID, fieldID in
 	if fieldID == -1 && idxName == "" { // return default index
 		for _, seg := range segIdxMap {
 			info, ok := mt.indexID2Meta[seg.IndexID]
-			if ok && info.IndexName == Params.CommonCfg.DefaultIndexName {
+			if ok && info.IndexName == util.DefaultIndexName {
 				return seg, nil
 			}
 		}

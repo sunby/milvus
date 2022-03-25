@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/bits-and-blooms/bloom/v3"
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
@@ -218,7 +219,8 @@ func TestFlowGraphDeleteNode_Operate(t *testing.T) {
 	replica := genMockReplica(segIDs, pks, chanName)
 	cm := storage.NewLocalChunkManager(storage.RootPath(deleteNodeTestDir))
 	defer cm.RemoveWithPrefix("")
-	fm := NewRendezvousFlushManager(NewAllocatorFactory(), cm, replica, func(*segmentFlushPack) {}, emptyFlushAndDropFunc)
+	cfg := configs.NewConfig()
+	fm := NewRendezvousFlushManager(cfg, NewAllocatorFactory(), cm, replica, func(*segmentFlushPack) {}, emptyFlushAndDropFunc)
 	t.Run("Test get segment by primary keys", func(te *testing.T) {
 		c := &nodeConfig{
 			replica:      replica,
@@ -249,8 +251,9 @@ func TestFlowGraphDeleteNode_Operate(t *testing.T) {
 		chanName := "datanode-test-FlowGraphDeletenode-operate"
 		testPath := "/test/datanode/root/meta"
 		assert.NoError(t, clearEtcd(testPath))
-		Params.EtcdCfg.MetaRootPath = testPath
-		Params.DataNodeCfg.DeleteBinlogRootPath = testPath
+		cfg := configs.NewConfig()
+		cfg.Etcd.PathPrefix = testPath
+		cfg.Minio.SecretAccessKey = testPath
 
 		c := &nodeConfig{
 			replica:      replica,
@@ -273,8 +276,9 @@ func TestFlowGraphDeleteNode_Operate(t *testing.T) {
 		chanName := "datanode-test-FlowGraphDeletenode-operate"
 		testPath := "/test/datanode/root/meta"
 		assert.NoError(t, clearEtcd(testPath))
-		Params.EtcdCfg.MetaRootPath = testPath
-		Params.DataNodeCfg.DeleteBinlogRootPath = testPath
+		cfg := configs.NewConfig()
+		cfg.Etcd.PathPrefix = testPath
+		cfg.Minio.RootPath = testPath
 
 		c := &nodeConfig{
 			replica:      replica,
@@ -302,8 +306,9 @@ func TestFlowGraphDeleteNode_Operate(t *testing.T) {
 		chanName := "datanode-test-FlowGraphDeletenode-operate"
 		testPath := "/test/datanode/root/meta"
 		assert.NoError(t, clearEtcd(testPath))
-		Params.EtcdCfg.MetaRootPath = testPath
-		Params.DataNodeCfg.DeleteBinlogRootPath = testPath
+		cfg := configs.NewConfig()
+		cfg.Etcd.PathPrefix = testPath
+		cfg.Minio.RootPath = testPath
 
 		c := &nodeConfig{
 			replica:      replica,

@@ -30,6 +30,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
@@ -41,7 +42,6 @@ func (qc *QueryCoord) GetComponentStates(ctx context.Context) (*internalpb.Compo
 		nodeID = qc.session.ServerID
 	}
 	serviceComponentInfo := &internalpb.ComponentInfo{
-		// NodeID:    Params.QueryCoordID, // will race with QueryCoord.Register()
 		NodeID:    nodeID,
 		StateCode: qc.stateCode.Load().(internalpb.StateCode),
 	}
@@ -72,7 +72,7 @@ func (qc *QueryCoord) GetTimeTickChannel(ctx context.Context) (*milvuspb.StringR
 			ErrorCode: commonpb.ErrorCode_Success,
 			Reason:    "",
 		},
-		Value: Params.CommonCfg.QueryCoordTimeTick,
+		Value: util.GetPath(qc.cfg, util.QueryCoordTimeTickChannel),
 	}, nil
 }
 
@@ -84,7 +84,7 @@ func (qc *QueryCoord) GetStatisticsChannel(ctx context.Context) (*milvuspb.Strin
 			ErrorCode: commonpb.ErrorCode_Success,
 			Reason:    "",
 		},
-		Value: Params.CommonCfg.QueryNodeStats,
+		Value: util.GetPath(qc.cfg, util.QueryNodeStatsChannel),
 	}, nil
 }
 
@@ -946,7 +946,7 @@ func (qc *QueryCoord) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRe
 		Status: &commonpb.Status{
 			ErrorCode: commonpb.ErrorCode_UnexpectedError,
 		},
-		ComponentName: metricsinfo.ConstructComponentName(typeutil.QueryCoordRole, Params.QueryCoordCfg.QueryCoordID),
+		ComponentName: metricsinfo.ConstructComponentName(typeutil.QueryCoordRole, qc.session.ServerID),
 	}
 
 	if qc.stateCode.Load() != internalpb.StateCode_Healthy {

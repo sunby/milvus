@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
@@ -34,6 +35,7 @@ func TestUpperLimitCalBySchema(t *testing.T) {
 		expected  int
 		expectErr bool
 	}
+	cfg := configs.NewConfig()
 	testCases := []testCase{
 		{
 			schema:    nil,
@@ -78,12 +80,12 @@ func TestUpperLimitCalBySchema(t *testing.T) {
 					},
 				},
 			},
-			expected:  int(Params.DataCoordCfg.SegmentMaxSize * 1024 * 1024 / float64(524)),
+			expected:  int(float64(cfg.SegmentMaxSizeInMB) * 1024 * 1024 / float64(524)),
 			expectErr: false,
 		},
 	}
 	for _, c := range testCases {
-		result, err := calBySchemaPolicy(c.schema)
+		result, err := calBySchemaPolicy(cfg, c.schema)
 		if c.expectErr {
 			assert.NotNil(t, err)
 		} else {

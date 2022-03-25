@@ -26,11 +26,13 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
@@ -52,6 +54,7 @@ type queryNodeServerMock struct {
 	querypb.QueryNodeServer
 	ctx         context.Context
 	cancel      context.CancelFunc
+	cfg         *configs.Config
 	session     *sessionutil.Session
 	grpcErrChan chan error
 	grpcServer  *grpc.Server
@@ -76,11 +79,12 @@ type queryNodeServerMock struct {
 	totalMem uint64
 }
 
-func newQueryNodeServerMock(ctx context.Context) *queryNodeServerMock {
+func newQueryNodeServerMock(ctx context.Context, cfg *configs.Config) *queryNodeServerMock {
 	ctx1, cancel := context.WithCancel(ctx)
 	return &queryNodeServerMock{
 		ctx:         ctx1,
 		cancel:      cancel,
+		cfg:         cfg,
 		grpcErrChan: make(chan error),
 
 		addQueryChannels:    returnSuccessResult,
@@ -101,12 +105,11 @@ func newQueryNodeServerMock(ctx context.Context) *queryNodeServerMock {
 }
 
 func (qs *queryNodeServerMock) Register() error {
-	log.Debug("query node session info", zap.String("metaPath", Params.EtcdCfg.MetaRootPath))
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(qs.cfg)
 	if err != nil {
 		return err
 	}
-	qs.session = sessionutil.NewSession(qs.ctx, Params.EtcdCfg.MetaRootPath, etcdCli)
+	qs.session = sessionutil.NewSession(qs.ctx, util.GetPath(qs.cfg, util.EtcdMeta), etcdCli)
 	qs.session.Init(typeutil.QueryNodeRole, qs.queryNodeIP+":"+strconv.FormatInt(qs.queryNodePort, 10), false, false)
 	qs.queryNodeID = qs.session.ServerID
 	log.Debug("query nodeID", zap.Int64("nodeID", qs.queryNodeID))
@@ -118,7 +121,7 @@ func (qs *queryNodeServerMock) Register() error {
 
 func (qs *queryNodeServerMock) init() error {
 	qs.queryNodeIP = funcutil.GetLocalIP()
-	grpcPort := Params.QueryCoordCfg.Port
+	grpcPort := qs.cfg.QueryCoord.Port
 
 	go func() {
 		var lis net.Listener
@@ -296,8 +299,8 @@ func (qs *queryNodeServerMock) GetMetrics(ctx context.Context, req *milvuspb.Get
 	return response, nil
 }
 
-func startQueryNodeServer(ctx context.Context) (*queryNodeServerMock, error) {
-	node := newQueryNodeServerMock(ctx)
+func startQueryNodeServer(ctx context.Context, cfg *configs.Config) (*queryNodeServerMock, error) {
+	node := newQueryNodeServerMock(ctx, cfg)
 	err := node.run()
 	if err != nil {
 		return nil, err

@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/common"
 	grpcindexnode "github.com/milvus-io/milvus/internal/distributed/indexnode"
 	"github.com/milvus-io/milvus/internal/indexnode"
@@ -45,8 +46,9 @@ import (
 func TestIndexCoord(t *testing.T) {
 	ctx := context.Background()
 	inm0 := &indexnode.Mock{}
-	Params.Init()
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	()
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.NoError(t, err)
 	inm0.SetEtcdClient(etcdCli)
 	err = inm0.Init()

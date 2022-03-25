@@ -19,6 +19,7 @@ package components
 import (
 	"context"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 
@@ -32,11 +33,11 @@ type Proxy struct {
 }
 
 // NewProxy creates a new Proxy
-func NewProxy(ctx context.Context, factory msgstream.Factory) (*Proxy, error) {
+func NewProxy(ctx context.Context, cfg *configs.Config, factory msgstream.Factory) (*Proxy, error) {
 	var err error
 	n := &Proxy{}
 
-	svr, err := grpcproxy.NewServer(ctx, factory)
+	svr, err := grpcproxy.NewServer(ctx, cfg, factory)
 	if err != nil {
 		return nil, err
 	}

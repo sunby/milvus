@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
+
 	"github.com/stretchr/testify/assert"
 
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
@@ -30,6 +32,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
@@ -37,12 +40,13 @@ import (
 //func waitQueryNodeOnline(cluster *queryNodeCluster, nodeID int64)
 
 func removeNodeSession(id int64) error {
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	defer etcdCli.Close()
 	if err != nil {
 		return err
 	}
-	kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
+	kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
 
 	err = kv.Remove(fmt.Sprintf("session/"+typeutil.QueryNodeRole+"-%d", id))
 	if err != nil {
@@ -52,12 +56,13 @@ func removeNodeSession(id int64) error {
 }
 
 func removeAllSession() error {
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	defer etcdCli.Close()
 	if err != nil {
 		return err
 	}
-	kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
+	kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
 	err = kv.RemoveWithPrefix("session")
 	if err != nil {
 		return err
@@ -96,17 +101,17 @@ func waitQueryNodeOnline(cluster Cluster, nodeID int64) {
 }
 
 func TestQueryNode_MultiNode_stop(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	baseCtx := context.Background()
 
-	queryCoord, err := startQueryCoord(baseCtx)
+	queryCoord, err := startQueryCoord(baseCtx, cfg)
 	assert.Nil(t, err)
 
-	queryNode1, err := startQueryNodeServer(baseCtx)
+	queryNode1, err := startQueryNodeServer(baseCtx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, queryNode1.queryNodeID)
 
-	queryNode2, err := startQueryNodeServer(baseCtx)
+	queryNode2, err := startQueryNodeServer(baseCtx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, queryNode2.queryNodeID)
 
@@ -142,13 +147,13 @@ func TestQueryNode_MultiNode_stop(t *testing.T) {
 }
 
 func TestQueryNode_MultiNode_reStart(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	baseCtx := context.Background()
 
-	queryCoord, err := startQueryCoord(baseCtx)
+	queryCoord, err := startQueryCoord(baseCtx, cfg)
 	assert.Nil(t, err)
 
-	queryNode1, err := startQueryNodeServer(baseCtx)
+	queryNode1, err := startQueryNodeServer(baseCtx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, queryNode1.queryNodeID)
 
@@ -163,7 +168,7 @@ func TestQueryNode_MultiNode_reStart(t *testing.T) {
 	queryNode1.stop()
 	err = removeNodeSession(queryNode1.queryNodeID)
 	assert.Nil(t, err)
-	queryNode3, err := startQueryNodeServer(baseCtx)
+	queryNode3, err := startQueryNodeServer(baseCtx, cfg)
 	assert.Nil(t, err)
 
 	time.Sleep(100 * time.Millisecond)
@@ -191,14 +196,14 @@ func TestQueryNode_getMetrics(t *testing.T) {
 }
 
 func TestNewQueryNode(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	baseCtx, cancel := context.WithCancel(context.Background())
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer etcdCli.Close()
-	kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
+	kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
 
-	queryNode1, err := startQueryNodeServer(baseCtx)
+	queryNode1, err := startQueryNodeServer(baseCtx, cfg)
 	assert.Nil(t, err)
 
 	addr := queryNode1.session.Address
@@ -217,12 +222,12 @@ func TestNewQueryNode(t *testing.T) {
 }
 
 func TestReleaseCollectionOnOfflineNode(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	baseCtx, cancel := context.WithCancel(context.Background())
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer etcdCli.Close()
-	kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
+	kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
 
 	node, err := newQueryNode(baseCtx, "test", 100, kv)
 	assert.Nil(t, err)
@@ -242,13 +247,13 @@ func TestReleaseCollectionOnOfflineNode(t *testing.T) {
 }
 
 func TestSealedSegmentChangeAfterQueryNodeStop(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	baseCtx := context.Background()
 
-	queryCoord, err := startQueryCoord(baseCtx)
+	queryCoord, err := startQueryCoord(baseCtx, cfg)
 	assert.Nil(t, err)
 
-	queryNode1, err := startQueryNodeServer(baseCtx)
+	queryNode1, err := startQueryNodeServer(baseCtx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, queryNode1.queryNodeID)
 
@@ -260,7 +265,7 @@ func TestSealedSegmentChangeAfterQueryNodeStop(t *testing.T) {
 		Schema:       genDefaultCollectionSchema(false),
 	})
 
-	queryNode2, err := startQueryNodeServer(baseCtx)
+	queryNode2, err := startQueryNodeServer(baseCtx, cfg)
 	assert.Nil(t, err)
 	waitQueryNodeOnline(queryCoord.cluster, queryNode2.queryNodeID)
 
@@ -288,13 +293,13 @@ func TestSealedSegmentChangeAfterQueryNodeStop(t *testing.T) {
 }
 
 func TestGrpcRequestWithNodeOffline(t *testing.T) {
-	refreshParams()
+	cfg := refreshParams()
 	baseCtx, cancel := context.WithCancel(context.Background())
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer etcdCli.Close()
-	kv := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
-	nodeServer, err := startQueryNodeServer(baseCtx)
+	kv := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
+	nodeServer, err := startQueryNodeServer(baseCtx, cfg)
 	assert.Nil(t, err)
 	address := nodeServer.queryNodeIP
 	nodeID := nodeServer.queryNodeID

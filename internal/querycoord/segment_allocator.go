@@ -22,6 +22,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"go.uber.org/zap"
@@ -34,12 +35,12 @@ func defaultSegAllocatePolicy() SegmentAllocatePolicy {
 const shuffleWaitInterval = 1 * time.Second
 
 // SegmentAllocatePolicy helper function definition to allocate Segment to queryNode
-type SegmentAllocatePolicy func(ctx context.Context, reqs []*querypb.LoadSegmentsRequest, cluster Cluster, metaCache Meta, wait bool, excludeNodeIDs []int64, includeNodeIDs []int64) error
+type SegmentAllocatePolicy func(ctx context.Context, cfg *configs.Config, reqs []*querypb.LoadSegmentsRequest, cluster Cluster, metaCache Meta, wait bool, excludeNodeIDs []int64, includeNodeIDs []int64) error
 
 // shuffleSegmentsToQueryNode shuffle segments to online nodes
 // returned are noded id for each segment, which satisfies:
 //     len(returnedNodeIds) == len(segmentIDs) && segmentIDs[i] is assigned to returnedNodeIds[i]
-func shuffleSegmentsToQueryNode(ctx context.Context, reqs []*querypb.LoadSegmentsRequest, cluster Cluster, metaCache Meta, wait bool, excludeNodeIDs []int64, includeNodeIDs []int64) error {
+func shuffleSegmentsToQueryNode(ctx context.Context, cfg *configs.Config, reqs []*querypb.LoadSegmentsRequest, cluster Cluster, metaCache Meta, wait bool, excludeNodeIDs []int64, includeNodeIDs []int64) error {
 	if len(reqs) == 0 {
 		return nil
 	}
@@ -95,7 +96,7 @@ func shuffleSegmentsToQueryNode(ctx context.Context, reqs []*querypb.LoadSegment
 	}
 }
 
-func shuffleSegmentsToQueryNodeV2(ctx context.Context, reqs []*querypb.LoadSegmentsRequest, cluster Cluster, metaCache Meta, wait bool, excludeNodeIDs []int64, includeNodeIDs []int64) error {
+func shuffleSegmentsToQueryNodeV2(ctx context.Context, cfg *configs.Config, reqs []*querypb.LoadSegmentsRequest, cluster Cluster, metaCache Meta, wait bool, excludeNodeIDs []int64, includeNodeIDs []int64) error {
 	// key = offset, value = segmentSize
 	if len(reqs) == 0 {
 		return nil
@@ -141,7 +142,7 @@ func shuffleSegmentsToQueryNodeV2(ctx context.Context, reqs []*querypb.LoadSegme
 			}
 			queryNodeInfo := nodeInfo.(*queryNode)
 			// avoid allocate segment to node which memUsageRate is high
-			if queryNodeInfo.memUsageRate >= Params.QueryCoordCfg.OverloadedMemoryThresholdPercentage {
+			if queryNodeInfo.memUsageRate >= cfg.QueryCoord.MemoryUsageLimitRatio {
 				log.Debug("shuffleSegmentsToQueryNodeV2: queryNode memUsageRate large than MaxMemUsagePerNode", zap.Int64("nodeID", nodeID), zap.Float64("current rate", queryNodeInfo.memUsageRate))
 				continue
 			}
@@ -163,7 +164,7 @@ func shuffleSegmentsToQueryNodeV2(ctx context.Context, reqs []*querypb.LoadSegme
 				for _, nodeID := range availableNodeIDs {
 					memUsageAfterLoad := memUsage[nodeID] + uint64(sizeOfReq)
 					memUsageRateAfterLoad := float64(memUsageAfterLoad) / float64(totalMem[nodeID])
-					if memUsageRateAfterLoad > Params.QueryCoordCfg.OverloadedMemoryThresholdPercentage {
+					if memUsageRateAfterLoad > cfg.QueryCoord.MemoryUsageLimitRatio {
 						continue
 					}
 					reqs[offset].DstNodeID = nodeID

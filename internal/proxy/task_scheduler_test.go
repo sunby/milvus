@@ -22,11 +22,11 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestBaseTaskQueue(t *testing.T) {
-	Params.Init()
 
 	var err error
 	var unissuedTask task
@@ -34,7 +34,7 @@ func TestBaseTaskQueue(t *testing.T) {
 
 	tsoAllocatorIns := newMockTsoAllocator()
 	idAllocatorIns := newMockIDAllocatorInterface()
-	queue := newBaseTaskQueue(tsoAllocatorIns, idAllocatorIns)
+	queue := newBaseTaskQueue(configs.NewConfig(), tsoAllocatorIns, idAllocatorIns)
 	assert.NotNil(t, queue)
 
 	assert.True(t, queue.utEmpty())
@@ -105,7 +105,6 @@ func TestBaseTaskQueue(t *testing.T) {
 }
 
 func TestDdTaskQueue(t *testing.T) {
-	Params.Init()
 
 	var err error
 	var unissuedTask task
@@ -113,7 +112,7 @@ func TestDdTaskQueue(t *testing.T) {
 
 	tsoAllocatorIns := newMockTsoAllocator()
 	idAllocatorIns := newMockIDAllocatorInterface()
-	queue := newDdTaskQueue(tsoAllocatorIns, idAllocatorIns)
+	queue := newDdTaskQueue(configs.NewConfig(), tsoAllocatorIns, idAllocatorIns)
 	assert.NotNil(t, queue)
 
 	assert.True(t, queue.utEmpty())
@@ -185,7 +184,6 @@ func TestDdTaskQueue(t *testing.T) {
 
 // test the logic of queue
 func TestDmTaskQueue_Basic(t *testing.T) {
-	Params.Init()
 
 	var err error
 	var unissuedTask task
@@ -193,7 +191,7 @@ func TestDmTaskQueue_Basic(t *testing.T) {
 
 	tsoAllocatorIns := newMockTsoAllocator()
 	idAllocatorIns := newMockIDAllocatorInterface()
-	queue := newDmTaskQueue(tsoAllocatorIns, idAllocatorIns)
+	queue := newDmTaskQueue(configs.NewConfig(), tsoAllocatorIns, idAllocatorIns)
 	assert.NotNil(t, queue)
 
 	assert.True(t, queue.utEmpty())
@@ -265,14 +263,13 @@ func TestDmTaskQueue_Basic(t *testing.T) {
 
 // test the timestamp statistics
 func TestDmTaskQueue_TimestampStatistics(t *testing.T) {
-	Params.Init()
 
 	var err error
 	var unissuedTask task
 
 	tsoAllocatorIns := newMockTsoAllocator()
 	idAllocatorIns := newMockIDAllocatorInterface()
-	queue := newDmTaskQueue(tsoAllocatorIns, idAllocatorIns)
+	queue := newDmTaskQueue(configs.NewConfig(), tsoAllocatorIns, idAllocatorIns)
 	assert.NotNil(t, queue)
 
 	st := newDefaultMockDmlTask()
@@ -305,7 +302,6 @@ func TestDmTaskQueue_TimestampStatistics(t *testing.T) {
 }
 
 func TestDqTaskQueue(t *testing.T) {
-	Params.Init()
 
 	var err error
 	var unissuedTask task
@@ -313,7 +309,7 @@ func TestDqTaskQueue(t *testing.T) {
 
 	tsoAllocatorIns := newMockTsoAllocator()
 	idAllocatorIns := newMockIDAllocatorInterface()
-	queue := newDqTaskQueue(tsoAllocatorIns, idAllocatorIns)
+	queue := newDqTaskQueue(configs.NewConfig(), tsoAllocatorIns, idAllocatorIns)
 	assert.NotNil(t, queue)
 
 	assert.True(t, queue.utEmpty())
@@ -384,7 +380,6 @@ func TestDqTaskQueue(t *testing.T) {
 }
 
 func TestTaskScheduler(t *testing.T) {
-	Params.Init()
 
 	var err error
 
@@ -393,7 +388,7 @@ func TestTaskScheduler(t *testing.T) {
 	idAllocatorIns := newMockIDAllocatorInterface()
 	factory := newSimpleMockMsgStreamFactory()
 
-	sched, err := newTaskScheduler(ctx, idAllocatorIns, tsoAllocatorIns, factory)
+	sched, err := newTaskScheduler(ctx, configs.NewConfig(), idAllocatorIns, tsoAllocatorIns, factory)
 	assert.NoError(t, err)
 	assert.NotNil(t, sched)
 

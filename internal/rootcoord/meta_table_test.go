@@ -25,6 +25,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
+	"github.com/milvus-io/milvus/internal/util"
+
 	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
@@ -107,68 +110,69 @@ func Test_MockKV(t *testing.T) {
 		return nil, nil, fmt.Errorf("load prefix error")
 	}
 
-	_, err := NewMetaTable(kt, k1)
+	cfg := configs.NewConfig()
+	_, err := NewMetaTable(cfg, kt, k1)
 	assert.NotNil(t, err)
 	assert.EqualError(t, err, "load prefix error")
 
 	// tenant
 	prefix[TenantMetaPrefix] = []string{"tenant-prefix"}
-	_, err = NewMetaTable(kt, k1)
+	_, err = NewMetaTable(cfg, kt, k1)
 	assert.NotNil(t, err)
 
 	value, err := proto.Marshal(&pb.TenantMeta{})
 	assert.Nil(t, err)
 	prefix[TenantMetaPrefix] = []string{string(value)}
-	_, err = NewMetaTable(kt, k1)
+	_, err = NewMetaTable(cfg, kt, k1)
 	assert.NotNil(t, err)
 
 	// proxy
 	prefix[ProxyMetaPrefix] = []string{"porxy-meta"}
-	_, err = NewMetaTable(kt, k1)
+	_, err = NewMetaTable(cfg, kt, k1)
 	assert.NotNil(t, err)
 
 	value, err = proto.Marshal(&pb.ProxyMeta{})
 	assert.Nil(t, err)
 	prefix[ProxyMetaPrefix] = []string{string(value)}
-	_, err = NewMetaTable(kt, k1)
+	_, err = NewMetaTable(cfg, kt, k1)
 	assert.NotNil(t, err)
 
 	// collection
 	prefix[CollectionMetaPrefix] = []string{"collection-meta"}
-	_, err = NewMetaTable(kt, k1)
+	_, err = NewMetaTable(cfg, kt, k1)
 	assert.NotNil(t, err)
 
 	value, err = proto.Marshal(&pb.CollectionInfo{Schema: &schemapb.CollectionSchema{}})
 	assert.Nil(t, err)
 	prefix[CollectionMetaPrefix] = []string{string(value)}
-	_, err = NewMetaTable(kt, k1)
+	_, err = NewMetaTable(cfg, kt, k1)
 	assert.NotNil(t, err)
 
 	// segment index
 	prefix[SegmentIndexMetaPrefix] = []string{"segment-index-meta"}
-	_, err = NewMetaTable(kt, k1)
+	_, err = NewMetaTable(cfg, kt, k1)
 	assert.NotNil(t, err)
 
 	value, err = proto.Marshal(&pb.SegmentIndexInfo{})
 	assert.Nil(t, err)
 	prefix[SegmentIndexMetaPrefix] = []string{string(value)}
-	_, err = NewMetaTable(kt, k1)
+	_, err = NewMetaTable(cfg, kt, k1)
 	assert.NotNil(t, err)
 
 	prefix[SegmentIndexMetaPrefix] = []string{string(value), string(value)}
-	_, err = NewMetaTable(kt, k1)
+	_, err = NewMetaTable(cfg, kt, k1)
 	assert.NotNil(t, err)
 	assert.EqualError(t, err, "load prefix error")
 
 	// index
 	prefix[IndexMetaPrefix] = []string{"index-meta"}
-	_, err = NewMetaTable(kt, k1)
+	_, err = NewMetaTable(cfg, kt, k1)
 	assert.NotNil(t, err)
 
 	value, err = proto.Marshal(&pb.IndexInfo{})
 	assert.Nil(t, err)
 	prefix[IndexMetaPrefix] = []string{string(value)}
-	m1, err := NewMetaTable(kt, k1)
+	m1, err := NewMetaTable(cfg, kt, k1)
 	assert.NotNil(t, err)
 	assert.EqualError(t, err, "load prefix error")
 	prefix[CollectionAliasMetaPrefix] = []string{"alias-meta"}
@@ -213,7 +217,6 @@ func TestMetaTable(t *testing.T) {
 
 	rand.Seed(time.Now().UnixNano())
 	randVal := rand.Int()
-	Params.Init()
 	rootPath := fmt.Sprintf("/test/meta/%d", randVal)
 
 	var vtso typeutil.Timestamp
@@ -222,7 +225,8 @@ func TestMetaTable(t *testing.T) {
 		return vtso
 	}
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	require.Nil(t, err)
 	defer etcdCli.Close()
 
@@ -230,7 +234,7 @@ func TestMetaTable(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, skv)
 	txnKV := etcdkv.NewEtcdKV(etcdCli, rootPath)
-	mt, err := NewMetaTable(txnKV, skv)
+	mt, err := NewMetaTable(cfg, txnKV, skv)
 	assert.Nil(t, err)
 
 	collInfo := &pb.CollectionInfo{
@@ -276,7 +280,7 @@ func TestMetaTable(t *testing.T) {
 		},
 		CreateTime:                 0,
 		PartitionIDs:               []typeutil.UniqueID{partIDDefault},
-		PartitionNames:             []string{Params.CommonCfg.DefaultPartitionName},
+		PartitionNames:             []string{util.DefaultPartitionName},
 		PartitionCreatedTimestamps: []uint64{0},
 	}
 	idxInfo := []*pb.IndexInfo{
@@ -497,7 +501,7 @@ func TestMetaTable(t *testing.T) {
 		err = mt.AddProxy(&po)
 		assert.Nil(t, err)
 
-		_, err = NewMetaTable(txnKV, skv)
+		_, err = NewMetaTable(cfg, txnKV, skv)
 		assert.Nil(t, err)
 	})
 
@@ -650,11 +654,11 @@ func TestMetaTable(t *testing.T) {
 		assert.EqualError(t, err, "can't find collection. id = 2")
 
 		coll := mt.collID2Meta[collInfo.ID]
-		coll.PartitionIDs = make([]int64, Params.RootCoordCfg.MaxPartitionNum)
+		coll.PartitionIDs = make([]int64, cfg.PartitionCountLimit)
 		mt.collID2Meta[coll.ID] = coll
 		err = mt.AddPartition(coll.ID, "no-part", 22, ts, "")
 		assert.NotNil(t, err)
-		assert.EqualError(t, err, fmt.Sprintf("maximum partition's number should be limit to %d", Params.RootCoordCfg.MaxPartitionNum))
+		assert.EqualError(t, err, fmt.Sprintf("maximum partition's number should be limit to %d", cfg.PartitionCountLimit))
 
 		coll.PartitionIDs = []int64{partID}
 		coll.PartitionNames = []string{partName}
@@ -733,7 +737,7 @@ func TestMetaTable(t *testing.T) {
 		assert.Nil(t, err)
 
 		ts = ftso()
-		_, err = mt.DeletePartition(collInfo.ID, Params.CommonCfg.DefaultPartitionName, ts, "")
+		_, err = mt.DeletePartition(collInfo.ID, util.DefaultPartitionName, ts, "")
 		assert.NotNil(t, err)
 		assert.EqualError(t, err, "default partition cannot be deleted")
 
@@ -1133,16 +1137,16 @@ func TestMetaWithTimestamp(t *testing.T) {
 	)
 	rand.Seed(time.Now().UnixNano())
 	randVal := rand.Int()
-	Params.Init()
 	rootPath := fmt.Sprintf("/test/meta/%d", randVal)
 
+	cfg := configs.NewConfig()
 	var tsoStart typeutil.Timestamp = 100
 	vtso := tsoStart
 	ftso := func() typeutil.Timestamp {
 		vtso++
 		return vtso
 	}
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer etcdCli.Close()
 
@@ -1150,7 +1154,7 @@ func TestMetaWithTimestamp(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, skv)
 	txnKV := etcdkv.NewEtcdKV(etcdCli, rootPath)
-	mt, err := NewMetaTable(txnKV, skv)
+	mt, err := NewMetaTable(cfg, txnKV, skv)
 	assert.Nil(t, err)
 
 	collInfo := &pb.CollectionInfo{
@@ -1296,10 +1300,10 @@ func TestMetaWithTimestamp(t *testing.T) {
 func TestFixIssue10540(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	randVal := rand.Int()
-	Params.Init()
 	rootPath := fmt.Sprintf("/test/meta/%d", randVal)
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
 	defer etcdCli.Close()
 
@@ -1313,6 +1317,6 @@ func TestFixIssue10540(t *testing.T) {
 	txnKV.Save(path.Join(SegmentIndexMetaPrefix, "2"), string(suffixSnapshotTombstone))
 	txnKV.Save(path.Join(IndexMetaPrefix, "3"), string(suffixSnapshotTombstone))
 
-	_, err = NewMetaTable(txnKV, skv)
+	_, err = NewMetaTable(cfg, txnKV, skv)
 	assert.Nil(t, err)
 }

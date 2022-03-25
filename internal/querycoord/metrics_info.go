@@ -19,6 +19,7 @@ package querycoord
 import (
 	"context"
 
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/uniquegenerator"
 
 	"github.com/milvus-io/milvus/internal/util/typeutil"
@@ -41,7 +42,7 @@ func getSystemInfoMetrics(
 	clusterTopology := metricsinfo.QueryClusterTopology{
 		Self: metricsinfo.QueryCoordInfos{
 			BaseComponentInfos: metricsinfo.BaseComponentInfos{
-				Name: metricsinfo.ConstructComponentName(typeutil.QueryCoordRole, Params.QueryCoordCfg.QueryCoordID),
+				Name: metricsinfo.ConstructComponentName(typeutil.QueryCoordRole, qc.session.ServerID),
 				HardwareInfos: metricsinfo.HardwareMetrics{
 					IP:           qc.session.Address,
 					CPUCoreCount: metricsinfo.GetCPUCoreCount(false),
@@ -52,14 +53,14 @@ func getSystemInfoMetrics(
 					DiskUsage:    metricsinfo.GetDiskUsage(),
 				},
 				SystemInfo:  metricsinfo.DeployMetrics{},
-				CreatedTime: Params.QueryCoordCfg.CreatedTime.String(),
-				UpdatedTime: Params.QueryCoordCfg.UpdatedTime.String(),
+				CreatedTime: qc.CreatedTime.String(),
+				UpdatedTime: qc.UpdatedTime.String(),
 				Type:        typeutil.QueryCoordRole,
 				ID:          qc.session.ServerID,
 			},
 			SystemConfigurations: metricsinfo.QueryCoordConfiguration{
-				SearchChannelPrefix:       Params.CommonCfg.QueryCoordSearch,
-				SearchResultChannelPrefix: Params.CommonCfg.QueryCoordSearchResult,
+				SearchChannelPrefix:       util.GetPath(qc.cfg, util.QueryCoordSearchChannel),
+				SearchResultChannelPrefix: util.GetPath(qc.cfg, util.QueryCoordSearchResultChannel),
 			},
 		},
 		ConnectedNodes: make([]metricsinfo.QueryNodeInfos, 0),
@@ -119,7 +120,7 @@ func getSystemInfoMetrics(
 	coordTopology := metricsinfo.QueryCoordTopology{
 		Cluster: clusterTopology,
 		Connections: metricsinfo.ConnTopology{
-			Name: metricsinfo.ConstructComponentName(typeutil.QueryCoordRole, Params.QueryCoordCfg.QueryCoordID),
+			Name: metricsinfo.ConstructComponentName(typeutil.QueryCoordRole, qc.session.ServerID),
 			// TODO(dragondriver): fill ConnectedComponents if necessary
 			ConnectedComponents: []metricsinfo.ConnectionInfo{},
 		},

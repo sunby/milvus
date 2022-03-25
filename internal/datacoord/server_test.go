@@ -24,11 +24,13 @@ import (
 	"os"
 	"os/signal"
 	"path"
-	"strconv"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/milvus-io/milvus/configs"
+	"github.com/milvus-io/milvus/internal/util"
 
 	"github.com/milvus-io/milvus/internal/common"
 	memkv "github.com/milvus-io/milvus/internal/kv/mem"
@@ -42,6 +44,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
+	"github.com/milvus-io/milvus/internal/util/tsoutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -58,10 +61,11 @@ func TestGetSegmentInfoChannel(t *testing.T) {
 	svr := newTestServer(t, nil)
 	defer closeTestServer(t, svr)
 	t.Run("get segment info channel", func(t *testing.T) {
+		cfg := configs.NewConfig()
 		resp, err := svr.GetSegmentInfoChannel(context.TODO())
 		assert.Nil(t, err)
 		assert.EqualValues(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
-		assert.EqualValues(t, Params.CommonCfg.DataCoordSegmentInfo, resp.Value)
+		assert.EqualValues(t, util.GetPath(cfg, util.DataCoordSegmentInfoChannel), resp.Value)
 	})
 }
 
@@ -245,10 +249,11 @@ func TestFlush(t *testing.T) {
 func TestGetTimeTickChannel(t *testing.T) {
 	svr := newTestServer(t, nil)
 	defer closeTestServer(t, svr)
+	cfg := configs.NewConfig()
 	resp, err := svr.GetTimeTickChannel(context.TODO())
 	assert.Nil(t, err)
 	assert.EqualValues(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
-	assert.EqualValues(t, Params.CommonCfg.DataCoordTimeTick, resp.Value)
+	assert.EqualValues(t, util.GetPath(cfg, util.DataCoordTimeTickChannel), resp.Value)
 }
 
 func TestGetSegmentStates(t *testing.T) {
@@ -1080,7 +1085,8 @@ func TestDataNodeTtChannel(t *testing.T) {
 
 		ttMsgStream, err := svr.msFactory.NewMsgStream(context.TODO())
 		assert.Nil(t, err)
-		ttMsgStream.AsProducer([]string{Params.CommonCfg.DataCoordTimeTick})
+		cfg := configs.NewConfig()
+		ttMsgStream.AsProducer([]string{util.GetPath(cfg, util.DataCoordTimeTickChannel)})
 		ttMsgStream.Start()
 		defer ttMsgStream.Close()
 		info := &NodeInfo{
@@ -1148,7 +1154,8 @@ func TestDataNodeTtChannel(t *testing.T) {
 		})
 		ttMsgStream, err := svr.msFactory.NewMsgStream(context.TODO())
 		assert.Nil(t, err)
-		ttMsgStream.AsProducer([]string{Params.CommonCfg.DataCoordTimeTick})
+		cfg := configs.NewConfig()
+		ttMsgStream.AsProducer([]string{util.GetPath(cfg, util.DataCoordTimeTickChannel)})
 		ttMsgStream.Start()
 		defer ttMsgStream.Close()
 		info := &NodeInfo{
@@ -1230,7 +1237,8 @@ func TestDataNodeTtChannel(t *testing.T) {
 
 		ttMsgStream, err := svr.msFactory.NewMsgStream(context.TODO())
 		assert.Nil(t, err)
-		ttMsgStream.AsProducer([]string{Params.CommonCfg.DataCoordTimeTick})
+		cfg := configs.NewConfig()
+		ttMsgStream.AsProducer([]string{util.GetPath(cfg, util.DataCoordTimeTickChannel)})
 		ttMsgStream.Start()
 		defer ttMsgStream.Close()
 		node := &NodeInfo{
@@ -1752,7 +1760,8 @@ func TestGetRecoveryInfo(t *testing.T) {
 }
 
 func TestGetCompactionState(t *testing.T) {
-	Params.DataCoordCfg.EnableCompaction = true
+	cfg := configs.NewConfig()
+	cfg.Compaction.EnableCompaction = true
 	t.Run("test get compaction state with new compactionhandler", func(t *testing.T) {
 		svr := &Server{}
 		svr.isServing = ServerStateHealthy
@@ -1807,12 +1816,13 @@ func TestGetCompactionState(t *testing.T) {
 		resp, err := svr.GetCompactionState(context.Background(), &milvuspb.GetCompactionStateRequest{})
 		assert.Nil(t, err)
 		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.GetStatus().GetErrorCode())
-		assert.Equal(t, msgDataCoordIsUnhealthy(Params.DataCoordCfg.NodeID), resp.GetStatus().GetReason())
+		assert.Equal(t, msgDataCoordIsUnhealthy(serverID), resp.GetStatus().GetReason())
 	})
 }
 
 func TestCompleteCompaction(t *testing.T) {
-	Params.DataCoordCfg.EnableCompaction = true
+	cfg := configs.NewConfig()
+	cfg.Compaction.EnableCompaction = true
 	t.Run("test complete compaction successfully", func(t *testing.T) {
 		svr := &Server{}
 		svr.isServing = ServerStateHealthy
@@ -1851,12 +1861,13 @@ func TestCompleteCompaction(t *testing.T) {
 		resp, err := svr.CompleteCompaction(context.Background(), &datapb.CompactionResult{})
 		assert.Nil(t, err)
 		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.GetErrorCode())
-		assert.Equal(t, msgDataCoordIsUnhealthy(Params.DataCoordCfg.NodeID), resp.GetReason())
+		assert.Equal(t, msgDataCoordIsUnhealthy(serverID), resp.GetReason())
 	})
 }
 
 func TestManualCompaction(t *testing.T) {
-	Params.DataCoordCfg.EnableCompaction = true
+	cfg := configs.NewConfig()
+	cfg.Compaction.EnableCompaction = true
 	t.Run("test manual compaction successfully", func(t *testing.T) {
 		svr := &Server{allocator: &MockAllocator{}}
 		svr.isServing = ServerStateHealthy
@@ -1912,7 +1923,7 @@ func TestManualCompaction(t *testing.T) {
 		})
 		assert.Nil(t, err)
 		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.Status.ErrorCode)
-		assert.Equal(t, msgDataCoordIsUnhealthy(Params.DataCoordCfg.NodeID), resp.Status.Reason)
+		assert.Equal(t, msgDataCoordIsUnhealthy(serverID), resp.Status.Reason)
 	})
 }
 
@@ -1962,7 +1973,7 @@ func TestGetCompactionStateWithPlans(t *testing.T) {
 		})
 		assert.Nil(t, err)
 		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.Status.ErrorCode)
-		assert.Equal(t, msgDataCoordIsUnhealthy(Params.DataCoordCfg.NodeID), resp.Status.Reason)
+		assert.Equal(t, msgDataCoordIsUnhealthy(serverID), resp.Status.Reason)
 	})
 }
 
@@ -1985,7 +1996,8 @@ func TestOptions(t *testing.T) {
 	t.Run("SetCluster", func(t *testing.T) {
 		kv := memkv.NewMemoryKV()
 		sessionManager := NewSessionManager()
-		channelManager, err := NewChannelManager(kv, newMockHandler())
+		cfg := configs.NewConfig()
+		channelManager, err := NewChannelManager(kv, newMockHandler(), cfg)
 		assert.Nil(t, err)
 
 		cluster := NewCluster(sessionManager, channelManager)
@@ -2032,7 +2044,8 @@ func (p *mockPolicyFactory) NewDeregisterPolicy() DeregisterPolicy {
 
 func TestHandleSessionEvent(t *testing.T) {
 	kv := memkv.NewMemoryKV()
-	channelManager, err := NewChannelManager(kv, newMockHandler(), withFactory(&mockPolicyFactory{}))
+	cfg := configs.NewConfig()
+	channelManager, err := NewChannelManager(kv, newMockHandler(), cfg, withFactory(&mockPolicyFactory{}))
 	assert.Nil(t, err)
 	sessionManager := NewSessionManager()
 	cluster := NewCluster(sessionManager, channelManager)
@@ -2291,21 +2304,20 @@ func (ms *MockClosePanicMsgstream) Chan() <-chan *msgstream.MsgPack {
 }
 
 func newTestServer(t *testing.T, receiveCh chan interface{}, opts ...Option) *Server {
-	Params.Init()
-	Params.CommonCfg.DataCoordTimeTick = Params.CommonCfg.DataCoordTimeTick + strconv.Itoa(rand.Int())
 	var err error
 	factory := msgstream.NewPmsFactory()
+	cfg := configs.NewConfig()
 	m := map[string]interface{}{
-		"pulsarAddress":  Params.PulsarCfg.Address,
+		"pulsarAddress":  util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port),
 		"receiveBufSize": 1024,
 		"pulsarBufSize":  1024,
 	}
 	err = factory.SetParams(m)
 	assert.Nil(t, err)
 
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
-	sessKey := path.Join(Params.EtcdCfg.MetaRootPath, sessionutil.DefaultServiceRoot)
+	sessKey := path.Join(util.GetPath(cfg, util.EtcdMeta), sessionutil.DefaultServiceRoot)
 	_, err = etcdCli.Delete(context.Background(), sessKey, clientv3.WithPrefix())
 	assert.Nil(t, err)
 
@@ -2332,4 +2344,9 @@ func closeTestServer(t *testing.T, svr *Server) {
 	assert.Nil(t, err)
 	err = svr.CleanMeta()
 	assert.Nil(t, err)
+}
+
+func TestXXX(t *testing.T) {
+	ts, _ := tsoutil.ParseTS(430723606947299329)
+	t.Log(ts)
 }

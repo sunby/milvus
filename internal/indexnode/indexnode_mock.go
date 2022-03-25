@@ -24,12 +24,14 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/milvus-io/milvus/configs"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 	"github.com/milvus-io/milvus/internal/util/retry"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
@@ -180,15 +182,15 @@ func (inm *Mock) Stop() error {
 
 // Register registers an IndexNode role in etcd, if the internal member `Err` is true, it will return an error.
 func (inm *Mock) Register() error {
+	cfg := configs.NewConfig()
 	if inm.Err {
 		return errors.New("IndexNode register failed")
 	}
-	Params.Init()
-	inm.etcdKV = etcdkv.NewEtcdKV(inm.etcdCli, Params.EtcdCfg.MetaRootPath)
+	inm.etcdKV = etcdkv.NewEtcdKV(inm.etcdCli, util.GetPath(cfg, util.EtcdMeta))
 	if err := inm.etcdKV.RemoveWithPrefix("session/" + typeutil.IndexNodeRole); err != nil {
 		return err
 	}
-	session := sessionutil.NewSession(context.Background(), Params.EtcdCfg.MetaRootPath, inm.etcdCli)
+	session := sessionutil.NewSession(context.Background(), util.GetPath(cfg, util.EtcdMeta), inm.etcdCli)
 	session.Init(typeutil.IndexNodeRole, "localhost:21121", false, false)
 	session.Register()
 	return nil
@@ -307,7 +309,7 @@ func (inm *Mock) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest
 		metrics, err := getMockSystemInfoMetrics(ctx, req, inm)
 
 		log.Debug("IndexNode.GetMetrics",
-			zap.Int64("node_id", Params.IndexNodeCfg.NodeID),
+			zap.Int64("node_id", serverID),
 			zap.String("req", req.Request),
 			zap.String("metric_type", metricType),
 			zap.Any("metrics", metrics), // TODO(dragondriver): necessary? may be very large
@@ -317,7 +319,7 @@ func (inm *Mock) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest
 	}
 
 	log.Warn("IndexNode.GetMetrics failed, request metric type is not implemented yet",
-		zap.Int64("node_id", Params.IndexNodeCfg.NodeID),
+		zap.Int64("node_id", serverID),
 		zap.String("req", req.Request),
 		zap.String("metric_type", metricType))
 
@@ -338,7 +340,7 @@ func getMockSystemInfoMetrics(
 	// TODO(dragondriver): add more metrics
 	nodeInfos := metricsinfo.IndexNodeInfos{
 		BaseComponentInfos: metricsinfo.BaseComponentInfos{
-			Name: metricsinfo.ConstructComponentName(typeutil.IndexNodeRole, Params.IndexNodeCfg.NodeID),
+			Name: metricsinfo.ConstructComponentName(typeutil.IndexNodeRole, serverID),
 			HardwareInfos: metricsinfo.HardwareMetrics{
 				CPUCoreCount: metricsinfo.GetCPUCoreCount(false),
 				CPUCoreUsage: metricsinfo.GetCPUUsage(),
@@ -347,15 +349,10 @@ func getMockSystemInfoMetrics(
 				Disk:         metricsinfo.GetDiskCount(),
 				DiskUsage:    metricsinfo.GetDiskUsage(),
 			},
-			SystemInfo:  metricsinfo.DeployMetrics{},
-			CreatedTime: Params.IndexNodeCfg.CreatedTime.String(),
-			UpdatedTime: Params.IndexNodeCfg.UpdatedTime.String(),
-			Type:        typeutil.IndexNodeRole,
+			SystemInfo: metricsinfo.DeployMetrics{},
+			Type:       typeutil.IndexNodeRole,
 		},
-		SystemConfigurations: metricsinfo.IndexNodeConfiguration{
-			MinioBucketName: Params.MinioCfg.BucketName,
-			SimdType:        Params.CommonCfg.SimdType,
-		},
+		SystemConfigurations: metricsinfo.IndexNodeConfiguration{},
 	}
 
 	metricsinfo.FillDeployMetricsWithEnv(&nodeInfos.SystemInfo)
@@ -368,6 +365,6 @@ func getMockSystemInfoMetrics(
 			Reason:    "",
 		},
 		Response:      resp,
-		ComponentName: metricsinfo.ConstructComponentName(typeutil.IndexNodeRole, Params.IndexNodeCfg.NodeID),
+		ComponentName: metricsinfo.ConstructComponentName(typeutil.IndexNodeRole, serverID),
 	}, nil
 }

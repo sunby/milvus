@@ -28,6 +28,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/common"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
@@ -57,6 +58,7 @@ type segmentLoader struct {
 	etcdKV *etcdkv.EtcdKV
 
 	factory msgstream.Factory
+	cfg     *configs.Config
 }
 
 func (loader *segmentLoader) loadSegment(req *querypb.LoadSegmentsRequest, segmentType segmentType) error {
@@ -143,7 +145,7 @@ func (loader *segmentLoader) loadSegment(req *querypb.LoadSegmentsRequest, segme
 			return err
 		}
 
-		metrics.QueryNodeLoadSegmentLatency.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Observe(float64(tr.ElapseSpan().Milliseconds()))
+		metrics.QueryNodeLoadSegmentLatency.WithLabelValues(fmt.Sprint(queryNodeID)).Observe(float64(tr.ElapseSpan().Milliseconds()))
 
 		return nil
 	}
@@ -513,14 +515,14 @@ func (loader *segmentLoader) FromDmlCPLoadDelete(ctx context.Context, collection
 	}
 
 	defer func() {
-		metrics.QueryNodeNumConsumers.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Dec()
+		metrics.QueryNodeNumConsumers.WithLabelValues(fmt.Sprint(queryNodeID)).Dec()
 		stream.Close()
 	}()
 
 	pChannelName := funcutil.ToPhysicalChannel(position.ChannelName)
 	position.ChannelName = pChannelName
 
-	stream.AsConsumer([]string{pChannelName}, fmt.Sprintf("querynode-%d-%d", Params.QueryNodeCfg.QueryNodeID, collectionID))
+	stream.AsConsumer([]string{pChannelName}, fmt.Sprintf("querynode-%d-%d", queryNodeID, collectionID))
 	lastMsgID, err := stream.GetLatestMsgID(pChannelName)
 	if err != nil {
 		return err
@@ -531,7 +533,7 @@ func (loader *segmentLoader) FromDmlCPLoadDelete(ctx context.Context, collection
 		return nil
 	}
 
-	metrics.QueryNodeNumConsumers.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Inc()
+	metrics.QueryNodeNumConsumers.WithLabelValues(fmt.Sprint(queryNodeID)).Inc()
 	err = stream.Seek([]*internalpb.MsgPosition{position})
 	if err != nil {
 		return err
@@ -668,9 +670,9 @@ func (loader *segmentLoader) checkSegmentSize(collectionID UniqueID, segmentLoad
 	}
 
 	// when load segment, data will be copied from go memory to c++ memory
-	if uint64(usedMemAfterLoad+maxSegmentSize*int64(concurrency)) > uint64(float64(totalMem)*Params.QueryNodeCfg.OverloadedMemoryThresholdPercentage) {
+	if uint64(usedMemAfterLoad+maxSegmentSize*int64(concurrency)) > uint64(float64(totalMem)*loader.cfg.QueryCoord.MemoryUsageLimitRatio) {
 		return fmt.Errorf("load segment failed, OOM if load, collectionID = %d, maxSegmentSize = %d, usedMemAfterLoad = %d, totalMem = %d, thresholdFactor = %f",
-			collectionID, maxSegmentSize, usedMemAfterLoad, totalMem, Params.QueryNodeCfg.OverloadedMemoryThresholdPercentage)
+			collectionID, maxSegmentSize, usedMemAfterLoad, totalMem, loader.cfg.QueryCoord.MemoryUsageLimitRatio)
 	}
 
 	return nil

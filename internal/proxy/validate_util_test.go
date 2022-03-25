@@ -19,6 +19,7 @@ package proxy
 import (
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 	"github.com/stretchr/testify/assert"
@@ -101,14 +102,15 @@ func TestValidateFieldName(t *testing.T) {
 }
 
 func TestValidateDimension(t *testing.T) {
+	cfg := configs.NewConfig()
 	assert.Nil(t, validateDimension(1, false))
-	assert.Nil(t, validateDimension(Params.ProxyCfg.MaxDimension, false))
+	assert.Nil(t, validateDimension(int64(cfg.DimensionLimit), false))
 	assert.Nil(t, validateDimension(8, true))
-	assert.Nil(t, validateDimension(Params.ProxyCfg.MaxDimension, true))
+	assert.Nil(t, validateDimension(int64(cfg.DimensionLimit), true))
 
 	// invalid dim
 	assert.NotNil(t, validateDimension(-1, false))
-	assert.NotNil(t, validateDimension(Params.ProxyCfg.MaxDimension+1, false))
+	assert.NotNil(t, validateDimension(int64(cfg.DimensionLimit)+1, false))
 	assert.NotNil(t, validateDimension(9, true))
 }
 

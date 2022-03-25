@@ -55,7 +55,7 @@ func (fm *flowgraphManager) addAndStart(dn *DataNode, vchan *datapb.VchannelInfo
 
 	var alloc allocatorInterface = newAllocator(dn.rootCoord)
 
-	dataSyncService, err := newDataSyncService(dn.ctx, make(chan flushMsg, 100), replica, alloc, dn.msFactory, vchan, dn.clearSignal, dn.dataCoord, dn.segmentCache, dn.chunkManager, dn.compactionExecutor)
+	dataSyncService, err := newDataSyncService(dn.ctx, make(chan flushMsg, 100), replica, alloc, dn.msFactory, vchan, dn.clearSignal, dn.dataCoord, dn.segmentCache, dn.chunkManager, dn.compactionExecutor, dn.cfg)
 	if err != nil {
 		log.Warn("new data sync service fail", zap.String("vChannelName", vchan.GetChannelName()), zap.Error(err))
 		return err
@@ -67,7 +67,7 @@ func (fm *flowgraphManager) addAndStart(dn *DataNode, vchan *datapb.VchannelInfo
 
 	fm.flowgraphs.Store(vchan.GetChannelName(), dataSyncService)
 
-	metrics.DataNodeNumFlowGraphs.WithLabelValues(fmt.Sprint(Params.DataNodeCfg.NodeID)).Inc()
+	metrics.DataNodeNumFlowGraphs.WithLabelValues(fmt.Sprint(serverID)).Inc()
 	return nil
 }
 
@@ -76,7 +76,7 @@ func (fm *flowgraphManager) release(vchanName string) {
 
 	if fg, loaded := fm.flowgraphs.LoadAndDelete(vchanName); loaded {
 		fg.(*dataSyncService).close()
-		metrics.DataNodeNumFlowGraphs.WithLabelValues(fmt.Sprint(Params.DataNodeCfg.NodeID)).Dec()
+		metrics.DataNodeNumFlowGraphs.WithLabelValues(fmt.Sprint(serverID)).Dec()
 	}
 	log.Info("release flowgraph resources end", zap.String("Vchannel", vchanName))
 }

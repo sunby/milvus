@@ -24,12 +24,10 @@ import (
 	"github.com/milvus-io/milvus/internal/util/mock"
 	"google.golang.org/grpc"
 
-	"github.com/milvus-io/milvus/internal/proxy"
 	"github.com/stretchr/testify/assert"
 )
 
 func Test_NewClient(t *testing.T) {
-	proxy.Params.InitOnce()
 
 	ctx := context.Background()
 	client, err := NewClient(ctx, "")

@@ -19,11 +19,13 @@ package datacoord
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"path"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
@@ -203,10 +205,10 @@ func Test_garbageCollector_scan(t *testing.T) {
 
 // initialize unit test sso env
 func initUtOSSEnv(bucket, root string, n int) (cli *minio.Client, inserts []string, stats []string, delta []string, other []string, err error) {
-	Params.Init()
-	cli, err = minio.New(Params.MinioCfg.Address, &minio.Options{
-		Creds:  credentials.NewStaticV4(Params.MinioCfg.AccessKeyID, Params.MinioCfg.SecretAccessKey, ""),
-		Secure: Params.MinioCfg.UseSSL,
+	cfg := configs.NewConfig()
+	cli, err = minio.New(fmt.Sprintf("%s:%d", cfg.Minio.Address, cfg.Minio.Port), &minio.Options{
+		Creds:  credentials.NewStaticV4(cfg.Minio.AccessKeyID, cfg.Minio.SecretAccessKey, ""),
+		Secure: cfg.Minio.UseSSL,
 	})
 	if err != nil {
 		return nil, nil, nil, nil, nil, err

@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -31,11 +32,11 @@ func TestStatsService_start(t *testing.T) {
 
 	msFactory := msgstream.NewPmsFactory()
 	m := map[string]interface{}{
-		"PulsarAddress":  Params.PulsarCfg.Address,
+		"PulsarAddress":  util.CreatePulsarAddress(node.cfg.Pulsar.Address, node.cfg.Pulsar.Port),
 		"ReceiveBufSize": 1024,
 		"PulsarBufSize":  1024}
 	msFactory.SetParams(m)
-	node.statsService = newStatsService(node.queryNodeLoopCtx, node.historical.replica, msFactory)
+	node.statsService = newStatsService(node.queryNodeLoopCtx, node.cfg, node.historical.replica, msFactory)
 	node.statsService.start()
 	node.Stop()
 }
@@ -50,12 +51,12 @@ func TestSegmentManagement_sendSegmentStatistic(t *testing.T) {
 
 	const receiveBufSize = 1024
 	// start pulsar
-	producerChannels := []string{Params.CommonCfg.QueryNodeStats}
+	producerChannels := []string{util.GetPath(node.cfg, util.QueryNodeStatsChannel)}
 
 	msFactory := msgstream.NewPmsFactory()
 	m := map[string]interface{}{
 		"receiveBufSize": receiveBufSize,
-		"pulsarAddress":  Params.PulsarCfg.Address,
+		"pulsarAddress":  util.CreatePulsarAddress(node.cfg.Pulsar.Address, node.cfg.Pulsar.Port),
 		"pulsarBufSize":  1024}
 	err = msFactory.SetParams(m)
 	assert.Nil(t, err)
@@ -66,7 +67,7 @@ func TestSegmentManagement_sendSegmentStatistic(t *testing.T) {
 
 	var statsMsgStream msgstream.MsgStream = statsStream
 
-	node.statsService = newStatsService(node.queryNodeLoopCtx, node.historical.replica, msFactory)
+	node.statsService = newStatsService(node.queryNodeLoopCtx, node.cfg, node.historical.replica, msFactory)
 	node.statsService.statsStream = statsMsgStream
 	node.statsService.statsStream.Start()
 

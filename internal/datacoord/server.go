@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	datanodeclient "github.com/milvus-io/milvus/internal/distributed/datanode/client"
 	rootcoordclient "github.com/milvus-io/milvus/internal/distributed/rootcoord/client"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
@@ -38,9 +39,9 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/logutil"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/milvus-io/milvus/internal/util/retry"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/timerecord"
@@ -91,8 +92,6 @@ type rootCoordCreatorFunc func(ctx context.Context, metaRootPath string, etcdCli
 // makes sure Server implements `DataCoord`
 var _ types.DataCoord = (*Server)(nil)
 
-var Params paramtable.ComponentParam
-
 // Server implements `types.Datacoord`
 // handles Data Cooridinator related jobs
 type Server struct {
@@ -130,6 +129,11 @@ type Server struct {
 
 	dataNodeCreator        dataNodeCreatorFunc
 	rootCoordClientCreator rootCoordCreatorFunc
+
+	cfg *configs.Config
+
+	createdTime time.Time
+	updatedTime time.Time
 }
 
 // ServerHelper datacoord server injection helper
@@ -234,13 +238,13 @@ func (s *Server) Register() error {
 }
 
 func (s *Server) initSession() error {
-	s.session = sessionutil.NewSession(s.ctx, Params.EtcdCfg.MetaRootPath, s.etcdCli)
+	s.session = sessionutil.NewSession(s.ctx, util.GetPath(s.cfg, util.EtcdMeta), s.etcdCli)
 	if s.session == nil {
 		return errors.New("failed to initialize session")
 	}
-	s.session.Init(typeutil.DataCoordRole, Params.DataCoordCfg.Address, true, true)
-	Params.DataCoordCfg.NodeID = s.session.ServerID
-	Params.SetLogger(Params.DataCoordCfg.NodeID)
+	addr := fmt.Sprintf("%s:%d", s.cfg.AdvertiseAddress, s.cfg.DataCoord.Port)
+	s.session.Init(typeutil.DataCoordRole, addr, true, true)
+	serverID = s.session.ServerID
 	return nil
 }
 
@@ -260,7 +264,7 @@ func (s *Server) Init() error {
 func (s *Server) Start() error {
 	var err error
 	m := map[string]interface{}{
-		"PulsarAddress":  Params.PulsarCfg.Address,
+		"PulsarAddress":  util.CreatePulsarAddress(s.cfg.Pulsar.Address, s.cfg.Pulsar.Port),
 		"ReceiveBufSize": 1024,
 		"PulsarBufSize":  1024}
 	err = s.msFactory.SetParams(m)
@@ -282,7 +286,7 @@ func (s *Server) Start() error {
 	}
 
 	s.allocator = newRootCoordAllocator(s.rootCoordClient)
-	if Params.DataCoordCfg.EnableCompaction {
+	if s.cfg.Compaction.EnableCompaction {
 		s.createCompactionHandler()
 		s.createCompactionTrigger()
 	}
@@ -297,8 +301,8 @@ func (s *Server) Start() error {
 	}
 
 	s.startServerLoop()
-	Params.DataCoordCfg.CreatedTime = time.Now()
-	Params.DataCoordCfg.UpdatedTime = time.Now()
+	s.createdTime = time.Now()
+	s.updatedTime = time.Now()
 	atomic.StoreInt64(&s.isServing, ServerStateHealthy)
 	logutil.Logger(s.ctx).Debug("startup success")
 
@@ -346,22 +350,22 @@ func (s *Server) stopCompactionTrigger() {
 func (s *Server) initGarbageCollection() error {
 	var cli *minio.Client
 	var err error
-	if Params.DataCoordCfg.EnableGarbageCollection {
-		cli, err = minio.New(Params.MinioCfg.Address, &minio.Options{
-			Creds:  credentials.NewStaticV4(Params.MinioCfg.AccessKeyID, Params.MinioCfg.SecretAccessKey, ""),
-			Secure: Params.MinioCfg.UseSSL,
+	if s.cfg.GarbageCollector.Enable {
+		cli, err = minio.New(fmt.Sprintf("%s:%d", s.cfg.Minio.Address, s.cfg.Minio.Port), &minio.Options{
+			Creds:  credentials.NewStaticV4(s.cfg.Minio.AccessKeyID, s.cfg.Minio.SecretAccessKey, ""),
+			Secure: s.cfg.Minio.UseSSL,
 		})
 		if err != nil {
 			return err
 		}
 
 		checkBucketFn := func() error {
-			has, err := cli.BucketExists(context.TODO(), Params.MinioCfg.BucketName)
+			has, err := cli.BucketExists(context.TODO(), s.cfg.Minio.BucketName)
 			if err != nil {
 				return err
 			}
 			if !has {
-				err = cli.MakeBucket(context.TODO(), Params.MinioCfg.BucketName, minio.MakeBucketOptions{})
+				err = cli.MakeBucket(context.TODO(), s.cfg.Minio.BucketName, minio.MakeBucketOptions{})
 				if err != nil {
 					return err
 				}
@@ -380,13 +384,13 @@ func (s *Server) initGarbageCollection() error {
 
 	s.garbageCollector = newGarbageCollector(s.meta, GcOption{
 		cli:        cli,
-		enabled:    Params.DataCoordCfg.EnableGarbageCollection,
-		bucketName: Params.MinioCfg.BucketName,
-		rootPath:   Params.MinioCfg.RootPath,
+		enabled:    s.cfg.GarbageCollector.Enable,
+		bucketName: s.cfg.Minio.BucketName,
+		rootPath:   s.cfg.Minio.RootPath,
 
-		checkInterval:    Params.DataCoordCfg.GCInterval,
-		missingTolerance: Params.DataCoordCfg.GCMissingTolerance,
-		dropTolerance:    Params.DataCoordCfg.GCDropTolerance,
+		checkInterval:    time.Duration(s.cfg.GarbageCollector.Interval) * time.Second,
+		missingTolerance: time.Duration(s.cfg.GarbageCollector.MissedFileTolerance) * time.Second,
+		dropTolerance:    time.Duration(s.cfg.GarbageCollector.DroppedFileTolerance) * time.Second,
 	})
 	return nil
 }
@@ -422,7 +426,7 @@ func (s *Server) startSegmentManager() {
 }
 
 func (s *Server) initMeta() error {
-	etcdKV := etcdkv.NewEtcdKV(s.etcdCli, Params.EtcdCfg.MetaRootPath)
+	etcdKV := etcdkv.NewEtcdKV(s.etcdCli, util.GetPath(s.cfg, util.EtcdMeta))
 	s.kvClient = etcdKV
 	reloadEtcdFn := func() error {
 		var err error
@@ -452,11 +456,12 @@ func (s *Server) startDataNodeTtLoop(ctx context.Context) {
 		log.Error("DataCoord failed to create timetick channel", zap.Error(err))
 		return
 	}
-	ttMsgStream.AsConsumerWithPosition([]string{Params.CommonCfg.DataCoordTimeTick},
-		Params.CommonCfg.DataCoordSubName, mqwrapper.SubscriptionPositionLatest)
+	timetickChannel, subName := util.GetPath(s.cfg, util.DataCoordTimeTickChannel), util.GetPath(s.cfg, util.DataCoordSubName)
+	ttMsgStream.AsConsumerWithPosition([]string{timetickChannel},
+		subName, mqwrapper.SubscriptionPositionLatest)
 	log.Info("DataCoord creates the timetick channel consumer",
-		zap.String("timeTickChannel", Params.CommonCfg.DataCoordTimeTick),
-		zap.String("subscription", Params.CommonCfg.DataCoordSubName))
+		zap.String("timeTickChannel", timetickChannel),
+		zap.String("subscription", subName))
 	ttMsgStream.Start()
 
 	go s.handleDataNodeTimetickMsgstream(ctx, ttMsgStream)
@@ -757,7 +762,7 @@ func (s *Server) handleFlushingSegments(ctx context.Context) {
 
 func (s *Server) initRootCoordClient() error {
 	var err error
-	if s.rootCoordClient, err = s.rootCoordClientCreator(s.ctx, Params.EtcdCfg.MetaRootPath, s.etcdCli); err != nil {
+	if s.rootCoordClient, err = s.rootCoordClientCreator(s.ctx, util.GetPath(s.cfg, util.EtcdMeta), s.etcdCli); err != nil {
 		return err
 	}
 	if err = s.rootCoordClient.Init(); err != nil {
@@ -780,7 +785,7 @@ func (s *Server) Stop() error {
 	s.stopServerLoop()
 	s.session.Revoke(time.Second)
 
-	if Params.DataCoordCfg.EnableCompaction {
+	if s.cfg.Compaction.EnableCompaction {
 		s.stopCompactionTrigger()
 		s.stopCompactionHandler()
 	}
@@ -819,7 +824,7 @@ func (s *Server) loadCollectionFromRootCoord(ctx context.Context, collectionID i
 	resp, err := s.rootCoordClient.DescribeCollection(ctx, &milvuspb.DescribeCollectionRequest{
 		Base: &commonpb.MsgBase{
 			MsgType:  commonpb.MsgType_DescribeCollection,
-			SourceID: Params.DataCoordCfg.NodeID,
+			SourceID: serverID,
 		},
 		DbName:       "",
 		CollectionID: collectionID,
@@ -832,7 +837,7 @@ func (s *Server) loadCollectionFromRootCoord(ctx context.Context, collectionID i
 			MsgType:   commonpb.MsgType_ShowPartitions,
 			MsgID:     0,
 			Timestamp: 0,
-			SourceID:  Params.DataCoordCfg.NodeID,
+			SourceID:  serverID,
 		},
 		DbName:         "",
 		CollectionName: resp.Schema.Name,
@@ -852,3 +857,5 @@ func (s *Server) loadCollectionFromRootCoord(ctx context.Context, collectionID i
 	s.meta.AddCollection(collInfo)
 	return nil
 }
+
+var serverID int64

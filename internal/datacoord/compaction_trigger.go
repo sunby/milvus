@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
@@ -78,10 +79,12 @@ type compactionTrigger struct {
 	mergeCompactionSegmentThreshold int
 	quit                            chan struct{}
 	wg                              sync.WaitGroup
+	cfg                             *configs.Config
 }
 
-func newCompactionTrigger(meta *meta, compactionHandler compactionPlanContext, allocator allocator) *compactionTrigger {
+func newCompactionTrigger(cfg *configs.Config, meta *meta, compactionHandler compactionPlanContext, allocator allocator) *compactionTrigger {
 	return &compactionTrigger{
+		cfg:                             cfg,
 		meta:                            meta,
 		allocator:                       allocator,
 		signals:                         make(chan *compactionSignal, signalBufferSize),
@@ -125,7 +128,7 @@ func (t *compactionTrigger) startGlobalCompactionLoop() {
 	defer t.wg.Done()
 
 	// If AutoCompaction disabled, global loop will not start
-	if !Params.DataCoordCfg.EnableAutoCompaction {
+	if !t.cfg.Compaction.EnableAutoCompaction {
 		return
 	}
 
@@ -137,7 +140,7 @@ func (t *compactionTrigger) startGlobalCompactionLoop() {
 			return
 		case <-t.globalTrigger.C:
 			cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			tt, err := getTimetravelReverseTime(cctx, t.allocator)
+			tt, err := getTimetravelReverseTime(cctx, t.cfg.RetentionDuration, t.allocator)
 			if err != nil {
 				log.Warn("unbale to get compaction timetravel", zap.Error(err))
 				cancel()
@@ -176,7 +179,7 @@ func (t *compactionTrigger) triggerCompaction(timetravel *timetravel) error {
 // triggerSingleCompaction triger a compaction bundled with collection-partiiton-channel-segment
 func (t *compactionTrigger) triggerSingleCompaction(collectionID, partitionID, segmentID int64, channel string, timetravel *timetravel) error {
 	// If AutoCompaction diabled, flush request will not trigger compaction
-	if !Params.DataCoordCfg.EnableAutoCompaction {
+	if !t.cfg.Compaction.EnableAutoCompaction {
 		return nil
 	}
 

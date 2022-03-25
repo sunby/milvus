@@ -18,7 +18,6 @@ package querynode
 
 import (
 	"context"
-	"math/rand"
 	"os"
 	"os/signal"
 	"strconv"
@@ -29,8 +28,10 @@ import (
 
 	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/milvus-io/milvus/configs"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
@@ -49,8 +50,6 @@ type queryCoordMock struct {
 
 func setup() {
 	os.Setenv("QUERY_NODE_ID", "1")
-	Params.Init()
-	Params.EtcdCfg.MetaRootPath = "/etcd/test/root/querynode"
 }
 
 func genTestCollectionSchema(collectionID UniqueID, isBinary bool, dim int) *schemapb.CollectionSchema {
@@ -191,24 +190,25 @@ func newQueryNodeMock() *QueryNode {
 			cancel()
 		}()
 	}
-	etcdCli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	if err != nil {
 		panic(err)
 	}
-	etcdKV := etcdkv.NewEtcdKV(etcdCli, Params.EtcdCfg.MetaRootPath)
+	etcdKV := etcdkv.NewEtcdKV(etcdCli, util.GetPath(cfg, util.EtcdMeta))
 
 	msFactory, err := newMessageStreamFactory()
 	if err != nil {
 		panic(err)
 	}
-	svr := NewQueryNode(ctx, msFactory)
+	svr := NewQueryNode(ctx, cfg, msFactory)
 	tsReplica := newTSafeReplica()
 	streamingReplica := newCollectionReplica(etcdKV)
 	historicalReplica := newCollectionReplica(etcdKV)
 	svr.historical = newHistorical(svr.queryNodeLoopCtx, historicalReplica, tsReplica)
 	svr.streaming = newStreaming(ctx, streamingReplica, msFactory, etcdKV, tsReplica)
-	svr.dataSyncService = newDataSyncService(ctx, svr.streaming.replica, svr.historical.replica, tsReplica, msFactory)
-	svr.statsService = newStatsService(ctx, svr.historical.replica, msFactory)
+	svr.dataSyncService = newDataSyncService(ctx, cfg, svr.streaming.replica, svr.historical.replica, tsReplica, msFactory)
+	svr.statsService = newStatsService(ctx, cfg, svr.historical.replica, msFactory)
 	svr.chunkManager = storage.NewLocalChunkManager(storage.RootPath(defaultLocalStorage))
 	svr.loader = newSegmentLoader(svr.historical.replica, svr.streaming.replica, etcdKV, svr.chunkManager, msgstream.NewPmsFactory())
 	svr.etcdKV = etcdKV
@@ -227,7 +227,8 @@ func makeNewChannelNames(names []string, suffix string) []string {
 func newMessageStreamFactory() (msgstream.Factory, error) {
 	const receiveBufSize = 1024
 
-	pulsarURL := Params.PulsarCfg.Address
+	cfg := configs.NewConfig()
+	pulsarURL := util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port)
 	msFactory := msgstream.NewPmsFactory()
 	m := map[string]interface{}{
 		"receiveBufSize": receiveBufSize,
@@ -239,7 +240,6 @@ func newMessageStreamFactory() (msgstream.Factory, error) {
 
 func TestMain(m *testing.M) {
 	setup()
-	Params.CommonCfg.QueryNodeStats = Params.CommonCfg.QueryNodeStats + strconv.Itoa(rand.Int())
 	exitCode := m.Run()
 	os.Exit(exitCode)
 }
@@ -259,10 +259,11 @@ func TestQueryNode_register(t *testing.T) {
 	node, err := genSimpleQueryNode(ctx)
 	assert.NoError(t, err)
 
-	etcdcli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.NoError(t, err)
-	defer etcdcli.Close()
-	node.SetEtcdClient(etcdcli)
+	defer etcdCli.Close()
+	node.SetEtcdClient(etcdCli)
 	err = node.initSession()
 	assert.NoError(t, err)
 
@@ -277,10 +278,11 @@ func TestQueryNode_init(t *testing.T) {
 
 	node, err := genSimpleQueryNode(ctx)
 	assert.NoError(t, err)
-	etcdcli, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.NoError(t, err)
-	defer etcdcli.Close()
-	node.SetEtcdClient(etcdcli)
+	defer etcdCli.Close()
+	node.SetEtcdClient(etcdCli)
 	err = node.Init()
 	assert.Nil(t, err)
 }
@@ -341,7 +343,7 @@ func TestQueryNode_adjustByChangeInfo(t *testing.T) {
 
 		segmentChangeInfos := genSimpleChangeInfo()
 		segmentChangeInfos.Infos[0].OnlineSegments = nil
-		segmentChangeInfos.Infos[0].OfflineNodeID = Params.QueryNodeCfg.QueryNodeID
+		segmentChangeInfos.Infos[0].OfflineNodeID = queryNodeID
 
 		qc, err := node.queryService.getQueryCollection(defaultCollectionID)
 		assert.NoError(t, err)
@@ -413,7 +415,7 @@ func TestQueryNode_watchChangeInfo(t *testing.T) {
 
 		segmentChangeInfos := genSimpleChangeInfo()
 		segmentChangeInfos.Infos[0].OnlineSegments = nil
-		segmentChangeInfos.Infos[0].OfflineNodeID = Params.QueryNodeCfg.QueryNodeID
+		segmentChangeInfos.Infos[0].OfflineNodeID = queryNodeID
 
 		qc, err := node.queryService.getQueryCollection(defaultCollectionID)
 		assert.NoError(t, err)

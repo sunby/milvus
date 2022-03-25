@@ -23,6 +23,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/metrics"
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
@@ -44,6 +45,7 @@ type queryNodeFlowGraph struct {
 
 // newQueryNodeFlowGraph returns a new queryNodeFlowGraph
 func newQueryNodeFlowGraph(ctx context.Context,
+	cfg *configs.Config,
 	collectionID UniqueID,
 	streamingReplica ReplicaInterface,
 	tSafeReplica TSafeReplicaInterface,
@@ -60,13 +62,13 @@ func newQueryNodeFlowGraph(ctx context.Context,
 		flowGraph:    flowgraph.NewTimeTickedFlowGraph(ctx1),
 	}
 
-	dmStreamNode, err := q.newDmInputNode(ctx1, factory)
+	dmStreamNode, err := q.newDmInputNode(ctx1, cfg, factory)
 	if err != nil {
 		return nil, err
 	}
-	var filterDmNode node = newFilteredDmNode(streamingReplica, collectionID)
-	var insertNode node = newInsertNode(streamingReplica)
-	var serviceTimeNode node = newServiceTimeNode(tSafeReplica, collectionID, channel)
+	var filterDmNode node = newFilteredDmNode(cfg, streamingReplica, collectionID)
+	var insertNode node = newInsertNode(cfg, streamingReplica)
+	var serviceTimeNode node = newServiceTimeNode(cfg, tSafeReplica, collectionID, channel)
 
 	q.flowGraph.AddNode(dmStreamNode)
 	q.flowGraph.AddNode(filterDmNode)
@@ -114,6 +116,7 @@ func newQueryNodeFlowGraph(ctx context.Context,
 
 // newQueryNodeDeltaFlowGraph returns a new queryNodeFlowGraph
 func newQueryNodeDeltaFlowGraph(ctx context.Context,
+	cfg *configs.Config,
 	collectionID UniqueID,
 	historicalReplica ReplicaInterface,
 	tSafeReplica TSafeReplicaInterface,
@@ -130,13 +133,13 @@ func newQueryNodeDeltaFlowGraph(ctx context.Context,
 		flowGraph:    flowgraph.NewTimeTickedFlowGraph(ctx1),
 	}
 
-	dmStreamNode, err := q.newDmInputNode(ctx1, factory)
+	dmStreamNode, err := q.newDmInputNode(ctx1, cfg, factory)
 	if err != nil {
 		return nil, err
 	}
-	var filterDeleteNode node = newFilteredDeleteNode(historicalReplica, collectionID)
-	var deleteNode node = newDeleteNode(historicalReplica)
-	var serviceTimeNode node = newServiceTimeNode(tSafeReplica, collectionID, channel)
+	var filterDeleteNode node = newFilteredDeleteNode(cfg, historicalReplica, collectionID)
+	var deleteNode node = newDeleteNode(cfg, historicalReplica)
+	var serviceTimeNode node = newServiceTimeNode(cfg, tSafeReplica, collectionID, channel)
 
 	q.flowGraph.AddNode(dmStreamNode)
 	q.flowGraph.AddNode(filterDeleteNode)
@@ -183,7 +186,7 @@ func newQueryNodeDeltaFlowGraph(ctx context.Context,
 }
 
 // newDmInputNode returns a new inputNode
-func (q *queryNodeFlowGraph) newDmInputNode(ctx context.Context, factory msgstream.Factory) (*flowgraph.InputNode, error) {
+func (q *queryNodeFlowGraph) newDmInputNode(ctx context.Context, cfg *configs.Config, factory msgstream.Factory) (*flowgraph.InputNode, error) {
 	insertStream, err := factory.NewTtMsgStream(ctx)
 	if err != nil {
 		return nil, err
@@ -191,8 +194,8 @@ func (q *queryNodeFlowGraph) newDmInputNode(ctx context.Context, factory msgstre
 
 	q.dmlStream = insertStream
 
-	maxQueueLength := Params.QueryNodeCfg.FlowGraphMaxQueueLength
-	maxParallelism := Params.QueryNodeCfg.FlowGraphMaxParallelism
+	maxQueueLength := int32(cfg.FlowGraph.QueueLengthLimit)
+	maxParallelism := int32(cfg.FlowGraph.ParallelismLimit)
 
 	node := flowgraph.NewInputNode(insertStream, "dmlInputNode", maxQueueLength, maxParallelism)
 	return node, nil
@@ -210,7 +213,7 @@ func (q *queryNodeFlowGraph) consumeFlowGraph(channel Channel, subName ConsumeSu
 		zap.Any("subName", subName),
 	)
 	q.consumerCnt++
-	metrics.QueryNodeNumConsumers.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Inc()
+	metrics.QueryNodeNumConsumers.WithLabelValues(fmt.Sprint(queryNodeID)).Inc()
 	return nil
 }
 
@@ -226,7 +229,7 @@ func (q *queryNodeFlowGraph) consumeFlowGraphFromLatest(channel Channel, subName
 		zap.Any("subName", subName),
 	)
 	q.consumerCnt++
-	metrics.QueryNodeNumConsumers.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Inc()
+	metrics.QueryNodeNumConsumers.WithLabelValues(fmt.Sprint(queryNodeID)).Inc()
 	return nil
 }
 
@@ -239,7 +242,7 @@ func (q *queryNodeFlowGraph) seekQueryNodeFlowGraph(position *internalpb.MsgPosi
 		zap.Any("channel", position.ChannelName),
 	)
 	q.consumerCnt++
-	metrics.QueryNodeNumConsumers.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Inc()
+	metrics.QueryNodeNumConsumers.WithLabelValues(fmt.Sprint(queryNodeID)).Inc()
 	return err
 }
 
@@ -248,7 +251,7 @@ func (q *queryNodeFlowGraph) close() {
 	q.cancel()
 	q.flowGraph.Close()
 	if q.dmlStream != nil && q.consumerCnt > 0 {
-		metrics.QueryNodeNumConsumers.WithLabelValues(fmt.Sprint(Params.QueryNodeCfg.QueryNodeID)).Sub(float64(q.consumerCnt))
+		metrics.QueryNodeNumConsumers.WithLabelValues(fmt.Sprint(queryNodeID)).Sub(float64(q.consumerCnt))
 	}
 	log.Debug("stop query node flow graph",
 		zap.Any("collectionID", q.collectionID),

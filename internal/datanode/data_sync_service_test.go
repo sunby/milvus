@@ -24,7 +24,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
 
@@ -153,6 +155,7 @@ func TestDataSyncService_newDataSyncService(te *testing.T) {
 				newCache(),
 				cm,
 				newCompactionExecutor(),
+				configs.NewConfig(),
 			)
 
 			if !test.isValidCase {
@@ -181,7 +184,8 @@ func TestDataSyncService_Start(t *testing.T) {
 	defer cancel()
 
 	// init data node
-	pulsarURL := Params.PulsarCfg.Address
+	cfg := configs.NewConfig()
+	pulsarURL := util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port)
 
 	Factory := &MetaFactory{}
 	collMeta := Factory.GetCollectionMeta(UniqueID(0), "coll1")
@@ -205,7 +209,7 @@ func TestDataSyncService_Start(t *testing.T) {
 
 	insertChannelName := "data_sync_service_test_dml"
 	ddlChannelName := "data_sync_service_test_ddl"
-	Params.DataNodeCfg.FlushInsertBufferSize = 1
+	cfg.DataNode.InsertBufferSizeLimit = 1
 
 	ufs := []*datapb.SegmentInfo{{
 		CollectionID:  collMeta.ID,
@@ -231,7 +235,7 @@ func TestDataSyncService_Start(t *testing.T) {
 	}
 
 	signalCh := make(chan string, 100)
-	sync, err := newDataSyncService(ctx, flushChan, replica, allocFactory, msFactory, vchan, signalCh, &DataCoordFactory{}, newCache(), cm, newCompactionExecutor())
+	sync, err := newDataSyncService(ctx, flushChan, replica, allocFactory, msFactory, vchan, signalCh, &DataCoordFactory{}, newCache(), cm, newCompactionExecutor(), cfg)
 
 	assert.Nil(t, err)
 	// sync.replica.addCollection(collMeta.ID, collMeta.Schema)
