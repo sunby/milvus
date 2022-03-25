@@ -39,20 +39,16 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/milvus-io/milvus/internal/util/retry"
 	"github.com/milvus-io/milvus/internal/util/trace"
-	"github.com/milvus-io/milvus/internal/util/typeutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 )
-
-// Params contains parameters for datanode grpc server.
-var Params paramtable.GrpcServerConfig
 
 type Server struct {
 	datanode    types.DataNodeComponent
@@ -71,21 +67,23 @@ type Server struct {
 	newDataCoordClient func(string, *clientv3.Client) (types.DataCoord, error)
 
 	closer io.Closer
+	cfg    *configs.Config
 }
 
 // NewServer new DataNode grpc server
-func NewServer(ctx context.Context, factory msgstream.Factory) (*Server, error) {
+func NewServer(ctx context.Context, cfg *configs.Config, factory msgstream.Factory) (*Server, error) {
 	ctx1, cancel := context.WithCancel(ctx)
 	var s = &Server{
 		ctx:         ctx1,
 		cancel:      cancel,
+		cfg:         cfg,
 		msFactory:   factory,
 		grpcErrChan: make(chan error),
 		newRootCoordClient: func(etcdMetaRoot string, client *clientv3.Client) (types.RootCoord, error) {
-			return rcc.NewClient(ctx1, etcdMetaRoot, client)
+			return rcc.NewClient(ctx1, cfg, etcdMetaRoot, client)
 		},
 		newDataCoordClient: func(etcdMetaRoot string, client *clientv3.Client) (types.DataCoord, error) {
-			return dcc.NewClient(ctx1, etcdMetaRoot, client)
+			return dcc.NewClient(ctx1, cfg, etcdMetaRoot, client)
 		},
 	}
 
@@ -96,7 +94,7 @@ func NewServer(ctx context.Context, factory msgstream.Factory) (*Server, error) 
 
 func (s *Server) startGrpc() error {
 	s.wg.Add(1)
-	go s.startGrpcLoop(Params.Port)
+	go s.startGrpcLoop(s.cfg.DataNode.Port)
 	// wait for grpc server loop start
 	err := <-s.grpcErrChan
 	return err
@@ -133,8 +131,8 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 	s.grpcServer = grpc.NewServer(
 		grpc.KeepaliveEnforcementPolicy(kaep),
 		grpc.KeepaliveParams(kasp),
-		grpc.MaxRecvMsgSize(Params.ServerMaxRecvSize),
-		grpc.MaxSendMsgSize(Params.ServerMaxSendSize),
+		grpc.MaxRecvMsgSize(int(s.cfg.Grpc.ServerMaxReceiveSize)),
+		grpc.MaxSendMsgSize(int(s.cfg.Grpc.ServerMaxSendSize)),
 		grpc.UnaryInterceptor(ot.UnaryServerInterceptor(opts...)),
 		grpc.StreamInterceptor(ot.StreamServerInterceptor(opts...)))
 	datapb.RegisterDataNodeServer(s.grpcServer, s)
@@ -178,7 +176,7 @@ func (s *Server) Run() error {
 
 // Stop stops Datanode's grpc service.
 func (s *Server) Stop() error {
-	log.Debug("Datanode stop", zap.String("Address", Params.GetAddress()))
+	log.Debug("Datanode stop", zap.String("Address", fmt.Sprintf("%s:%d", s.cfg.AdvertiseAddress, s.cfg.DataNode.Port)))
 	if s.closer != nil {
 		if err := s.closer.Close(); err != nil {
 			return err
@@ -218,26 +216,20 @@ func (s *Server) Stop() error {
 // init initializes Datanode's grpc service.
 func (s *Server) init() error {
 	ctx := context.Background()
-	Params.InitOnce(typeutil.DataNodeRole)
-	if !funcutil.CheckPortAvailable(Params.Port) {
-		Params.Port = funcutil.GetAvailablePort()
-		log.Warn("DataNode get available port when init", zap.Int("Port", Params.Port))
+	if !funcutil.CheckPortAvailable(s.cfg.DataNode.Port) {
+		s.cfg.DataNode.Port = funcutil.GetAvailablePort()
+		log.Warn("DataNode get available port when init", zap.Int("Port", s.cfg.DataNode.Port))
 	}
-	dn.Params.InitOnce()
-	dn.Params.DataNodeCfg.Port = Params.Port
-	dn.Params.DataNodeCfg.IP = Params.IP
-
-	cfg := configs.NewConfig()
-	etcdCli, err := etcd.GetEtcdClient(cfg)
+	etcdCli, err := etcd.GetEtcdClient(s.cfg)
 	if err != nil {
 		log.Debug("DataNode connect to etcd failed", zap.Error(err))
 		return err
 	}
 	s.etcdCli = etcdCli
 	s.SetEtcdClient(s.etcdCli)
-	closer := trace.InitTracing(fmt.Sprintf("data_node ip: %s, port: %d", Params.IP, Params.Port))
+	closer := trace.InitTracing(fmt.Sprintf("data_node ip: %s, port: %d", s.cfg.AdvertiseAddress, s.cfg.DataNode.Port))
 	s.closer = closer
-	addr := Params.IP + ":" + strconv.Itoa(Params.Port)
+	addr := s.cfg.AdvertiseAddress + ":" + strconv.Itoa(s.cfg.DataNode.Port)
 	log.Debug("DataNode address", zap.String("address", addr))
 
 	err = s.startGrpc()
@@ -248,7 +240,7 @@ func (s *Server) init() error {
 	// --- RootCoord Client ---
 	if s.newRootCoordClient != nil {
 		log.Debug("Init root coord client ...")
-		rootCoordClient, err := s.newRootCoordClient(dn.Params.EtcdCfg.MetaRootPath, s.etcdCli)
+		rootCoordClient, err := s.newRootCoordClient(util.GetPath(s.cfg, util.EtcdMeta), s.etcdCli)
 		if err != nil {
 			log.Debug("DataNode newRootCoordClient failed", zap.Error(err))
 			panic(err)
@@ -275,7 +267,7 @@ func (s *Server) init() error {
 	// --- Data Server Client ---
 	if s.newDataCoordClient != nil {
 		log.Debug("DataNode Init data service client ...")
-		dataCoordClient, err := s.newDataCoordClient(dn.Params.EtcdCfg.MetaRootPath, s.etcdCli)
+		dataCoordClient, err := s.newDataCoordClient(util.GetPath(s.cfg, util.EtcdMeta), s.etcdCli)
 		if err != nil {
 			log.Debug("DataNode newDataCoordClient failed", zap.Error(err))
 			panic(err)
@@ -299,7 +291,6 @@ func (s *Server) init() error {
 		}
 	}
 
-	s.datanode.SetNodeID(dn.Params.DataNodeCfg.NodeID)
 	s.datanode.UpdateStateCode(internalpb.StateCode_Initializing)
 
 	if err := s.datanode.Init(); err != nil {

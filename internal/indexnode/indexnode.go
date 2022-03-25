@@ -57,7 +57,6 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/trace"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
@@ -73,9 +72,6 @@ var _ types.IndexNode = (*IndexNode)(nil)
 
 // make sure IndexNode implements types.IndexNodeComponent
 var _ types.IndexNodeComponent = (*IndexNode)(nil)
-
-// Params is a GlobalParamTable singleton of indexnode
-var Params paramtable.ComponentParam
 
 // IndexNode is a component that executes the task of building indexes.
 type IndexNode struct {

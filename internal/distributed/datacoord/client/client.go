@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
@@ -27,16 +28,12 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/milvus-io/milvus/internal/util/grpcclient"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 )
-
-// ClientParams is the parameters of client singleton
-var ClientParams paramtable.GrpcClientConfig
 
 // Client is the datacoord grpc client
 type Client struct {
@@ -45,18 +42,17 @@ type Client struct {
 }
 
 // NewClient creates a new client instance
-func NewClient(ctx context.Context, metaRoot string, etcdCli *clientv3.Client) (*Client, error) {
+func NewClient(ctx context.Context, cfg *configs.Config, metaRoot string, etcdCli *clientv3.Client) (*Client, error) {
 	sess := sessionutil.NewSession(ctx, metaRoot, etcdCli)
 	if sess == nil {
 		err := fmt.Errorf("new session error, maybe can not connect to etcd")
 		log.Debug("DataCoordClient NewClient failed", zap.Error(err))
 		return nil, err
 	}
-	ClientParams.InitOnce(typeutil.DataCoordRole)
 	client := &Client{
 		grpcClient: &grpcclient.ClientBase{
-			ClientMaxRecvSize: ClientParams.ClientMaxRecvSize,
-			ClientMaxSendSize: ClientParams.ClientMaxSendSize,
+			ClientMaxRecvSize: int(cfg.Grpc.ClientMaxReceiveSize),
+			ClientMaxSendSize: int(cfg.Grpc.ClientMaxSendSize),
 		},
 		sess: sess,
 	}

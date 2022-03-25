@@ -28,8 +28,9 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/mq/msgstream/mqwrapper"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
+	"github.com/milvus-io/milvus/internal/util"
 
 	"go.uber.org/zap"
 
@@ -40,10 +41,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-var Params paramtable.BaseTable
-
 func TestMain(m *testing.M) {
-	Params.Init()
 	exitCode := m.Run()
 	os.Exit(exitCode)
 }
@@ -193,7 +191,8 @@ func Consume3(ctx context.Context, t *testing.T, pc *pulsarClient, topic string,
 }
 
 func TestPulsarClient_Consume1(t *testing.T) {
-	pulsarAddress, _ := Params.Load("_PulsarAddress")
+	cfg := configs.NewConfig()
+	pulsarAddress := util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port)
 	pc, err := NewClient(pulsar.ClientOptions{URL: pulsarAddress})
 	defer pc.Close()
 	assert.NoError(t, err)
@@ -344,7 +343,8 @@ func Consume23(ctx context.Context, t *testing.T, pc *pulsarClient, topic string
 }
 
 func TestPulsarClient_Consume2(t *testing.T) {
-	pulsarAddress, _ := Params.Load("_PulsarAddress")
+	cfg := configs.NewConfig()
+	pulsarAddress := util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port)
 	pc, err := NewClient(pulsar.ClientOptions{URL: pulsarAddress})
 	defer pc.Close()
 	assert.NoError(t, err)
@@ -394,7 +394,8 @@ func TestPulsarClient_Consume2(t *testing.T) {
 }
 
 func TestPulsarClient_SeekPosition(t *testing.T) {
-	pulsarAddress, _ := Params.Load("_PulsarAddress")
+	cfg := configs.NewConfig()
+	pulsarAddress := util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port)
 	pc, err := NewClient(pulsar.ClientOptions{URL: pulsarAddress})
 	defer pc.Close()
 	assert.NoError(t, err)
@@ -467,7 +468,8 @@ func TestPulsarClient_SeekPosition(t *testing.T) {
 }
 
 func TestPulsarClient_SeekLatest(t *testing.T) {
-	pulsarAddress, _ := Params.Load("_PulsarAddress")
+	cfg := configs.NewConfig()
+	pulsarAddress := util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port)
 	pc, err := NewClient(pulsar.ClientOptions{URL: pulsarAddress})
 	defer pc.Close()
 	assert.NoError(t, err)
@@ -530,7 +532,8 @@ func TestPulsarClient_SeekLatest(t *testing.T) {
 }
 
 func TestPulsarClient_EarliestMessageID(t *testing.T) {
-	pulsarAddress, _ := Params.Load("_PulsarAddress")
+	cfg := configs.NewConfig()
+	pulsarAddress := util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port)
 	client, _ := NewClient(pulsar.ClientOptions{URL: pulsarAddress})
 	defer client.Close()
 
@@ -539,7 +542,8 @@ func TestPulsarClient_EarliestMessageID(t *testing.T) {
 }
 
 func TestPulsarClient_StringToMsgID(t *testing.T) {
-	pulsarAddress, _ := Params.Load("_PulsarAddress")
+	cfg := configs.NewConfig()
+	pulsarAddress := util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port)
 	client, _ := NewClient(pulsar.ClientOptions{URL: pulsarAddress})
 	defer client.Close()
 
@@ -557,7 +561,8 @@ func TestPulsarClient_StringToMsgID(t *testing.T) {
 }
 
 func TestPulsarClient_BytesToMsgID(t *testing.T) {
-	pulsarAddress, _ := Params.Load("_PulsarAddress")
+	cfg := configs.NewConfig()
+	pulsarAddress := util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port)
 	client, _ := NewClient(pulsar.ClientOptions{URL: pulsarAddress})
 	defer client.Close()
 

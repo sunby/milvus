@@ -2027,7 +2027,6 @@ func (qt *queryTask) PreExecute(ctx context.Context) error {
 		qt.RetrieveRequest.TimeoutTimestamp = tsoutil.ComposeTSByTime(deadline, 0)
 	}
 
-	qt.ResultChannelID = Params.ProxyCfg.RetrieveResultChannelNames[0]
 	qt.DbID = 0 // todo(yukun)
 
 	qt.CollectionID = info.collID

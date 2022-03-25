@@ -31,22 +31,18 @@ import (
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 	"github.com/milvus-io/milvus/internal/util/mock"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
-	"github.com/milvus-io/milvus/internal/util/typeutil"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc"
 )
 
-var ParamsGlobal paramtable.ComponentParam
-
 func Test_NewClient(t *testing.T) {
-	ClientParams.InitOnce(typeutil.IndexNodeRole)
 	ctx := context.Background()
-	client, err := NewClient(ctx, "")
+	cfg := configs.NewConfig()
+	client, err := NewClient(ctx, cfg, "")
 	assert.Nil(t, client)
 	assert.NotNil(t, err)
 
-	client, err = NewClient(ctx, "test")
+	client, err = NewClient(ctx, cfg, "test")
 	assert.Nil(t, err)
 	assert.NotNil(t, client)
 
@@ -124,13 +120,12 @@ func Test_NewClient(t *testing.T) {
 func TestIndexNodeClient(t *testing.T) {
 	ctx := context.Background()
 
-	ins, err := grpcindexnode.NewServer(ctx)
+	cfg := configs.NewConfig()
+	ins, err := grpcindexnode.NewServer(ctx, cfg)
 	assert.Nil(t, err)
 	assert.NotNil(t, ins)
 
 	inm := &indexnode.Mock{}
-	ParamsGlobal.InitOnce()
-	cfg := configs.NewConfig()
 	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.NoError(t, err)
 	inm.SetEtcdClient(etcdCli)
@@ -140,7 +135,7 @@ func TestIndexNodeClient(t *testing.T) {
 	err = ins.Run()
 	assert.Nil(t, err)
 
-	inc, err := NewClient(ctx, "localhost:21121")
+	inc, err := NewClient(ctx, cfg, "localhost:21121")
 	assert.Nil(t, err)
 	assert.NotNil(t, inc)
 

@@ -24,20 +24,16 @@ import (
 
 	"github.com/milvus-io/milvus/configs"
 
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/stretchr/testify/assert"
 )
 
-var Params paramtable.ServiceParam
-
 func TestEtcd(t *testing.T) {
-	Params.Init()
-	Params.EtcdCfg.UseEmbedEtcd = true
-	Params.EtcdCfg.DataDir = "/tmp/data"
 	cfg := configs.NewConfig()
+	cfg.Etcd.UseEmbed = true
+	cfg.Etcd.DataPath = "/tmp/data"
 	err := InitEtcdServer(cfg)
 	assert.NoError(t, err)
-	defer os.RemoveAll(Params.EtcdCfg.DataDir)
+	defer os.RemoveAll(cfg.Etcd.DataPath)
 	defer StopEtcdServer()
 
 	// port is binded

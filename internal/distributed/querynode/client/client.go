@@ -20,18 +20,16 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/milvus-io/milvus/internal/util/grpcclient"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 	"google.golang.org/grpc"
 )
-
-var ClientParams paramtable.GrpcClientConfig
 
 // Client is the grpc client of QueryNode.
 type Client struct {
@@ -40,16 +38,15 @@ type Client struct {
 }
 
 // NewClient creates a new QueryNode client.
-func NewClient(ctx context.Context, addr string) (*Client, error) {
+func NewClient(ctx context.Context, cfg *configs.Config, addr string) (*Client, error) {
 	if addr == "" {
 		return nil, fmt.Errorf("addr is empty")
 	}
-	ClientParams.InitOnce(typeutil.QueryNodeRole)
 	client := &Client{
 		addr: addr,
 		grpcClient: &grpcclient.ClientBase{
-			ClientMaxRecvSize: ClientParams.ClientMaxRecvSize,
-			ClientMaxSendSize: ClientParams.ClientMaxSendSize,
+			ClientMaxRecvSize: int(cfg.Grpc.ClientMaxReceiveSize),
+			ClientMaxSendSize: int(cfg.Grpc.ClientMaxSendSize),
 		},
 	}
 	client.grpcClient.SetRole(typeutil.QueryNodeRole)

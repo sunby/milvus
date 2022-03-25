@@ -19,6 +19,7 @@ package grpcdatacoord
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
@@ -40,23 +41,19 @@ import (
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/milvus-io/milvus/internal/util/logutil"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/milvus-io/milvus/internal/util/trace"
-	"github.com/milvus-io/milvus/internal/util/typeutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 )
 
-// Params is the parameters for DataCoord grpc server
-var Params paramtable.GrpcServerConfig
-
 // Server is the grpc server of datacoord
 type Server struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	cfg       *configs.Config
 	wg        sync.WaitGroup
 	dataCoord types.DataCoordComponent
 
@@ -68,28 +65,23 @@ type Server struct {
 }
 
 // NewServer new data service grpc server
-func NewServer(ctx context.Context, factory msgstream.Factory, opts ...datacoord.Option) *Server {
+func NewServer(ctx context.Context, cfg *configs.Config, factory msgstream.Factory, opts ...datacoord.Option) *Server {
 	ctx1, cancel := context.WithCancel(ctx)
 
 	s := &Server{
 		ctx:         ctx1,
 		cancel:      cancel,
+		cfg:         cfg,
 		grpcErrChan: make(chan error),
 	}
-	s.dataCoord = datacoord.CreateServer(s.ctx, factory, opts...)
+	s.dataCoord = datacoord.CreateServer(s.ctx, s.cfg, factory, opts...)
 	return s
 }
 
 func (s *Server) init() error {
-	Params.InitOnce(typeutil.DataCoordRole)
 
 	closer := trace.InitTracing("datacoord")
 	s.closer = closer
-
-	datacoord.Params.InitOnce()
-	datacoord.Params.DataCoordCfg.IP = Params.IP
-	datacoord.Params.DataCoordCfg.Port = Params.Port
-	datacoord.Params.DataCoordCfg.Address = Params.GetAddress()
 
 	cfg := configs.NewConfig()
 	etcdCli, err := etcd.GetEtcdClient(cfg)
@@ -115,7 +107,7 @@ func (s *Server) init() error {
 
 func (s *Server) startGrpc() error {
 	s.wg.Add(1)
-	go s.startGrpcLoop(Params.Port)
+	go s.startGrpcLoop(s.cfg.DataCoord.Port)
 	// wait for grpc server loop start
 	err := <-s.grpcErrChan
 	return err
@@ -150,8 +142,8 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 	s.grpcServer = grpc.NewServer(
 		grpc.KeepaliveEnforcementPolicy(kaep),
 		grpc.KeepaliveParams(kasp),
-		grpc.MaxRecvMsgSize(Params.ServerMaxRecvSize),
-		grpc.MaxSendMsgSize(Params.ServerMaxSendSize),
+		grpc.MaxRecvMsgSize(int(s.cfg.Grpc.ServerMaxReceiveSize)),
+		grpc.MaxSendMsgSize(int(s.cfg.Grpc.ServerMaxSendSize)),
 		grpc.UnaryInterceptor(ot.UnaryServerInterceptor(opts...)),
 		grpc.StreamInterceptor(ot.StreamServerInterceptor(opts...)))
 	//grpc.UnaryInterceptor(grpc_prometheus.UnaryServerInterceptor))
@@ -180,7 +172,7 @@ func (s *Server) start() error {
 // Stop stops the DataCoord server gracefully.
 // Need to call the GracefulStop interface of grpc server and call the stop method of the inner DataCoord object.
 func (s *Server) Stop() error {
-	log.Debug("Datacoord stop", zap.String("Address", Params.GetAddress()))
+	log.Debug("Datacoord stop", zap.String("Address", fmt.Sprintf("%s:%d", s.cfg.AdvertiseAddress, s.cfg.DataCoord.Port)))
 	var err error
 	if s.closer != nil {
 		if err = s.closer.Close(); err != nil {

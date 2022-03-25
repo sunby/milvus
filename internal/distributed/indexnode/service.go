@@ -42,12 +42,8 @@ import (
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/milvus-io/milvus/internal/util/trace"
-	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
-
-var Params paramtable.GrpcServerConfig
 
 // Server is the grpc wrapper of IndexNode.
 type Server struct {
@@ -62,6 +58,7 @@ type Server struct {
 
 	etcdCli *clientv3.Client
 	closer  io.Closer
+	cfg     *configs.Config
 }
 
 // Run initializes and starts IndexNode's grpc service.
@@ -81,7 +78,7 @@ func (s *Server) Run() error {
 func (s *Server) startGrpcLoop(grpcPort int) {
 	defer s.loopWg.Done()
 
-	log.Debug("IndexNode", zap.String("network address", Params.GetAddress()), zap.Int("network port: ", grpcPort))
+	log.Debug("IndexNode", zap.String("network address", s.cfg.AdvertiseAddress), zap.Int("network port: ", grpcPort))
 	lis, err := net.Listen("tcp", ":"+strconv.Itoa(grpcPort))
 	if err != nil {
 		log.Warn("IndexNode", zap.String("GrpcServer:failed to listen", err.Error()))
@@ -106,8 +103,8 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 	s.grpcServer = grpc.NewServer(
 		grpc.KeepaliveEnforcementPolicy(kaep),
 		grpc.KeepaliveParams(kasp),
-		grpc.MaxRecvMsgSize(Params.ServerMaxRecvSize),
-		grpc.MaxSendMsgSize(Params.ServerMaxSendSize),
+		grpc.MaxRecvMsgSize(int(s.cfg.Grpc.ServerMaxReceiveSize)),
+		grpc.MaxSendMsgSize(int(s.cfg.Grpc.ServerMaxSendSize)),
 		grpc.UnaryInterceptor(ot.UnaryServerInterceptor(opts...)),
 		grpc.StreamInterceptor(ot.StreamServerInterceptor(opts...)))
 	indexpb.RegisterIndexNodeServer(s.grpcServer, s)
@@ -120,17 +117,11 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 // init initializes IndexNode's grpc service.
 func (s *Server) init() error {
 	var err error
-	Params.InitOnce(typeutil.IndexNodeRole)
-	if !funcutil.CheckPortAvailable(Params.Port) {
-		Params.Port = funcutil.GetAvailablePort()
-		log.Warn("IndexNode get available port when init", zap.Int("Port", Params.Port))
+	if !funcutil.CheckPortAvailable(s.cfg.IndexNode.Port) {
+		s.cfg.IndexNode.Port = funcutil.GetAvailablePort()
+		log.Warn("IndexNode get available port when init", zap.Int("Port", s.cfg.IndexNode.Port))
 	}
-	indexnode.Params.InitOnce()
-	indexnode.Params.IndexNodeCfg.Port = Params.Port
-	indexnode.Params.IndexNodeCfg.IP = Params.IP
-	indexnode.Params.IndexNodeCfg.Address = Params.GetAddress()
-
-	closer := trace.InitTracing(fmt.Sprintf("IndexNode-%d", indexnode.Params.IndexNodeCfg.NodeID))
+	closer := trace.InitTracing(fmt.Sprintf("IndexNode-%s-%d", s.cfg.AdvertiseAddress, s.cfg.IndexNode.Port))
 	s.closer = closer
 
 	defer func() {
@@ -143,7 +134,7 @@ func (s *Server) init() error {
 	}()
 
 	s.loopWg.Add(1)
-	go s.startGrpcLoop(Params.Port)
+	go s.startGrpcLoop(s.cfg.IndexNode.Port)
 	// wait for grpc server loop start
 	err = <-s.grpcErrChan
 	if err != nil {
@@ -185,7 +176,7 @@ func (s *Server) start() error {
 
 // Stop stops IndexNode's grpc service.
 func (s *Server) Stop() error {
-	log.Debug("IndexNode stop", zap.String("Address", Params.GetAddress()))
+	log.Debug("IndexNode stop", zap.String("Address", fmt.Sprintf("%s:%d", s.cfg.AdvertiseAddress, s.cfg.IndexNode.Port)))
 	if s.closer != nil {
 		if err := s.closer.Close(); err != nil {
 			return err
@@ -244,15 +235,16 @@ func (s *Server) GetMetrics(ctx context.Context, request *milvuspb.GetMetricsReq
 }
 
 // NewServer create a new IndexNode grpc server.
-func NewServer(ctx context.Context) (*Server, error) {
+func NewServer(ctx context.Context, cfg *configs.Config) (*Server, error) {
 	ctx1, cancel := context.WithCancel(ctx)
-	node, err := indexnode.NewIndexNode(ctx1)
+	node, err := indexnode.NewIndexNode(ctx1, cfg)
 	if err != nil {
 		defer cancel()
 		return nil, err
 	}
 
 	return &Server{
+		cfg:         cfg,
 		loopCtx:     ctx1,
 		loopCancel:  cancel,
 		indexnode:   node,

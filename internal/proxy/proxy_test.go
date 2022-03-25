@@ -86,20 +86,12 @@ import (
 
 	grpcrootcoord "github.com/milvus-io/milvus/internal/distributed/rootcoord"
 
-	"github.com/milvus-io/milvus/internal/datacoord"
-	"github.com/milvus-io/milvus/internal/datanode"
-	"github.com/milvus-io/milvus/internal/indexcoord"
-	"github.com/milvus-io/milvus/internal/indexnode"
-	"github.com/milvus-io/milvus/internal/querynode"
-
-	"github.com/milvus-io/milvus/internal/querycoord"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/milvus-io/milvus/internal/mq/msgstream"
 
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/metrics"
-	"github.com/milvus-io/milvus/internal/util/logutil"
 )
 
 const (
@@ -146,13 +138,6 @@ func runQueryCoord(ctx context.Context, localMsg bool) *grpcquerycoord.Server {
 
 	wg.Add(1)
 	go func() {
-		querycoord.Params.Init()
-
-		if !localMsg {
-			logutil.SetupLogger(&querycoord.Params.Log)
-			defer log.Sync()
-		}
-
 		factory := newMsgFactory(localMsg)
 		var err error
 		qs, err = grpcquerycoord.NewServer(ctx, factory)
@@ -177,17 +162,10 @@ func runQueryNode(ctx context.Context, localMsg bool, alias string) *grpcqueryno
 
 	wg.Add(1)
 	go func() {
-		querynode.Params.QueryNodeCfg.InitAlias(alias)
-		querynode.Params.Init()
-
-		if !localMsg {
-			logutil.SetupLogger(&querynode.Params.Log)
-			defer log.Sync()
-		}
 
 		factory := newMsgFactory(localMsg)
 		var err error
-		qn, err = grpcquerynode.NewServer(ctx, factory)
+		qn, err = grpcquerynode.NewServer(ctx, configs.NewConfig(), factory)
 		if err != nil {
 			panic(err)
 		}
@@ -209,15 +187,8 @@ func runDataCoord(ctx context.Context, localMsg bool) *grpcdatacoordclient.Serve
 
 	wg.Add(1)
 	go func() {
-		datacoord.Params.Init()
-
-		if !localMsg {
-			logutil.SetupLogger(&datacoord.Params.Log)
-			defer log.Sync()
-		}
-
 		factory := newMsgFactory(localMsg)
-		ds = grpcdatacoordclient.NewServer(ctx, factory)
+		ds = grpcdatacoordclient.NewServer(ctx, configs.NewConfig(), factory)
 		wg.Done()
 		err := ds.Run()
 		if err != nil {
@@ -236,17 +207,9 @@ func runDataNode(ctx context.Context, localMsg bool, alias string) *grpcdatanode
 
 	wg.Add(1)
 	go func() {
-		datanode.Params.DataNodeCfg.InitAlias(alias)
-		datanode.Params.Init()
-
-		if !localMsg {
-			logutil.SetupLogger(&datanode.Params.Log)
-			defer log.Sync()
-		}
-
 		factory := newMsgFactory(localMsg)
 		var err error
-		dn, err = grpcdatanode.NewServer(ctx, factory)
+		dn, err = grpcdatanode.NewServer(ctx, configs.NewConfig(), factory)
 		if err != nil {
 			panic(err)
 		}
@@ -268,15 +231,8 @@ func runIndexCoord(ctx context.Context, localMsg bool) *grpcindexcoord.Server {
 
 	wg.Add(1)
 	go func() {
-		indexcoord.Params.Init()
-
-		if !localMsg {
-			logutil.SetupLogger(&indexcoord.Params.Log)
-			defer log.Sync()
-		}
-
 		var err error
-		is, err = grpcindexcoord.NewServer(ctx)
+		is, err = grpcindexcoord.NewServer(ctx, configs.NewConfig())
 		if err != nil {
 			panic(err)
 		}
@@ -298,16 +254,8 @@ func runIndexNode(ctx context.Context, localMsg bool, alias string) *grpcindexno
 
 	wg.Add(1)
 	go func() {
-		indexnode.Params.IndexNodeCfg.InitAlias(alias)
-		indexnode.Params.Init()
-
-		if !localMsg {
-			logutil.SetupLogger(&indexnode.Params.Log)
-			defer log.Sync()
-		}
-
 		var err error
-		in, err = grpcindexnode.NewServer(ctx)
+		in, err = grpcindexnode.NewServer(ctx, configs.NewConfig())
 		if err != nil {
 			panic(err)
 		}
@@ -522,7 +470,7 @@ func TestProxy(t *testing.T) {
 	go testServer.startGrpc(ctx, &wg)
 	assert.NoError(t, testServer.waitForGrpcReady())
 
-	rootCoordClient, err := rcc.NewClient(ctx, util.GetPath(cfg, util.EtcdMeta), etcdcli)
+	rootCoordClient, err := rcc.NewClient(ctx, cfg, util.GetPath(cfg, util.EtcdMeta), etcdcli)
 	assert.NoError(t, err)
 	err = rootCoordClient.Init()
 	assert.NoError(t, err)
@@ -531,7 +479,7 @@ func TestProxy(t *testing.T) {
 	proxy.SetRootCoordClient(rootCoordClient)
 	log.Info("Proxy set root coordinator client")
 
-	dataCoordClient, err := grpcdatacoordclient2.NewClient(ctx, util.GetPath(cfg, util.EtcdMeta), etcdcli)
+	dataCoordClient, err := grpcdatacoordclient2.NewClient(ctx, cfg, util.GetPath(cfg, util.EtcdMeta), etcdcli)
 	assert.NoError(t, err)
 	err = dataCoordClient.Init()
 	assert.NoError(t, err)
@@ -540,7 +488,7 @@ func TestProxy(t *testing.T) {
 	proxy.SetDataCoordClient(dataCoordClient)
 	log.Info("Proxy set data coordinator client")
 
-	queryCoordClient, err := grpcquerycoordclient.NewClient(ctx, util.GetPath(cfg, util.EtcdMeta), etcdcli)
+	queryCoordClient, err := grpcquerycoordclient.NewClient(ctx, cfg, util.GetPath(cfg, util.EtcdMeta), etcdcli)
 	assert.NoError(t, err)
 	err = queryCoordClient.Init()
 	assert.NoError(t, err)
@@ -549,7 +497,7 @@ func TestProxy(t *testing.T) {
 	proxy.SetQueryCoordClient(queryCoordClient)
 	log.Info("Proxy set query coordinator client")
 
-	indexCoordClient, err := grpcindexcoordclient.NewClient(ctx, util.GetPath(cfg, util.EtcdMeta), etcdcli)
+	indexCoordClient, err := grpcindexcoordclient.NewClient(ctx, cfg, util.GetPath(cfg, util.EtcdMeta), etcdcli)
 	assert.NoError(t, err)
 	err = indexCoordClient.Init()
 	assert.NoError(t, err)

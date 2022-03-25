@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
@@ -29,7 +30,6 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/proxypb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
-	"github.com/milvus-io/milvus/internal/proxy"
 	"github.com/milvus-io/milvus/internal/types"
 	milvusmock "github.com/milvus-io/milvus/internal/util/mock"
 	"github.com/milvus-io/milvus/internal/util/uniquegenerator"
@@ -687,7 +687,8 @@ func (m *MockProxy) GetImportState(ctx context.Context, req *milvuspb.GetImportS
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 func Test_NewServer(t *testing.T) {
 	ctx := context.Background()
-	server, err := NewServer(ctx, nil)
+	cfg := configs.NewConfig()
+	server, err := NewServer(ctx, cfg, nil)
 	assert.NotNil(t, server)
 	assert.Nil(t, err)
 
@@ -922,7 +923,8 @@ func Test_NewServer(t *testing.T) {
 
 	// Update config and start server again to test with different config set.
 	// This works as config will be initialized only once
-	proxy.Params.ProxyCfg.GinLogging = false
+
+	cfg.Proxy.GinLogEnable = false
 	err = server.Run()
 	assert.Nil(t, err)
 	err = server.Stop()
@@ -931,7 +933,8 @@ func Test_NewServer(t *testing.T) {
 
 func TestServer_Check(t *testing.T) {
 	ctx := context.Background()
-	server, err := NewServer(ctx, nil)
+	cfg := configs.NewConfig()
+	server, err := NewServer(ctx, cfg, nil)
 	assert.NotNil(t, server)
 	assert.Nil(t, err)
 
@@ -987,7 +990,8 @@ func TestServer_Check(t *testing.T) {
 
 func TestServer_Watch(t *testing.T) {
 	ctx := context.Background()
-	server, err := NewServer(ctx, nil)
+	cfg := configs.NewConfig()
+	server, err := NewServer(ctx, cfg, nil)
 	assert.NotNil(t, server)
 	assert.Nil(t, err)
 
@@ -1053,7 +1057,8 @@ func TestServer_Watch(t *testing.T) {
 
 func Test_NewServer_HTTPServerDisabled(t *testing.T) {
 	ctx := context.Background()
-	server, err := NewServer(ctx, nil)
+	cfg := configs.NewConfig()
+	server, err := NewServer(ctx, cfg, nil)
 	assert.NotNil(t, server)
 	assert.Nil(t, err)
 
@@ -1063,9 +1068,7 @@ func Test_NewServer_HTTPServerDisabled(t *testing.T) {
 	server.queryCoordClient = &MockQueryCoord{}
 	server.dataCoordClient = &MockDataCoord{}
 
-	HTTPParams.InitOnce()
-	HTTPParams.Enabled = false
-
+	cfg.Proxy.HttpConf.Enable = false
 	err = server.Run()
 	assert.Nil(t, err)
 	assert.Nil(t, server.httpServer)

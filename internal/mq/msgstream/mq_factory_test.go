@@ -21,13 +21,16 @@ import (
 	"os"
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestPmsFactory(t *testing.T) {
 	pmsFactory := NewPmsFactory()
 
-	pulsarAddress, _ := Params.Load("_PulsarAddress")
+	cfg := configs.NewConfig()
+	pulsarAddress := util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port)
 	m := map[string]interface{}{
 		"PulsarAddress":  pulsarAddress,
 		"receiveBufSize": 1024,
@@ -49,7 +52,8 @@ func TestPmsFactory(t *testing.T) {
 func TestPmsFactory_SetParams(t *testing.T) {
 	pmsFactory := (*PmsFactory)(nil)
 
-	pulsarAddress, _ := Params.Load("_PulsarAddress")
+	cfg := configs.NewConfig()
+	pulsarAddress := util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port)
 	m := map[string]interface{}{
 		"PulsarAddress":  pulsarAddress,
 		"receiveBufSize": 1024,

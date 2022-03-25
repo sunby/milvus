@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"math/rand"
 	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/milvus-io/milvus/configs"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/util/etcd"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -21,20 +20,12 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-var Params paramtable.BaseTable
-
 func TestGetServerIDConcurrently(t *testing.T) {
 	ctx := context.Background()
-	Params.Init()
 
-	endpoints, err := Params.Load("_EtcdEndpoints")
 	metaRoot := fmt.Sprintf("%d/%s", rand.Int(), DefaultServiceRoot)
-	if err != nil {
-		panic(err)
-	}
-
-	etcdEndpoints := strings.Split(endpoints, ",")
-	etcdCli, err := etcd.GetRemoteEtcdClient(etcdEndpoints)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetRemoteEtcdClient(cfg.Etcd.Endpoints)
 	require.NoError(t, err)
 	defer etcdCli.Close()
 	etcdKV := etcdkv.NewEtcdKV(etcdCli, metaRoot)
@@ -72,16 +63,9 @@ func TestGetServerIDConcurrently(t *testing.T) {
 
 func TestInit(t *testing.T) {
 	ctx := context.Background()
-	Params.Init()
-
-	endpoints, err := Params.Load("_EtcdEndpoints")
-	if err != nil {
-		panic(err)
-	}
 	metaRoot := fmt.Sprintf("%d/%s", rand.Int(), DefaultServiceRoot)
-
-	etcdEndpoints := strings.Split(endpoints, ",")
-	etcdCli, err := etcd.GetRemoteEtcdClient(etcdEndpoints)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetRemoteEtcdClient(cfg.Etcd.Endpoints)
 	require.NoError(t, err)
 	etcdKV := etcdkv.NewEtcdKV(etcdCli, metaRoot)
 	err = etcdKV.RemoveWithPrefix("")
@@ -102,16 +86,9 @@ func TestInit(t *testing.T) {
 
 func TestUpdateSessions(t *testing.T) {
 	ctx := context.Background()
-	Params.Init()
-
-	endpoints, err := Params.Load("_EtcdEndpoints")
-	if err != nil {
-		panic(err)
-	}
-
-	etcdEndpoints := strings.Split(endpoints, ",")
 	metaRoot := fmt.Sprintf("%d/%s", rand.Int(), DefaultServiceRoot)
-	etcdCli, err := etcd.GetRemoteEtcdClient(etcdEndpoints)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetRemoteEtcdClient(cfg.Etcd.Endpoints)
 	require.NoError(t, err)
 	defer etcdCli.Close()
 	etcdKV := etcdkv.NewEtcdKV(etcdCli, "")
@@ -132,7 +109,7 @@ func TestUpdateSessions(t *testing.T) {
 	sList := []*Session{}
 
 	getIDFunc := func() {
-		etcdCli, err := etcd.GetRemoteEtcdClient(etcdEndpoints)
+		etcdCli, err := etcd.GetRemoteEtcdClient(cfg.Etcd.Endpoints)
 		require.NoError(t, err)
 		singleS := NewSession(ctx, metaRoot, etcdCli)
 		singleS.Init("test", "testAddr", false, false)
@@ -220,15 +197,11 @@ func TestSessionLivenessCheck(t *testing.T) {
 
 func TestWatcherHandleWatchResp(t *testing.T) {
 	ctx := context.Background()
-	Params.Init()
 
-	endpoints, err := Params.Load("_EtcdEndpoints")
-	require.NoError(t, err)
-
-	etcdEndpoints := strings.Split(endpoints, ",")
 	metaRoot := fmt.Sprintf("%d/%s", rand.Int(), DefaultServiceRoot)
 
-	etcdCli, err := etcd.GetRemoteEtcdClient(etcdEndpoints)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetRemoteEtcdClient(cfg.Etcd.Endpoints)
 	require.NoError(t, err)
 	defer etcdCli.Close()
 
@@ -366,16 +339,10 @@ func TestSessionRevoke(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	Params.Init()
-
-	endpoints, err := Params.Load("_EtcdEndpoints")
-	if err != nil {
-		panic(err)
-	}
 	metaRoot := fmt.Sprintf("%d/%s", rand.Int(), DefaultServiceRoot)
 
-	etcdEndpoints := strings.Split(endpoints, ",")
-	etcdCli, err := etcd.GetRemoteEtcdClient(etcdEndpoints)
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetRemoteEtcdClient(cfg.Etcd.Endpoints)
 	defer etcdCli.Close()
 	require.NoError(t, err)
 	etcdKV := etcdkv.NewEtcdKV(etcdCli, metaRoot)

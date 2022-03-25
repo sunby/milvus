@@ -18,6 +18,7 @@ package grpcindexcoord
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
@@ -41,13 +42,9 @@ import (
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/etcd"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/milvus-io/milvus/internal/util/trace"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
-
-// Params contains parameters for indexcoord grpc server.
-var Params paramtable.GrpcServerConfig
 
 // UniqueID is an alias of int64, is used as a unique identifier for the request.
 type UniqueID = typeutil.UniqueID
@@ -66,6 +63,7 @@ type Server struct {
 	etcdCli *clientv3.Client
 
 	closer io.Closer
+	cfg    *configs.Config
 }
 
 // Run initializes and starts IndexCoord's grpc service.
@@ -84,12 +82,6 @@ func (s *Server) Run() error {
 
 // init initializes IndexCoord's grpc service.
 func (s *Server) init() error {
-	Params.InitOnce(typeutil.IndexCoordRole)
-
-	indexcoord.Params.InitOnce()
-	indexcoord.Params.IndexCoordCfg.Address = Params.GetAddress()
-	indexcoord.Params.IndexCoordCfg.Port = Params.Port
-
 	closer := trace.InitTracing("IndexCoord")
 	s.closer = closer
 
@@ -103,7 +95,7 @@ func (s *Server) init() error {
 	s.indexcoord.SetEtcdClient(s.etcdCli)
 
 	s.loopWg.Add(1)
-	go s.startGrpcLoop(indexcoord.Params.IndexCoordCfg.Port)
+	go s.startGrpcLoop(s.cfg.IndexCoord.Port)
 	// wait for grpc IndexCoord loop start
 	if err := <-s.grpcErrChan; err != nil {
 		log.Error("IndexCoord", zap.Any("init error", err))
@@ -133,7 +125,7 @@ func (s *Server) start() error {
 
 // Stop stops IndexCoord's grpc service.
 func (s *Server) Stop() error {
-	log.Debug("Indexcoord stop", zap.String("Address", Params.GetAddress()))
+	log.Debug("Indexcoord stop", zap.String("Address", fmt.Sprintf("%s:%d", s.cfg.AdvertiseAddress, s.cfg.IndexCoord.Port)))
 	if s.closer != nil {
 		if err := s.closer.Close(); err != nil {
 			return err
@@ -215,7 +207,7 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 		Timeout: 10 * time.Second, // Wait 10 second for the ping ack before assuming the connection is dead
 	}
 
-	log.Debug("IndexCoord", zap.String("network address", Params.IP), zap.Int("network port", grpcPort))
+	log.Debug("IndexCoord", zap.String("network address", s.cfg.AdvertiseAddress), zap.Int("network port", grpcPort))
 	lis, err := net.Listen("tcp", ":"+strconv.Itoa(grpcPort))
 	if err != nil {
 		log.Warn("IndexCoord", zap.String("GrpcServer:failed to listen", err.Error()))
@@ -230,8 +222,8 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 	s.grpcServer = grpc.NewServer(
 		grpc.KeepaliveEnforcementPolicy(kaep),
 		grpc.KeepaliveParams(kasp),
-		grpc.MaxRecvMsgSize(Params.ServerMaxRecvSize),
-		grpc.MaxSendMsgSize(Params.ServerMaxSendSize),
+		grpc.MaxRecvMsgSize(int(s.cfg.Grpc.ServerMaxReceiveSize)),
+		grpc.MaxSendMsgSize(int(s.cfg.Grpc.ServerMaxSendSize)),
 		grpc.UnaryInterceptor(ot.UnaryServerInterceptor(opts...)),
 		grpc.StreamInterceptor(ot.StreamServerInterceptor(opts...)))
 	indexpb.RegisterIndexCoordServer(s.grpcServer, s)
@@ -244,14 +236,15 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 }
 
 // NewServer create a new IndexCoord grpc server.
-func NewServer(ctx context.Context) (*Server, error) {
+func NewServer(ctx context.Context, cfg *configs.Config) (*Server, error) {
 	ctx1, cancel := context.WithCancel(ctx)
-	serverImp, err := indexcoord.NewIndexCoord(ctx)
+	serverImp, err := indexcoord.NewIndexCoord(ctx, cfg)
 	if err != nil {
 		defer cancel()
 		return nil, err
 	}
 	s := &Server{
+		cfg:         cfg,
 		loopCtx:     ctx1,
 		loopCancel:  cancel,
 		indexcoord:  serverImp,

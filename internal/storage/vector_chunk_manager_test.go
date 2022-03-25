@@ -27,7 +27,6 @@ import (
 
 	"github.com/milvus-io/milvus/internal/proto/etcdpb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
@@ -136,11 +135,9 @@ func buildVectorChunkManager(localPath string, localCacheEnable bool) (*VectorCh
 	return vcm, cancel, nil
 }
 
-var Params paramtable.BaseTable
 var localPath = "/tmp/milvus/test_data/"
 
 func TestMain(m *testing.M) {
-	Params.Init()
 	exitCode := m.Run()
 	err := os.RemoveAll(localPath)
 	if err != nil {

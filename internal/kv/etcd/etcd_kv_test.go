@@ -27,16 +27,12 @@ import (
 
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/util/etcd"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-var Params paramtable.ComponentParam
-
 func TestMain(m *testing.M) {
-	Params.Init()
 	code := m.Run()
 	os.Exit(code)
 }

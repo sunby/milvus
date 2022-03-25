@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/kv"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
@@ -427,16 +428,16 @@ func AverageReassignPolicy(store ROChannelStore, reassigns []*NodeChannelInfo) C
 }
 
 // ChannelBGChecker check nodes' channels and return the channels needed to be reallocated.
-type ChannelBGChecker func(channels []*NodeChannelInfo, ts time.Time) ([]*NodeChannelInfo, error)
+type ChannelBGChecker func(cfg *configs.Config, channels []*NodeChannelInfo, ts time.Time) ([]*NodeChannelInfo, error)
 
 // EmptyBgChecker does nothing
-func EmptyBgChecker(channels []*NodeChannelInfo, ts time.Time) ([]*NodeChannelInfo, error) {
+func EmptyBgChecker(cfg *configs.Config, channels []*NodeChannelInfo, ts time.Time) ([]*NodeChannelInfo, error) {
 	return nil, nil
 }
 
 // BgCheckWithMaxWatchDuration returns a ChannelBGChecker with the maxWatchDuration
 func BgCheckWithMaxWatchDuration(kv kv.TxnKV) ChannelBGChecker {
-	return func(channels []*NodeChannelInfo, ts time.Time) ([]*NodeChannelInfo, error) {
+	return func(cfg *configs.Config, channels []*NodeChannelInfo, ts time.Time) ([]*NodeChannelInfo, error) {
 		reAllocations := make([]*NodeChannelInfo, 0, len(channels))
 		for _, ch := range channels {
 			cinfo := &NodeChannelInfo{
@@ -444,7 +445,7 @@ func BgCheckWithMaxWatchDuration(kv kv.TxnKV) ChannelBGChecker {
 				Channels: make([]*channel, 0),
 			}
 			for _, c := range ch.Channels {
-				k := buildNodeChannelKey(ch.NodeID, c.Name)
+				k := buildNodeChannelKey(cfg.DataCoord.ChannelWatchPath, ch.NodeID, c.Name)
 				v, err := kv.Load(k)
 				if err != nil {
 					return nil, err

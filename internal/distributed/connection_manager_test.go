@@ -19,28 +19,23 @@ package distributed
 import (
 	"context"
 	"net"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/milvus-io/milvus/internal/log"
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/etcd"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 	"github.com/stretchr/testify/assert"
-	"go.uber.org/zap"
 	"google.golang.org/grpc"
 )
 
-var Params paramtable.BaseTable
-
 func TestConnectionManager(t *testing.T) {
-	Params.Init()
 	ctx := context.Background()
 
 	session := initSession(ctx)
@@ -232,29 +227,11 @@ type testIndexNode struct {
 }
 
 func initSession(ctx context.Context) *sessionutil.Session {
-	rootPath, err := Params.Load("etcd.rootPath")
+	cfg := configs.NewConfig()
+	etcdCli, err := etcd.GetRemoteEtcdClient(cfg.Etcd.Endpoints)
 	if err != nil {
 		panic(err)
 	}
-	subPath, err := Params.Load("etcd.metaSubPath")
-	if err != nil {
-		panic(err)
-	}
-	metaRootPath := rootPath + "/" + subPath
-
-	endpoints, err := Params.Load("_EtcdEndpoints")
-	if err != nil {
-		panic(err)
-	}
-	etcdEndpoints := strings.Split(endpoints, ",")
-
-	log.Debug("metaRootPath", zap.Any("metaRootPath", metaRootPath))
-	log.Debug("etcdPoints", zap.Any("etcdPoints", etcdEndpoints))
-
-	etcdCli, err := etcd.GetRemoteEtcdClient(etcdEndpoints)
-	if err != nil {
-		panic(err)
-	}
-	session := sessionutil.NewSession(ctx, metaRootPath, etcdCli)
+	session := sessionutil.NewSession(ctx, util.GetPath(cfg, util.EtcdMeta), etcdCli)
 	return session
 }

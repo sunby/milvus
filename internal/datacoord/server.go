@@ -86,8 +86,8 @@ const (
 	ServerStateHealthy ServerState = 2
 )
 
-type dataNodeCreatorFunc func(ctx context.Context, addr string) (types.DataNode, error)
-type rootCoordCreatorFunc func(ctx context.Context, metaRootPath string, etcdClient *clientv3.Client) (types.RootCoord, error)
+type dataNodeCreatorFunc func(ctx context.Context, cfg *configs.Config, addr string) (types.DataNode, error)
+type rootCoordCreatorFunc func(ctx context.Context, cfg *configs.Config, metaRootPath string, etcdClient *clientv3.Client) (types.RootCoord, error)
 
 // makes sure Server implements `DataCoord`
 var _ types.DataCoord = (*Server)(nil)
@@ -186,10 +186,11 @@ func SetSegmentManager(manager Manager) Option {
 }
 
 // CreateServer creates a `Server` instance
-func CreateServer(ctx context.Context, factory msgstream.Factory, opts ...Option) *Server {
+func CreateServer(ctx context.Context, cfg *configs.Config, factory msgstream.Factory, opts ...Option) *Server {
 	rand.Seed(time.Now().UnixNano())
 	s := &Server{
 		ctx:                    ctx,
+		cfg:                    cfg,
 		quitCh:                 make(chan struct{}),
 		msFactory:              factory,
 		flushCh:                make(chan UniqueID, 1024),
@@ -206,12 +207,12 @@ func CreateServer(ctx context.Context, factory msgstream.Factory, opts ...Option
 	return s
 }
 
-func defaultDataNodeCreatorFunc(ctx context.Context, addr string) (types.DataNode, error) {
-	return datanodeclient.NewClient(ctx, addr)
+func defaultDataNodeCreatorFunc(ctx context.Context, cfg *configs.Config, addr string) (types.DataNode, error) {
+	return datanodeclient.NewClient(ctx, cfg, addr)
 }
 
-func defaultRootCoordCreatorFunc(ctx context.Context, metaRootPath string, client *clientv3.Client) (types.RootCoord, error) {
-	return rootcoordclient.NewClient(ctx, metaRootPath, client)
+func defaultRootCoordCreatorFunc(ctx context.Context, cfg *configs.Config, metaRootPath string, client *clientv3.Client) (types.RootCoord, error) {
+	return rootcoordclient.NewClient(ctx, cfg, metaRootPath, client)
 }
 
 // QuitSignal returns signal when server quits
@@ -315,7 +316,7 @@ func (s *Server) initCluster() error {
 	}
 
 	var err error
-	s.channelManager, err = NewChannelManager(s.kvClient, s.handler, withMsgstreamFactory(s.msFactory))
+	s.channelManager, err = NewChannelManager(s.kvClient, s.handler, s.cfg, withMsgstreamFactory(s.msFactory))
 	if err != nil {
 		return err
 	}
@@ -339,7 +340,7 @@ func (s *Server) stopCompactionHandler() {
 }
 
 func (s *Server) createCompactionTrigger() {
-	s.compactionTrigger = newCompactionTrigger(s.meta, s.compactionHandler, s.allocator)
+	s.compactionTrigger = newCompactionTrigger(s.cfg, s.meta, s.compactionHandler, s.allocator)
 	s.compactionTrigger.start()
 }
 
@@ -421,7 +422,7 @@ func (s *Server) initServiceDiscovery() error {
 
 func (s *Server) startSegmentManager() {
 	if s.segmentManager == nil {
-		s.segmentManager = newSegmentManager(s.meta, s.allocator)
+		s.segmentManager = newSegmentManager(s.cfg, s.meta, s.allocator)
 	}
 }
 
@@ -762,7 +763,7 @@ func (s *Server) handleFlushingSegments(ctx context.Context) {
 
 func (s *Server) initRootCoordClient() error {
 	var err error
-	if s.rootCoordClient, err = s.rootCoordClientCreator(s.ctx, util.GetPath(s.cfg, util.EtcdMeta), s.etcdCli); err != nil {
+	if s.rootCoordClient, err = s.rootCoordClientCreator(s.ctx, s.cfg, util.GetPath(s.cfg, util.EtcdMeta), s.etcdCli); err != nil {
 		return err
 	}
 	if err = s.rootCoordClient.Init(); err != nil {

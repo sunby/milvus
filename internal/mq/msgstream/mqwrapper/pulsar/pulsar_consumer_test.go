@@ -20,14 +20,17 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/mq/msgstream/mqwrapper"
+	"github.com/milvus-io/milvus/internal/util"
 
 	"github.com/apache/pulsar-client-go/pulsar"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestPulsarConsumer_Subscription(t *testing.T) {
-	pulsarAddress, _ := Params.Load("_PulsarAddress")
+	cfg := configs.NewConfig()
+	pulsarAddress := util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port)
 	pc, err := NewClient(pulsar.ClientOptions{URL: pulsarAddress})
 	assert.Nil(t, err)
 	defer pc.Close()
@@ -58,7 +61,8 @@ func Test_PatchEarliestMessageID(t *testing.T) {
 }
 
 func TestPulsarConsumer_Close(t *testing.T) {
-	pulsarAddress, _ := Params.Load("_PulsarAddress")
+	cfg := configs.NewConfig()
+	pulsarAddress := util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port)
 	pc, err := NewClient(pulsar.ClientOptions{URL: pulsarAddress})
 	assert.Nil(t, err)
 

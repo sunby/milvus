@@ -48,7 +48,6 @@ import (
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/milvus-io/milvus/internal/util/trace"
-	"github.com/milvus-io/milvus/internal/util/typeutil"
 	"github.com/opentracing/opentracing-go"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
@@ -105,7 +104,7 @@ func (s *Server) startHTTPServer(port int) {
 	// (Embedded Milvus Only) Discard gin logs if logging is disabled.
 	// We might need to put these logs in some files in the further.
 	// But we don't care about these logs now, at least not in embedded Milvus.
-	if !proxy.Params.ProxyCfg.GinLogging {
+	if !s.cfg.Proxy.GinLogEnable {
 		gin.DefaultWriter = io.Discard
 		gin.DefaultErrorWriter = io.Discard
 	}
@@ -116,8 +115,8 @@ func (s *Server) startHTTPServer(port int) {
 	s.httpServer = &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
 		Handler:      ginHandler,
-		ReadTimeout:  HTTPParams.ReadTimeout,
-		WriteTimeout: HTTPParams.WriteTimeout,
+		ReadTimeout:  time.Duration(s.cfg.Proxy.HttpConf.ReadTimeoutInMs) * time.Millisecond,
+		WriteTimeout: time.Duration(s.cfg.Proxy.HttpConf.WriteTimeoutInMs) * time.Millisecond,
 	}
 	s.httpServerMtx.Unlock()
 	if err := s.httpServer.ListenAndServe(); err != nil {
@@ -156,8 +155,8 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 	s.grpcServer = grpc.NewServer(
 		grpc.KeepaliveEnforcementPolicy(kaep),
 		grpc.KeepaliveParams(kasp),
-		grpc.MaxRecvMsgSize(Params.ServerMaxRecvSize),
-		grpc.MaxSendMsgSize(Params.ServerMaxSendSize),
+		grpc.MaxRecvMsgSize(int(s.cfg.Grpc.ServerMaxReceiveSize)),
+		grpc.MaxSendMsgSize(int(s.cfg.Grpc.ServerMaxSendSize)),
 		grpc.UnaryInterceptor(ot.UnaryServerInterceptor(opts...)),
 		grpc.StreamInterceptor(ot.StreamServerInterceptor(opts...)))
 	proxypb.RegisterProxyServer(s.grpcServer, s)
@@ -197,17 +196,15 @@ func (s *Server) Run() error {
 }
 
 func (s *Server) init() error {
-	Params.InitOnce(typeutil.ProxyRole)
 	log.Debug("Proxy init service's parameter table done")
-	HTTPParams.InitOnce()
 	log.Debug("Proxy init http server's parameter table done")
 
-	if !funcutil.CheckPortAvailable(Params.Port) {
-		Params.Port = funcutil.GetAvailablePort()
-		log.Warn("Proxy get available port when init", zap.Int("Port", Params.Port))
+	if !funcutil.CheckPortAvailable(s.cfg.Proxy.Port) {
+		s.cfg.Proxy.Port = funcutil.GetAvailablePort()
+		log.Warn("Proxy get available port when init", zap.Int("Port", s.cfg.Proxy.Port))
 	}
 
-	serviceName := fmt.Sprintf("Proxy ip: %s, port: %d", Params.IP, Params.Port)
+	serviceName := fmt.Sprintf("Proxy ip: %s, port: %d", s.cfg.AdvertiseAddress, s.cfg.Proxy.Port)
 	closer := trace.InitTracing(serviceName)
 	s.closer = closer
 	log.Debug("init Proxy's tracer done", zap.String("service name", serviceName))
@@ -220,17 +217,17 @@ func (s *Server) init() error {
 	s.etcdCli = etcdCli
 	s.proxy.SetEtcdClient(s.etcdCli)
 	s.wg.Add(1)
-	go s.startGrpcLoop(Params.Port)
+	go s.startGrpcLoop(s.cfg.Proxy.Port)
 	log.Debug("waiting for grpc server of Proxy to be started")
 	if err := <-s.grpcErrChan; err != nil {
 		log.Warn("failed to start Proxy's grpc server", zap.Error(err))
 		return err
 	}
 	log.Debug("grpc server of proxy has been started")
-	if HTTPParams.Enabled {
-		log.Info("start http server of proxy", zap.Int("port", HTTPParams.Port))
+	if s.cfg.Proxy.HttpConf.Enable {
+		log.Info("start http server of proxy", zap.Int("port", s.cfg.Proxy.HttpConf.Port))
 		s.wg.Add(1)
-		go s.startHTTPServer(HTTPParams.Port)
+		go s.startHTTPServer(s.cfg.Proxy.HttpConf.Port)
 	}
 
 	if s.rootCoordClient == nil {
@@ -378,7 +375,7 @@ func (s *Server) start() error {
 
 // Stop stop the Proxy Server
 func (s *Server) Stop() error {
-	log.Debug("Proxy stop", zap.String("Address", Params.GetAddress()))
+	log.Debug("Proxy stop", zap.String("Address", fmt.Sprintf("%s:%d", s.cfg.AdvertiseAddress, s.cfg.Proxy.Port)))
 	var err error
 	if s.closer != nil {
 		if err = s.closer.Close(); err != nil {

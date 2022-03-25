@@ -36,7 +36,7 @@ import (
 var Params paramtable.BaseTable
 
 func TestMain(m *testing.M) {
-	Params.Init()
+	
 	path := "/tmp/milvus/rdb_data"
 	os.Setenv("ROCKSMQ_PATH", path)
 	defer os.RemoveAll(path)

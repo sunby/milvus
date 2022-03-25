@@ -22,17 +22,13 @@ import (
 	"github.com/milvus-io/milvus/configs"
 
 	"github.com/milvus-io/milvus/internal/util/etcd"
-	"github.com/milvus-io/milvus/internal/util/paramtable"
 	"github.com/milvus-io/milvus/internal/util/tsoutil"
 	"github.com/stretchr/testify/assert"
 )
 
 var gTestIDAllocator *GlobalIDAllocator
 
-var Params paramtable.ComponentParam
-
 func TestGlobalTSOAllocator_All(t *testing.T) {
-	Params.Init()
 	cfg := configs.NewConfig()
 	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.NoError(t, err)

@@ -3191,8 +3191,6 @@ func TestSearchTask_Reduce(t *testing.T) {
 func TestQueryTask_all(t *testing.T) {
 	var err error
 
-	Params.ProxyCfg.RetrieveResultChannelNames = []string{funcutil.GenRandomStr()}
-
 	rc := NewRootCoordMock()
 	rc.Start()
 	defer rc.Stop()
@@ -3508,8 +3506,6 @@ func TestQueryTask_all(t *testing.T) {
 
 func TestTask_all(t *testing.T) {
 	var err error
-
-	Params.ProxyCfg.RetrieveResultChannelNames = []string{funcutil.GenRandomStr()}
 
 	rc := NewRootCoordMock()
 	rc.Start()

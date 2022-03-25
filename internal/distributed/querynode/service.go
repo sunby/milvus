@@ -66,16 +66,18 @@ type Server struct {
 	etcdCli *clientv3.Client
 
 	closer io.Closer
+	cfg    *configs.Config
 }
 
 // NewServer create a new QueryNode grpc server.
-func NewServer(ctx context.Context, factory msgstream.Factory) (*Server, error) {
+func NewServer(ctx context.Context, cfg *configs.Config, factory msgstream.Factory) (*Server, error) {
 	ctx1, cancel := context.WithCancel(ctx)
 
 	s := &Server{
 		ctx:         ctx1,
 		cancel:      cancel,
-		querynode:   qn.NewQueryNode(ctx, factory),
+		cfg:         cfg,
+		querynode:   qn.NewQueryNode(ctx, cfg, factory),
 		grpcErrChan: make(chan error),
 	}
 	return s, nil
@@ -83,22 +85,15 @@ func NewServer(ctx context.Context, factory msgstream.Factory) (*Server, error) 
 
 // init initializes QueryNode's grpc service.
 func (s *Server) init() error {
-	Params.InitOnce(typeutil.QueryNodeRole)
-
-	if !funcutil.CheckPortAvailable(Params.Port) {
-		Params.Port = funcutil.GetAvailablePort()
-		log.Warn("QueryNode get available port when init", zap.Int("Port", Params.Port))
+	if !funcutil.CheckPortAvailable(s.cfg.QueryNode.Port) {
+		s.cfg.QueryNode.Port = funcutil.GetAvailablePort()
+		log.Warn("QueryNode get available port when init", zap.Int("Port", s.cfg.QueryNode.Port))
 	}
 
-	qn.Params.InitOnce()
-	qn.Params.QueryNodeCfg.QueryNodeIP = Params.IP
-	qn.Params.QueryNodeCfg.QueryNodePort = int64(Params.Port)
-	//qn.Params.QueryNodeID = Params.QueryNodeID
-
-	closer := trace.InitTracing(fmt.Sprintf("query_node ip: %s, port: %d", Params.IP, Params.Port))
+	closer := trace.InitTracing(fmt.Sprintf("query_node ip: %s, port: %d", s.cfg.AdvertiseAddress, s.cfg.QueryNode.Port))
 	s.closer = closer
 
-	log.Debug("QueryNode", zap.Int("port", Params.Port))
+	log.Debug("QueryNode", zap.Int("port", s.cfg.QueryNode.Port))
 
 	etcdCli, err := etcd.GetEtcdClient(configs.NewConfig())
 	if err != nil {
@@ -109,7 +104,7 @@ func (s *Server) init() error {
 	s.SetEtcdClient(etcdCli)
 	log.Debug("QueryNode connect to etcd successfully")
 	s.wg.Add(1)
-	go s.startGrpcLoop(Params.Port)
+	go s.startGrpcLoop(s.cfg.QueryNode.Port)
 	// wait for grpc server loop start
 	err = <-s.grpcErrChan
 	if err != nil {
@@ -157,7 +152,7 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 		addr := ":" + strconv.Itoa(grpcPort)
 		lis, err = net.Listen("tcp", addr)
 		if err == nil {
-			qn.Params.QueryNodeCfg.QueryNodePort = int64(lis.Addr().(*net.TCPAddr).Port)
+			s.cfg.QueryNode.Port = lis.Addr().(*net.TCPAddr).Port
 		} else {
 			// set port=0 to get next available port
 			grpcPort = 0
@@ -174,8 +169,8 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 	s.grpcServer = grpc.NewServer(
 		grpc.KeepaliveEnforcementPolicy(kaep),
 		grpc.KeepaliveParams(kasp),
-		grpc.MaxRecvMsgSize(Params.ServerMaxRecvSize),
-		grpc.MaxSendMsgSize(Params.ServerMaxSendSize),
+		grpc.MaxRecvMsgSize(int(s.cfg.Grpc.ServerMaxReceiveSize)),
+		grpc.MaxSendMsgSize(int(s.cfg.Grpc.ServerMaxSendSize)),
 		grpc.UnaryInterceptor(ot.UnaryServerInterceptor(opts...)),
 		grpc.StreamInterceptor(ot.StreamServerInterceptor(opts...)))
 	querypb.RegisterQueryNodeServer(s.grpcServer, s)
@@ -208,7 +203,7 @@ func (s *Server) Run() error {
 
 // Stop stops QueryNode's grpc service.
 func (s *Server) Stop() error {
-	log.Debug("QueryNode stop", zap.String("Address", Params.GetAddress()))
+	log.Debug("QueryNode stop", zap.String("Address", fmt.Sprintf("%s:%d", s.cfg.AdvertiseAddress, s.cfg.QueryNode.Port)))
 	if s.closer != nil {
 		if err := s.closer.Close(); err != nil {
 			return err

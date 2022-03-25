@@ -28,15 +28,15 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
+	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/internal/util/etcd"
-	"github.com/milvus-io/milvus/internal/util/typeutil"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestIndexCoordClient(t *testing.T) {
-	ClientParams.InitOnce(typeutil.IndexCoordRole)
 	ctx := context.Background()
-	server, err := grpcindexcoord.NewServer(ctx)
+	cfg := configs.NewConfig()
+	server, err := grpcindexcoord.NewServer(ctx, cfg)
 	assert.Nil(t, err)
 	icm := &indexcoord.Mock{}
 	err = server.SetClient(icm)
@@ -45,10 +45,9 @@ func TestIndexCoordClient(t *testing.T) {
 	err = server.Run()
 	assert.Nil(t, err)
 
-	cfg := configs.NewConfig()
 	etcdCli, err := etcd.GetEtcdClient(cfg)
 	assert.Nil(t, err)
-	icc, err := NewClient(ctx, indexcoord.Params.EtcdCfg.MetaRootPath, etcdCli)
+	icc, err := NewClient(ctx, cfg, util.GetPath(cfg, util.EtcdMeta), etcdCli)
 	assert.Nil(t, err)
 	assert.NotNil(t, icc)
 

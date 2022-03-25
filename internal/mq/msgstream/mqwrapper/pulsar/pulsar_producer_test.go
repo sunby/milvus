@@ -20,14 +20,17 @@ import (
 	"context"
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/mq/msgstream/mqwrapper"
+	"github.com/milvus-io/milvus/internal/util"
 
 	"github.com/apache/pulsar-client-go/pulsar"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestPulsarProducer(t *testing.T) {
-	pulsarAddress, _ := Params.Load("_PulsarAddress")
+	cfg := configs.NewConfig()
+	pulsarAddress := util.CreatePulsarAddress(cfg.Pulsar.Address, cfg.Pulsar.Port)
 	pc, err := NewClient(pulsar.ClientOptions{URL: pulsarAddress})
 	defer pc.Close()
 	assert.NoError(t, err)

@@ -18,43 +18,36 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"path"
-	"strconv"
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func newMinIOChunkManager(ctx context.Context, bucketName string) (*MinioChunkManager, error) {
-	endPoint, _ := Params.Load("_MinioAddress")
-	accessKeyID, _ := Params.Load("minio.accessKeyID")
-	secretAccessKey, _ := Params.Load("minio.secretAccessKey")
-	useSSLStr, _ := Params.Load("minio.useSSL")
-	useSSL, _ := strconv.ParseBool(useSSLStr)
+	cfg := configs.NewConfig()
 	client, err := NewMinioChunkManager(ctx,
-		Address(endPoint),
-		AccessKeyID(accessKeyID),
-		SecretAccessKeyID(secretAccessKey),
-		UseSSL(useSSL),
-		BucketName(bucketName),
+		Address(fmt.Sprintf("%s:%d", cfg.Minio.Address, cfg.Minio.Port)),
+		AccessKeyID(cfg.Minio.AccessKeyID),
+		SecretAccessKeyID(cfg.Minio.SecretAccessKey),
+		UseSSL(cfg.Minio.UseSSL),
+		BucketName(cfg.Minio.BucketName),
 		CreateBucket(true),
 	)
 	return client, err
 }
 func TestMinIOCMFail(t *testing.T) {
 	ctx := context.Background()
-	endPoint, _ := Params.Load("9.9.9.9")
-	accessKeyID, _ := Params.Load("minio.accessKeyID")
-	secretAccessKey, _ := Params.Load("minio.secretAccessKey")
-	useSSLStr, _ := Params.Load("minio.useSSL")
-	useSSL, _ := strconv.ParseBool(useSSLStr)
+	cfg := configs.NewConfig()
 	client, err := NewMinioChunkManager(ctx,
-		Address(endPoint),
-		AccessKeyID(accessKeyID),
-		SecretAccessKeyID(secretAccessKey),
-		UseSSL(useSSL),
-		BucketName("test"),
+		Address(""),
+		AccessKeyID(cfg.Minio.AccessKeyID),
+		SecretAccessKeyID(cfg.Minio.SecretAccessKey),
+		UseSSL(cfg.Minio.UseSSL),
+		BucketName(cfg.Minio.BucketName),
 		CreateBucket(true),
 	)
 	assert.Error(t, err)
@@ -63,13 +56,9 @@ func TestMinIOCMFail(t *testing.T) {
 }
 
 func TestMinIOCM(t *testing.T) {
-	Params.Init()
-	testBucket, err := Params.Load("minio.bucketName")
-	require.NoError(t, err)
-
-	configRoot, err := Params.Load("minio.rootPath")
-	require.NoError(t, err)
-
+	cfg := configs.NewConfig()
+	testBucket := cfg.Minio.BucketName
+	configRoot := cfg.Minio.RootPath
 	testMinIOKVRoot := path.Join(configRoot, "milvus-minio-ut-root")
 
 	t.Run("test load", func(t *testing.T) {

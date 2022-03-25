@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/milvus-io/milvus/configs"
 	"github.com/milvus-io/milvus/internal/indexcoord"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
@@ -31,11 +32,11 @@ import (
 
 func TestIndexCoordinateServer(t *testing.T) {
 	ctx := context.Background()
-	server, err := NewServer(ctx)
+	cfg := configs.NewConfig()
+	server, err := NewServer(ctx, cfg)
 	assert.Nil(t, err)
 	assert.NotNil(t, server)
-	Params.Init()
-	etcd, err := etcd.GetEtcdClient(&Params.EtcdCfg)
+	etcd, err := etcd.GetEtcdClient(cfg)
 	assert.NoError(t, err)
 	indexCoordClient := &indexcoord.Mock{}
 	indexCoordClient.SetEtcdClient(etcd)
