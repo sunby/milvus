@@ -71,6 +71,7 @@ type Meta interface {
 	showSegmentInfos(collectionID UniqueID, partitionIDs []UniqueID) []*querypb.SegmentInfo
 	getSegmentInfoByID(segmentID UniqueID) (*querypb.SegmentInfo, error)
 	getSegmentInfosByNode(nodeID int64) []*querypb.SegmentInfo
+	getSegmentInfosByNodeAndCollection(nodeID, collectionID int64) []*querypb.SegmentInfo
 
 	getPartitionStatesByID(collectionID UniqueID, partitionID UniqueID) (*querypb.PartitionStates, error)
 
@@ -795,6 +796,16 @@ func (m *MetaReplica) getSegmentInfosByNode(nodeID int64) []*querypb.SegmentInfo
 	segments := m.segmentsInfo.getSegments()
 	for _, segment := range segments {
 		if segment.GetNodeID() == nodeID {
+			res = append(res, segment)
+		}
+	}
+	return res
+}
+func (m *MetaReplica) getSegmentInfosByNodeAndCollection(nodeID, collectionID int64) []*querypb.SegmentInfo {
+	var res []*querypb.SegmentInfo
+	segments := m.segmentsInfo.getSegments()
+	for _, segment := range segments {
+		if segment.GetNodeID() == nodeID && segment.GetCollectionID() == collectionID {
 			res = append(res, segment)
 		}
 	}
