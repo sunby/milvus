@@ -182,6 +182,10 @@ func (qc *QueryCoord) Init() error {
 			return
 		}
 
+		// NOTE: ignore the returned error
+		// we only try best to reload the leader addresses
+		reloadShardLeaderAddress(qc.meta, qc.cluster)
+
 		qc.chunkManager, initError = storage.NewMinioChunkManager(qc.loopCtx,
 			storage.Address(Params.MinioCfg.Address),
 			storage.AccessKeyID(Params.MinioCfg.AccessKeyID),
