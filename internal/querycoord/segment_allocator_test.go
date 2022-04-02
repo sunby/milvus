@@ -18,6 +18,8 @@ package querycoord
 
 import (
 	"context"
+	"math/rand"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -40,7 +42,13 @@ func TestShuffleSegmentsToQueryNode(t *testing.T) {
 	clusterSession := sessionutil.NewSession(context.Background(), Params.EtcdCfg.MetaRootPath, etcdCli)
 	clusterSession.Init(typeutil.QueryCoordRole, Params.QueryCoordCfg.Address, true, false)
 	factory := msgstream.NewPmsFactory()
-	meta, err := newMeta(baseCtx, kv, factory, nil)
+
+	id := UniqueID(rand.Int31())
+	idAllocator := func() (UniqueID, error) {
+		newID := atomic.AddInt64(&id, 1)
+		return newID, nil
+	}
+	meta, err := newMeta(baseCtx, kv, factory, idAllocator)
 	assert.Nil(t, err)
 	handler, err := newChannelUnsubscribeHandler(baseCtx, kv, factory)
 	assert.Nil(t, err)
