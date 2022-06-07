@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -437,6 +438,12 @@ func (s *Server) startServerLoop() {
 	s.startWatchService(s.serverLoopCtx)
 	s.startFlushLoop(s.serverLoopCtx)
 	s.garbageCollector.start()
+	go func() {
+		for {
+			time.Sleep(30 * time.Second)
+			debug.FreeOSMemory()
+		}
+	}()
 }
 
 // startDataNodeTtLoop start a goroutine to recv data node tt msg from msgstream
