@@ -440,7 +440,7 @@ func (s *Server) startServerLoop() {
 	s.garbageCollector.start()
 	go func() {
 		for {
-			time.Sleep(30 * time.Second)
+			time.Sleep(30 * time.Minute)
 			debug.FreeOSMemory()
 		}
 	}()
