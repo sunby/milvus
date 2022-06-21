@@ -292,7 +292,7 @@ func (t *compactionTrigger) handleSignal(signal *compactionSignal) {
 		t.compactionHandler.execCompactionPlan(signal, plan)
 
 		log.Info("time cost of generating compaction", zap.Int64("planID", plan.PlanID), zap.Any("time cost", time.Since(start).Milliseconds()),
-			zap.Int64("collectionID", signal.collectionID), zap.String("channel", channel), zap.Int64("partitionID", partitionID))
+			zap.Int64("collectionID", signal.collectionID), zap.String("channel", channel), zap.Int64("partitionID", partitionID), zap.Any("plan", plan))
 	}
 }
 
@@ -307,8 +307,10 @@ func (t *compactionTrigger) generatePlans(segments []*SegmentInfo, force bool, c
 		segment := segment.ShadowClone()
 		// TODO should we trigger compaction periodically even if the segment has no obvious reason to be compacted?
 		if force || t.ShouldDoSingleCompaction(segment, compactTime) {
+      log.Info("should do single compaction", zap.Any("segment", segment), zap.Any("isForce", force))
 			prioritizedCandidates = append(prioritizedCandidates, segment)
 		} else if t.isSmallSegment(segment) {
+			log.Info("small segment", zap.Any("segment", segment), zap.Any("size", segment.getSegmentSize()))
 			smallCandidates = append(smallCandidates, segment)
 		}
 	}
