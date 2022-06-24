@@ -135,7 +135,7 @@ func TestMetaTable(t *testing.T) {
 		key = "indexes/" + strconv.FormatInt(indexMeta1.IndexBuildID, 10)
 		err = etcdKV.Save(key, string(value))
 		assert.Nil(t, err)
-		err = metaTable.MarkIndexAsDeleted(indexMeta1.Req.IndexID)
+		_, err = metaTable.MarkIndexAsDeleted(indexMeta1.Req.IndexID)
 		assert.Nil(t, err)
 	})
 
@@ -153,7 +153,7 @@ func TestMetaTable(t *testing.T) {
 		key = path.Join(indexFilePrefix, strconv.FormatInt(indexMeta1.IndexBuildID, 10))
 		err = etcdKV.Save(key, string(value))
 		assert.Nil(t, err)
-		err = metaTable.MarkIndexAsDeletedByBuildIDs([]UniqueID{indexMeta1.IndexBuildID})
+		_, err = metaTable.MarkIndexAsDeletedByBuildIDs([]UniqueID{indexMeta1.IndexBuildID})
 		assert.Nil(t, err)
 	})
 
@@ -346,4 +346,85 @@ func TestMetaTable_Error(t *testing.T) {
 
 	err = etcdKV.RemoveWithPrefix("indexes/")
 	assert.Nil(t, err)
+}
+
+func TestMetaTable_GetUnassignedTasks(t *testing.T) {
+	mt := metaTable{
+		indexBuildID2Meta: map[UniqueID]Meta{
+			1: {
+				indexMeta: &indexpb.IndexMeta{
+					IndexBuildID: 1,
+					Req: &indexpb.BuildIndexRequest{
+						NumRows: 10,
+					},
+					Version: 1,
+					NodeID:  1,
+					State:   commonpb.IndexState_Unissued,
+				},
+			},
+			2: {
+				indexMeta: &indexpb.IndexMeta{
+					IndexBuildID: 2,
+					Req: &indexpb.BuildIndexRequest{
+						NumRows: 100,
+					},
+					Version: 1,
+					NodeID:  1,
+					State:   commonpb.IndexState_Unissued,
+				},
+			},
+			3: {
+				indexMeta: &indexpb.IndexMeta{
+					IndexBuildID: 3,
+					Req: &indexpb.BuildIndexRequest{
+						NumRows: 1000,
+					},
+					Version: 2,
+					NodeID:  1,
+					State:   commonpb.IndexState_Unissued,
+				},
+			},
+			4: {
+				indexMeta: &indexpb.IndexMeta{
+					IndexBuildID: 4,
+					Req: &indexpb.BuildIndexRequest{
+						NumRows: 1000,
+					},
+					Version: 2,
+					NodeID:  2,
+					State:   commonpb.IndexState_Finished,
+				},
+			},
+			5: {
+				indexMeta: &indexpb.IndexMeta{
+					IndexBuildID: 5,
+					Req: &indexpb.BuildIndexRequest{
+						NumRows: 1000,
+					},
+					Version: 3,
+					NodeID:  2,
+					State:   commonpb.IndexState_InProgress,
+				},
+			},
+			6: {
+				indexMeta: &indexpb.IndexMeta{
+					IndexBuildID: 5,
+					Req: &indexpb.BuildIndexRequest{
+						NumRows: 1000,
+					},
+					Version:     1,
+					NodeID:      1,
+					State:       commonpb.IndexState_InProgress,
+					MarkDeleted: true,
+				},
+			},
+		},
+	}
+
+	metas := mt.GetUnassignedTasks([]UniqueID{1, 3, 4})
+	assert.Equal(t, 4, len(metas))
+	assert.Equal(t, int64(2), metas[0].indexMeta.IndexBuildID)
+	assert.Equal(t, int64(1), metas[1].indexMeta.IndexBuildID)
+	assert.Equal(t, int64(3), metas[2].indexMeta.IndexBuildID)
+	assert.Equal(t, int64(5), metas[3].indexMeta.IndexBuildID)
 }

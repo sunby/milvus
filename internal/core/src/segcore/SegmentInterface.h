@@ -27,7 +27,6 @@
 #include "common/LoadInfo.h"
 #include "common/BitsetView.h"
 #include "common/QueryResult.h"
-#include "knowhere/index/vector_index/VecIndex.h"
 #include "query/Plan.h"
 #include "query/PlanNode.h"
 #include "pb/schema.pb.h"
@@ -119,7 +118,7 @@ class SegmentInternalInterface : public SegmentInterface {
  public:
     virtual void
     vector_search(int64_t vec_count,
-                  query::SearchInfo search_info,
+                  query::SearchInfo& search_info,
                   const void* query_data,
                   int64_t query_count,
                   Timestamp timestamp,

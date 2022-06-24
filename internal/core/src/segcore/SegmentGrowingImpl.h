@@ -30,7 +30,6 @@
 #include "SegmentGrowing.h"
 
 #include "exceptions/EasyAssert.h"
-#include "knowhere/index/vector_index/VecIndex.h"
 #include "query/PlanNode.h"
 #include "query/deprecated/GeneralQuery.h"
 #include "utils/Status.h"
@@ -171,7 +170,7 @@ class SegmentGrowingImpl : public SegmentGrowing {
 
     void
     vector_search(int64_t vec_count,
-                  query::SearchInfo search_info,
+                  query::SearchInfo& search_info,
                   const void* query_data,
                   int64_t query_count,
                   Timestamp timestamp,
