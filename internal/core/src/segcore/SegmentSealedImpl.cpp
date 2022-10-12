@@ -10,6 +10,7 @@
 // or implied. See the License for the specific language governing permissions and limitations under the License
 
 #include "SegmentSealedImpl.h"
+#include <string>
 #include "common/Consts.h"
 #include "query/SearchBruteForce.h"
 #include "query/SearchOnSealed.h"
@@ -181,6 +182,7 @@ SegmentSealedImpl::LoadFieldData(const LoadFieldDataInfo& info) {
             AssertInfo(insert_record_.row_ids_.num_chunk() == 1, "num chunk not equal to 1 for sealed segment");
         }
         ++system_ready_count_;
+        std::cout << "load system field " + std::to_string(field_id.get()) + " , segment " + std::to_string(id_) + "\n";
     } else {
         // prepare data
         auto& field_meta = schema_->operator[](field_id);
@@ -359,6 +361,7 @@ SegmentSealedImpl::DropFieldData(const FieldId field_id) {
 
         std::unique_lock lck(mutex_);
         --system_ready_count_;
+        std::cout << "drop system field " + std::to_string(field_id.get()) + " , segment " + std::to_string(id_) + "\n";
         if (system_field_type == SystemFieldType::RowId) {
             insert_record_.row_ids_.clear();
         } else if (system_field_type == SystemFieldType::Timestamp) {
