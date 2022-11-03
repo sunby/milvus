@@ -216,11 +216,14 @@ func (loader *segmentLoader) loadFiles(ctx context.Context, segment *Segment,
 	collectionID := loadInfo.CollectionID
 	partitionID := loadInfo.PartitionID
 	segmentID := loadInfo.SegmentID
+	usedMem := hardware.GetUsedMemoryCount()
 	log.Info("start loading segment data into memory",
 		zap.Int64("collectionID", collectionID),
 		zap.Int64("partitionID", partitionID),
 		zap.Int64("segmentID", segmentID),
-		zap.String("segmentType", segment.getType().String()))
+		zap.String("segmentType", segment.getType().String()),
+		zap.Uint64("usedMemInMB", usedMem/1024/1024),
+	)
 
 	pkFieldID, err := loader.metaReplica.getPKFieldIDByCollectionID(collectionID)
 	if err != nil {
@@ -229,7 +232,17 @@ func (loader *segmentLoader) loadFiles(ctx context.Context, segment *Segment,
 
 	// TODO(xige-16): Optimize the data loading process and reduce data copying
 	// for now, there will be multiple copies in the process of data loading into segCore
-	defer debug.FreeOSMemory()
+	defer func() {
+		usedMem := hardware.GetUsedMemoryCount()
+		log.Info("load segment complete before gc",
+			zap.Int64("segmentID", segmentID),
+			zap.Uint64("usedMemInMB", usedMem/1024/1024))
+		debug.FreeOSMemory()
+		usedMem = hardware.GetUsedMemoryCount()
+		log.Info("load segment complete after gc",
+			zap.Int64("segmentID", segmentID),
+			zap.Uint64("usedMemInMB", usedMem/1024/1024))
+	}()
 
 	if segment.getType() == segmentTypeSealed {
 		fieldID2IndexInfo := make(map[int64]*querypb.FieldIndexInfo)
@@ -885,6 +898,7 @@ func (loader *segmentLoader) checkSegmentSize(collectionID UniqueID, segmentLoad
 		if usedMemAfterLoad-oldUsedMem > maxSegmentSize {
 			maxSegmentSize = usedMemAfterLoad - oldUsedMem
 		}
+		log.Info("estimated segment size", zap.Int64("segmentID", loadInfo.SegmentID), zap.Uint64("sizeInMB", (usedMemAfterLoad-oldUsedMem)/1024/1024))
 	}
 
 	toMB := func(mem uint64) uint64 {
@@ -897,6 +911,7 @@ func (loader *segmentLoader) checkSegmentSize(collectionID UniqueID, segmentLoad
 	log.Info("predict memory and disk usage while loading (in MiB)",
 		zap.Int64("collectionID", collectionID),
 		zap.Int("concurrency", concurrency),
+		zap.Uint64("usedMem", toMB(usedMem)),
 		zap.Uint64("memUsage", toMB(memLoadingUsage)),
 		zap.Uint64("memUsageAfterLoad", toMB(usedMemAfterLoad)),
 		zap.Uint64("diskUsageAfterLoad", toMB(usedLocalSizeAfterLoad)))
