@@ -720,4 +720,8 @@ SegmentSealedImpl::mask_with_timestamps(BitsetType& bitset_chunk, Timestamp time
     bitset_chunk |= mask;
 }
 
+InsertRecord<true>*
+SegmentSealedImpl::get_insert_record() {
+    return &insert_record_;
+}
 }  // namespace milvus::segcore

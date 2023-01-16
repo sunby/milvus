@@ -11,12 +11,16 @@
 
 #include <gtest/gtest.h>
 #include <boost/format.hpp>
+#include <memory>
 
 #include <knowhere/index/IndexType.h>
 #include "knowhere/index/vector_index/adapter/VectorAdapter.h"
 #include "segcore/SegmentSealedImpl.h"
 #include "test_utils/DataGen.h"
 #include "index/IndexFactory.h"
+#include "velox/exec/tests/utils/PlanBuilder.h"
+#include "velox/exec/tests/utils/AssertQueryBuilder.h"
+#include "storage/MilvusConnector.h"
 
 using namespace milvus;
 using namespace milvus::query;
@@ -625,7 +629,7 @@ TEST(Sealed, Delete) {
     SealedLoadFieldData(dataset, *segment);
 
     int64_t row_count = 5;
-    std::vector<idx_t> pks{1, 2, 3, 4, 5};
+    std::vector<milvus::idx_t> pks{1, 2, 3, 4, 5};
     auto ids = std::make_unique<IdArray>();
     ids->mutable_int_id()->mutable_data()->Add(pks.begin(), pks.end());
     std::vector<Timestamp> timestamps{10, 10, 10, 10, 10};
@@ -639,10 +643,10 @@ TEST(Sealed, Delete) {
     ASSERT_EQ(bitset.count(), pks.size());
 
     int64_t new_count = 3;
-    std::vector<idx_t> new_pks{6, 7, 8};
+    std::vector<milvus::idx_t> new_pks{6, 7, 8};
     auto new_ids = std::make_unique<IdArray>();
     new_ids->mutable_int_id()->mutable_data()->Add(new_pks.begin(), new_pks.end());
-    std::vector<idx_t> new_timestamps{10, 10, 10};
+    std::vector<milvus::idx_t> new_timestamps{10, 10, 10};
     auto reserved_offset = segment->PreDelete(new_count);
     ASSERT_EQ(reserved_offset, row_count);
     segment->Delete(reserved_offset, new_count, new_ids.get(),
@@ -850,4 +854,50 @@ TEST(Sealed, RealCount) {
     status = segment->Delete(del_offset3, c, del_ids3.get(), del_tss3.data());
     ASSERT_TRUE(status.ok());
     ASSERT_EQ(0, segment->get_real_count());
+}
+
+TEST(Sealed, Velox) {
+    auto N = 10;
+    auto schema = std::make_shared<Schema>();
+    auto counter_id = schema->AddDebugField("counter", DataType::INT64);
+    auto nothing_id = schema->AddDebugField("nothing", DataType::INT32);
+    schema->set_primary_field_id(counter_id);
+
+    auto dataset = DataGen(schema, N);
+
+    auto segment = CreateSealedSegment(schema);
+
+    LoadIndexInfo counter_index;
+    counter_index.field_id = counter_id.get();
+    counter_index.field_type = DataType::INT64;
+    counter_index.index_params["index_type"] = "sort";
+    auto counter_data = dataset.get_col<int64_t>(counter_id);
+    counter_index.index = std::move(GenScalarIndexing<int64_t>(N, counter_data.data()));
+    segment->LoadIndex(counter_index);
+
+    LoadIndexInfo nothing_index;
+    nothing_index.field_id = nothing_id.get();
+    nothing_index.field_type = DataType::INT32;
+    nothing_index.index_params["index_type"] = "sort";
+    auto nothing_data = dataset.get_col<int32_t>(nothing_id);
+    nothing_index.index = std::move(GenScalarIndexing<int32_t>(N, nothing_data.data()));
+    segment->LoadIndex(nothing_index);
+
+    std::string milvus_connector_id = "milvus-connector";
+    auto milvusConnector = std::make_shared<milvus::storage::MilvusConnector>(milvus_connector_id, nullptr);
+
+    facebook::velox::connector::registerConnector(milvusConnector);
+    auto inputRowType =
+        facebook::velox::ROW({{"counter", facebook::velox::BIGINT()}, {"nothing", facebook::velox::INTEGER()}});
+    auto milvusTableHandle = std::make_shared<milvus::storage::MilvusTableHandle>(milvus_connector_id);
+    auto counterColumnHandle = std::make_shared<milvus::storage::MilvusColumnHandle>(counter_id);
+    auto nothingColumnHanlde = std::make_shared<milvus::storage::MilvusColumnHandle>(nothing_id);
+    auto plan = facebook::velox::exec::test::PlanBuilder()
+                    .tableScan(inputRowType, milvusTableHandle,
+                               {{"counter", counterColumnHandle}, {"nothing", nothingColumnHanlde}})
+                    .planNode();
+    auto milvusSplit = facebook::velox::exec::Split(std::make_shared<milvus::storage::MilvusConnectorSplit>(
+        milvus_connector_id, dynamic_cast<SegmentSealedImpl*>(segment.get())));
+    auto pool = facebook::velox::memory::getDefaultMemoryPool();
+    auto res = facebook::velox::exec::test::AssertQueryBuilder(plan).split(milvusSplit).copyResults(pool.get());
 }
