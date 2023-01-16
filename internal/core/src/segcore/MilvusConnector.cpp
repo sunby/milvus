@@ -1,6 +1,8 @@
 #include "MilvusConnector.h"
+#include <velox/type/Type.h>
 #include <optional>
 #include "common/Types.h"
+#include "glog/logging.h"
 #include "velox/vector/FlatVector.h"
 
 namespace milvus::storage {
@@ -36,10 +38,7 @@ void
 MilvusDataSource::fillVector(facebook::velox::FlatVector<T>* vec, milvus::FieldId field_id, size_t size) {
     for (int i = splitOffsets_; i < splitOffsets_ + size; ++i) {
         auto data = getRawData<T>(field_id, i);
-        std::cout << "got data" << std::endl;
         vec->set(i, data);
-
-        std::cout << "set data" << std::endl;
     }
 }
 
@@ -65,11 +64,10 @@ MilvusDataSource::next(uint64_t size, facebook::velox::ContinueFuture& future) {
         split_ = nullptr;
         return nullptr;
     }
-    std::cout << "next " << maxRows << std::endl;
     auto vectorPtr = allocateVectors(outputType_, maxRows, pool_);
 
     for (int i = 0; i < fieldIDs.size(); ++i) {
-        switch (outputType_->childAt(i)->kind()) {
+        switch (auto t = outputType_->childAt(i)->kind()) {
             case facebook::velox::TypeKind::BOOLEAN: {
                 auto flatVector = vectorPtr[i]->asFlatVector<bool>();
                 fillVector<bool>(flatVector, fieldIDs[i], maxRows);
@@ -95,7 +93,23 @@ MilvusDataSource::next(uint64_t size, facebook::velox::ContinueFuture& future) {
                 fillVector<int64_t>(flatVector, fieldIDs[i], maxRows);
                 break;
             }
+            case facebook::velox::TypeKind::REAL: {
+                auto flatVector = vectorPtr[i]->asFlatVector<float>();
+                fillVector<float>(flatVector, fieldIDs[i], maxRows);
+                break;
+            }
+            case facebook::velox::TypeKind::DOUBLE: {
+                auto flatVector = vectorPtr[i]->asFlatVector<double>();
+                fillVector<double>(flatVector, fieldIDs[i], maxRows);
+                break;
+            }
+            case facebook::velox::TypeKind::VARCHAR: {
+                auto flatVector = vectorPtr[i]->asFlatVector<facebook::velox::StringView>();
+                fillVector<facebook::velox::StringView>(flatVector, fieldIDs[i], maxRows);
+                break;
+            }
             default: {
+                PanicInfo("unsupported type: " + facebook::velox::mapTypeKindToName(t));
             }
         }
     }
@@ -112,7 +126,6 @@ MilvusDataSource::getRawData(milvus::FieldId field_id, int64_t index) {
     auto size_per_chunk = split_->segment->size_per_chunk();
     auto chunk_idx = index / size_per_chunk;
     auto chunk_offset = index % size_per_chunk;
-    std::cout << size_per_chunk << " " << chunk_idx << " " << chunk_offset << std::endl;
     return split_->segment->chunk_data<T>(field_id, chunk_idx)[chunk_offset];
 }
 }  // namespace milvus::storage

@@ -32,8 +32,6 @@ class MilvusDataSource : public facebook::velox::connector::DataSource {
         split_ = std::dynamic_pointer_cast<MilvusConnectorSplit>(split);
         VELOX_CHECK_NOT_NULL(split_->segment, "Split's segment can not be null");
         splitOffsets_ = 0;
-        chunkIdx_ = 0;
-        chunkOffset_ = 0;
     }
 
     void
@@ -73,8 +71,6 @@ class MilvusDataSource : public facebook::velox::connector::DataSource {
     uint64_t completedRows_ = 0;
     std::shared_ptr<MilvusConnectorSplit> split_;
     int64_t splitOffsets_;
-    ssize_t chunkIdx_;
-    ssize_t chunkOffset_;
     std::shared_ptr<const facebook::velox::RowType> outputType_;
     std::shared_ptr<facebook::velox::connector::ConnectorTableHandle> tableHandle_;
     std::vector<milvus::FieldId> fieldIDs;

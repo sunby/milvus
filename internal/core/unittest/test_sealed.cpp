@@ -14,6 +14,7 @@
 #include <memory>
 
 #include <knowhere/index/IndexType.h>
+#include <velox/type/Type.h>
 #include "knowhere/index/vector_index/adapter/VectorAdapter.h"
 #include "segcore/SegmentSealedImpl.h"
 #include "test_utils/DataGen.h"
@@ -859,9 +860,12 @@ TEST(Sealed, RealCount) {
 TEST(Sealed, Velox) {
     auto N = 10;
     auto schema = std::make_shared<Schema>();
-    auto counter_id = schema->AddDebugField("counter", DataType::INT64);
-    auto nothing_id = schema->AddDebugField("nothing", DataType::INT32);
-    schema->set_primary_field_id(counter_id);
+    auto int64_id = schema->AddDebugField("int64_f", DataType::INT64);
+    auto int32_id = schema->AddDebugField("int32_f", DataType::INT32);
+    auto float_id = schema->AddDebugField("float_f", DataType::FLOAT);
+    auto double_id = schema->AddDebugField("double_f", DataType::DOUBLE);
+    auto varchar_id = schema->AddDebugField("varchar_f", DataType::VARCHAR);
+    schema->set_primary_field_id(int64_id);
 
     auto dataset = DataGen(schema, N);
     auto segment = CreateSealedSegment(schema);
@@ -869,16 +873,27 @@ TEST(Sealed, Velox) {
 
     std::string milvus_connector_id = "milvus-connector";
     auto milvusConnector = std::make_shared<milvus::storage::MilvusConnector>(milvus_connector_id, nullptr);
-
     facebook::velox::connector::registerConnector(milvusConnector);
-    auto inputRowType =
-        facebook::velox::ROW({{"counter", facebook::velox::BIGINT()}, {"nothing", facebook::velox::INTEGER()}});
+
+    auto inputRowType = facebook::velox::ROW({{"int64_f", facebook::velox::BIGINT()},
+                                              {"int32_f", facebook::velox::INTEGER()},
+                                              {"double_f", facebook::velox::DOUBLE()},
+                                              {"varchar_f", facebook::velox::VARCHAR()},
+                                              {"float_f", facebook::velox::REAL()}});
     auto milvusTableHandle = std::make_shared<milvus::storage::MilvusTableHandle>(milvus_connector_id);
-    auto counterColumnHandle = std::make_shared<milvus::storage::MilvusColumnHandle>(counter_id);
-    auto nothingColumnHanlde = std::make_shared<milvus::storage::MilvusColumnHandle>(nothing_id);
+    auto int64ColumnHandle = std::make_shared<milvus::storage::MilvusColumnHandle>(int64_id);
+    auto int32ColumnHanlde = std::make_shared<milvus::storage::MilvusColumnHandle>(int32_id);
+    auto floatColumnHanlde = std::make_shared<milvus::storage::MilvusColumnHandle>(float_id);
+    auto doubleColumnHanlde = std::make_shared<milvus::storage::MilvusColumnHandle>(double_id);
+    auto varcharColumnHanlde = std::make_shared<milvus::storage::MilvusColumnHandle>(varchar_id);
+
     auto plan = facebook::velox::exec::test::PlanBuilder()
                     .tableScan(inputRowType, milvusTableHandle,
-                               {{"counter", counterColumnHandle}, {"nothing", nothingColumnHanlde}})
+                               {{"int64_f", int64ColumnHandle},
+                                {"int32_f", int32ColumnHanlde},
+                                {"float_f", floatColumnHanlde},
+                                {"double_f", doubleColumnHanlde},
+                                {"varchar_f", varcharColumnHanlde}})
                     .planNode();
     auto milvusSplit = facebook::velox::exec::Split(std::make_shared<milvus::storage::MilvusConnectorSplit>(
         milvus_connector_id, dynamic_cast<SegmentSealedImpl*>(segment.get())));
