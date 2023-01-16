@@ -25,7 +25,7 @@ if ( BUILD_DISK_ANN STREQUAL "ON" )
 endif ()
 
 milvus_add_pkg_config("milvus_index")
-add_library(milvus_index SHARED ${INDEX_FILES})
+add_library(milvus_index ${INDEX_FILES})
 
 set(PLATFORM_LIBS )
 if ( LINUX OR APPLE )

@@ -107,7 +107,7 @@ target_link_libraries(all_tests
         milvus_storage
         milvus_indexbuilder
         pthread
-        # velox_exec
+        velox_bundled
         )
 
 install(TARGETS all_tests DESTINATION unittest)

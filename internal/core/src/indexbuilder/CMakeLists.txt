@@ -18,7 +18,7 @@ set(INDEXBUILDER_FILES
         )
 
 milvus_add_pkg_config("milvus_indexbuilder")
-add_library(milvus_indexbuilder SHARED ${INDEXBUILDER_FILES})
+add_library(milvus_indexbuilder ${INDEXBUILDER_FILES})
 
 find_library(TBB NAMES tbb)
 set(PLATFORM_LIBS dl)

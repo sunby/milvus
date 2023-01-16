@@ -83,6 +83,7 @@ class Span<T, typename std::enable_if_t<IsScalar<T> || std::is_same_v<T, PkType>
 
     const T&
     operator[](int64_t offset) const {
+        std::cout << "data " << data_ << " row count " << row_count_ << std::endl;
         return data_[offset];
     }
 

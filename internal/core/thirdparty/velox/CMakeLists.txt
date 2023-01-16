@@ -10,7 +10,7 @@
 # is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 # or implied. See the License for the specific language governing permissions and limitations under the License.
 
-set(VELOX_SOURCE_URL "https://github.com/jiaoew1991/velox")
+set(VELOX_SOURCE_URL "https://github.com/sunby/velox.git")
 set(VELOX_COMMIT_ID "milvus")
 
 macro(build_velox)
@@ -18,11 +18,12 @@ macro(build_velox)
   set(VELOX_INSTALL_PREFIX ${CMAKE_INSTALL_PREFIX})
   set(VELOX_CMAKE_ARGS 
     ${EP_COMMON_CMAKE_ARGS}
-    -DVELOX_ENABLE_DUCKDB=OFF
-    -DVELOX_ENABLE_TPCH_CONNECTOR=OFF
+    -DVELOX_ENABLE_DUCKDB=ON
+    -DVELOX_ENABLE_TPCH_CONNECTOR=ON
     -DVELOX_ENABLE_SPARK_FUNCTIONS=OFF
-    -DVELOX_ENABLE_PARSE=OFF
+    -DVELOX_ENABLE_PARSE=ON
     -DVELOX_BUILD_TESTING=OFF
+    -DVELOX_BUILD_TEST_UTILS=ON
     -DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}
     -DCMAKE_PREFIX_PATH=${CONAN_BISON_ROOT}$<SEMICOLON>${CONAN_FLEX_ROOT}$<SEMICOLON>${CONAN_PROTOBUF_ROOT}
     -DCMAKE_MODULE_PATH=${CMAKE_BINARY_DIR}/conan/

@@ -34,7 +34,6 @@ set(STORAGE_FILES
     InsertData.cpp
     Event.cpp
     ThreadPool.cpp
-    MilvusConnector.cpp
     storage_c.cpp)
 
 if(BUILD_DISK_ANN STREQUAL "ON")
@@ -45,7 +44,7 @@ if(BUILD_DISK_ANN STREQUAL "ON")
         DiskFileManagerImpl.cpp)
 endif()
 
-add_library(milvus_storage SHARED ${STORAGE_FILES})
+add_library(milvus_storage ${STORAGE_FILES})
 
 find_package(Boost REQUIRED COMPONENTS filesystem)
 
@@ -53,7 +52,6 @@ target_link_libraries(milvus_storage PUBLIC
         milvus_common 
         Boost::filesystem 
         pthread 
-        velox_bundled      
         ${CONAN_LIBS}
         )
 

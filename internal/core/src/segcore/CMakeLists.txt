@@ -35,8 +35,9 @@ set(SEGCORE_FILES
         ScalarIndex.cpp
         TimestampIndex.cpp
         Utils.cpp
+        MilvusConnector.cpp
         ConcurrentVector.cpp)
-add_library(milvus_segcore SHARED ${SEGCORE_FILES})
+add_library(milvus_segcore  ${SEGCORE_FILES})
 
 find_library(TBB NAMES tbb)
 set(PLATFORM_LIBS dl)
@@ -47,6 +48,7 @@ endif()
 
 target_link_libraries(milvus_segcore
         milvus_query
+        velox_bundled
         ${PLATFORM_LIBS}
         ${TBB}
         ${OpenMP_CXX_FLAGS}

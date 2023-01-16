@@ -20,7 +20,7 @@
 #include "index/IndexFactory.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
-#include "storage/MilvusConnector.h"
+#include "segcore/MilvusConnector.h"
 
 using namespace milvus;
 using namespace milvus::query;
@@ -864,24 +864,8 @@ TEST(Sealed, Velox) {
     schema->set_primary_field_id(counter_id);
 
     auto dataset = DataGen(schema, N);
-
     auto segment = CreateSealedSegment(schema);
-
-    LoadIndexInfo counter_index;
-    counter_index.field_id = counter_id.get();
-    counter_index.field_type = DataType::INT64;
-    counter_index.index_params["index_type"] = "sort";
-    auto counter_data = dataset.get_col<int64_t>(counter_id);
-    counter_index.index = std::move(GenScalarIndexing<int64_t>(N, counter_data.data()));
-    segment->LoadIndex(counter_index);
-
-    LoadIndexInfo nothing_index;
-    nothing_index.field_id = nothing_id.get();
-    nothing_index.field_type = DataType::INT32;
-    nothing_index.index_params["index_type"] = "sort";
-    auto nothing_data = dataset.get_col<int32_t>(nothing_id);
-    nothing_index.index = std::move(GenScalarIndexing<int32_t>(N, nothing_data.data()));
-    segment->LoadIndex(nothing_index);
+    SealedLoadFieldData(dataset, *segment);
 
     std::string milvus_connector_id = "milvus-connector";
     auto milvusConnector = std::make_shared<milvus::storage::MilvusConnector>(milvus_connector_id, nullptr);
@@ -900,4 +884,5 @@ TEST(Sealed, Velox) {
         milvus_connector_id, dynamic_cast<SegmentSealedImpl*>(segment.get())));
     auto pool = facebook::velox::memory::getDefaultMemoryPool();
     auto res = facebook::velox::exec::test::AssertQueryBuilder(plan).split(milvusSplit).copyResults(pool.get());
+    std::cout << res->toString() << std::endl;
 }

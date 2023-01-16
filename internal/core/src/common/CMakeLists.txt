@@ -20,7 +20,7 @@ set(COMMON_SRC
         Common.cpp
         )
 
-add_library(milvus_common SHARED ${COMMON_SRC})
+add_library(milvus_common ${COMMON_SRC})
 
 target_link_libraries(milvus_common
         milvus_config

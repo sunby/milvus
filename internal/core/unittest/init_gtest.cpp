@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 #include "common/SystemProperty.h"
+#include <folly/init/Init.h>
 
 #ifndef MILVUS_TEST_SEGCORE_YAML_PATH
 #error MILVUS_TEST_SEGCORE_YAML_PATH is not defined
@@ -20,6 +21,7 @@
 int
 main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
+    folly::init(&argc, &argv);
 
     return RUN_ALL_TESTS();
 }

@@ -449,6 +449,7 @@ SealedLoadFieldData(const GeneratedData& dataset, SegmentSealed& seg, const std:
     for (auto field_data : dataset.raw_->fields_data()) {
         int64_t field_id = field_data.field_id();
         if (exclude_fields.find(field_id) != exclude_fields.end()) {
+            std::cout << "load field data " << field_id << std::endl;
             continue;
         }
         LoadFieldDataInfo info;
