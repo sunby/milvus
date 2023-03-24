@@ -491,6 +491,7 @@ func (ms *mqMsgStream) receiveMsg(consumer mqwrapper.Consumer) {
 				log.Warn("MqMsgStream get msg whose payload is nil")
 				continue
 			}
+			log.Info("msg payload len", zap.Any("len", len(msg.Payload())))
 			tsMsg, err := ms.getTsMsgFromConsumerMsg(msg)
 			if err != nil {
 				log.Error("Failed to getTsMsgFromConsumerMsg", zap.Error(err))
@@ -514,6 +515,8 @@ func (ms *mqMsgStream) receiveMsg(consumer mqwrapper.Consumer) {
 				StartPositions: []*internalpb.MsgPosition{tsMsg.Position()},
 				EndPositions:   []*internalpb.MsgPosition{tsMsg.Position()},
 			}
+
+			log.Info("receive buf len", zap.Int("len", len(ms.receiveBuf)))
 			select {
 			case ms.receiveBuf <- &msgPack:
 			case <-ms.ctx.Done():

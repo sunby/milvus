@@ -593,6 +593,7 @@ func (s *Server) handleTimetickMessage(ctx context.Context, ttMsg *msgstream.Dat
 		WithLabelValues(fmt.Sprint(Params.DataCoordCfg.GetNodeID()), pChannelName).
 		Set(float64(sub))
 
+	log.Info("segments stats num", zap.Any("num", len(ttMsg.GetSegmentsStats())), zap.Any("channel", ch))
 	s.updateSegmentStatistics(ttMsg.GetSegmentsStats())
 
 	if err := s.segmentManager.ExpireAllocations(ch, ts); err != nil {
