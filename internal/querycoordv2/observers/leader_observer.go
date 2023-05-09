@@ -137,6 +137,7 @@ func (o *LeaderObserver) findNeedLoadedSegments(leaderView *meta.LeaderView, dis
 				Version:     s.Version,
 				Info:        loadInfo,
 			})
+			log.Info("leader observer find need loaded segments", zap.Any("collection", s.CollectionID), zap.Any("segment", s.GetID()), zap.Any("nodeid", s.Node))
 		}
 	}
 	return ret

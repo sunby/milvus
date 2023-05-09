@@ -1,5 +1,3 @@
-// Licensed to the LF AI & Data foundation under one
-// or more contributor license agreements. See the NOTICE file
 // distributed with this work for additional information
 // regarding copyright ownership. The ASF licenses this file
 // to you under the Apache License, Version 2.0 (the
@@ -232,6 +230,7 @@ func (dh *distHandler) getDistribution(ctx context.Context) error {
 	}
 
 	dh.handleDistResp(resp)
+	log.Info("get distribution success", zap.Any("nodeID", dh.nodeID))
 	return nil
 }
 
@@ -239,6 +238,7 @@ func (dh *distHandler) stop() {
 	dh.stopOnce.Do(func() {
 		close(dh.c)
 		dh.wg.Wait()
+		log.Info("distHandler stopped", zap.Any("nodeID", dh.nodeID))
 	})
 }
 
