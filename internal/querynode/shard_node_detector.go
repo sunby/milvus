@@ -271,6 +271,7 @@ func (nd *etcdShardNodeDetector) handlePutEvent(e *clientv3.Event, collectionID,
 		oldIDs[id] = struct{}{}
 	}
 
+	log.Info("hanldePutEvent infos", zap.Any("oldIds", oldIDs), zap.Any("currIds", currIDs), zap.Any("collection", collectionID), zap.Any("replica", replicaID))
 	for id := range currIDs {
 		_, has := oldIDs[id]
 		if !has {
@@ -293,6 +294,7 @@ func (nd *etcdShardNodeDetector) handlePutEvent(e *clientv3.Event, collectionID,
 		if !has {
 			addr := idAddr[id]
 			// best effort to notify node del
+			log.Info("generate node event pos1", zap.Any("collection", collectionID), zap.Any("replica", replicaID), zap.Any("nodeID", id))
 			nd.evtCh <- nodeEvent{
 				nodeID:    id,
 				nodeAddr:  addr,
@@ -327,6 +329,7 @@ func (nd *etcdShardNodeDetector) handleDelEvent(e *clientv3.Event, collectionID,
 	for _, id := range prevInfo.GetNodes() {
 		//best effort to notify offline
 		addr := idAddr[id]
+		log.Info("generate node event pos2", zap.Any("collection", collectionID), zap.Any("replica", replicaID), zap.Any("nodeID", id))
 		nd.evtCh <- nodeEvent{
 			nodeID:    id,
 			nodeAddr:  addr,
