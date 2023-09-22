@@ -25,6 +25,7 @@
 #include "storage/FieldData.h"
 #include "storage/Util.h"
 #include "mmap/Types.h"
+#include "storage/space.h"
 
 //////////////////////////////    common interfaces    //////////////////////////////
 CSegmentInterface

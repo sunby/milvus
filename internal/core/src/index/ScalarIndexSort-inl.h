@@ -186,6 +186,44 @@ ScalarIndexSort<T>::Load(const Config& config) {
 }
 
 template <typename T>
+inline void
+ScalarIndexSort<T>::LoadV2(const Config& config) {
+    auto index_files =
+        GetValueFromConfig<std::vector<std::string>>(config, "index_files");
+    AssertInfo(index_files.has_value(),
+               "index file paths is empty when load disk ann index");
+    std::map<std::string, storage::FieldDataPtr> index_datas{};
+    for (auto& file_name : index_files.value()) {
+        auto res = space_->GetBlobByteSize(file_name);
+        if (!res.ok()) {
+            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+                          "unable to read index blob");
+        }
+        auto index_blob_data =
+            std::shared_ptr<uint8_t[]>(new uint8_t[res.value()]);
+        auto status = space_->ReadBlob(file_name, index_blob_data.get());
+        if (!status.ok()) {
+            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+                          "unable to read index blob");
+        }
+        auto raw_index_blob =
+            storage::DeserializeFileData(index_blob_data, res.value());
+        index_datas[file_name] = raw_index_blob->GetFieldData();
+    }
+    AssembleIndexDatas(index_datas);
+    BinarySet binary_set;
+    for (auto& [key, data] : index_datas) {
+        auto size = data->Size();
+        auto deleter = [&](uint8_t*) {};  // avoid repeated deconstruction
+        auto buf = std::shared_ptr<uint8_t[]>(
+            (uint8_t*)const_cast<void*>(data->Data()), deleter);
+        binary_set.Append(key, buf, size);
+    }
+
+    LoadWithoutAssemble(binary_set, config);
+}
+
+template <typename T>
 inline const TargetBitmap
 ScalarIndexSort<T>::In(const size_t n, const T* values) {
     AssertInfo(is_built_, "index has not been built");

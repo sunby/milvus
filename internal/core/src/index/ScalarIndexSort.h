@@ -26,6 +26,7 @@
 #include "index/IndexStructure.h"
 #include "index/ScalarIndex.h"
 #include "storage/MemFileManagerImpl.h"
+#include "storage/space.h"
 
 namespace milvus::index {
 
@@ -43,6 +44,9 @@ class ScalarIndexSort : public ScalarIndex<T> {
 
     void
     Load(const Config& config = {}) override;
+
+    void
+    LoadV2(const Config& config = {}) override;
 
     int64_t
     Count() override {
@@ -101,6 +105,7 @@ class ScalarIndexSort : public ScalarIndex<T> {
     std::vector<int32_t> idx_to_offsets_;  // used to retrieve.
     std::vector<IndexStructure<T>> data_;
     std::shared_ptr<storage::MemFileManagerImpl> file_manager_;
+    std::shared_ptr<milvus_storage::Space> space_;
 };
 
 template <typename T>

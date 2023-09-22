@@ -33,6 +33,7 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	milvus_storage "github.com/milvus-io/milvus-storage/go/storage"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querynodev2/pkoracle"
@@ -69,6 +70,8 @@ type Loader interface {
 
 	// LoadIndex append index for segment and remove vector binlogs.
 	LoadIndex(ctx context.Context, segment *LocalSegment, info *querypb.SegmentLoadInfo, version int64) error
+
+	LoadDelta(ctx context.Context, collectionID int64, segment *LocalSegment) error
 }
 
 type LoadResource struct {
@@ -128,6 +131,7 @@ type segmentLoader struct {
 	// The channel will be closed as the segment loaded
 	loadingSegments   *typeutil.ConcurrentMap[int64, chan struct{}]
 	committedResource LoadResource
+	space             *milvus_storage.Space
 }
 
 var _ Loader = (*segmentLoader)(nil)
@@ -701,6 +705,63 @@ func (loader *segmentLoader) loadBloomFilter(ctx context.Context, segmentID int6
 	return nil
 }
 
+func (loader *segmentLoader) loadBloomFilterV2(ctx context.Context, segmentID int64, bfs *pkoracle.BloomFilterSet,
+	binlogPaths []string, logType storage.StatsLogType) error {
+
+	log := log.Ctx(ctx).With(
+		zap.Int64("segmentID", segmentID),
+	)
+	if len(binlogPaths) == 0 {
+		log.Info("there are no stats logs saved with segment")
+		return nil
+	}
+
+	startTs := time.Now()
+
+	blobs := []*storage.Blob{}
+	for _, path := range binlogPaths {
+		size, err := loader.space.GetBlobByteSize(path)
+		if err != nil {
+			return err
+		}
+		blob := make([]byte, size)
+		_, err = loader.space.ReadBlob(path, blob)
+		if err != nil {
+			return err
+		}
+		blobs = append(blobs, &storage.Blob{Value: blob})
+	}
+
+	var err error
+	var stats []*storage.PrimaryKeyStats
+	if logType == storage.CompoundStatsType {
+		stats, err = storage.DeserializeStatsList(blobs[0])
+		if err != nil {
+			log.Warn("failed to deserialize stats list", zap.Error(err))
+			return err
+		}
+	} else {
+		stats, err = storage.DeserializeStats(blobs)
+		if err != nil {
+			log.Warn("failed to deserialize stats", zap.Error(err))
+			return err
+		}
+	}
+
+	var size uint
+	for _, stat := range stats {
+		pkStat := &storage.PkStatistics{
+			PkFilter: stat.BF,
+			MinPK:    stat.MinPk,
+			MaxPK:    stat.MaxPk,
+		}
+		size += stat.BF.Cap()
+		bfs.AddHistoricalStats(pkStat)
+	}
+	log.Info("Successfully load pk stats", zap.Duration("time", time.Since(startTs)), zap.Uint("size", size))
+	return nil
+}
+
 func (loader *segmentLoader) LoadDeltaLogs(ctx context.Context, segment *LocalSegment, deltaLogs []*datapb.FieldBinlog) error {
 	dCodec := storage.DeleteCodec{}
 	var blobs []*storage.Blob
@@ -731,6 +792,15 @@ func (loader *segmentLoader) LoadDeltaLogs(ctx context.Context, segment *LocalSe
 		return err
 	}
 	return nil
+}
+func (loader *segmentLoader) LoadDelta(ctx context.Context, collectionID int64, segment *LocalSegment) error {
+	collection := loader.manager.Collection.Get(collectionID)
+	if collection == nil {
+		err := merr.WrapErrCollectionNotFound(collectionID)
+		log.Warn("failed to get collection while loading delta", zap.Error(err))
+		return err
+	}
+	return segment.LoadDeltaData2(collection.Schema())
 }
 
 func (loader *segmentLoader) patchEntryNumber(ctx context.Context, segment *LocalSegment, loadInfo *querypb.SegmentLoadInfo) error {

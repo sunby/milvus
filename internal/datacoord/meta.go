@@ -437,6 +437,186 @@ func (m *meta) UnsetIsImporting(segmentID UniqueID) error {
 	return nil
 }
 
+func (m *meta) UpdateFlushSegmentsInfo2(
+	segmentID UniqueID,
+	flushed bool,
+	dropped bool,
+	importing bool,
+	binlogs, statslogs, deltalogs []*datapb.FieldBinlog,
+	checkpoints []*datapb.CheckPoint,
+	startPositions []*datapb.SegmentStartPosition,
+	storageVersion int64,
+) error {
+	log.Debug("meta update: update flush segments info",
+		zap.Int64("segmentId", segmentID),
+		zap.Int("binlog", len(binlogs)),
+		zap.Int("stats log", len(statslogs)),
+		zap.Int("delta logs", len(deltalogs)),
+		zap.Bool("flushed", flushed),
+		zap.Bool("dropped", dropped),
+		zap.Any("check points", checkpoints),
+		zap.Any("start position", startPositions),
+		zap.Bool("importing", importing))
+	m.Lock()
+	defer m.Unlock()
+
+	segment := m.segments.GetSegment(segmentID)
+	if segment == nil || !isSegmentHealthy(segment) {
+		log.Warn("meta update: update flush segments info - segment not found",
+			zap.Int64("segmentID", segmentID),
+			zap.Bool("segment nil", segment == nil),
+			zap.Bool("segment unhealthy", !isSegmentHealthy(segment)))
+		return nil
+	}
+
+	metricMutation := &segMetricMutation{
+		stateChange: make(map[string]int),
+	}
+	clonedSegment := segment.Clone()
+	modSegments := make(map[UniqueID]*SegmentInfo)
+	if flushed {
+		// Update segment state and prepare metrics.
+		updateSegStateAndPrepareMetrics(clonedSegment, commonpb.SegmentState_Flushing, metricMutation)
+		modSegments[segmentID] = clonedSegment
+	}
+	if dropped {
+		// Update segment state and prepare metrics.
+		updateSegStateAndPrepareMetrics(clonedSegment, commonpb.SegmentState_Dropped, metricMutation)
+		clonedSegment.DroppedAt = uint64(time.Now().UnixNano())
+		modSegments[segmentID] = clonedSegment
+	}
+	// TODO add diff encoding and compression
+	// currBinlogs := clonedSegment.GetBinlogs()
+	// var getFieldBinlogs = func(id UniqueID, binlogs []*datapb.FieldBinlog) *datapb.FieldBinlog {
+	// 	for _, binlog := range binlogs {
+	// 		if id == binlog.GetFieldID() {
+	// 			return binlog
+	// 		}
+	// 	}
+	// 	return nil
+	// }
+	// binlogs
+	// for _, tBinlogs := range binlogs {
+	// 	fieldBinlogs := getFieldBinlogs(tBinlogs.GetFieldID(), currBinlogs)
+	// 	if fieldBinlogs == nil {
+	// 		currBinlogs = append(currBinlogs, tBinlogs)
+	// 	} else {
+	// 		fieldBinlogs.Binlogs = append(fieldBinlogs.Binlogs, tBinlogs.Binlogs...)
+	// 	}
+	// }
+	// clonedSegment.Binlogs = currBinlogs
+	// // statlogs
+	// currStatsLogs := clonedSegment.GetStatslogs()
+	// for _, tStatsLogs := range statslogs {
+	// 	fieldStatsLog := getFieldBinlogs(tStatsLogs.GetFieldID(), currStatsLogs)
+	// 	if fieldStatsLog == nil {
+	// 		currStatsLogs = append(currStatsLogs, tStatsLogs)
+	// 	} else {
+	// 		fieldStatsLog.Binlogs = append(fieldStatsLog.Binlogs, tStatsLogs.Binlogs...)
+	// 	}
+	// }
+	// clonedSegment.Statslogs = currStatsLogs
+	// // deltalogs
+	// currDeltaLogs := clonedSegment.GetDeltalogs()
+	// for _, tDeltaLogs := range deltalogs {
+	// 	fieldDeltaLogs := getFieldBinlogs(tDeltaLogs.GetFieldID(), currDeltaLogs)
+	// 	if fieldDeltaLogs == nil {
+	// 		currDeltaLogs = append(currDeltaLogs, tDeltaLogs)
+	// 	} else {
+	// 		fieldDeltaLogs.Binlogs = append(fieldDeltaLogs.Binlogs, tDeltaLogs.Binlogs...)
+	// 	}
+	// }
+	// clonedSegment.Deltalogs = currDeltaLogs
+
+	clonedSegment.StorageVersion = storageVersion
+	modSegments[segmentID] = clonedSegment
+	var getClonedSegment = func(segmentID UniqueID) *SegmentInfo {
+		if s, ok := modSegments[segmentID]; ok {
+			return s
+		}
+		if s := m.segments.GetSegment(segmentID); s != nil && isSegmentHealthy(s) {
+			return s.Clone()
+		}
+		return nil
+	}
+	for _, pos := range startPositions {
+		if len(pos.GetStartPosition().GetMsgID()) == 0 {
+			continue
+		}
+		s := getClonedSegment(pos.GetSegmentID())
+		if s == nil {
+			continue
+		}
+
+		s.StartPosition = pos.GetStartPosition()
+		modSegments[pos.GetSegmentID()] = s
+	}
+
+	if importing {
+		s := clonedSegment
+		s.NumOfRows = s.currRows
+		count := segmentutil.CalcRowCountFromBinLog(s.SegmentInfo)
+		if count != segment.currRows && count > 0 {
+			log.Info("check point reported inconsistent with bin log row count",
+				zap.Int64("segmentID", segment.GetID()),
+				zap.Int64("current rows (wrong)", segment.currRows),
+				zap.Int64("segment bin log row count (correct)", count))
+			s.NumOfRows = count
+		}
+		modSegments[segmentID] = s
+	} else {
+		for _, cp := range checkpoints {
+			if cp.SegmentID != segmentID {
+				// Don't think this is gonna to happen, ignore for now.
+				log.Warn("checkpoint in segment is not same as flush segment to update, igreo", zap.Int64("current", segmentID), zap.Int64("checkpoint segment", cp.SegmentID))
+				continue
+			}
+			s := clonedSegment
+
+			if s.DmlPosition != nil && s.DmlPosition.Timestamp >= cp.Position.Timestamp {
+				log.Warn("checkpoint in segment is larger than reported", zap.Any("current", s.GetDmlPosition()), zap.Any("reported", cp.GetPosition()))
+				// segment position in etcd is larger than checkpoint, then dont change it
+				continue
+			}
+
+			s.NumOfRows = cp.NumOfRows
+			count := segmentutil.CalcRowCountFromBinLog(s.SegmentInfo)
+			// count should smaller than or equal to cp reported
+			if count != cp.NumOfRows && count > 0 {
+				log.Info("check point reported inconsistent with bin log row count",
+					zap.Int64("segmentID", segment.GetID()),
+					zap.Int64("check point (wrong)", cp.NumOfRows),
+					zap.Int64("segment bin log row count (correct)", count))
+				s.NumOfRows = count
+			}
+
+			s.DmlPosition = cp.GetPosition()
+			modSegments[cp.GetSegmentID()] = s
+		}
+	}
+	segments := make([]*datapb.SegmentInfo, 0, len(modSegments))
+	for _, seg := range modSegments {
+		segments = append(segments, seg.SegmentInfo)
+	}
+	if err := m.catalog.AlterSegments(m.ctx, segments,
+		metastore.BinlogsIncrement{
+			Segment: clonedSegment.SegmentInfo,
+		}); err != nil {
+		log.Error("meta update: update flush segments info - failed to store flush segment info into Etcd",
+			zap.Error(err))
+		return err
+	}
+	// Apply metric mutation after a successful meta update.
+	metricMutation.commit()
+	// update memory status
+	for id, s := range modSegments {
+		m.segments.SetSegment(id, s)
+	}
+	log.Info("meta update: update flush segments info - update flush segments info successfully",
+		zap.Int64("segmentID", segmentID))
+	return nil
+}
+
 // UpdateFlushSegmentsInfo update segment partial/completed flush info
 // `flushed` parameter indicating whether segment is flushed completely or partially
 // `binlogs`, `checkpoints` and `statPositions` are persistence data for segment
@@ -448,6 +628,7 @@ func (m *meta) UpdateFlushSegmentsInfo(
 	binlogs, statslogs, deltalogs []*datapb.FieldBinlog,
 	checkpoints []*datapb.CheckPoint,
 	startPositions []*datapb.SegmentStartPosition,
+	storageVersion int64,
 ) error {
 	log.Debug("meta update: update flush segments info",
 		zap.Int64("segmentId", segmentID),

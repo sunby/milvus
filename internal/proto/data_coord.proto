@@ -284,6 +284,7 @@ message SegmentInfo {
   // For compatibility reasons, this flag of an old compacted segment may still be False.
   // As for new fields added in the message, they will be populated with their respective field types' default values.
   bool compacted = 19;
+  int64 storage_version = 20;
 }
 
 message SegmentStartPosition {
@@ -304,6 +305,7 @@ message SaveBinlogPathsRequest {
   bool dropped = 10;
   bool importing = 11;
   string channel = 12; // report channel name for verification
+  int64 storageVersion = 13;
 }
 
 message CheckPoint {

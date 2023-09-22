@@ -39,12 +39,14 @@
 #include "common/RangeSearchHelper.h"
 #include "common/Utils.h"
 #include "log/Log.h"
+#include "storage/DataCodec.h"
 #include "storage/FieldData.h"
 #include "storage/MemFileManagerImpl.h"
 #include "storage/ThreadPools.h"
 #include "storage/Util.h"
 #include "utils/File.h"
 #include "common/Tracer.h"
+#include "storage/space.h"
 
 namespace milvus::index {
 
@@ -105,6 +107,103 @@ VectorMemIndex::Load(const BinarySet& binary_set, const Config& config) {
     LoadWithoutAssemble(binary_set, config);
 }
 
+void
+VectorMemIndex::LoadV2(const Config& config) {
+    if (config.contains(kMmapFilepath)) {
+        return LoadFromFile(config);
+    }
+    auto index_files =
+        GetValueFromConfig<std::vector<std::string>>(config, "index_files");
+    AssertInfo(index_files.has_value(),
+               "index file paths is empty when load index");
+
+    std::unordered_set<std::string> pending_index_files(index_files->begin(),
+                                                        index_files->end());
+
+    LOG_SEGCORE_INFO_ << "load index files: " << index_files.value().size();
+
+    auto res = space_->GetBlobByteSize(std::string(INDEX_FILE_SLICE_META));
+    std::map<std::string, storage::FieldDataPtr> index_datas{};
+
+    if (!res.ok() && !res.status().IsFileNotFound()) {
+        PanicCodeInfo(ErrorCodeEnum::UnexpectedError, "failed to read blob");
+    }
+    bool slice_meta_exist = res.ok();
+
+    auto read_blob = [&](const std::string& file_name)
+        -> std::unique_ptr<storage::DataCodec> {
+        auto res = space_->GetBlobByteSizeIsManifestNotFound(file_name);
+        if (!res.ok()) {
+            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+                          "unable to read index blob");
+        }
+        auto index_blob_data =
+            std::shared_ptr<uint8_t[]>(new uint8_t[res.value()]);
+        auto status = space_->ReadBlob(file_name, index_blob_data.get());
+        if (!status.ok()) {
+            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+                          "unable to read index blob");
+        }
+        return storage::DeserializeFileData(index_blob_data, res.value());
+    };
+    if (slice_meta_exist) {
+        auto slice_meta_sz = res.value();
+        auto slice_meta_data =
+            std::shared_ptr<uint8_t[]>(new uint8_t[slice_meta_sz]);
+        auto status =
+            space_->ReadBlob(INDEX_FILE_SLICE_META, slice_meta_data.get());
+        if (!status.ok()) {
+            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+                          "unable to read slice meta");
+        }
+        auto raw_slice_meta =
+            storage::DeserializeFileData(slice_meta_data, slice_meta_sz);
+        Config meta_data = Config::parse(std::string(
+            static_cast<const char*>(raw_slice_meta->GetFieldData()->Data()),
+            raw_slice_meta->GetFieldData()->Size()));
+        for (auto& item : meta_data[META]) {
+            std::string prefix = item[NAME];
+            int slice_num = item[SLICE_NUM];
+            auto total_len = static_cast<size_t>(item[TOTAL_LEN]);
+
+            auto new_field_data =
+                milvus::storage::CreateFieldData(DataType::INT8, 1, total_len);
+            for (auto i = 0; i < slice_num; ++i) {
+                std::string file_name = GenSlicedFileName(prefix, i);
+                auto raw_index_blob = read_blob(file_name);
+                new_field_data->FillFieldData(
+                    raw_index_blob->GetFieldData()->Data(),
+                    raw_index_blob->GetFieldData()->Size());
+                pending_index_files.erase(file_name);
+            }
+            AssertInfo(
+                new_field_data->IsFull(),
+                "index len is inconsistent after disassemble and assemble");
+            index_datas[prefix] = new_field_data;
+        }
+    }
+
+    if (!pending_index_files.empty()) {
+        for (auto& file_name : pending_index_files) {
+            auto raw_index_blob = read_blob(file_name);
+            index_datas.insert({file_name, raw_index_blob->GetFieldData()});
+        }
+    }
+    LOG_SEGCORE_INFO_ << "construct binary set...";
+    BinarySet binary_set;
+    for (auto& [key, data] : index_datas) {
+        LOG_SEGCORE_INFO_ << "add index data to binary set: " << key;
+        auto size = data->Size();
+        auto deleter = [&](uint8_t*) {};  // avoid repeated deconstruction
+        auto buf = std::shared_ptr<uint8_t[]>(
+            (uint8_t*)const_cast<void*>(data->Data()), deleter);
+        binary_set.Append(key, buf, size);
+    }
+
+    LOG_SEGCORE_INFO_ << "load index into Knowhere...";
+    LoadWithoutAssemble(binary_set, config);
+    LOG_SEGCORE_INFO_ << "load vector index done";
+}
 void
 VectorMemIndex::Load(const Config& config) {
     if (config.contains(kMmapFilepath)) {

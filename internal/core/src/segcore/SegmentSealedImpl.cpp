@@ -190,8 +190,13 @@ SegmentSealedImpl::LoadFieldData(const LoadFieldDataInfo& load_info) {
         field_data_info.channel->set_capacity(parallel_degree * 2);
         auto& pool =
             ThreadPools::GetThreadPool(milvus::ThreadPoolPriority::MIDDLE);
+        // auto load_future = pool.Submit(
+        //     LoadFieldDatasFromRemote, insert_files, field_data_info.channel);
+
+        // TODO: create space;
+        std::shared_ptr<milvus_storage::Space> space;
         auto load_future = pool.Submit(
-            LoadFieldDatasFromRemote, insert_files, field_data_info.channel);
+            LoadFieldDatasFromRemote2, space, schema_, field_data_info.channel);
         LOG_SEGCORE_INFO_ << "finish submitting LoadFieldDatasFromRemote task "
                              "to thread pool, "
                           << "segmentID:" << this->id_

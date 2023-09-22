@@ -45,6 +45,8 @@ add_subdirectory(rocksdb)
 add_subdirectory(rdkafka)
 add_subdirectory(simdjson)
 
+add_subdirectory(milvus-storage)
+
 if (LINUX)
     add_subdirectory(jemalloc)
 endif()

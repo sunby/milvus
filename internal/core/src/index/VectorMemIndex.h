@@ -21,9 +21,11 @@
 #include <string>
 #include <vector>
 #include <boost/dynamic_bitset.hpp>
+#include "common/Types.h"
 #include "knowhere/factory.h"
 #include "index/VectorIndex.h"
 #include "storage/MemFileManagerImpl.h"
+#include "storage/space.h"
 
 namespace milvus::index {
 
@@ -41,6 +43,9 @@ class VectorMemIndex : public VectorIndex {
 
     void
     Load(const Config& config = {}) override;
+
+    void
+    LoadV2(const Config& config = {}) override;
 
     void
     BuildWithDataset(const DatasetPtr& dataset,
@@ -83,6 +88,7 @@ class VectorMemIndex : public VectorIndex {
     Config config_;
     knowhere::Index<knowhere::IndexNode> index_;
     std::shared_ptr<storage::MemFileManagerImpl> file_manager_;
+    std::shared_ptr<milvus_storage::Space> space_;
 };
 
 using VectorMemIndexPtr = std::unique_ptr<VectorMemIndex>;

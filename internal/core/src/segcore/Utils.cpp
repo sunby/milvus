@@ -582,6 +582,33 @@ ReverseDataFromIndex(const index::IndexBase* index,
 
     return data_array;
 }
+void
+LoadFieldDatasFromRemote2(std::shared_ptr<milvus_storage::Space> space,
+                          SchemaPtr schema,
+                          storage::FieldDataChannelPtr channel) {
+    auto res = space->ScanData();
+    if (!res.ok()) {
+        PanicInfo("failed to create scan iterator");
+    }
+    auto reader = res.value();
+    for (auto rec = reader->Next(); rec != nullptr; rec = reader->Next()) {
+        if (!rec.ok()) {
+            PanicInfo("failed to read data");
+        }
+        auto data = rec.ValueUnsafe();
+        auto total_num_rows = data->num_rows();
+        for (auto& field : schema->get_fields()) {
+            auto col_data =
+                data->GetColumnByName(field.second.get_name().get());
+            auto field_data =
+                storage::CreateFieldData(field.second.get_data_type(),
+                                         field.second.get_dim(),
+                                         total_num_rows);
+            channel->push(field_data);
+        }
+    }
+    channel->close();
+}
 // init segcore storage config first, and create default remote chunk manager
 // segcore use default remote chunk manager to load data from minio/s3
 void

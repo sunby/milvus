@@ -53,6 +53,7 @@ target_link_libraries(milvus_segcore
         ${PLATFORM_LIBS}
         ${TBB}
         ${OpenMP_CXX_FLAGS}
+        milvus-storage
         )
 
 install(TARGETS milvus_segcore DESTINATION "${CMAKE_INSTALL_LIBDIR}")

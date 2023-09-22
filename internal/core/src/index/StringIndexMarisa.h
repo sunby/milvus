@@ -25,6 +25,7 @@
 #include <map>
 #include <memory>
 #include "storage/MemFileManagerImpl.h"
+#include "storage/space.h"
 
 namespace milvus::index {
 
@@ -44,6 +45,9 @@ class StringIndexMarisa : public StringIndex {
 
     void
     Load(const Config& config = {}) override;
+
+    void
+    LoadV2(const Config& config = {}) override;
 
     int64_t
     Count() override {
@@ -104,6 +108,7 @@ class StringIndexMarisa : public StringIndex {
     std::map<size_t, std::vector<size_t>> str_ids_to_offsets_;
     bool built_ = false;
     std::shared_ptr<storage::MemFileManagerImpl> file_manager_;
+    std::shared_ptr<milvus_storage::Space> space_;
 };
 
 using StringIndexMarisaPtr = std::unique_ptr<StringIndexMarisa>;

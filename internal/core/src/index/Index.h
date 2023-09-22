@@ -43,6 +43,9 @@ class IndexBase {
     Load(const Config& config = {}) = 0;
 
     virtual void
+    LoadV2(const Config& config = {}) = 0;
+
+    virtual void
     BuildWithRawData(size_t n,
                      const void* values,
                      const Config& config = {}) = 0;

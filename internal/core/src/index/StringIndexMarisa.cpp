@@ -17,16 +17,19 @@
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_io.hpp>
 #include <boost/uuid/uuid_generators.hpp>
+#include <memory>
 #include <stdlib.h>
 #include <stdio.h>
 #include <fcntl.h>
 
+#include "common/Types.h"
 #include "index/StringIndexMarisa.h"
 #include "index/Utils.h"
 #include "index/Index.h"
 #include "index/Exception.h"
 #include "common/Utils.h"
 #include "common/Slice.h"
+#include "storage/space.h"
 
 namespace milvus::index {
 
@@ -208,6 +211,43 @@ StringIndexMarisa::Load(const Config& config) {
     AssertInfo(index_files.has_value(),
                "index file paths is empty when load index");
     auto index_datas = file_manager_->LoadIndexToMemory(index_files.value());
+    AssembleIndexDatas(index_datas);
+    BinarySet binary_set;
+    for (auto& [key, data] : index_datas) {
+        auto size = data->Size();
+        auto deleter = [&](uint8_t*) {};  // avoid repeated deconstruction
+        auto buf = std::shared_ptr<uint8_t[]>(
+            (uint8_t*)const_cast<void*>(data->Data()), deleter);
+        binary_set.Append(key, buf, size);
+    }
+
+    LoadWithoutAssemble(binary_set, config);
+}
+
+void
+StringIndexMarisa::LoadV2(const Config& config) {
+    auto index_files =
+        GetValueFromConfig<std::vector<std::string>>(config, "index_files");
+    AssertInfo(index_files.has_value(),
+               "index file paths is empty when load index");
+    std::map<std::string, storage::FieldDataPtr> index_datas{};
+    for (auto& file_name : index_files.value()) {
+        auto res = space_->GetBlobByteSize(file_name);
+        if (!res.ok()) {
+            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+                          "unable to read index blob");
+        }
+        auto index_blob_data =
+            std::shared_ptr<uint8_t[]>(new uint8_t[res.value()]);
+        auto status = space_->ReadBlob(file_name, index_blob_data.get());
+        if (!status.ok()) {
+            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+                          "unable to read index blob");
+        }
+        auto raw_index_blob =
+            storage::DeserializeFileData(index_blob_data, res.value());
+        index_datas[file_name] = raw_index_blob->GetFieldData();
+    }
     AssembleIndexDatas(index_datas);
     BinarySet binary_set;
     for (auto& [key, data] : index_datas) {

@@ -20,6 +20,9 @@
 
 #include "common/Consts.h"
 #include "common/Types.h"
+#include "common/macro.h"
+#include "exceptions/EasyAssert.h"
+#include "fmt/core.h"
 #include "nlohmann/json.hpp"
 #include "query/PlanNode.h"
 #include "query/SearchOnSealed.h"
@@ -29,6 +32,8 @@
 #include "storage/RemoteChunkManagerSingleton.h"
 #include "storage/Util.h"
 #include "storage/ThreadPools.h"
+#include "storage/options.h"
+#include "storage/space.h"
 
 namespace milvus::segcore {
 
@@ -170,8 +175,14 @@ SegmentGrowingImpl::LoadFieldData(const LoadFieldDataInfo& infos) {
         auto channel = std::make_shared<storage::FieldDataChannel>();
         auto& pool =
             ThreadPools::GetThreadPool(milvus::ThreadPoolPriority::MIDDLE);
+        auto res = milvus_storage::Space::Open(
+            infos.url, milvus_storage::Options{nullptr, infos.storage_version});
+        AssertInfo(!res.ok(), "init space failed");
+        std::shared_ptr<milvus_storage::Space> space = std::move(res.value());
+        // auto load_future =
+        //     pool.Submit(LoadFieldDatasFromRemote, insert_files, channel);
         auto load_future =
-            pool.Submit(LoadFieldDatasFromRemote, insert_files, channel);
+            pool.Submit(LoadFieldDatasFromRemote2, space, schema_, channel);
         auto field_data = CollectFieldDataChannel(channel);
         if (field_id == TimestampFieldID) {
             // step 2: sort timestamp

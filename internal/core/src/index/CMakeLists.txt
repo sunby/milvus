@@ -38,6 +38,7 @@ endif ()
 target_link_libraries(milvus_index
         milvus_storage
         ${PLATFORM_LIBS}
+        milvus-storage
         )
 
 install(TARGETS milvus_index DESTINATION "${CMAKE_INSTALL_LIBDIR}")

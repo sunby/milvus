@@ -20,13 +20,17 @@ import (
 	"context"
 	"sync"
 
+	"github.com/apache/arrow/go/v12/arrow/array"
 	"github.com/cockroachdb/errors"
+	milvus_storage "github.com/milvus-io/milvus-storage/go/storage"
+	"github.com/milvus-io/milvus-storage/go/storage/options"
 	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus/internal/kv"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
+	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/retry"
 )
@@ -70,6 +74,11 @@ type flushTaskRunner struct {
 
 	insertErr error // task execution error
 	deleteErr error // task execution error
+
+	space     *milvus_storage.Space
+	insertRec array.RecordReader
+	statsBlob *storage.Blob
+	deleteRec array.RecordReader
 }
 
 type taskInjection struct {
@@ -179,6 +188,37 @@ func (t *flushTaskRunner) runFlushDel(task flushDeleteTask, deltaLogs *DelDataBu
 	})
 }
 
+// runFlushInsert executes flush insert task with once and retry
+func (t *flushTaskRunner) runFlushInsertV2(task flushInsertTask, flushed bool, dropped bool, pos *msgpb.MsgPosition, opts ...retry.Option) {
+	t.insertOnce.Do(func() {
+		t.flushed = flushed
+		t.pos = pos
+		t.dropped = dropped
+		log.Info("running flush insert task",
+			zap.Int64("segmentID", t.segmentID),
+			zap.Bool("flushed", flushed),
+			zap.Bool("dropped", dropped),
+			zap.Any("position", pos),
+			zap.Time("PosTime", tsoutil.PhysicalTime(pos.GetTimestamp())),
+		)
+		taskv2 := task.(*flushBufferInsertTask2)
+		t.insertRec = taskv2.reader
+		t.insertRec.Retain()
+		t.statsBlob = taskv2.statsBlob
+		t.Done()
+	})
+}
+
+// runFlushDel execute flush delete task with once and retry
+func (t *flushTaskRunner) runFlushDelV2(task flushDeleteTask, opts ...retry.Option) {
+	t.deleteOnce.Do(func() {
+		taskv2 := task.(*flushBufferDeleteTask2)
+		t.deleteRec = taskv2.rec
+		t.deleteRec.Retain()
+		t.Done()
+	})
+}
+
 // waitFinish waits flush & insert done
 func (t *flushTaskRunner) waitFinish(notifyFunc notifyMetaFunc, postFunc taskPostFunc) {
 	// wait insert & del done
@@ -208,6 +248,48 @@ func (t *flushTaskRunner) waitFinish(notifyFunc notifyMetaFunc, postFunc taskPos
 	close(t.finishSignal)
 }
 
+func (t *flushTaskRunner) waitFinishV2(notifyFunc notifyMetaFunc, postFunc taskPostFunc) {
+	// wait insert & del done
+	t.Wait()
+	// wait previous task done
+	<-t.startSignal
+
+	milvus_storage.Open()
+
+	err := t.space.NewTransaction().
+		Write(t.insertRec, &options.DefaultWriteOptions).
+		WriteBlob(t.statsBlob.Value, t.statsBlob.Key, t.flushed).
+		Delete(t.deleteRec).
+		Commit()
+	if err != nil {
+		panic("")
+	}
+
+	pack := t.getFlushPack()
+	var postInjection postInjectionFunc
+	select {
+	case injection := <-t.injectSignal:
+		// notify injected
+		injection.injectOne()
+		ok := <-injection.injectOver
+		if ok {
+			// apply postInjection func
+			postInjection = injection.postInjection
+		}
+	default:
+	}
+	postFunc(pack, postInjection)
+
+	// execution done, dequeue and make count --
+	notifyFunc(pack)
+
+	// notify next task
+	close(t.finishSignal)
+
+	t.insertRec.Release()
+	t.deleteRec.Release()
+}
+
 func (t *flushTaskRunner) getFlushPack() *segmentFlushPack {
 	pack := &segmentFlushPack{
 		segmentID:  t.segmentID,
@@ -217,6 +299,35 @@ func (t *flushTaskRunner) getFlushPack() *segmentFlushPack {
 		deltaLogs:  t.deltaLogs,
 		flushed:    t.flushed,
 		dropped:    t.dropped,
+	}
+	log.Debug("flush pack composed",
+		zap.Int64("segmentID", t.segmentID),
+		zap.Int("insertLogs", len(t.insertLogs)),
+		zap.Int("statsLogs", len(t.statsLogs)),
+		zap.Int("deleteLogs", len(t.deltaLogs)),
+		zap.Bool("flushed", t.flushed),
+		zap.Bool("dropped", t.dropped),
+	)
+
+	if t.insertErr != nil || t.deleteErr != nil {
+		log.Warn("flush task error detected", zap.Error(t.insertErr), zap.Error(t.deleteErr))
+		pack.err = errors.New("execution failed")
+	}
+
+	return pack
+}
+
+func (t *flushTaskRunner) getFlushPackV2() *segmentFlushPack {
+	pack := &segmentFlushPack{
+		segmentID:      t.segmentID,
+		insertLogs:     t.insertLogs,
+		statsLogs:      t.statsLogs,
+		pos:            t.pos,
+		deltaLogs:      t.deltaLogs,
+		flushed:        t.flushed,
+		dropped:        t.dropped,
+		rec:            t.deleteRec,
+		storageVersion: t.space.GetCurrentVersion(),
 	}
 	log.Debug("flush pack composed",
 		zap.Int64("segmentID", t.segmentID),
