@@ -1,4 +1,4 @@
-package dependency
+package storage
 
 import (
 	"testing"
@@ -8,13 +8,9 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-var Params = paramtable.Get()
-
-func TestMain(m *testing.M) {
-	paramtable.Init()
-	m.Run()
-}
 func TestStorageLock(t *testing.T) {
+	paramtable.Init()
+	Params := paramtable.Get()
 	etcdCli, err := etcd.GetEtcdClient(
 		Params.EtcdCfg.UseEmbedEtcd.GetAsBool(),
 		Params.EtcdCfg.EtcdUseSSL.GetAsBool(),
@@ -34,12 +30,12 @@ func TestStorageLock(t *testing.T) {
 		version = v
 		return nil
 	}
-	lm := NewEtcdLockManager(etcdCli, fetch, save)
+	lm := NewEtcdLockManager(1, etcdCli, fetch, save)
 	v, err := lm.Acquire()
 	assert.NoError(t, err)
 	assert.EqualValues(t, 0, v)
 	// another will block and timeout
-	lm2 := NewEtcdLockManager(etcdCli, fetch, save)
+	lm2 := NewEtcdLockManager(1, etcdCli, fetch, save)
 	_, err = lm2.Acquire()
 	assert.Error(t, err)
 

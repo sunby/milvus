@@ -46,7 +46,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	milvus_storage "github.com/milvus-io/milvus-storage/go/storage"
-	"github.com/milvus-io/milvus-storage/go/storage/options/option"
+	"github.com/milvus-io/milvus-storage/go/storage/options"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/segcorepb"
@@ -168,6 +168,47 @@ func NewSegment(collection *Collection,
 	version int64,
 	startPosition *msgpb.MsgPosition,
 	deltaPosition *msgpb.MsgPosition,
+) (*LocalSegment, error) {
+
+	/*
+		CSegmentInterface
+		NewSegment(CCollection collection, uint64_t segment_id, SegmentType seg_type);
+	*/
+	var segmentPtr C.CSegmentInterface
+	switch segmentType {
+	case SegmentTypeSealed:
+		segmentPtr = C.NewSegment(collection.collectionPtr, C.Sealed, C.int64_t(segmentID))
+	case SegmentTypeGrowing:
+		segmentPtr = C.NewSegment(collection.collectionPtr, C.Growing, C.int64_t(segmentID))
+	default:
+		return nil, fmt.Errorf("illegal segment type %d when create segment %d", segmentType, segmentID)
+	}
+
+	log.Info("create segment",
+		zap.Int64("collectionID", collectionID),
+		zap.Int64("partitionID", partitionID),
+		zap.Int64("segmentID", segmentID),
+		zap.String("segmentType", segmentType.String()))
+
+	var segment = &LocalSegment{
+		baseSegment:        newBaseSegment(segmentID, partitionID, collectionID, shard, segmentType, version, startPosition),
+		ptr:                segmentPtr,
+		lastDeltaTimestamp: atomic.NewUint64(deltaPosition.GetTimestamp()),
+		fieldIndexes:       typeutil.NewConcurrentMap[int64, *IndexedFieldInfo](),
+	}
+
+	return segment, nil
+}
+
+func NewSegmentV2(collection *Collection,
+	segmentID int64,
+	partitionID int64,
+	collectionID int64,
+	shard string,
+	segmentType SegmentType,
+	version int64,
+	startPosition *msgpb.MsgPosition,
+	deltaPosition *msgpb.MsgPosition,
 	storageVersion int64,
 ) (*LocalSegment, error) {
 	/*
@@ -191,7 +232,7 @@ func NewSegment(collection *Collection,
 		zap.String("segmentType", segmentType.String()))
 
 	url := fmt.Sprintf("s3://%s:%s@%s/%s/", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.Address.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue())
-	space, err := milvus_storage.Open(url, *option.NewOptions(nil, storageVersion))
+	space, err := milvus_storage.Open(url, options.NewSpaceOptionBuilder().SetVersion(storageVersion).Build())
 	if err != nil {
 		return nil, err
 	}

@@ -485,48 +485,6 @@ func (m *meta) UpdateFlushSegmentsInfo2(
 		clonedSegment.DroppedAt = uint64(time.Now().UnixNano())
 		modSegments[segmentID] = clonedSegment
 	}
-	// TODO add diff encoding and compression
-	// currBinlogs := clonedSegment.GetBinlogs()
-	// var getFieldBinlogs = func(id UniqueID, binlogs []*datapb.FieldBinlog) *datapb.FieldBinlog {
-	// 	for _, binlog := range binlogs {
-	// 		if id == binlog.GetFieldID() {
-	// 			return binlog
-	// 		}
-	// 	}
-	// 	return nil
-	// }
-	// binlogs
-	// for _, tBinlogs := range binlogs {
-	// 	fieldBinlogs := getFieldBinlogs(tBinlogs.GetFieldID(), currBinlogs)
-	// 	if fieldBinlogs == nil {
-	// 		currBinlogs = append(currBinlogs, tBinlogs)
-	// 	} else {
-	// 		fieldBinlogs.Binlogs = append(fieldBinlogs.Binlogs, tBinlogs.Binlogs...)
-	// 	}
-	// }
-	// clonedSegment.Binlogs = currBinlogs
-	// // statlogs
-	// currStatsLogs := clonedSegment.GetStatslogs()
-	// for _, tStatsLogs := range statslogs {
-	// 	fieldStatsLog := getFieldBinlogs(tStatsLogs.GetFieldID(), currStatsLogs)
-	// 	if fieldStatsLog == nil {
-	// 		currStatsLogs = append(currStatsLogs, tStatsLogs)
-	// 	} else {
-	// 		fieldStatsLog.Binlogs = append(fieldStatsLog.Binlogs, tStatsLogs.Binlogs...)
-	// 	}
-	// }
-	// clonedSegment.Statslogs = currStatsLogs
-	// // deltalogs
-	// currDeltaLogs := clonedSegment.GetDeltalogs()
-	// for _, tDeltaLogs := range deltalogs {
-	// 	fieldDeltaLogs := getFieldBinlogs(tDeltaLogs.GetFieldID(), currDeltaLogs)
-	// 	if fieldDeltaLogs == nil {
-	// 		currDeltaLogs = append(currDeltaLogs, tDeltaLogs)
-	// 	} else {
-	// 		fieldDeltaLogs.Binlogs = append(fieldDeltaLogs.Binlogs, tDeltaLogs.Binlogs...)
-	// 	}
-	// }
-	// clonedSegment.Deltalogs = currDeltaLogs
 
 	clonedSegment.StorageVersion = storageVersion
 	modSegments[segmentID] = clonedSegment
@@ -628,7 +586,6 @@ func (m *meta) UpdateFlushSegmentsInfo(
 	binlogs, statslogs, deltalogs []*datapb.FieldBinlog,
 	checkpoints []*datapb.CheckPoint,
 	startPositions []*datapb.SegmentStartPosition,
-	storageVersion int64,
 ) error {
 	log.Debug("meta update: update flush segments info",
 		zap.Int64("segmentId", segmentID),

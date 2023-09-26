@@ -454,19 +454,34 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 		s.segmentManager.DropSegment(ctx, segment.GetID())
 	}
 
-	// Set segment to SegmentState_Flushing. Also save binlogs and checkpoints.
-	err := s.meta.UpdateFlushSegmentsInfo2(
-		req.GetSegmentID(),
-		req.GetFlushed(),
-		req.GetDropped(),
-		req.GetImporting(),
-		req.GetField2BinlogPaths(),
-		req.GetField2StatslogPaths(),
-		req.GetDeltalogs(),
-		req.GetCheckPoints(),
-		req.GetStartPositions(),
-		req.GetStorageVersion(),
-	)
+	var err error
+	if Params.CommonCfg.EnableStorageV2.GetAsBool() {
+		// Set segment to SegmentState_Flushing. Also save binlogs and checkpoints.
+		err = s.meta.UpdateFlushSegmentsInfo2(
+			req.GetSegmentID(),
+			req.GetFlushed(),
+			req.GetDropped(),
+			req.GetImporting(),
+			req.GetField2BinlogPaths(),
+			req.GetField2StatslogPaths(),
+			req.GetDeltalogs(),
+			req.GetCheckPoints(),
+			req.GetStartPositions(),
+			req.GetStorageVersion(),
+		)
+	} else {
+		err = s.meta.UpdateFlushSegmentsInfo(
+			req.GetSegmentID(),
+			req.GetFlushed(),
+			req.GetDropped(),
+			req.GetImporting(),
+			req.GetField2BinlogPaths(),
+			req.GetField2StatslogPaths(),
+			req.GetDeltalogs(),
+			req.GetCheckPoints(),
+			req.GetStartPositions(),
+		)
+	}
 	if err != nil {
 		log.Error("save binlog and checkpoints failed", zap.Error(err))
 		resp.Reason = err.Error()

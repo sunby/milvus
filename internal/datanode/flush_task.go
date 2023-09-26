@@ -25,6 +25,7 @@ import (
 	milvus_storage "github.com/milvus-io/milvus-storage/go/storage"
 	"github.com/milvus-io/milvus-storage/go/storage/options"
 	"github.com/milvus-io/milvus/pkg/util/tsoutil"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
@@ -75,10 +76,13 @@ type flushTaskRunner struct {
 	insertErr error // task execution error
 	deleteErr error // task execution error
 
-	space     *milvus_storage.Space
-	insertRec array.RecordReader
-	statsBlob *storage.Blob
-	deleteRec array.RecordReader
+	space        *milvus_storage.Space
+	insertRec    array.RecordReader
+	statsBlob    *storage.Blob
+	deleteRec    array.RecordReader
+	fetchVersion func() (int64, error)
+	saveVersion  func(*segmentFlushPack, int64) error
+	cli          *clientv3.Client
 }
 
 type taskInjection struct {
@@ -128,7 +132,11 @@ func (t *flushTaskRunner) init(f notifyMetaFunc, postFunc taskPostFunc, signal <
 	t.initOnce.Do(func() {
 		t.startSignal = signal
 		t.finishSignal = make(chan struct{})
-		go t.waitFinish(f, postFunc)
+		if Params.CommonCfg.EnableStorageV2.GetAsBool() {
+			go t.waitFinishV2(f, postFunc)
+		} else {
+			go t.waitFinish(f, postFunc)
+		}
 	})
 }
 
@@ -202,6 +210,7 @@ func (t *flushTaskRunner) runFlushInsertV2(task flushInsertTask, flushed bool, d
 			zap.Time("PosTime", tsoutil.PhysicalTime(pos.GetTimestamp())),
 		)
 		taskv2 := task.(*flushBufferInsertTask2)
+		t.space = taskv2.space
 		t.insertRec = taskv2.reader
 		t.insertRec.Retain()
 		t.statsBlob = taskv2.statsBlob
@@ -254,7 +263,11 @@ func (t *flushTaskRunner) waitFinishV2(notifyFunc notifyMetaFunc, postFunc taskP
 	// wait previous task done
 	<-t.startSignal
 
-	milvus_storage.Open()
+	lm := storage.NewEtcdLockManager(t.segmentID, t.cli, t.fetchVersion, func(version int64) error {
+		pack := t.getFlushPackV2()
+		return t.saveVersion(pack, version)
+	})
+	t.space.SetLockManager(lm)
 
 	err := t.space.NewTransaction().
 		Write(t.insertRec, &options.DefaultWriteOptions).
@@ -262,10 +275,10 @@ func (t *flushTaskRunner) waitFinishV2(notifyFunc notifyMetaFunc, postFunc taskP
 		Delete(t.deleteRec).
 		Commit()
 	if err != nil {
-		panic("")
+		panic(err)
 	}
 
-	pack := t.getFlushPack()
+	pack := t.getFlushPackV2()
 	var postInjection postInjectionFunc
 	select {
 	case injection := <-t.injectSignal:
@@ -279,9 +292,6 @@ func (t *flushTaskRunner) waitFinishV2(notifyFunc notifyMetaFunc, postFunc taskP
 	default:
 	}
 	postFunc(pack, postInjection)
-
-	// execution done, dequeue and make count --
-	notifyFunc(pack)
 
 	// notify next task
 	close(t.finishSignal)
@@ -319,29 +329,17 @@ func (t *flushTaskRunner) getFlushPack() *segmentFlushPack {
 
 func (t *flushTaskRunner) getFlushPackV2() *segmentFlushPack {
 	pack := &segmentFlushPack{
-		segmentID:      t.segmentID,
-		insertLogs:     t.insertLogs,
-		statsLogs:      t.statsLogs,
-		pos:            t.pos,
-		deltaLogs:      t.deltaLogs,
-		flushed:        t.flushed,
-		dropped:        t.dropped,
-		rec:            t.deleteRec,
-		storageVersion: t.space.GetCurrentVersion(),
+		segmentID: t.segmentID,
+		pos:       t.pos,
+		flushed:   t.flushed,
+		dropped:   t.dropped,
+		deleteRec: t.deleteRec,
 	}
 	log.Debug("flush pack composed",
 		zap.Int64("segmentID", t.segmentID),
-		zap.Int("insertLogs", len(t.insertLogs)),
-		zap.Int("statsLogs", len(t.statsLogs)),
-		zap.Int("deleteLogs", len(t.deltaLogs)),
 		zap.Bool("flushed", t.flushed),
 		zap.Bool("dropped", t.dropped),
 	)
-
-	if t.insertErr != nil || t.deleteErr != nil {
-		log.Warn("flush task error detected", zap.Error(t.insertErr), zap.Error(t.deleteErr))
-		pack.err = errors.New("execution failed")
-	}
 
 	return pack
 }
@@ -352,6 +350,27 @@ func newFlushTaskRunner(segmentID UniqueID, injectCh <-chan *taskInjection) *flu
 		WaitGroup:    sync.WaitGroup{},
 		segmentID:    segmentID,
 		injectSignal: injectCh,
+	}
+	// insert & del
+	t.Add(2)
+	return t
+}
+
+func newFlushTaskRunnerV2(segmentID UniqueID,
+	injectCh <-chan *taskInjection,
+	space *milvus_storage.Space,
+	cli *clientv3.Client,
+	fetchVersion func() (int64, error),
+	saveVersion func(*segmentFlushPack, int64) error,
+) *flushTaskRunner {
+	t := &flushTaskRunner{
+		WaitGroup:    sync.WaitGroup{},
+		segmentID:    segmentID,
+		injectSignal: injectCh,
+		space:        space,
+		cli:          cli,
+		fetchVersion: fetchVersion,
+		saveVersion:  saveVersion,
 	}
 	// insert & del
 	t.Add(2)

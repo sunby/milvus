@@ -132,7 +132,7 @@ VectorMemIndex::LoadV2(const Config& config) {
 
     auto read_blob = [&](const std::string& file_name)
         -> std::unique_ptr<storage::DataCodec> {
-        auto res = space_->GetBlobByteSizeIsManifestNotFound(file_name);
+        auto res = space_->GetBlobByteSize(file_name);
         if (!res.ok()) {
             PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
                           "unable to read index blob");

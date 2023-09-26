@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/cockroachdb/errors"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
@@ -67,6 +68,35 @@ type dataSyncService struct {
 	stopOnce       sync.Once
 	flushListener  chan *segmentFlushPack // chan to listen flush event
 	timetickSender *timeTickSender        // reference to timeTickSender
+	cli            *clientv3.Client
+}
+
+func newDataSyncServiceV2(ctx context.Context,
+	flushCh chan flushMsg,
+	resendTTCh chan resendTTMsg,
+	channel Channel,
+	alloc allocator.Allocator,
+	dispClient msgdispatcher.Client,
+	factory msgstream.Factory,
+	vchan *datapb.VchannelInfo,
+	clearSignal chan<- string,
+	dataCoord types.DataCoord,
+	flushingSegCache *Cache,
+	chunkManager storage.ChunkManager,
+	compactor *compactionExecutor,
+	tickler *tickler,
+	serverID int64,
+	timetickSender *timeTickSender,
+	cli *clientv3.Client,
+) (*dataSyncService, error) {
+	ret, err := newDataSyncService(ctx, flushCh, resendTTCh, channel, alloc, dispClient,
+		factory, vchan, clearSignal, dataCoord, flushingSegCache, chunkManager, compactor, tickler, serverID,
+		timetickSender)
+	if err != nil {
+		return nil, err
+	}
+	ret.cli = cli
+	return ret, nil
 }
 
 func newDataSyncService(ctx context.Context,
@@ -202,8 +232,13 @@ func (dsService *dataSyncService) clearGlobalFlushingCache() {
 func (dsService *dataSyncService) initNodes(vchanInfo *datapb.VchannelInfo, tickler *tickler) error {
 	dsService.fg = flowgraph.NewTimeTickedFlowGraph(dsService.ctx)
 	// initialize flush manager for DataSync Service
-	dsService.flushManager = NewRendezvousFlushManager(dsService.idAllocator, dsService.chunkManager, dsService.channel,
-		flushNotifyFunc(dsService, retry.Attempts(50)), dropVirtualChannelFunc(dsService))
+	if Params.CommonCfg.EnableStorageV2.GetAsBool() {
+		dsService.flushManager = NewRendezvousFlushManagerV2(dsService.idAllocator, dsService.chunkManager, dsService.channel,
+			flushNotifyFunc2(dsService, retry.Attempts(50)), dropVirtualChannelFunc(dsService), dsService, dsService.cli)
+	} else {
+		dsService.flushManager = NewRendezvousFlushManager(dsService.idAllocator, dsService.chunkManager, dsService.channel,
+			flushNotifyFunc(dsService, retry.Attempts(50)), dropVirtualChannelFunc(dsService))
+	}
 
 	log.Info("begin to init data sync service", zap.Int64("collection", vchanInfo.CollectionID),
 		zap.String("Chan", vchanInfo.ChannelName),

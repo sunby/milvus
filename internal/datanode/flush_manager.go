@@ -28,6 +28,7 @@ import (
 	"github.com/apache/arrow/go/v12/arrow/memory"
 	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -36,8 +37,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	milvus_storage "github.com/milvus-io/milvus-storage/go/storage"
-	"github.com/milvus-io/milvus-storage/go/storage/options/option"
-	"github.com/milvus-io/milvus-storage/go/storage/options/schema_option"
+	"github.com/milvus-io/milvus-storage/go/storage/options"
 	"github.com/milvus-io/milvus-storage/go/storage/schema"
 	"github.com/milvus-io/milvus/internal/datanode/allocator"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
@@ -84,7 +84,7 @@ type segmentFlushPack struct {
 	dropped        bool
 	err            error // task execution error, if not nil, notify func should stop datanode
 	storageVersion int64
-	rec            array.RecordReader
+	deleteRec      array.RecordReader
 }
 
 // notifyMetaFunc notify meta to persistent flush result
@@ -118,6 +118,11 @@ type orderFlushQueue struct {
 	injectMut     sync.Mutex
 	runningTasks  int32
 	postInjection postInjectionFunc
+
+	space        *milvus_storage.Space
+	cli          *clientv3.Client
+	fetchVersion func() (int64, error)
+	saveVersion  func(*segmentFlushPack, int64) error
 }
 
 // newOrderFlushQueue creates an orderFlushQueue
@@ -131,6 +136,24 @@ func newOrderFlushQueue(segID UniqueID, f notifyMetaFunc) *orderFlushQueue {
 	return q
 }
 
+func newOrderFlushQueueV2(segID UniqueID,
+	f notifyMetaFunc,
+	cli *clientv3.Client,
+	fetchVersion func() (int64, error),
+	saveVersion func(*segmentFlushPack, int64) error,
+) *orderFlushQueue {
+	q := &orderFlushQueue{
+		segmentID:    segID,
+		notifyFunc:   f,
+		injectCh:     make(chan *taskInjection, 100),
+		working:      typeutil.NewConcurrentMap[string, *flushTaskRunner](),
+		cli:          cli,
+		fetchVersion: fetchVersion,
+		saveVersion:  saveVersion,
+	}
+	return q
+}
+
 // init orderFlushQueue use once protect init, init tailCh
 func (q *orderFlushQueue) init() {
 	q.Once.Do(func() {
@@ -138,6 +161,28 @@ func (q *orderFlushQueue) init() {
 		q.tailCh = make(chan struct{})
 		close(q.tailCh)
 	})
+}
+
+func (q *orderFlushQueue) getFlushTaskRunnerV2(pos *msgpb.MsgPosition) *flushTaskRunner {
+	t, loaded := q.working.GetOrInsert(getSyncTaskID(pos), newFlushTaskRunnerV2(q.segmentID, q.injectCh, q.space,
+		q.cli, q.fetchVersion, q.saveVersion))
+	// not loaded means the task runner is new, do initializtion
+	if !loaded {
+		// take over injection if task queue is handling it
+		q.injectMut.Lock()
+		q.runningTasks++
+		q.injectMut.Unlock()
+		// add task to tail
+		q.tailMut.Lock()
+		t.init(q.notifyFunc, q.postTask, q.tailCh)
+		q.tailCh = t.finishSignal
+		q.tailMut.Unlock()
+		log.Info("new flush task runner created and initialized",
+			zap.Int64("segmentID", q.segmentID),
+			zap.String("pos message ID", string(pos.GetMsgID())),
+		)
+	}
+	return t
 }
 
 func (q *orderFlushQueue) getFlushTaskRunner(pos *msgpb.MsgPosition) *flushTaskRunner {
@@ -196,6 +241,16 @@ func (q *orderFlushQueue) enqueueInsertFlush(task flushInsertTask, binlogs, stat
 // enqueueDelBuffer put delete buffer data into queue
 func (q *orderFlushQueue) enqueueDelFlush(task flushDeleteTask, deltaLogs *DelDataBuf, pos *msgpb.MsgPosition) {
 	q.getFlushTaskRunner(pos).runFlushDel(task, deltaLogs)
+}
+
+// enqueueInsertBuffer put insert buffer data into queue
+func (q *orderFlushQueue) enqueueInsertFlushV2(task flushInsertTask, flushed bool, dropped bool, pos *msgpb.MsgPosition) {
+	q.getFlushTaskRunnerV2(pos).runFlushInsertV2(task, flushed, dropped, pos)
+}
+
+// enqueueDelBuffer put delete buffer data into queue
+func (q *orderFlushQueue) enqueueDelFlushV2(task flushDeleteTask, pos *msgpb.MsgPosition) {
+	q.getFlushTaskRunnerV2(pos).runFlushDelV2(task)
 }
 
 // inject performs injection for current task queue
@@ -274,6 +329,186 @@ type dropHandler struct {
 	flushAndDrop flushAndDropFunc
 	allFlushed   chan struct{}
 	packs        []*segmentFlushPack
+}
+
+type rendezvousFlushManagerV2 struct {
+	*rendezvousFlushManager
+	dsService *dataSyncService
+	cli       *clientv3.Client
+}
+
+// TODO: make it singleton
+var pool memory.Allocator = memory.NewGoAllocator()
+
+func (m *rendezvousFlushManagerV2) flushBufferData(data *BufferData, segmentID UniqueID, flushed bool, dropped bool, pos *msgpb.MsgPosition) (*storage.PrimaryKeyStats, error) {
+	// convert to record reader
+	_, _, meta, err := m.getSegmentMeta(segmentID, pos)
+	if err != nil {
+		return nil, err
+	}
+
+	fields := meta.Schema.Fields
+	fields = append(fields, &schemapb.FieldSchema{
+		FieldID:  common.RowIDField,
+		Name:     common.RowIDFieldName,
+		DataType: schemapb.DataType_Int64,
+	}, &schemapb.FieldSchema{
+		FieldID:  common.TimeStampField,
+		Name:     common.TimeStampFieldName,
+		DataType: schemapb.DataType_Int64,
+	})
+
+	arrowSchema, err := covertToArrowSchema(fields)
+	if err != nil {
+		return nil, err
+	}
+	b := array.NewRecordBuilder(pool, arrowSchema)
+	defer b.Release()
+
+	if err = buildRecord(b, data, fields); err != nil {
+		return nil, err
+	}
+
+	rec := b.NewRecord()
+	defer rec.Release()
+
+	itr, err := array.NewRecordReader(arrowSchema, []arrow.Record{rec})
+	if err != nil {
+		return nil, err
+	}
+	defer itr.Release()
+
+	inCodec := storage.NewInsertCodecWithSchema(meta)
+	pkStatsBlob, stats, err := m.serializePkStatsLog(segmentID, flushed, data, inCodec)
+	if err != nil {
+		return nil, err
+	}
+
+	itr.Retain()
+	space, err := m.createSpaceIfNotExist(segmentID, meta, arrowSchema)
+	if err != nil {
+		return nil, err
+	}
+	m.handleInsertTask(segmentID, &flushBufferInsertTask2{
+		space:     space,
+		reader:    itr,
+		statsBlob: pkStatsBlob,
+		flush:     flushed,
+	}, flushed, dropped, pos)
+
+	return stats, nil
+}
+
+func (m *rendezvousFlushManagerV2) createSpaceIfNotExist(segmentID int64, meta *etcdpb.CollectionMeta, arrowSchema *arrow.Schema) (*milvus_storage.Space, error) {
+	space, ok := m.getSpace(segmentID)
+	if !ok {
+		url := fmt.Sprintf("s3://%s:%s@%s/%s/", Params.MinioCfg.AccessKeyID.GetValue(), Params.MinioCfg.SecretAccessKey.GetValue(), Params.MinioCfg.Address.GetValue(), Params.MinioCfg.BucketName.GetValue())
+		pkSchema, err := typeutil.GetPrimaryFieldSchema(meta.Schema)
+		if err != nil {
+			return nil, err
+		}
+		vecSchema, err := typeutil.GetVectorFieldSchema(meta.Schema)
+		if err != nil {
+			return nil, err
+		}
+		space, err = milvus_storage.Open(url, options.NewSpaceOptionBuilder().SetSchema(schema.NewSchema(arrowSchema, &schema.SchemaOptions{PrimaryColumn: pkSchema.Name, VectorColumn: vecSchema.Name, VersionColumn: common.TimeStampFieldName})).Build())
+		if err != nil {
+			return nil, err
+		}
+		m.setSpace(segmentID, space)
+	}
+	return space, nil
+}
+
+func (m *rendezvousFlushManagerV2) getFlushQueue(segmentID UniqueID) *orderFlushQueue {
+	newQueue := newOrderFlushQueueV2(segmentID, m.notifyFunc, m.cli, getStorageVersion(m.dsService, segmentID), saveStorageVersion(m.dsService, segmentID, m.notifyFunc))
+	queue, _ := m.dispatcher.GetOrInsert(segmentID, newQueue)
+	queue.init()
+	return queue
+}
+func (m *rendezvousFlushManagerV2) handleDeleteTask(segmentID UniqueID, task flushDeleteTask, pos *msgpb.MsgPosition) {
+	m.getFlushQueue(segmentID).enqueueDelFlushV2(task, pos)
+}
+
+func (m *rendezvousFlushManagerV2) handleInsertTask(segmentID UniqueID, task flushInsertTask, flushed bool, dropped bool, pos *msgpb.MsgPosition) {
+	m.getFlushQueue(segmentID).enqueueInsertFlushV2(task, flushed, dropped, pos)
+}
+
+func (m *rendezvousFlushManagerV2) flushDelData(data *DelDataBuf, segmentID UniqueID,
+	pos *msgpb.MsgPosition) error {
+	if data == nil || data.delData == nil {
+		m.handleDeleteTask(segmentID, &flushBufferDeleteTask{}, pos)
+		return nil
+	}
+
+	_, _, meta, err := m.getSegmentMeta(segmentID, pos)
+	if err != nil {
+		return err
+	}
+
+	fields := make([]*schemapb.FieldSchema, 0)
+	pkField := getPKField(meta)
+	fields = append(fields, pkField)
+	tsField := &schemapb.FieldSchema{
+		FieldID:  common.TimeStampField,
+		Name:     common.TimeStampFieldName,
+		DataType: schemapb.DataType_Int64,
+	}
+	fields = append(fields, tsField)
+
+	schema, err := covertToArrowSchema(fields)
+	if err != nil {
+		return err
+	}
+
+	b := array.NewRecordBuilder(pool, schema)
+	defer b.Release()
+
+	switch pkField.DataType {
+	case schemapb.DataType_Int64:
+		pb := b.Field(0).(*array.Int64Builder)
+		for _, pk := range data.delData.Pks {
+			pb.Append(pk.GetValue().(int64))
+		}
+	case schemapb.DataType_VarChar:
+		pb := b.Field(0).(*array.StringBuilder)
+		for _, pk := range data.delData.Pks {
+			pb.Append(pk.GetValue().(string))
+		}
+	default:
+		return fmt.Errorf("unexpected pk type %v", pkField.DataType)
+	}
+
+	for _, ts := range data.delData.Tss {
+		b.Field(1).(*array.Int64Builder).Append(int64(ts))
+	}
+
+	rec := b.NewRecord()
+	defer rec.Release()
+
+	reader, err := array.NewRecordReader(schema, []arrow.Record{rec})
+	if err != nil {
+		return err
+	}
+
+	space, err := m.createSpaceIfNotExist(segmentID, meta, schema)
+	if err != nil {
+		return err
+	}
+	m.handleDeleteTask(segmentID, &flushBufferDeleteTask2{
+		space: space,
+		rec:   reader,
+	}, pos)
+
+	return nil
+}
+
+func NewRendezvousFlushManagerV2(allocator allocator.Allocator, cm storage.ChunkManager, channel Channel, f notifyMetaFunc, drop flushAndDropFunc, dsService *dataSyncService, cli *clientv3.Client) *rendezvousFlushManagerV2 {
+	return &rendezvousFlushManagerV2{
+		rendezvousFlushManager: NewRendezvousFlushManager(allocator, cm, channel, f, drop),
+		dsService:              dsService,
+		cli:                    cli,
+	}
 }
 
 // rendezvousFlushManager makes sure insert & del buf all flushed
@@ -437,82 +672,6 @@ func (m *rendezvousFlushManager) isFull() bool {
 		return true
 	})
 	return num >= Params.DataNodeCfg.MaxParallelSyncTaskNum.GetAsInt()
-}
-
-// TODO: make it singleton
-var pool memory.Allocator = memory.NewGoAllocator()
-
-func (m *rendezvousFlushManager) flushBufferData2(data *BufferData, segmentID UniqueID, flushed bool, dropped bool, pos *msgpb.MsgPosition) (*storage.PrimaryKeyStats, error) {
-	// convert to record reader
-	_, _, meta, err := m.getSegmentMeta(segmentID, pos)
-	if err != nil {
-		return nil, err
-	}
-
-	fields := meta.Schema.Fields
-	fields = append(fields, &schemapb.FieldSchema{
-		FieldID:  common.RowIDField,
-		Name:     common.RowIDFieldName,
-		DataType: schemapb.DataType_Int64,
-	}, &schemapb.FieldSchema{
-		FieldID:  common.TimeStampField,
-		Name:     common.TimeStampFieldName,
-		DataType: schemapb.DataType_Int64,
-	})
-
-	arrowSchema, err := covertToArrowSchema(fields)
-	if err != nil {
-		return nil, err
-	}
-	b := array.NewRecordBuilder(pool, arrowSchema)
-	defer b.Release()
-
-	if err = buildRecord(b, data, fields); err != nil {
-		return nil, err
-	}
-
-	rec := b.NewRecord()
-	defer rec.Release()
-
-	itr, err := array.NewRecordReader(arrowSchema, []arrow.Record{rec})
-	if err != nil {
-		return nil, err
-	}
-	defer itr.Release()
-
-	inCodec := storage.NewInsertCodecWithSchema(meta)
-	pkStatsBlob, stats, err := m.serializePkStatsLog(segmentID, flushed, data, inCodec)
-	if err != nil {
-		return nil, err
-	}
-
-	itr.Retain()
-	space, ok := m.getSpace(segmentID)
-	if !ok {
-		url := fmt.Sprintf("s3://%s:%s@%s/%s/", Params.MinioCfg.AccessKeyID.GetValue(), Params.MinioCfg.SecretAccessKey.GetValue(), Params.MinioCfg.Address.GetValue(), Params.MinioCfg.BucketName.GetValue())
-		pkSchema, err := typeutil.GetPrimaryFieldSchema(meta.Schema)
-		if err != nil {
-			return nil, err
-		}
-		vecSchema, err := typeutil.GetVectorFieldSchema(meta.Schema)
-		if err != nil {
-			return nil, err
-		}
-		space, err = milvus_storage.Open(url, *option.NewOptions(schema.NewSchema(arrowSchema, &schema_option.SchemaOptions{PrimaryColumn: pkSchema.Name, VectorColumn: vecSchema.Name, VersionColumn: common.TimeStampFieldName}), -1))
-		if err != nil {
-			return nil, err
-		}
-		m.setSpace(segmentID, space)
-	}
-
-	m.handleInsertTask(segmentID, &flushBufferInsertTask2{
-		space:     space,
-		reader:    itr,
-		statsBlob: pkStatsBlob,
-		flush:     flushed,
-	}, nil, nil, flushed, dropped, pos)
-
-	return stats, nil
 }
 
 func buildRecord(b *array.RecordBuilder, data *BufferData, fields []*schemapb.FieldSchema) error {
@@ -864,71 +1023,6 @@ func (m *rendezvousFlushManager) flushDelData(data *DelDataBuf, segmentID Unique
 	return nil
 }
 
-func (m *rendezvousFlushManager) flushDelData2(data *DelDataBuf, segmentID UniqueID,
-	pos *msgpb.MsgPosition) error {
-	if data == nil || data.delData == nil {
-		m.handleDeleteTask(segmentID, &flushBufferDeleteTask{}, nil, pos)
-		return nil
-	}
-
-	_, _, meta, err := m.getSegmentMeta(segmentID, pos)
-	if err != nil {
-		return err
-	}
-
-	fields := make([]*schemapb.FieldSchema, 0)
-	pkField := getPKField(meta)
-	fields = append(fields, pkField)
-	tsField := &schemapb.FieldSchema{
-		FieldID:  common.TimeStampField,
-		Name:     common.TimeStampFieldName,
-		DataType: schemapb.DataType_Int64,
-	}
-	fields = append(fields, tsField)
-
-	schema, err := covertToArrowSchema(fields)
-	if err != nil {
-		return err
-	}
-
-	b := array.NewRecordBuilder(pool, schema)
-	defer b.Release()
-
-	switch pkField.DataType {
-	case schemapb.DataType_Int64:
-		pb := b.Field(0).(*array.Int64Builder)
-		for _, pk := range data.delData.Pks {
-			pb.Append(pk.GetValue().(int64))
-		}
-	case schemapb.DataType_VarChar:
-		pb := b.Field(0).(*array.StringBuilder)
-		for _, pk := range data.delData.Pks {
-			pb.Append(pk.GetValue().(string))
-		}
-	default:
-		return fmt.Errorf("unexpected pk type %v", pkField.DataType)
-	}
-
-	for _, ts := range data.delData.Tss {
-		b.Field(1).(*array.Int64Builder).Append(int64(ts))
-	}
-
-	rec := b.NewRecord()
-	defer rec.Release()
-
-	reader, err := array.NewRecordReader(schema, []arrow.Record{rec})
-	if err != nil {
-		return err
-	}
-
-	m.handleDeleteTask(segmentID, &flushBufferDeleteTask2{
-		space: nil, // TODO: add space
-		rec:   reader,
-	}, nil, pos)
-
-	return nil
-}
-
 // injectFlush inject process before task finishes
 func (m *rendezvousFlushManager) injectFlush(injection *taskInjection, segments ...UniqueID) {
 	go injection.waitForInjected()
@@ -1062,7 +1156,7 @@ type flushBufferInsertTask2 struct {
 
 func (t *flushBufferInsertTask2) flushInsertData() error {
 	defer t.reader.Release()
-	err := t.space.Write(t.reader, &option.WriteOptions{
+	err := t.space.Write(t.reader, &options.WriteOptions{
 		MaxRecordPerFile: 1024,
 	})
 	if err != nil {
@@ -1285,6 +1379,7 @@ func flushNotifyFunc2(dsService *dataSyncService, opts ...retry.Option) notifyMe
 			Flushed:        pack.flushed,
 			Dropped:        pack.dropped,
 			Channel:        dsService.vchannelName,
+			StorageVersion: pack.storageVersion,
 		}
 		err := retry.Do(context.Background(), func() error {
 			rsp, err := dsService.dataCoord.SaveBinlogPaths(context.Background(), req)
@@ -1341,6 +1436,24 @@ func flushNotifyFunc2(dsService *dataSyncService, opts ...retry.Option) notifyMe
 		dsService.channel.updateSingleSegmentMemorySize(req.GetSegmentID())
 		segment.setSyncing(false)
 		// dsService.channel.saveBinlogPath(fieldStats)
+	}
+}
+
+func getStorageVersion(dsService *dataSyncService, segmentID int64) func() (int64, error) {
+	return func() (int64, error) {
+		infos, err := dsService.getSegmentInfos([]int64{segmentID})
+		if err != nil {
+			return -1, nil
+		}
+		return infos[0].StorageVersion, nil
+	}
+}
+
+func saveStorageVersion(dsService *dataSyncService, segmentID int64, notifyFunc func(segment *segmentFlushPack)) func(*segmentFlushPack, int64) error {
+	return func(pack *segmentFlushPack, version int64) error {
+		pack.storageVersion = version
+		notifyFunc(pack)
+		return nil
 	}
 }
 

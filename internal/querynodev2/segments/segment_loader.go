@@ -92,6 +92,76 @@ func (r *LoadResource) Sub(resource LoadResource) {
 	r.WorkNum -= resource.WorkNum
 }
 
+type segmentLoaderV2 struct {
+	*segmentLoader
+}
+
+func NewLoaderV2(
+	manager *Manager,
+	cm storage.ChunkManager,
+) *segmentLoaderV2 {
+	return &segmentLoaderV2{
+		segmentLoader: NewLoader(manager, cm),
+	}
+}
+
+func (loader *segmentLoaderV2) loadBloomFilter(ctx context.Context, segmentID int64, bfs *pkoracle.BloomFilterSet,
+	binlogPaths []string, logType storage.StatsLogType) error {
+
+	log := log.Ctx(ctx).With(
+		zap.Int64("segmentID", segmentID),
+	)
+	if len(binlogPaths) == 0 {
+		log.Info("there are no stats logs saved with segment")
+		return nil
+	}
+
+	startTs := time.Now()
+
+	blobs := []*storage.Blob{}
+	for _, path := range binlogPaths {
+		size, err := loader.space.GetBlobByteSize(path)
+		if err != nil {
+			return err
+		}
+		blob := make([]byte, size)
+		_, err = loader.space.ReadBlob(path, blob)
+		if err != nil {
+			return err
+		}
+		blobs = append(blobs, &storage.Blob{Value: blob})
+	}
+
+	var err error
+	var stats []*storage.PrimaryKeyStats
+	if logType == storage.CompoundStatsType {
+		stats, err = storage.DeserializeStatsList(blobs[0])
+		if err != nil {
+			log.Warn("failed to deserialize stats list", zap.Error(err))
+			return err
+		}
+	} else {
+		stats, err = storage.DeserializeStats(blobs)
+		if err != nil {
+			log.Warn("failed to deserialize stats", zap.Error(err))
+			return err
+		}
+	}
+
+	var size uint
+	for _, stat := range stats {
+		pkStat := &storage.PkStatistics{
+			PkFilter: stat.BF,
+			MinPK:    stat.MinPk,
+			MaxPK:    stat.MaxPk,
+		}
+		size += stat.BF.Cap()
+		bfs.AddHistoricalStats(pkStat)
+	}
+	log.Info("Successfully load pk stats", zap.Duration("time", time.Since(startTs)), zap.Uint("size", size))
+	return nil
+}
+
 func NewLoader(
 	manager *Manager,
 	cm storage.ChunkManager,
@@ -186,7 +256,13 @@ func (loader *segmentLoader) Load(ctx context.Context,
 			clearAll()
 			return nil, err
 		}
-		segment, err := NewSegment(collection, segmentID, partitionID, collectionID, shard, segmentType, version, info.GetStartPosition(), info.GetDeltaPosition())
+
+		var segment *LocalSegment
+		if paramtable.Get().CommonCfg.EnableStorageV2.GetAsBool() {
+			segment, err = NewSegmentV2(collection, segmentID, partitionID, collectionID, shard, segmentType, version, info.GetStartPosition(), info.GetDeltaPosition(), info.GetStorageVersion())
+		} else {
+			segment, err = NewSegment(collection, segmentID, partitionID, collectionID, shard, segmentType, version, info.GetStartPosition(), info.GetDeltaPosition())
+		}
 		if err != nil {
 			log.Warn("load segment failed when create new segment",
 				zap.Int64("partitionID", partitionID),
@@ -676,63 +752,6 @@ func (loader *segmentLoader) loadBloomFilter(ctx context.Context, segmentID int6
 		blobs = append(blobs, &storage.Blob{Value: values[i]})
 	}
 
-	var stats []*storage.PrimaryKeyStats
-	if logType == storage.CompoundStatsType {
-		stats, err = storage.DeserializeStatsList(blobs[0])
-		if err != nil {
-			log.Warn("failed to deserialize stats list", zap.Error(err))
-			return err
-		}
-	} else {
-		stats, err = storage.DeserializeStats(blobs)
-		if err != nil {
-			log.Warn("failed to deserialize stats", zap.Error(err))
-			return err
-		}
-	}
-
-	var size uint
-	for _, stat := range stats {
-		pkStat := &storage.PkStatistics{
-			PkFilter: stat.BF,
-			MinPK:    stat.MinPk,
-			MaxPK:    stat.MaxPk,
-		}
-		size += stat.BF.Cap()
-		bfs.AddHistoricalStats(pkStat)
-	}
-	log.Info("Successfully load pk stats", zap.Duration("time", time.Since(startTs)), zap.Uint("size", size))
-	return nil
-}
-
-func (loader *segmentLoader) loadBloomFilterV2(ctx context.Context, segmentID int64, bfs *pkoracle.BloomFilterSet,
-	binlogPaths []string, logType storage.StatsLogType) error {
-
-	log := log.Ctx(ctx).With(
-		zap.Int64("segmentID", segmentID),
-	)
-	if len(binlogPaths) == 0 {
-		log.Info("there are no stats logs saved with segment")
-		return nil
-	}
-
-	startTs := time.Now()
-
-	blobs := []*storage.Blob{}
-	for _, path := range binlogPaths {
-		size, err := loader.space.GetBlobByteSize(path)
-		if err != nil {
-			return err
-		}
-		blob := make([]byte, size)
-		_, err = loader.space.ReadBlob(path, blob)
-		if err != nil {
-			return err
-		}
-		blobs = append(blobs, &storage.Blob{Value: blob})
-	}
-
-	var err error
 	var stats []*storage.PrimaryKeyStats
 	if logType == storage.CompoundStatsType {
 		stats, err = storage.DeserializeStatsList(blobs[0])

@@ -216,6 +216,8 @@ type commonConfig struct {
 	EnableLockMetrics        ParamItem `refreshable:"false"`
 	LockSlowLogInfoThreshold ParamItem `refreshable:"true"`
 	LockSlowLogWarnThreshold ParamItem `refreshable:"true"`
+
+	EnableStorageV2 ParamItem `refreshable:"false"`
 }
 
 func (p *commonConfig) init(base *BaseTable) {
@@ -610,6 +612,12 @@ like the old password verification when updating the credential`,
 		DefaultValue: "1000",
 		Doc:          "minimum milliseconds for printing durations in warn level",
 		Export:       true,
+	}
+
+	p.EnableStorageV2 = ParamItem{
+		Key:          "common.storage.enablev2",
+		Version:      "2.3.1",
+		DefaultValue: "false",
 	}
 	p.LockSlowLogWarnThreshold.Init(base.mgr)
 }
