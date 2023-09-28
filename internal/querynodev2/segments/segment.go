@@ -733,7 +733,14 @@ func (s *LocalSegment) LoadMultiFieldData(rowCount int64, fields []*datapb.Field
 
 	var status C.CStatus
 	GetDynamicPool().Submit(func() (any, error) {
-		status = C.LoadFieldData(s.ptr, loadFieldDataInfo.cLoadFieldDataInfo)
+		if paramtable.Get().CommonCfg.EnableStorageV2.GetAsBool() {
+			uri := fmt.Sprintf("s3://%s:%s@%s/%s/", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.Address.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue())
+			loadFieldDataInfo.appendUri(uri)
+			loadFieldDataInfo.appendStorageVersion(s.space.GetCurrentVersion())
+			status = C.LoadFieldDataV2(s.ptr, loadFieldDataInfo.cLoadFieldDataInfo)
+		} else {
+			status = C.LoadFieldData(s.ptr, loadFieldDataInfo.cLoadFieldDataInfo)
+		}
 		return nil, nil
 	}).Await()
 	if err := HandleCStatus(&status, "LoadMultiFieldData failed"); err != nil {
@@ -786,7 +793,14 @@ func (s *LocalSegment) LoadFieldData(fieldID int64, rowCount int64, field *datap
 	var status C.CStatus
 	GetDynamicPool().Submit(func() (any, error) {
 		log.Info("submitted loadFieldData task to dy pool")
-		status = C.LoadFieldData(s.ptr, loadFieldDataInfo.cLoadFieldDataInfo)
+		if paramtable.Get().CommonCfg.EnableStorageV2.GetAsBool() {
+			uri := fmt.Sprintf("s3://%s:%s@%s/%s/", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.Address.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue())
+			loadFieldDataInfo.appendUri(uri)
+			loadFieldDataInfo.appendStorageVersion(s.space.GetCurrentVersion())
+			status = C.LoadFieldDataV2(s.ptr, loadFieldDataInfo.cLoadFieldDataInfo)
+		} else {
+			status = C.LoadFieldData(s.ptr, loadFieldDataInfo.cLoadFieldDataInfo)
+		}
 		return nil, nil
 	}).Await()
 	if err := HandleCStatus(&status, "LoadFieldData failed"); err != nil {
@@ -966,6 +980,10 @@ func (s *LocalSegment) LoadIndex(indexInfo *querypb.FieldIndexInfo, fieldType sc
 		return err
 	}
 
+	if paramtable.Get().CommonCfg.EnableStorageV2.GetAsBool() {
+		url := fmt.Sprintf("s3://%s:%s@%s/%s/", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.Address.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue())
+		loadIndexInfo.appendStorgeInfo(url, s.space.GetCurrentVersion())
+	}
 	err = loadIndexInfo.appendLoadIndexInfo(indexInfo, s.collectionID, s.partitionID, s.segmentID, fieldType)
 	if err != nil {
 		if loadIndexInfo.cleanLocalData() != nil {

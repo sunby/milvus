@@ -35,6 +35,9 @@ class VectorMemIndex : public VectorIndex {
                             const MetricType& metric_type,
                             storage::FileManagerImplPtr file_manager = nullptr);
 
+    explicit VectorMemIndex(const IndexType& index_type,
+                            const MetricType& metric_type,
+                            std::shared_ptr<milvus_storage::Space> space);
     BinarySet
     Serialize(const Config& config) override;
 
@@ -83,6 +86,9 @@ class VectorMemIndex : public VectorIndex {
  private:
     void
     LoadFromFile(const Config& config);
+
+    void
+    LoadFromFileV2(const Config& config);
 
  protected:
     Config config_;

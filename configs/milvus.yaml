@@ -470,6 +470,9 @@ common:
   session:
     ttl: 60 # ttl value when session granting a lease to register service
     retryTimes: 30 # retry times when session sending etcd requests
+  storage:
+    # enablev2: false
+    enablev2: true
 
   # preCreatedTopic decides whether using existed topic
   preCreatedTopic:

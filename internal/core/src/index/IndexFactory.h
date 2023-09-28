@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 #include <mutex>
 #include <shared_mutex>
@@ -27,6 +28,7 @@
 #include "index/IndexInfo.h"
 #include "storage/Types.h"
 #include "storage/FileManager.h"
+#include "storage/space.h"
 
 namespace milvus::index {
 
@@ -58,6 +60,18 @@ class IndexFactory {
     CreateScalarIndex(const CreateIndexInfo& create_index_info,
                       storage::FileManagerImplPtr file_manager = nullptr);
 
+    IndexBasePtr
+    CreateIndexV2(const CreateIndexInfo& create_index_info,
+                  std::shared_ptr<milvus_storage::Space> space);
+
+    IndexBasePtr
+    CreateVectorIndexV2(const CreateIndexInfo& create_index_info,
+                        std::shared_ptr<milvus_storage::Space> space);
+
+    IndexBasePtr
+    CreateScalarIndexV2(const CreateIndexInfo& create_index_info,
+                        std::shared_ptr<milvus_storage::Space> space);
+
     // IndexBasePtr
     // CreateIndex(DataType dtype, const IndexType& index_type);
  private:
@@ -65,6 +79,11 @@ class IndexFactory {
     ScalarIndexPtr<T>
     CreateScalarIndex(const IndexType& index_type,
                       storage::FileManagerImplPtr file_manager = nullptr);
+
+    template <typename T>
+    ScalarIndexPtr<T>
+    CreateScalarIndexV2(const IndexType& index_type,
+                        std::shared_ptr<milvus_storage::Space> space);
 };
 
 }  // namespace milvus::index

@@ -27,6 +27,12 @@ IndexFactory::CreateScalarIndex(const IndexType& index_type,
                                 storage::FileManagerImplPtr file_manager) {
     return CreateScalarIndexSort<T>(file_manager);
 }
+template <typename T>
+inline ScalarIndexPtr<T>
+IndexFactory::CreateScalarIndexV2(
+    const IndexType& index_type, std::shared_ptr<milvus_storage::Space> space) {
+    return CreateScalarIndexSortV2<T>(space);
+}
 
 // template <>
 // inline ScalarIndexPtr<bool>

@@ -36,6 +36,12 @@ class VectorMemNMIndex : public VectorMemIndex {
         AssertInfo(is_in_nm_list(index_type), "not valid nm index type");
     }
 
+    explicit VectorMemNMIndex(const IndexType& index_type,
+                              const MetricType& metric_type,
+                              std::shared_ptr<milvus_storage::Space> space)
+        : VectorMemIndex(index_type, metric_type, space) {
+        AssertInfo(is_in_nm_list(index_type), "not valid nm index type");
+    }
     BinarySet
     Serialize(const Config& config) override;
 

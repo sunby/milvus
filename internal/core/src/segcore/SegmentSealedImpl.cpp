@@ -190,6 +190,43 @@ SegmentSealedImpl::LoadFieldData(const LoadFieldDataInfo& load_info) {
         field_data_info.channel->set_capacity(parallel_degree * 2);
         auto& pool =
             ThreadPools::GetThreadPool(milvus::ThreadPoolPriority::MIDDLE);
+        auto load_future = pool.Submit(
+            LoadFieldDatasFromRemote, insert_files, field_data_info.channel);
+        LOG_SEGCORE_INFO_ << "finish submitting LoadFieldDatasFromRemote task "
+                             "to thread pool, "
+                          << "segmentID:" << this->id_
+                          << ", fieldID:" << info.field_id;
+        if (load_info.mmap_dir_path.empty() ||
+            SystemProperty::Instance().IsSystem(field_id)) {
+            LoadFieldData(field_id, field_data_info);
+        } else {
+            MapFieldData(field_id, field_data_info);
+        }
+        LOG_SEGCORE_INFO_ << "finish loading segment field, "
+                          << "segmentID:" << this->id_
+                          << ", fieldID:" << info.field_id;
+    }
+}
+
+void
+SegmentSealedImpl::LoadFieldDataV2(const LoadFieldDataInfo& load_info) {
+    // NOTE: lock only when data is ready to avoid starvation
+    // only one field for now, parallel load field data in golang
+    size_t num_rows = storage::GetNumRowsForLoadInfo(load_info);
+
+    for (auto& [id, info] : load_info.field_infos) {
+        AssertInfo(info.row_count > 0, "The row count of field data is 0");
+
+        auto field_id = FieldId(id);
+        auto insert_files = info.insert_files;
+        auto field_data_info =
+            FieldDataInfo(field_id.get(), num_rows, load_info.mmap_dir_path);
+
+        auto parallel_degree = static_cast<uint64_t>(
+            DEFAULT_FIELD_MAX_MEMORY_LIMIT / FILE_SLICE_SIZE);
+        field_data_info.channel->set_capacity(parallel_degree * 2);
+        auto& pool =
+            ThreadPools::GetThreadPool(milvus::ThreadPoolPriority::MIDDLE);
         // auto load_future = pool.Submit(
         //     LoadFieldDatasFromRemote, insert_files, field_data_info.channel);
 
@@ -212,7 +249,6 @@ SegmentSealedImpl::LoadFieldData(const LoadFieldDataInfo& load_info) {
                           << ", fieldID:" << info.field_id;
     }
 }
-
 void
 SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
     auto num_rows = data.row_count;

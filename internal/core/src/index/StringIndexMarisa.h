@@ -34,6 +34,8 @@ class StringIndexMarisa : public StringIndex {
     explicit StringIndexMarisa(
         storage::FileManagerImplPtr file_manager = nullptr);
 
+    explicit StringIndexMarisa(std::shared_ptr<milvus_storage::Space> space);
+
     int64_t
     Size() override;
 

@@ -102,4 +102,80 @@ IndexFactory::CreateVectorIndex(const CreateIndexInfo& create_index_info,
         index_type, metric_type, file_manager);
 }
 
+IndexBasePtr
+IndexFactory::CreateIndexV2(const CreateIndexInfo& create_index_info,
+                            std::shared_ptr<milvus_storage::Space> space) {
+    if (datatype_is_vector(create_index_info.field_type)) {
+        return CreateVectorIndexV2(create_index_info, space);
+    }
+
+    return CreateScalarIndexV2(create_index_info, space);
+}
+
+IndexBasePtr
+IndexFactory::CreateScalarIndexV2(
+    const CreateIndexInfo& create_index_info,
+    std::shared_ptr<milvus_storage::Space> space) {
+    auto data_type = create_index_info.field_type;
+    auto index_type = create_index_info.index_type;
+
+    switch (data_type) {
+        // create scalar index
+        case DataType::BOOL:
+            return CreateScalarIndexV2<bool>(index_type, space);
+        case DataType::INT8:
+            return CreateScalarIndexV2<int8_t>(index_type, space);
+        case DataType::INT16:
+            return CreateScalarIndexV2<int16_t>(index_type, space);
+        case DataType::INT32:
+            return CreateScalarIndexV2<int32_t>(index_type, space);
+        case DataType::INT64:
+            return CreateScalarIndexV2<int64_t>(index_type, space);
+        case DataType::FLOAT:
+            return CreateScalarIndexV2<float>(index_type, space);
+        case DataType::DOUBLE:
+            return CreateScalarIndexV2<double>(index_type, space);
+
+            // create string index
+        case DataType::STRING:
+        case DataType::VARCHAR:
+            return CreateScalarIndexV2<std::string>(index_type, space);
+        default:
+            throw std::invalid_argument(
+                std::string("invalid data type to build index: ") +
+                std::to_string(int(data_type)));
+    }
+}
+
+IndexBasePtr
+IndexFactory::CreateVectorIndexV2(
+    const CreateIndexInfo& create_index_info,
+    std::shared_ptr<milvus_storage::Space> space) {
+    auto data_type = create_index_info.field_type;
+    auto index_type = create_index_info.index_type;
+    auto metric_type = create_index_info.metric_type;
+
+#ifdef BUILD_DISK_ANN
+    // create disk index
+    if (is_in_disk_list(index_type)) {
+        switch (data_type) {
+            case DataType::VECTOR_FLOAT: {
+                return std::make_unique<VectorDiskAnnIndex<float>>(
+                    index_type, metric_type, file_manager);
+            }
+            default:
+                throw std::invalid_argument(
+                    std::string("invalid data type to build disk index: ") +
+                    std::to_string(int(data_type)));
+        }
+    }
+#endif
+
+    if (is_in_nm_list(index_type)) {
+        return std::make_unique<VectorMemNMIndex>(
+            index_type, metric_type, space);
+    }
+    // create mem index
+    return std::make_unique<VectorMemIndex>(index_type, metric_type, space);
+}
 }  // namespace milvus::index

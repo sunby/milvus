@@ -42,6 +42,11 @@ StringIndexMarisa::StringIndexMarisa(storage::FileManagerImplPtr file_manager) {
     }
 }
 
+StringIndexMarisa::StringIndexMarisa(
+    std::shared_ptr<milvus_storage::Space> space)
+    : space_(space) {
+}
+
 int64_t
 StringIndexMarisa::Size() {
     return trie_.size();

@@ -63,6 +63,15 @@ VectorMemIndex::VectorMemIndex(const IndexType& index_type,
     index_ = knowhere::IndexFactory::Instance().Create(GetIndexType());
 }
 
+VectorMemIndex::VectorMemIndex(const IndexType& index_type,
+                               const MetricType& metric_type,
+                               std::shared_ptr<milvus_storage::Space> space)
+    : VectorIndex(index_type, metric_type), space_(space) {
+    AssertInfo(!is_unsupported(index_type, metric_type),
+               index_type + " doesn't support metric: " + metric_type);
+    index_ = knowhere::IndexFactory::Instance().Create(GetIndexType());
+}
+
 BinarySet
 VectorMemIndex::Upload(const Config& config) {
     auto binary_set = Serialize(config);
@@ -110,7 +119,7 @@ VectorMemIndex::Load(const BinarySet& binary_set, const Config& config) {
 void
 VectorMemIndex::LoadV2(const Config& config) {
     if (config.contains(kMmapFilepath)) {
-        return LoadFromFile(config);
+        return LoadFromFileV2(config);
     }
     auto index_files =
         GetValueFromConfig<std::vector<std::string>>(config, "index_files");
@@ -600,4 +609,108 @@ VectorMemIndex::LoadFromFile(const Config& config) {
     LOG_SEGCORE_INFO_ << "load vector index done";
 }
 
+void
+VectorMemIndex::LoadFromFileV2(const Config& config) {
+    auto filepath = GetValueFromConfig<std::string>(config, kMmapFilepath);
+    AssertInfo(filepath.has_value(), "mmap filepath is empty when load index");
+
+    std::filesystem::create_directories(
+        std::filesystem::path(filepath.value()).parent_path());
+
+    auto file = File::Open(filepath.value(), O_CREAT | O_TRUNC | O_RDWR);
+
+    auto index_files =
+        GetValueFromConfig<std::vector<std::string>>(config, "index_files");
+    AssertInfo(index_files.has_value(),
+               "index file paths is empty when load index");
+
+    std::unordered_set<std::string> pending_index_files(index_files->begin(),
+                                                        index_files->end());
+
+    LOG_SEGCORE_INFO_ << "load index files: " << index_files.value().size();
+
+    auto res = space_->GetBlobByteSize(std::string(INDEX_FILE_SLICE_META));
+
+    if (!res.ok() && !res.status().IsFileNotFound()) {
+        PanicCodeInfo(ErrorCodeEnum::UnexpectedError, "failed to read blob");
+    }
+    bool slice_meta_exist = res.ok();
+
+    auto read_blob = [&](const std::string& file_name)
+        -> std::unique_ptr<storage::DataCodec> {
+        auto res = space_->GetBlobByteSize(file_name);
+        if (!res.ok()) {
+            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+                          "unable to read index blob");
+        }
+        auto index_blob_data =
+            std::shared_ptr<uint8_t[]>(new uint8_t[res.value()]);
+        auto status = space_->ReadBlob(file_name, index_blob_data.get());
+        if (!status.ok()) {
+            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+                          "unable to read index blob");
+        }
+        return storage::DeserializeFileData(index_blob_data, res.value());
+    };
+    if (slice_meta_exist) {
+        auto slice_meta_sz = res.value();
+        auto slice_meta_data =
+            std::shared_ptr<uint8_t[]>(new uint8_t[slice_meta_sz]);
+        auto status =
+            space_->ReadBlob(INDEX_FILE_SLICE_META, slice_meta_data.get());
+        if (!status.ok()) {
+            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+                          "unable to read slice meta");
+        }
+        auto raw_slice_meta =
+            storage::DeserializeFileData(slice_meta_data, slice_meta_sz);
+        Config meta_data = Config::parse(std::string(
+            static_cast<const char*>(raw_slice_meta->GetFieldData()->Data()),
+            raw_slice_meta->GetFieldData()->Size()));
+        for (auto& item : meta_data[META]) {
+            std::string prefix = item[NAME];
+            int slice_num = item[SLICE_NUM];
+            auto total_len = static_cast<size_t>(item[TOTAL_LEN]);
+
+            for (auto i = 0; i < slice_num; ++i) {
+                std::string file_name = GenSlicedFileName(prefix, i);
+                auto raw_index_blob = read_blob(file_name);
+                auto written =
+                    file.Write(raw_index_blob->GetFieldData()->Data(),
+                               raw_index_blob->GetFieldData()->Size());
+                pending_index_files.erase(file_name);
+            }
+        }
+    }
+
+    if (!pending_index_files.empty()) {
+        for (auto& file_name : pending_index_files) {
+            auto raw_index_blob = read_blob(file_name);
+            file.Write(raw_index_blob->GetFieldData()->Data(),
+                       raw_index_blob->GetFieldData()->Size());
+        }
+    }
+    file.Close();
+
+    LOG_SEGCORE_INFO_ << "load index into Knowhere...";
+    auto conf = config;
+    conf.erase(kMmapFilepath);
+    conf[kEnableMmap] = true;
+    auto stat = index_.DeserializeFromFile(filepath.value(), conf);
+    if (stat != knowhere::Status::success) {
+        PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+                      fmt::format("failed to Deserialize index: {}",
+                                  KnowhereStatusString(stat)));
+    }
+
+    auto dim = index_.Dim();
+    this->SetDim(index_.Dim());
+
+    auto ok = unlink(filepath->data());
+    AssertInfo(ok == 0,
+               fmt::format("failed to unlink mmap index file {}: {}",
+                           filepath.value(),
+                           strerror(errno)));
+    LOG_SEGCORE_INFO_ << "load vector index done";
+}
 }  // namespace milvus::index

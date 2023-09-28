@@ -136,6 +136,13 @@ func (li *LoadIndexInfo) appendFieldInfo(collectionID int64, partitionID int64, 
 	return HandleCStatus(&status, "AppendFieldInfo failed")
 }
 
+func (li *LoadIndexInfo) appendStorgeInfo(uri string, version int64) {
+	cUri := C.CString(uri)
+	defer C.free(unsafe.Pointer(cUri))
+	cVersion := C.int64_t(version)
+	C.AppendStorageInfo(li.cLoadIndexInfo, cUri, cVersion)
+}
+
 // appendIndexData appends index path to cLoadIndexInfo and create index
 func (li *LoadIndexInfo) appendIndexData(indexKeys []string) error {
 	for _, indexPath := range indexKeys {
@@ -145,6 +152,12 @@ func (li *LoadIndexInfo) appendIndexData(indexKeys []string) error {
 		}
 	}
 
-	status := C.AppendIndexV2(li.cLoadIndexInfo)
+	var status C.CStatus
+	if paramtable.Get().CommonCfg.EnableStorageV2.GetAsBool() {
+		status = C.AppendIndexV3(li.cLoadIndexInfo)
+	} else {
+		status = C.AppendIndexV2(li.cLoadIndexInfo)
+	}
 	return HandleCStatus(&status, "AppendIndex failed")
+
 }

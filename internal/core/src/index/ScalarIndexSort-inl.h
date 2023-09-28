@@ -20,6 +20,7 @@
 #include <pb/schema.pb.h>
 #include <vector>
 #include <string>
+#include "index/ScalarIndex.h"
 #include "knowhere/log.h"
 #include "Meta.h"
 #include "common/Utils.h"
@@ -36,6 +37,12 @@ inline ScalarIndexSort<T>::ScalarIndexSort(
         file_manager_ = std::dynamic_pointer_cast<storage::MemFileManagerImpl>(
             file_manager);
     }
+}
+
+template <typename T>
+inline ScalarIndexSort<T>::ScalarIndexSort(
+    std::shared_ptr<milvus_storage::Space> space)
+    : is_built_(false), data_(), space_(space) {
 }
 
 template <typename T>
