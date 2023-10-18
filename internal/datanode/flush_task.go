@@ -104,6 +104,7 @@ func newTaskInjection(segmentCnt int, pf func(pack *segmentFlushPack)) *taskInje
 
 // Injected returns a chan, which will be closed after pre set segments counts an injected
 func (ti *taskInjection) Injected() <-chan struct{} {
+	
 	return ti.injected
 }
 
@@ -223,7 +224,9 @@ func (t *flushTaskRunner) runFlushDelV2(task flushDeleteTask, opts ...retry.Opti
 	t.deleteOnce.Do(func() {
 		taskv2 := task.(*flushBufferDeleteTask2)
 		t.deleteRec = taskv2.rec
-		t.deleteRec.Retain()
+		if t.deleteRec != nil {
+			t.deleteRec.Retain()
+		}
 		t.Done()
 	})
 }
@@ -268,16 +271,23 @@ func (t *flushTaskRunner) waitFinishV2(notifyFunc notifyMetaFunc, postFunc taskP
 		return t.saveVersion(pack, version)
 	})
 	t.space.SetLockManager(lm)
+	var err error
+	if t.deleteRec != nil {
+		err = t.space.NewTransaction().
+			Write(t.insertRec, &options.DefaultWriteOptions).
+			WriteBlob(t.statsBlob.Value, t.statsBlob.Key, t.flushed).
+			Delete(t.deleteRec).
+			Commit()
+	} else {
+		err = t.space.NewTransaction().
+			Write(t.insertRec, &options.DefaultWriteOptions).
+			WriteBlob(t.statsBlob.Value, t.statsBlob.Key, t.flushed).
+			Commit()
+	}
 
-	err := t.space.NewTransaction().
-		Write(t.insertRec, &options.DefaultWriteOptions).
-		WriteBlob(t.statsBlob.Value, t.statsBlob.Key, t.flushed).
-		Delete(t.deleteRec).
-		Commit()
 	if err != nil {
 		panic(err)
 	}
-
 	pack := t.getFlushPackV2()
 	var postInjection postInjectionFunc
 	select {
@@ -297,7 +307,9 @@ func (t *flushTaskRunner) waitFinishV2(notifyFunc notifyMetaFunc, postFunc taskP
 	close(t.finishSignal)
 
 	t.insertRec.Release()
-	t.deleteRec.Release()
+	if t.deleteRec != nil {
+		t.deleteRec.Release()
+	}
 }
 
 func (t *flushTaskRunner) getFlushPack() *segmentFlushPack {

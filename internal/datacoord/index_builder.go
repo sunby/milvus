@@ -18,6 +18,7 @@ package datacoord
 
 import (
 	"context"
+	"fmt"
 	"path"
 	"sync"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
+	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/types"
@@ -291,6 +293,25 @@ func (ib *indexBuilder) process(buildID UniqueID) bool {
 				UseVirtualHost:  Params.MinioCfg.UseVirtualHost.GetAsBool(),
 			}
 		}
+
+		schema := ib.meta.GetCollection(segment.GetCollectionID()).Schema
+		var field *schemapb.FieldSchema
+
+		for _, f := range schema.Fields {
+			if f.FieldID == fieldID {
+				field = f
+				break
+			}
+		}
+
+		dim, _ := storage.GetDimFromParams(field.TypeParams)
+		var scheme string
+		if Params.MinioCfg.UseSSL.GetAsBool() {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
+
 		req := &indexpb.CreateJobRequest{
 			ClusterID:       Params.CommonCfg.ClusterPrefix.GetValue(),
 			IndexFilePrefix: path.Join(ib.chunkManager.RootPath(), common.SegmentIndexPath),
@@ -301,7 +322,18 @@ func (ib *indexBuilder) process(buildID UniqueID) bool {
 			IndexParams:     indexParams,
 			TypeParams:      typeParams,
 			NumRows:         meta.NumRows,
+			CollectionID:    segment.GetCollectionID(),
+			PartitionID:     segment.GetPartitionID(),
+			SegmentID:       segment.GetID(),
+			FieldID:         fieldID,
+			FieldName:       field.Name,
+			FieldType:       field.DataType,
+			StorePath:       fmt.Sprintf("s3://%s:%s@%s/%d?scheme=%s&endpoint_override=%s&allow_bucket_creation=true", Params.MinioCfg.AccessKeyID.GetValue(), Params.MinioCfg.SecretAccessKey.GetValue(), Params.MinioCfg.BucketName.GetValue(), segment.GetID(), scheme, Params.MinioCfg.Address.GetValue()),
+			StoreVersion:    segment.GetStorageVersion(),
+			IndexStorePath:  fmt.Sprintf("s3://%s:%s@%s/index/%d?scheme=%s&endpoint_override=%s&allow_bucket_creation=true", Params.MinioCfg.AccessKeyID.GetValue(), Params.MinioCfg.SecretAccessKey.GetValue(), Params.MinioCfg.BucketName.GetValue(), segment.GetID(), scheme, Params.MinioCfg.Address.GetValue()),
+			Dim:             int64(dim),
 		}
+
 		if err := ib.assignTask(client, req); err != nil {
 			// need to release lock then reassign, so set task state to retry
 			log.Ctx(ib.ctx).Warn("index builder assign task to IndexNode failed", zap.Int64("buildID", buildID),

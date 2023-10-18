@@ -47,7 +47,9 @@ add_library(milvus_storage SHARED ${STORAGE_FILES})
 
 find_package(Boost REQUIRED COMPONENTS filesystem)
 
+# message(FATAL_ERROR "${CONAN_LIBS}") 
 target_link_libraries(milvus_storage PUBLIC 
+        milvus-storage
         milvus_common 
         Boost::filesystem 
         pthread 

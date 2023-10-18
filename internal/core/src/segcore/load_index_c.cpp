@@ -313,8 +313,8 @@ AppendIndexV3(CLoadIndexInfo c_load_index_info) {
         AssertInfo(!res.ok(), "init space failed");
         std::shared_ptr<milvus_storage::Space> space = std::move(res.value());
         load_index_info->index =
-            milvus::index::IndexFactory::GetInstance().CreateIndexV2(index_info,
-                                                                     space);
+            milvus::index::IndexFactory::GetInstance().CreateIndex(
+                index_info, nullptr, space);
 
         if (!load_index_info->mmap_dir_path.empty() &&
             load_index_info->index->IsMmapSupported()) {

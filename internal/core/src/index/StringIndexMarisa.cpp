@@ -29,6 +29,7 @@
 #include "index/Exception.h"
 #include "common/Utils.h"
 #include "common/Slice.h"
+#include "storage/Util.h"
 #include "storage/space.h"
 
 namespace milvus::index {
@@ -43,8 +44,13 @@ StringIndexMarisa::StringIndexMarisa(storage::FileManagerImplPtr file_manager) {
 }
 
 StringIndexMarisa::StringIndexMarisa(
+    storage::FileManagerImplPtr file_manager,
     std::shared_ptr<milvus_storage::Space> space)
     : space_(space) {
+    if (file_manager != nullptr) {
+        file_manager_ = std::dynamic_pointer_cast<storage::MemFileManagerImpl>(
+            file_manager);
+    }
 }
 
 int64_t
@@ -57,6 +63,62 @@ valid_str_id(size_t str_id) {
     return str_id >= 0 && str_id != MARISA_INVALID_KEY_ID;
 }
 
+void
+StringIndexMarisa::BuildV2(const Config& config) {
+    if (built_) {
+        throw std::runtime_error("index has been built");
+    }
+    auto field_name = GetValueFromConfig<std::string>(config, "field_name");
+    AssertInfo(field_name.has_value(), "field name can not be empty");
+    auto res = space_->ScanData();
+    if (!res.ok()) {
+        PanicInfo("failed to create scan iterator");
+    }
+    auto reader = res.value();
+    std::vector<storage::FieldDataPtr> field_datas;
+    for (auto rec = reader->Next(); rec != nullptr; rec = reader->Next()) {
+        if (!rec.ok()) {
+            PanicInfo("failed to read data");
+        }
+        auto data = rec.ValueUnsafe();
+        auto total_num_rows = data->num_rows();
+        auto col_data = data->GetColumnByName(field_name.value());
+        auto field_data =
+            storage::CreateFieldData(DataType::STRING, 0, total_num_rows);
+        field_datas.push_back(field_data);
+    }
+    int64_t total_num_rows = 0;
+
+    // fill key set.
+    marisa::Keyset keyset;
+    for (auto data : field_datas) {
+        auto slice_num = data->get_num_rows();
+        for (size_t i = 0; i < slice_num; ++i) {
+            keyset.push_back(
+                (*static_cast<const std::string*>(data->RawValue(i))).c_str());
+        }
+        total_num_rows += slice_num;
+    }
+    trie_.build(keyset);
+
+    // fill str_ids_
+    str_ids_.resize(total_num_rows);
+    int64_t offset = 0;
+    for (auto data : field_datas) {
+        auto slice_num = data->get_num_rows();
+        for (size_t i = 0; i < slice_num; ++i) {
+            auto str_id =
+                lookup(*static_cast<const std::string*>(data->RawValue(i)));
+            AssertInfo(valid_str_id(str_id), "invalid marisa key");
+            str_ids_[offset++] = str_id;
+        }
+    }
+
+    // fill str_ids_to_offsets_
+    fill_offsets();
+
+    built_ = true;
+}
 void
 StringIndexMarisa::Build(const Config& config) {
     if (built_) {
@@ -158,6 +220,20 @@ BinarySet
 StringIndexMarisa::Upload(const Config& config) {
     auto binary_set = Serialize(config);
     file_manager_->AddFile(binary_set);
+
+    auto remote_paths_to_size = file_manager_->GetRemotePathsToFileSize();
+    BinarySet ret;
+    for (auto& file : remote_paths_to_size) {
+        ret.Append(file.first, nullptr, file.second);
+    }
+
+    return ret;
+}
+
+BinarySet
+StringIndexMarisa::UploadV2(const Config& config) {
+    auto binary_set = Serialize(config);
+    file_manager_->AddFileV2(binary_set);
 
     auto remote_paths_to_size = file_manager_->GetRemotePathsToFileSize();
     BinarySet ret;

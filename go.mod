@@ -56,7 +56,7 @@ require (
 
 require (
 	github.com/apache/arrow/go/v12 v12.0.0-20230223012627-e0e740bd7a24
-	github.com/milvus-io/milvus-storage/go v0.0.0-20230925074119-0d54a8c7f8f4
+	github.com/milvus-io/milvus-storage/go v0.0.0-20231017063757-b4720fe2ec8f
 )
 
 require (

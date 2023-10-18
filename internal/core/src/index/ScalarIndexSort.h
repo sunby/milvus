@@ -36,7 +36,8 @@ class ScalarIndexSort : public ScalarIndex<T> {
     explicit ScalarIndexSort(
         storage::FileManagerImplPtr file_manager = nullptr);
 
-    explicit ScalarIndexSort(std::shared_ptr<milvus_storage::Space> space);
+    explicit ScalarIndexSort(storage::FileManagerImplPtr file_manager,
+                             std::shared_ptr<milvus_storage::Space> space);
 
     BinarySet
     Serialize(const Config& config) override;
@@ -61,6 +62,9 @@ class ScalarIndexSort : public ScalarIndex<T> {
     void
     Build(const Config& config = {}) override;
 
+    void
+    BuildV2(const Config& config = {}) override;
+
     const TargetBitmap
     In(size_t n, const T* values) override;
 
@@ -74,7 +78,7 @@ class ScalarIndexSort : public ScalarIndex<T> {
     Range(T lower_bound_value,
           bool lb_inclusive,
           T upper_bound_value,
-          bool ub_inclusive) override;
+          bool ub_inclsive) override;
 
     T
     Reverse_Lookup(size_t offset) const override;
@@ -86,6 +90,8 @@ class ScalarIndexSort : public ScalarIndex<T> {
 
     BinarySet
     Upload(const Config& config = {}) override;
+    BinarySet
+    UploadV2(const Config& config = {}) override;
 
  public:
     const std::vector<IndexStructure<T>>&
@@ -125,7 +131,8 @@ CreateScalarIndexSort(storage::FileManagerImplPtr file_manager = nullptr) {
 }
 template <typename T>
 inline ScalarIndexSortPtr<T>
-CreateScalarIndexSortV2(std::shared_ptr<milvus_storage::Space> space) {
-    return std::make_unique<ScalarIndexSort<T>>(space);
+CreateScalarIndexSort(storage::FileManagerImplPtr file_manager,
+                      std::shared_ptr<milvus_storage::Space> space) {
+    return std::make_unique<ScalarIndexSort<T>>(file_manager, space);
 }
 }  // namespace milvus::index

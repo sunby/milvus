@@ -402,7 +402,7 @@ func (m *rendezvousFlushManagerV2) flushBufferData(data *BufferData, segmentID U
 func (m *rendezvousFlushManagerV2) createSpaceIfNotExist(segmentID int64, meta *etcdpb.CollectionMeta, arrowSchema *arrow.Schema) (*milvus_storage.Space, error) {
 	space, ok := m.getSpace(segmentID)
 	if !ok {
-		url := fmt.Sprintf("s3://%s:%s@%s/%s/", Params.MinioCfg.AccessKeyID.GetValue(), Params.MinioCfg.SecretAccessKey.GetValue(), Params.MinioCfg.Address.GetValue(), Params.MinioCfg.BucketName.GetValue())
+		url := fmt.Sprintf("s3://%s:%s@%s/%d?endpoint_override=%s", Params.MinioCfg.AccessKeyID.GetValue(), Params.MinioCfg.SecretAccessKey.GetValue(), Params.MinioCfg.BucketName.GetValue(), segmentID, Params.MinioCfg.Address.GetValue())
 		pkSchema, err := typeutil.GetPrimaryFieldSchema(meta.Schema)
 		if err != nil {
 			return nil, err
@@ -437,7 +437,7 @@ func (m *rendezvousFlushManagerV2) handleInsertTask(segmentID UniqueID, task flu
 func (m *rendezvousFlushManagerV2) flushDelData(data *DelDataBuf, segmentID UniqueID,
 	pos *msgpb.MsgPosition) error {
 	if data == nil || data.delData == nil {
-		m.handleDeleteTask(segmentID, &flushBufferDeleteTask{}, pos)
+		m.handleDeleteTask(segmentID, &flushBufferDeleteTask2{}, pos)
 		return nil
 	}
 

@@ -10,6 +10,9 @@
 // or implied. See the License for the specific language governing permissions and limitations under the License
 
 #include <string>
+#include "fmt/core.h"
+#include "indexbuilder/type_c.h"
+#include "storage/options.h"
 
 #ifdef __linux__
 #include <malloc.h>
@@ -25,6 +28,7 @@
 #include "index/Utils.h"
 #include "pb/index_cgo_msg.pb.h"
 #include "storage/Util.h"
+#include "storage/space.h"
 
 CStatus
 CreateIndex(enum CDataType dtype,
@@ -97,6 +101,7 @@ CreateIndexV2(CIndex* res_index, CBuildIndexInfo c_build_index_info) {
             build_index_info->partition_id,
             build_index_info->segment_id,
             build_index_info->field_id};
+
         milvus::storage::IndexMeta index_meta{build_index_info->segment_id,
                                               build_index_info->field_id,
                                               build_index_info->index_build_id,
@@ -110,12 +115,94 @@ CreateIndexV2(CIndex* res_index, CBuildIndexInfo c_build_index_info) {
         auto index =
             milvus::indexbuilder::IndexFactory::GetInstance().CreateIndex(
                 build_index_info->field_type, config, file_manager);
+
         index->Build();
         *res_index = index.release();
         auto status = CStatus();
         status.error_code = Success;
         status.error_msg = "";
         return status;
+    } catch (std::exception& e) {
+        auto status = CStatus();
+        status.error_code = UnexpectedError;
+        status.error_msg = strdup(e.what());
+        return status;
+    }
+}
+
+CStatus
+CreateIndexV3(CIndex* res_index, CBuildIndexInfo c_build_index_info) {
+    try {
+        auto build_index_info = (BuildIndexInfo*)c_build_index_info;
+        auto field_type = build_index_info->field_type;
+        milvus::index::CreateIndexInfo index_info;
+        index_info.field_type = build_index_info->field_type;
+
+        auto& config = build_index_info->config;
+        // get index type
+        auto index_type = milvus::index::GetValueFromConfig<std::string>(
+            config, "index_type");
+        AssertInfo(index_type.has_value(), "index type is empty");
+        index_info.index_type = index_type.value();
+
+        // get metric type
+        if (milvus::datatype_is_vector(field_type)) {
+            auto metric_type = milvus::index::GetValueFromConfig<std::string>(
+                config, "metric_type");
+            AssertInfo(metric_type.has_value(), "metric type is empty");
+            index_info.metric_type = metric_type.value();
+        }
+
+        milvus::storage::FieldDataMeta field_meta{
+            build_index_info->collection_id,
+            build_index_info->partition_id,
+            build_index_info->segment_id,
+            build_index_info->field_id};
+        milvus::storage::IndexMeta index_meta{
+            build_index_info->segment_id,
+            build_index_info->field_id,
+            build_index_info->index_build_id,
+            build_index_info->index_version,
+            build_index_info->field_name,
+            "",
+            build_index_info->field_type,
+            build_index_info->dim,
+        };
+
+        auto store_space = milvus_storage::Space::Open(
+            build_index_info->data_store_path,
+            milvus_storage::Options{nullptr,
+                                    build_index_info->data_store_version});
+        AssertInfo(store_space.ok(),
+                   fmt::format("create space failed: {}",
+                               store_space.status().ToString()));
+
+        auto index_space = milvus_storage::Space::Open(
+            build_index_info->index_store_path, milvus_storage::Options{});
+        AssertInfo(index_space.ok(),
+                   fmt::format("create space failed: {}",
+                               index_space.status().ToString()));
+
+        auto file_manager =
+            milvus::storage::CreateFileManager(index_info.index_type,
+                                               field_meta,
+                                               index_meta,
+                                               std::move(index_space.value()));
+        AssertInfo(file_manager != nullptr, "create file manager failed!");
+
+        auto index =
+            milvus::indexbuilder::IndexFactory::GetInstance().CreateIndex(
+                build_index_info->field_type,
+                config,
+                file_manager,
+                std::move(store_space.value()));
+        index->Build();
+        *res_index = index.release();
+        auto status = CStatus();
+        status.error_code = Success;
+        status.error_msg = "";
+        return status;
+
     } catch (std::exception& e) {
         auto status = CStatus();
         status.error_code = UnexpectedError;
@@ -379,6 +466,38 @@ AppendFieldMetaInfo(CBuildIndexInfo c_build_index_info,
                     int64_t partition_id,
                     int64_t segment_id,
                     int64_t field_id,
+                    const char* file_name,
+                    enum CDataType field_type,
+                    int64_t dim) {
+    try {
+        auto build_index_info = (BuildIndexInfo*)c_build_index_info;
+        build_index_info->collection_id = collection_id;
+        build_index_info->partition_id = partition_id;
+        build_index_info->segment_id = segment_id;
+        build_index_info->field_id = field_id;
+        build_index_info->field_type = milvus::DataType(field_type);
+        build_index_info->field_name = file_name;
+        build_index_info->dim = dim;
+
+        auto status = CStatus();
+        status.error_code = Success;
+        status.error_msg = "";
+        return status;
+    } catch (std::exception& e) {
+        auto status = CStatus();
+        status.error_code = UnexpectedError;
+        status.error_msg = strdup(e.what());
+        return status;
+    }
+}
+
+CStatus
+AppendFieldMetaInfo(CBuildIndexInfo c_build_index_info,
+                    int64_t collection_id,
+                    int64_t partition_id,
+                    int64_t segment_id,
+                    int64_t field_id,
+                    std::string field_name,
                     enum CDataType field_type) {
     try {
         auto build_index_info = (BuildIndexInfo*)c_build_index_info;
@@ -386,6 +505,8 @@ AppendFieldMetaInfo(CBuildIndexInfo c_build_index_info,
         build_index_info->partition_id = partition_id;
         build_index_info->segment_id = segment_id;
         build_index_info->field_id = field_id;
+        build_index_info->field_name = field_name;
+
         build_index_info->field_type = milvus::DataType(field_type);
 
         auto status = CStatus();
@@ -430,6 +551,33 @@ AppendInsertFilePath(CBuildIndexInfo c_build_index_info,
         auto build_index_info = (BuildIndexInfo*)c_build_index_info;
         std::string insert_file_path(c_file_path);
         build_index_info->insert_files.emplace_back(insert_file_path);
+
+        auto status = CStatus();
+        status.error_code = Success;
+        status.error_msg = "";
+        return status;
+    } catch (std::exception& e) {
+        auto status = CStatus();
+        status.error_code = UnexpectedError;
+        status.error_msg = strdup(e.what());
+        return status;
+    }
+}
+
+CStatus
+AppendIndexStorageInfo(CBuildIndexInfo c_build_index_info,
+                  const char* c_data_store_path,
+                  const char* c_index_store_path,
+                  int64_t data_store_version) {
+    try {
+        std::cout << "xxxx" << std::endl;
+        auto build_index_info = (BuildIndexInfo*)c_build_index_info;
+        std::string data_store_path(c_data_store_path),
+            index_store_path(c_index_store_path);
+        build_index_info->data_store_path = data_store_path;
+        build_index_info->index_store_path = index_store_path;
+        build_index_info->data_store_version = data_store_version;
+        std::cout << "yyyy" << std::endl;
 
         auto status = CStatus();
         status.error_code = Success;

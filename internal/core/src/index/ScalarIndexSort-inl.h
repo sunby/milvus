@@ -41,8 +41,17 @@ inline ScalarIndexSort<T>::ScalarIndexSort(
 
 template <typename T>
 inline ScalarIndexSort<T>::ScalarIndexSort(
+    storage::FileManagerImplPtr file_manager,
     std::shared_ptr<milvus_storage::Space> space)
     : is_built_(false), data_(), space_(space) {
+    if (file_manager != nullptr) {
+        file_manager_ = std::dynamic_pointer_cast<storage::MemFileManagerImpl>(
+            file_manager);
+    }
+}
+template <typename T>
+inline void
+ScalarIndexSort<T>::BuildV2(const Config& config) {
 }
 
 template <typename T>
@@ -146,6 +155,20 @@ ScalarIndexSort<T>::Upload(const Config& config) {
     return ret;
 }
 
+template <typename T>
+inline BinarySet
+ScalarIndexSort<T>::UploadV2(const Config& config) {
+    auto binary_set = Serialize(config);
+    file_manager_->AddFileV2(binary_set);
+
+    auto remote_paths_to_size = file_manager_->GetRemotePathsToFileSize();
+    BinarySet ret;
+    for (auto& file : remote_paths_to_size) {
+        ret.Append(file.first, nullptr, file.second);
+    }
+
+    return ret;
+}
 template <typename T>
 inline void
 ScalarIndexSort<T>::LoadWithoutAssemble(const BinarySet& index_binary,

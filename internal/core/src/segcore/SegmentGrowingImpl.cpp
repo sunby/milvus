@@ -249,17 +249,16 @@ SegmentGrowingImpl::LoadFieldDataV2(const LoadFieldDataInfo& infos) {
     auto reserved_offset = PreInsert(num_rows);
     for (auto& [id, info] : infos.field_infos) {
         auto field_id = FieldId(id);
-        auto insert_files = info.insert_files;
-        auto channel = std::make_shared<storage::FieldDataChannel>();
+        auto field_data_info = FieldDataInfo(field_id.get(), num_rows);
         auto& pool =
             ThreadPools::GetThreadPool(milvus::ThreadPoolPriority::MIDDLE);
         auto res = milvus_storage::Space::Open(
             infos.url, milvus_storage::Options{nullptr, infos.storage_version});
         AssertInfo(!res.ok(), "init space failed");
         std::shared_ptr<milvus_storage::Space> space = std::move(res.value());
-        auto load_future =
-            pool.Submit(LoadFieldDatasFromRemote2, space, schema_, channel);
-        auto field_data = CollectFieldDataChannel(channel);
+        auto load_future = pool.Submit(
+            LoadFieldDatasFromRemote2, space, schema_, field_data_info);
+        auto field_data = CollectFieldDataChannel(field_data_info.channel);
         if (field_id == TimestampFieldID) {
             // step 2: sort timestamp
             // query node already guarantees that the timestamp is ordered, avoid field data copy in c++

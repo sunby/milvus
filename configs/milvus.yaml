@@ -49,7 +49,7 @@ metastore:
   type: etcd
 
 localStorage:
-  path: /var/lib/milvus/data/ # please adjust in embedded Milvus: /tmp/milvus/data/
+  path: /tmp/milvus/data/ # please adjust in embedded Milvus: /tmp/milvus/data/
 
 # Related configuration of MinIO/S3/GCS or any other service supports S3 API, which is responsible for data persistence for Milvus.
 # We refer to the storage service as MinIO/S3 in the following description for simplicity.
@@ -116,7 +116,7 @@ pulsar:
 rocksmq:
   # The path where the message is stored in rocksmq
   # please adjust in embedded Milvus: /tmp/milvus/rdb_data
-  path: /var/lib/milvus/rdb_data
+  path: /tmp/milvus/rdb_data
   lrucacheratio: 0.06 # rocksdb cache memory ratio
   rocksmqPageSize: 67108864 # 64 MB, 64 * 1024 * 1024 bytes, The size of each page of messages in rocksmq
   retentionTimeInMinutes: 4320 # 3 days, 3 * 24 * 60 minutes, The retention time of the message in rocksmq.
@@ -132,7 +132,7 @@ rocksmq:
 natsmq:
   server: # server side configuration for natsmq.
     port: 4222 # 4222 by default, Port for nats server listening.
-    storeDir: /var/lib/milvus/nats # /var/lib/milvus/nats by default, directory to use for JetStream storage of nats.
+    storeDir: /tmp/milvus/nats # /var/lib/milvus/nats by default, directory to use for JetStream storage of nats.
     maxFileStore: 17179869184 # (B) 16GB by default, Maximum size of the 'file' storage.
     maxPayload: 8388608 # (B) 8MB by default, Maximum number of bytes in a message payload.
     maxPending: 67108864 # (B) 64MB by default, Maximum number of bytes buffered for a connection Applies to client connections.
@@ -153,7 +153,7 @@ rootCoord:
   dmlChannelNum: 16 # The number of dml channels created at system startup
   maxDatabaseNum: 64 # Maximum number of database
   maxPartitionNum: 4096 # Maximum number of partitions in a collection
-  minSegmentSizeToEnableIndex: 1024 # It's a threshold. When the segment size is less than this value, the segment will not be indexed
+  minSegmentSizeToEnableIndex: 10240000 # It's a threshold. When the segment size is less than this value, the segment will not be indexed
   importTaskExpiration: 900 # (in seconds) Duration after which an import task will expire (be killed). Default 900 seconds (15 minutes).
   importTaskRetention: 86400 # (in seconds) Milvus will keep the record of import tasks for at least `importTaskRetention` seconds. Default 86400, seconds (24 hours).
   enableActiveStandby: false
@@ -341,7 +341,7 @@ dataCoord:
     # MUST BE GREATER THAN OR EQUAL TO <smallProportion>!!!
     # During compaction, the size of segment # of rows is able to exceed segment max # of rows by (expansionRate-1) * 100%.
     expansionRate: 1.25
-  enableCompaction: true # Enable data segment compaction
+  enableCompaction: false # Enable data segment compaction
   compaction:
     enableAutoCompaction: true
     rpcTimeout: 10 # compaction rpc request timeout in seconds

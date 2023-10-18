@@ -31,6 +31,18 @@ ScalarIndexCreator::ScalarIndexCreator(DataType dtype,
                                                             file_manager);
 }
 
+ScalarIndexCreator::ScalarIndexCreator(
+    DataType dtype,
+    Config& config,
+    storage::FileManagerImplPtr file_manager,
+    std::shared_ptr<milvus_storage::Space> space)
+    : dtype_(dtype), config_(config) {
+    milvus::index::CreateIndexInfo index_info;
+    index_info.field_type = dtype_;
+    index_info.index_type = index_type();
+    index_ = index::IndexFactory::GetInstance().CreateIndex(
+        index_info, file_manager, space);
+}
 void
 ScalarIndexCreator::Build(const milvus::DatasetPtr& dataset) {
     auto size = dataset->GetRows();

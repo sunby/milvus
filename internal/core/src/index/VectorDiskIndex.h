@@ -21,9 +21,11 @@
 
 #include "index/VectorIndex.h"
 #include "storage/DiskFileManagerImpl.h"
+#include "storage/space.h"
 
 namespace milvus::index {
 
+#define BUILD_DISK_ANN
 #ifdef BUILD_DISK_ANN
 
 template <typename T>
@@ -64,6 +66,8 @@ class VectorDiskAnnIndex : public VectorIndex {
 
     void
     Build(const Config& config = {}) override;
+    void
+    BuildV2(const Config& config = {}) override;
 
     std::unique_ptr<SearchResult>
     Query(const DatasetPtr dataset,
@@ -87,6 +91,7 @@ class VectorDiskAnnIndex : public VectorIndex {
     knowhere::Index<knowhere::IndexNode> index_;
     std::shared_ptr<storage::DiskFileManagerImpl> file_manager_;
     uint32_t search_beamwidth_ = 8;
+    std::shared_ptr<milvus_storage::Space> space_;
 };
 
 template <typename T>

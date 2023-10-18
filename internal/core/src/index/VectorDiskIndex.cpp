@@ -27,6 +27,7 @@
 
 namespace milvus::index {
 
+#define BUILD_DISK_ANN
 #ifdef BUILD_DISK_ANN
 
 #define kSearchListMaxValue1 200    // used if tok <= 20
@@ -97,6 +98,11 @@ VectorDiskAnnIndex<T>::Upload(const Config& config) {
     }
 
     return ret;
+}
+
+template <typename T>
+void
+VectorDiskAnnIndex<T>::BuildV2(const Config& config) {
 }
 
 template <typename T>

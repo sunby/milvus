@@ -163,8 +163,8 @@ LoadFieldDatasFromRemote(std::vector<std::string>& remote_files,
 
 void
 LoadFieldDatasFromRemote2(std::shared_ptr<milvus_storage::Space> space,
-                         SchemaPtr schema,
-                         storage::FieldDataChannelPtr channel);
+                          SchemaPtr schema,
+                          FieldDataInfo& field_data_info);
 /**
  * Returns an index pointing to the first element in the range [first, last) such that `value < element` is true
  * (i.e. that is strictly greater than value), or last if no such element is found.

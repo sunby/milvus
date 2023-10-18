@@ -16,6 +16,7 @@
 
 #include "index/VectorMemIndex.h"
 
+#include <sys/_types/_int64_t.h>
 #include <unistd.h>
 #include <cmath>
 #include <filesystem>
@@ -24,6 +25,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "common/Types.h"
 #include "fmt/format.h"
 
 #include "index/Index.h"
@@ -39,6 +41,7 @@
 #include "common/RangeSearchHelper.h"
 #include "common/Utils.h"
 #include "log/Log.h"
+#include "mmap/Types.h"
 #include "storage/DataCodec.h"
 #include "storage/FieldData.h"
 #include "storage/MemFileManagerImpl.h"
@@ -65,11 +68,30 @@ VectorMemIndex::VectorMemIndex(const IndexType& index_type,
 
 VectorMemIndex::VectorMemIndex(const IndexType& index_type,
                                const MetricType& metric_type,
+                               storage::FileManagerImplPtr file_manager,
                                std::shared_ptr<milvus_storage::Space> space)
     : VectorIndex(index_type, metric_type), space_(space) {
     AssertInfo(!is_unsupported(index_type, metric_type),
                index_type + " doesn't support metric: " + metric_type);
+    if (file_manager != nullptr) {
+        file_manager_ = std::dynamic_pointer_cast<storage::MemFileManagerImpl>(
+            file_manager);
+    }
     index_ = knowhere::IndexFactory::Instance().Create(GetIndexType());
+}
+
+BinarySet
+VectorMemIndex::UploadV2(const Config& config) {
+    auto binary_set = Serialize(config);
+    file_manager_->AddFileV2(binary_set);
+
+    auto remote_paths_to_size = file_manager_->GetRemotePathsToFileSize();
+    BinarySet ret;
+    for (auto& file : remote_paths_to_size) {
+        ret.Append(file.first, nullptr, file.second);
+    }
+
+    return ret;
 }
 
 BinarySet
@@ -339,6 +361,59 @@ VectorMemIndex::BuildWithDataset(const DatasetPtr& dataset,
                       "failed to build index, " + KnowhereStatusString(stat));
     rc.ElapseFromBegin("Done");
     SetDim(index_.Dim());
+}
+
+void
+VectorMemIndex::BuildV2(const Config& config) {
+    auto field_name = GetValueFromConfig<std::string>(config, "field_name");
+    auto data_type = GetValueFromConfig<DataType>(config, "data_type");
+    auto dim_config = GetValueFromConfig<int64_t>(config, "dim");
+    AssertInfo(field_name.has_value(), "field name can not be empty");
+    AssertInfo(data_type.has_value(), "data type can not be empty");
+    AssertInfo(dim_config.has_value(), "dim name can not be empty");
+    auto res = space_->ScanData();
+    if (!res.ok()) {
+        PanicInfo("failed to create scan iterator");
+    }
+    auto reader = res.value();
+    std::vector<storage::FieldDataPtr> field_datas;
+    for (auto rec = reader->Next(); rec != nullptr; rec = reader->Next()) {
+        if (!rec.ok()) {
+            PanicInfo("failed to read data");
+        }
+        auto data = rec.ValueUnsafe();
+        auto total_num_rows = data->num_rows();
+        auto col_data = data->GetColumnByName(field_name.value());
+        auto field_data = storage::CreateFieldData(
+            data_type.value(), dim_config.value(), total_num_rows);
+        field_datas.push_back(field_data);
+    }
+    int64_t total_size = 0;
+    int64_t total_num_rows = 0;
+    int64_t dim = 0;
+    for (auto data : field_datas) {
+        total_size += data->Size();
+        total_num_rows += data->get_num_rows();
+        AssertInfo(dim == 0 || dim == data->get_dim(),
+                   "inconsistent dim value between field datas!");
+        dim = data->get_dim();
+    }
+
+    auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[total_size]);
+    int64_t offset = 0;
+    for (auto data : field_datas) {
+        std::memcpy(buf.get() + offset, data->Data(), data->Size());
+        offset += data->Size();
+        data.reset();
+    }
+    field_datas.clear();
+
+    Config build_config;
+    build_config.update(config);
+    build_config.erase("insert_files");
+
+    auto dataset = GenDataset(total_num_rows, dim, buf.get());
+    BuildWithDataset(dataset, build_config);
 }
 
 void

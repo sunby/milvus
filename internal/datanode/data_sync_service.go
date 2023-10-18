@@ -89,14 +89,47 @@ func newDataSyncServiceV2(ctx context.Context,
 	timetickSender *timeTickSender,
 	cli *clientv3.Client,
 ) (*dataSyncService, error) {
-	ret, err := newDataSyncService(ctx, flushCh, resendTTCh, channel, alloc, dispClient,
-		factory, vchan, clearSignal, dataCoord, flushingSegCache, chunkManager, compactor, tickler, serverID,
-		timetickSender)
-	if err != nil {
+	if channel == nil {
+		return nil, errors.New("Nil input")
+	}
+
+	ctx1, cancel := context.WithCancel(ctx)
+
+	delBufferManager := &DeltaBufferManager{
+		channel:    channel,
+		delBufHeap: &PriorityQueue{},
+	}
+
+	service := &dataSyncService{
+		ctx:              ctx1,
+		cancelFn:         cancel,
+		fg:               nil,
+		flushCh:          flushCh,
+		resendTTCh:       resendTTCh,
+		channel:          channel,
+		idAllocator:      alloc,
+		dispClient:       dispClient,
+		msFactory:        factory,
+		collectionID:     vchan.GetCollectionID(),
+		vchannelName:     vchan.GetChannelName(),
+		dataCoord:        dataCoord,
+		clearSignal:      clearSignal,
+		delBufferManager: delBufferManager,
+		flushingSegCache: flushingSegCache,
+		chunkManager:     chunkManager,
+		compactor:        compactor,
+		serverID:         serverID,
+		timetickSender:   timetickSender,
+		cli:              cli,
+	}
+
+	if err := service.initNodes(vchan, tickler); err != nil {
 		return nil, err
 	}
-	ret.cli = cli
-	return ret, nil
+	if tickler.isWatchFailed.Load() {
+		return nil, errors.Errorf("tickler watch failed")
+	}
+	return service, nil
 }
 
 func newDataSyncService(ctx context.Context,

@@ -231,7 +231,7 @@ func NewSegmentV2(collection *Collection,
 		zap.Int64("segmentID", segmentID),
 		zap.String("segmentType", segmentType.String()))
 
-	url := fmt.Sprintf("s3://%s:%s@%s/%s/", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.Address.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue())
+	url := fmt.Sprintf("s3://%s:%s@%s/%d?endpoint_override=%s", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue(), segmentID, paramtable.Get().MinioCfg.Address.GetValue())
 	space, err := milvus_storage.Open(url, options.NewSpaceOptionBuilder().SetVersion(storageVersion).Build())
 	if err != nil {
 		return nil, err
@@ -734,7 +734,7 @@ func (s *LocalSegment) LoadMultiFieldData(rowCount int64, fields []*datapb.Field
 	var status C.CStatus
 	GetDynamicPool().Submit(func() (any, error) {
 		if paramtable.Get().CommonCfg.EnableStorageV2.GetAsBool() {
-			uri := fmt.Sprintf("s3://%s:%s@%s/%s/", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.Address.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue())
+			uri := fmt.Sprintf("s3://%s:%s@%s/%d?endpoint_override=%s", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue(), s.segmentID, paramtable.Get().MinioCfg.Address.GetValue())
 			loadFieldDataInfo.appendUri(uri)
 			loadFieldDataInfo.appendStorageVersion(s.space.GetCurrentVersion())
 			status = C.LoadFieldDataV2(s.ptr, loadFieldDataInfo.cLoadFieldDataInfo)
@@ -794,7 +794,7 @@ func (s *LocalSegment) LoadFieldData(fieldID int64, rowCount int64, field *datap
 	GetDynamicPool().Submit(func() (any, error) {
 		log.Info("submitted loadFieldData task to dy pool")
 		if paramtable.Get().CommonCfg.EnableStorageV2.GetAsBool() {
-			uri := fmt.Sprintf("s3://%s:%s@%s/%s/", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.Address.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue())
+			uri := fmt.Sprintf("s3://%s:%s@%s/%d?endpoint_override=%s", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue(), s.segmentID, paramtable.Get().MinioCfg.Address.GetValue())
 			loadFieldDataInfo.appendUri(uri)
 			loadFieldDataInfo.appendStorageVersion(s.space.GetCurrentVersion())
 			status = C.LoadFieldDataV2(s.ptr, loadFieldDataInfo.cLoadFieldDataInfo)
@@ -981,7 +981,7 @@ func (s *LocalSegment) LoadIndex(indexInfo *querypb.FieldIndexInfo, fieldType sc
 	}
 
 	if paramtable.Get().CommonCfg.EnableStorageV2.GetAsBool() {
-		url := fmt.Sprintf("s3://%s:%s@%s/%s/", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.Address.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue())
+		url := fmt.Sprintf("s3://%s:%s@%s/%d?endpoint_override=%s", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue(), s.segmentID, paramtable.Get().MinioCfg.Address.GetValue())
 		loadIndexInfo.appendStorgeInfo(url, s.space.GetCurrentVersion())
 	}
 	err = loadIndexInfo.appendLoadIndexInfo(indexInfo, s.collectionID, s.partitionID, s.segmentID, fieldType)

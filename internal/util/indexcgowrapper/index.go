@@ -109,6 +109,21 @@ func CreateIndex(ctx context.Context, buildIndexInfo *BuildIndexInfo) (CodecInde
 	return index, nil
 }
 
+func CreateIndexV2(ctx context.Context, buildIndexInfo *BuildIndexInfo) (CodecIndex, error) {
+	var indexPtr C.CIndex
+	status := C.CreateIndexV3(&indexPtr, buildIndexInfo.cBuildIndexInfo)
+	if err := HandleCStatus(&status, "failed to create index"); err != nil {
+		return nil, err
+	}
+
+	index := &CgoIndex{
+		indexPtr: indexPtr,
+		close:    false,
+	}
+
+	return index, nil
+}
+
 func (index *CgoIndex) Build(dataset *Dataset) error {
 	switch dataset.DType {
 	case schemapb.DataType_None:

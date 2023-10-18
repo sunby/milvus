@@ -37,6 +37,17 @@ IndexFactory::CreateIndex(const CreateIndexInfo& create_index_info,
 }
 
 IndexBasePtr
+IndexFactory::CreateIndex(const CreateIndexInfo& create_index_info,
+                          storage::FileManagerImplPtr file_manager,
+                          std::shared_ptr<milvus_storage::Space> space) {
+    if (datatype_is_vector(create_index_info.field_type)) {
+        return CreateVectorIndex(create_index_info, file_manager, space);
+    }
+
+    return CreateScalarIndex(create_index_info, file_manager, space);
+}
+
+IndexBasePtr
 IndexFactory::CreateScalarIndex(const CreateIndexInfo& create_index_info,
                                 storage::FileManagerImplPtr file_manager) {
     auto data_type = create_index_info.field_type;
@@ -103,43 +114,34 @@ IndexFactory::CreateVectorIndex(const CreateIndexInfo& create_index_info,
 }
 
 IndexBasePtr
-IndexFactory::CreateIndexV2(const CreateIndexInfo& create_index_info,
-                            std::shared_ptr<milvus_storage::Space> space) {
-    if (datatype_is_vector(create_index_info.field_type)) {
-        return CreateVectorIndexV2(create_index_info, space);
-    }
-
-    return CreateScalarIndexV2(create_index_info, space);
-}
-
-IndexBasePtr
-IndexFactory::CreateScalarIndexV2(
-    const CreateIndexInfo& create_index_info,
-    std::shared_ptr<milvus_storage::Space> space) {
+IndexFactory::CreateScalarIndex(const CreateIndexInfo& create_index_info,
+                                storage::FileManagerImplPtr file_manager,
+                                std::shared_ptr<milvus_storage::Space> space) {
     auto data_type = create_index_info.field_type;
     auto index_type = create_index_info.index_type;
 
     switch (data_type) {
         // create scalar index
         case DataType::BOOL:
-            return CreateScalarIndexV2<bool>(index_type, space);
+            return CreateScalarIndex<bool>(index_type, file_manager, space);
         case DataType::INT8:
-            return CreateScalarIndexV2<int8_t>(index_type, space);
+            return CreateScalarIndex<int8_t>(index_type, file_manager, space);
         case DataType::INT16:
-            return CreateScalarIndexV2<int16_t>(index_type, space);
+            return CreateScalarIndex<int16_t>(index_type, file_manager, space);
         case DataType::INT32:
-            return CreateScalarIndexV2<int32_t>(index_type, space);
+            return CreateScalarIndex<int32_t>(index_type, file_manager, space);
         case DataType::INT64:
-            return CreateScalarIndexV2<int64_t>(index_type, space);
+            return CreateScalarIndex<int64_t>(index_type, file_manager, space);
         case DataType::FLOAT:
-            return CreateScalarIndexV2<float>(index_type, space);
+            return CreateScalarIndex<float>(index_type, file_manager, space);
         case DataType::DOUBLE:
-            return CreateScalarIndexV2<double>(index_type, space);
+            return CreateScalarIndex<double>(index_type, file_manager, space);
 
             // create string index
         case DataType::STRING:
         case DataType::VARCHAR:
-            return CreateScalarIndexV2<std::string>(index_type, space);
+            return CreateScalarIndex<std::string>(
+                index_type, file_manager, space);
         default:
             throw std::invalid_argument(
                 std::string("invalid data type to build index: ") +
@@ -148,9 +150,9 @@ IndexFactory::CreateScalarIndexV2(
 }
 
 IndexBasePtr
-IndexFactory::CreateVectorIndexV2(
-    const CreateIndexInfo& create_index_info,
-    std::shared_ptr<milvus_storage::Space> space) {
+IndexFactory::CreateVectorIndex(const CreateIndexInfo& create_index_info,
+                                storage::FileManagerImplPtr file_manager,
+                                std::shared_ptr<milvus_storage::Space> space) {
     auto data_type = create_index_info.field_type;
     auto index_type = create_index_info.index_type;
     auto metric_type = create_index_info.metric_type;
@@ -161,7 +163,7 @@ IndexFactory::CreateVectorIndexV2(
         switch (data_type) {
             case DataType::VECTOR_FLOAT: {
                 return std::make_unique<VectorDiskAnnIndex<float>>(
-                    index_type, metric_type, file_manager);
+                    index_type, metric_type, space);
             }
             default:
                 throw std::invalid_argument(
@@ -173,9 +175,10 @@ IndexFactory::CreateVectorIndexV2(
 
     if (is_in_nm_list(index_type)) {
         return std::make_unique<VectorMemNMIndex>(
-            index_type, metric_type, space);
+            index_type, metric_type, file_manager, space);
     }
     // create mem index
-    return std::make_unique<VectorMemIndex>(index_type, metric_type, space);
+    return std::make_unique<VectorMemIndex>(
+        index_type, metric_type, file_manager, space);
 }
 }  // namespace milvus::index

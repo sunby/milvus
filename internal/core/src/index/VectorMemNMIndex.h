@@ -38,8 +38,9 @@ class VectorMemNMIndex : public VectorMemIndex {
 
     explicit VectorMemNMIndex(const IndexType& index_type,
                               const MetricType& metric_type,
+                              storage::FileManagerImplPtr file_manager,
                               std::shared_ptr<milvus_storage::Space> space)
-        : VectorMemIndex(index_type, metric_type, space) {
+        : VectorMemIndex(index_type, metric_type, file_manager, space) {
         AssertInfo(is_in_nm_list(index_type), "not valid nm index type");
     }
     BinarySet

@@ -34,7 +34,8 @@ class StringIndexMarisa : public StringIndex {
     explicit StringIndexMarisa(
         storage::FileManagerImplPtr file_manager = nullptr);
 
-    explicit StringIndexMarisa(std::shared_ptr<milvus_storage::Space> space);
+    explicit StringIndexMarisa(storage::FileManagerImplPtr file_manager,
+                               std::shared_ptr<milvus_storage::Space> space);
 
     int64_t
     Size() override;
@@ -62,6 +63,9 @@ class StringIndexMarisa : public StringIndex {
     void
     Build(const Config& config = {}) override;
 
+    void
+    BuildV2(const Config& Config = {}) override;
+
     const TargetBitmap
     In(size_t n, const std::string* values) override;
 
@@ -85,6 +89,9 @@ class StringIndexMarisa : public StringIndex {
 
     BinarySet
     Upload(const Config& config = {}) override;
+
+    BinarySet
+    UploadV2(const Config& config = {});
 
  private:
     void
@@ -120,6 +127,11 @@ CreateStringIndexMarisa(storage::FileManagerImplPtr file_manager = nullptr) {
     return std::make_unique<StringIndexMarisa>(file_manager);
 }
 
+inline StringIndexPtr
+CreateStringIndexMarisa(storage::FileManagerImplPtr file_manager,
+                        std::shared_ptr<milvus_storage::Space> space) {
+    return std::make_unique<StringIndexMarisa>(file_manager, space);
+}
 }  // namespace milvus::index
 
 #endif

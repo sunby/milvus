@@ -19,17 +19,20 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "Utils.h"
 #include "Types.h"
 #include "common/Json.h"
+#include "common/LoadInfo.h"
 #include "exceptions/EasyAssert.h"
 #include "mmap/Column.h"
 #include "common/Consts.h"
 #include "common/FieldMeta.h"
 #include "common/Types.h"
 #include "log/Log.h"
+#include "mmap/Types.h"
 #include "query/ScalarIndex.h"
 #include "query/SearchBruteForce.h"
 #include "query/SearchOnSealed.h"
@@ -233,7 +236,7 @@ SegmentSealedImpl::LoadFieldDataV2(const LoadFieldDataInfo& load_info) {
         // TODO: create space;
         std::shared_ptr<milvus_storage::Space> space;
         auto load_future = pool.Submit(
-            LoadFieldDatasFromRemote2, space, schema_, field_data_info.channel);
+            LoadFieldDatasFromRemote2, space, schema_, field_data_info);
         LOG_SEGCORE_INFO_ << "finish submitting LoadFieldDatasFromRemote task "
                              "to thread pool, "
                           << "segmentID:" << this->id_

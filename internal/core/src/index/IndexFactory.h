@@ -53,6 +53,10 @@ class IndexFactory {
                 storage::FileManagerImplPtr file_manager);
 
     IndexBasePtr
+    CreateIndex(const CreateIndexInfo& create_index_info,
+                storage::FileManagerImplPtr file_manager,
+                std::shared_ptr<milvus_storage::Space> space);
+    IndexBasePtr
     CreateVectorIndex(const CreateIndexInfo& create_index_info,
                       storage::FileManagerImplPtr file_manager);
 
@@ -61,16 +65,14 @@ class IndexFactory {
                       storage::FileManagerImplPtr file_manager = nullptr);
 
     IndexBasePtr
-    CreateIndexV2(const CreateIndexInfo& create_index_info,
-                  std::shared_ptr<milvus_storage::Space> space);
+    CreateVectorIndex(const CreateIndexInfo& create_index_info,
+                      storage::FileManagerImplPtr file_manager,
+                      std::shared_ptr<milvus_storage::Space> space);
 
     IndexBasePtr
-    CreateVectorIndexV2(const CreateIndexInfo& create_index_info,
-                        std::shared_ptr<milvus_storage::Space> space);
-
-    IndexBasePtr
-    CreateScalarIndexV2(const CreateIndexInfo& create_index_info,
-                        std::shared_ptr<milvus_storage::Space> space);
+    CreateScalarIndex(const CreateIndexInfo& create_index_info,
+                      storage::FileManagerImplPtr file_manager,
+                      std::shared_ptr<milvus_storage::Space> space);
 
     // IndexBasePtr
     // CreateIndex(DataType dtype, const IndexType& index_type);
@@ -82,8 +84,9 @@ class IndexFactory {
 
     template <typename T>
     ScalarIndexPtr<T>
-    CreateScalarIndexV2(const IndexType& index_type,
-                        std::shared_ptr<milvus_storage::Space> space);
+    CreateScalarIndex(const IndexType& index_type,
+                      storage::FileManagerImplPtr file_manager,
+                      std::shared_ptr<milvus_storage::Space> space);
 };
 
 }  // namespace milvus::index

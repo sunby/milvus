@@ -33,4 +33,9 @@ struct BuildIndexInfo {
     std::vector<std::string> insert_files;
     milvus::storage::StorageConfig storage_config;
     milvus::Config config;
+    std::string field_name;
+    std::string data_store_path;
+    int64_t data_store_version;
+    std::string index_store_path;
+    int64_t dim;
 };

@@ -37,6 +37,7 @@ class VectorMemIndex : public VectorIndex {
 
     explicit VectorMemIndex(const IndexType& index_type,
                             const MetricType& metric_type,
+                            storage::FileManagerImplPtr file_manager,
                             std::shared_ptr<milvus_storage::Space> space);
     BinarySet
     Serialize(const Config& config) override;
@@ -58,6 +59,8 @@ class VectorMemIndex : public VectorIndex {
     Build(const Config& config = {}) override;
 
     void
+    BuildV2(const Config& config = {}) override;
+    void
     AddWithDataset(const DatasetPtr& dataset, const Config& config) override;
 
     int64_t
@@ -78,6 +81,9 @@ class VectorMemIndex : public VectorIndex {
 
     BinarySet
     Upload(const Config& config = {}) override;
+
+    BinarySet
+    UploadV2(const Config& config = {}) override;
 
  protected:
     virtual void

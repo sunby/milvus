@@ -29,6 +29,8 @@
 #include "knowhere/comp/index_param.h"
 #include "parquet/schema.h"
 #include "common/LoadInfo.h"
+#include "storage/Types.h"
+#include "storage/space.h"
 
 namespace milvus::storage {
 
@@ -94,9 +96,22 @@ EncodeAndUploadIndexSlice(ChunkManager* chunk_manager,
                           FieldDataMeta field_meta,
                           std::string object_key);
 
+std::pair<std::string, size_t>
+EncodeAndUploadIndexSlice2(std::shared_ptr<milvus_storage::Space> space,
+                           uint8_t* buf,
+                           int64_t batch_size,
+                           IndexMeta index_meta,
+                           FieldDataMeta field_meta,
+                           std::string object_key);
+
 std::vector<FieldDataPtr>
 GetObjectData(ChunkManager* remote_chunk_manager,
               const std::vector<std::string>& remote_files);
+
+std::vector<FieldDataPtr>
+GetObjectData(std::shared_ptr<milvus_storage::Space> space,
+              const std::vector<std::string>& remote_files,
+              const IndexMeta& index_meta);
 
 std::map<std::string, int64_t>
 PutIndexData(ChunkManager* remote_chunk_manager,
@@ -106,6 +121,13 @@ PutIndexData(ChunkManager* remote_chunk_manager,
              FieldDataMeta& field_meta,
              IndexMeta& index_meta);
 
+std::map<std::string, int64_t>
+PutIndexData(std::shared_ptr<milvus_storage::Space> space,
+             const std::vector<const uint8_t*>& data_slices,
+             const std::vector<int64_t>& slice_sizes,
+             const std::vector<std::string>& slice_names,
+             FieldDataMeta& field_meta,
+             IndexMeta& index_meta);
 int64_t
 GetTotalNumRowsForFieldDatas(const std::vector<FieldDataPtr>& field_datas);
 
@@ -126,6 +148,12 @@ CreateFileManager(IndexType index_type,
                   const FieldDataMeta& field_meta,
                   const IndexMeta& index_meta,
                   ChunkManagerPtr cm);
+
+FileManagerImplPtr
+CreateFileManager(IndexType index_type,
+                  const FieldDataMeta& field_meta,
+                  const IndexMeta& index_meta,
+                  std::shared_ptr<milvus_storage::Space> space);
 
 FieldDataPtr
 CreateFieldData(const DataType& type,

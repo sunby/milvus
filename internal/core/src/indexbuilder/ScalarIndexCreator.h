@@ -17,6 +17,7 @@
 #include <common/CDataType.h>
 #include "index/Index.h"
 #include "index/ScalarIndex.h"
+#include "storage/space.h"
 
 namespace milvus::indexbuilder {
 
@@ -26,6 +27,10 @@ class ScalarIndexCreator : public IndexCreatorBase {
                        Config& config,
                        storage::FileManagerImplPtr file_manager);
 
+    ScalarIndexCreator(DataType data_type,
+                       Config& config,
+                       storage::FileManagerImplPtr file_manager,
+                       std::shared_ptr<milvus_storage::Space> space);
     void
     Build(const milvus::DatasetPtr& dataset) override;
 
@@ -60,4 +65,12 @@ CreateScalarIndex(DataType dtype,
     return std::make_unique<ScalarIndexCreator>(dtype, config, file_manager);
 }
 
+inline ScalarIndexCreatorPtr
+CreateScalarIndex(DataType dtype,
+                  Config& config,
+                  storage::FileManagerImplPtr file_manager,
+                  std::shared_ptr<milvus_storage::Space> space) {
+    return std::make_unique<ScalarIndexCreator>(
+        dtype, config, file_manager, space);
+}
 }  // namespace milvus::indexbuilder

@@ -91,18 +91,37 @@ func (i *IndexNode) CreateJob(ctx context.Context, req *indexpb.CreateJobRequest
 			Reason:    "create chunk manager failed",
 		}, nil
 	}
-	task := &indexBuildTask{
-		ident:          fmt.Sprintf("%s/%d", req.ClusterID, req.BuildID),
-		ctx:            taskCtx,
-		cancel:         taskCancel,
-		BuildID:        req.BuildID,
-		ClusterID:      req.ClusterID,
-		node:           i,
-		req:            req,
-		cm:             cm,
-		nodeID:         i.GetNodeID(),
-		tr:             timerecord.NewTimeRecorder(fmt.Sprintf("IndexBuildID: %d, ClusterID: %s", req.BuildID, req.ClusterID)),
-		serializedSize: 0,
+	var task task
+	if Params.CommonCfg.EnableStorageV2.GetAsBool() {
+		task = &indexBuildTaskV2{
+			indexBuildTask: &indexBuildTask{
+				ident:          fmt.Sprintf("%s/%d", req.ClusterID, req.BuildID),
+				ctx:            taskCtx,
+				cancel:         taskCancel,
+				BuildID:        req.BuildID,
+				ClusterID:      req.ClusterID,
+				node:           i,
+				req:            req,
+				cm:             cm,
+				nodeID:         i.GetNodeID(),
+				tr:             timerecord.NewTimeRecorder(fmt.Sprintf("IndexBuildID: %d, ClusterID: %s", req.BuildID, req.ClusterID)),
+				serializedSize: 0,
+			},
+		}
+	} else {
+		task = &indexBuildTask{
+			ident:          fmt.Sprintf("%s/%d", req.ClusterID, req.BuildID),
+			ctx:            taskCtx,
+			cancel:         taskCancel,
+			BuildID:        req.BuildID,
+			ClusterID:      req.ClusterID,
+			node:           i,
+			req:            req,
+			cm:             cm,
+			nodeID:         i.GetNodeID(),
+			tr:             timerecord.NewTimeRecorder(fmt.Sprintf("IndexBuildID: %d, ClusterID: %s", req.BuildID, req.ClusterID)),
+			serializedSize: 0,
+		}
 	}
 	ret := merr.Status(nil)
 	if err := i.sched.IndexBuildQueue.Enqueue(task); err != nil {

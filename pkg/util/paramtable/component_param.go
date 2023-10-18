@@ -614,12 +614,13 @@ like the old password verification when updating the credential`,
 		Export:       true,
 	}
 
+	p.LockSlowLogWarnThreshold.Init(base.mgr)
 	p.EnableStorageV2 = ParamItem{
 		Key:          "common.storage.enablev2",
 		Version:      "2.3.1",
 		DefaultValue: "false",
 	}
-	p.LockSlowLogWarnThreshold.Init(base.mgr)
+	p.EnableStorageV2.Init(base.mgr)
 }
 
 type traceConfig struct {

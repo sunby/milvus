@@ -25,6 +25,7 @@
 #include "storage/IndexData.h"
 #include "storage/FileManager.h"
 #include "storage/ChunkManager.h"
+#include "storage/space.h"
 
 #include "common/Consts.h"
 
@@ -35,6 +36,10 @@ class DiskFileManagerImpl : public FileManagerImpl {
     explicit DiskFileManagerImpl(const FieldDataMeta& field_mata,
                                  IndexMeta index_meta,
                                  ChunkManagerPtr remote_chunk_manager);
+
+    explicit DiskFileManagerImpl(const FieldDataMeta& field_mata,
+                                 IndexMeta index_meta,
+                                 std::shared_ptr<milvus_storage::Space> space);
 
     virtual ~DiskFileManagerImpl();
 
@@ -89,6 +94,9 @@ class DiskFileManagerImpl : public FileManagerImpl {
     std::string
     CacheRawDataToDisk(std::vector<std::string> remote_files);
 
+    std::string
+    CacheRawDataToDisk();
+
  private:
     int64_t
     GetIndexBuildId() {
@@ -107,6 +115,8 @@ class DiskFileManagerImpl : public FileManagerImpl {
 
     // remote file path
     std::map<std::string, int64_t> remote_paths_to_size_;
+
+    std::shared_ptr<milvus_storage::Space> space_;
 };
 
 using DiskANNFileManagerImplPtr = std::shared_ptr<DiskFileManagerImpl>;

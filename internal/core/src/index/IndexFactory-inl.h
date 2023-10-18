@@ -29,9 +29,10 @@ IndexFactory::CreateScalarIndex(const IndexType& index_type,
 }
 template <typename T>
 inline ScalarIndexPtr<T>
-IndexFactory::CreateScalarIndexV2(
-    const IndexType& index_type, std::shared_ptr<milvus_storage::Space> space) {
-    return CreateScalarIndexSortV2<T>(space);
+IndexFactory::CreateScalarIndex(const IndexType& index_type,
+                                storage::FileManagerImplPtr file_manager,
+                                std::shared_ptr<milvus_storage::Space> space) {
+    return CreateScalarIndexSort<T>(file_manager, space);
 }
 
 // template <>
@@ -46,6 +47,18 @@ IndexFactory::CreateScalarIndex(const IndexType& index_type,
                                 storage::FileManagerImplPtr file_manager) {
 #if defined(__linux__) || defined(__APPLE__)
     return CreateStringIndexMarisa(file_manager);
+#else
+    throw std::runtime_error("unsupported platform");
+#endif
+}
+
+template <>
+inline ScalarIndexPtr<std::string>
+IndexFactory::CreateScalarIndex(const IndexType& index_type,
+                                storage::FileManagerImplPtr file_manager,
+                                std::shared_ptr<milvus_storage::Space> space) {
+#if defined(__linux__) || defined(__APPLE__)
+    return CreateStringIndexMarisa(file_manager, space);
 #else
     throw std::runtime_error("unsupported platform");
 #endif
