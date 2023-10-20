@@ -11,7 +11,7 @@
 # or implied. See the License for the specific language governing permissions and limitations under the License.
 #-------------------------------------------------------------------------------
 
-set( MILVUS_STORAGE_VERSION bef9bb3)
+set( MILVUS_STORAGE_VERSION 4dd296e)
 
 message(STATUS "Building milvus-storage-${MILVUS_STORAGE_VERSION} from source")
 message(STATUS ${CMAKE_BUILD_TYPE})

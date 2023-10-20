@@ -37,6 +37,9 @@ class ScalarIndexCreator : public IndexCreatorBase {
     void
     Build() override;
 
+    void
+    BuildV2() override;
+
     milvus::BinarySet
     Serialize() override;
 

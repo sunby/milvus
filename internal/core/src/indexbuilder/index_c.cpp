@@ -9,9 +9,12 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License
 
+#include <glog/logging.h>
+#include <memory>
 #include <string>
 #include "fmt/core.h"
 #include "indexbuilder/type_c.h"
+#include "log/Log.h"
 #include "storage/options.h"
 
 #ifdef __linux__
@@ -173,16 +176,18 @@ CreateIndexV3(CIndex* res_index, CBuildIndexInfo c_build_index_info) {
             build_index_info->data_store_path,
             milvus_storage::Options{nullptr,
                                     build_index_info->data_store_version});
-        AssertInfo(store_space.ok(),
+        AssertInfo(store_space.ok() && store_space.has_value(),
                    fmt::format("create space failed: {}",
                                store_space.status().ToString()));
 
         auto index_space = milvus_storage::Space::Open(
-            build_index_info->index_store_path, milvus_storage::Options{});
-        AssertInfo(index_space.ok(),
+            build_index_info->index_store_path,
+            milvus_storage::Options{.schema = store_space.value()->schema()});
+        AssertInfo(index_space.ok() && index_space.has_value(),
                    fmt::format("create space failed: {}",
                                index_space.status().ToString()));
 
+        LOG_SEGCORE_INFO_ << "init space success";
         auto file_manager =
             milvus::storage::CreateFileManager(index_info.index_type,
                                                field_meta,
@@ -193,10 +198,11 @@ CreateIndexV3(CIndex* res_index, CBuildIndexInfo c_build_index_info) {
         auto index =
             milvus::indexbuilder::IndexFactory::GetInstance().CreateIndex(
                 build_index_info->field_type,
+                build_index_info->field_name,
                 config,
                 file_manager,
                 std::move(store_space.value()));
-        index->Build();
+        index->BuildV2();
         *res_index = index.release();
         auto status = CStatus();
         status.error_code = Success;
@@ -466,7 +472,7 @@ AppendFieldMetaInfo(CBuildIndexInfo c_build_index_info,
                     int64_t partition_id,
                     int64_t segment_id,
                     int64_t field_id,
-                    const char* file_name,
+                    const char* field_name,
                     enum CDataType field_type,
                     int64_t dim) {
     try {
@@ -476,7 +482,7 @@ AppendFieldMetaInfo(CBuildIndexInfo c_build_index_info,
         build_index_info->segment_id = segment_id;
         build_index_info->field_id = field_id;
         build_index_info->field_type = milvus::DataType(field_type);
-        build_index_info->field_name = file_name;
+        build_index_info->field_name = field_name;
         build_index_info->dim = dim;
 
         auto status = CStatus();
@@ -566,18 +572,16 @@ AppendInsertFilePath(CBuildIndexInfo c_build_index_info,
 
 CStatus
 AppendIndexStorageInfo(CBuildIndexInfo c_build_index_info,
-                  const char* c_data_store_path,
-                  const char* c_index_store_path,
-                  int64_t data_store_version) {
+                       const char* c_data_store_path,
+                       const char* c_index_store_path,
+                       int64_t data_store_version) {
     try {
-        std::cout << "xxxx" << std::endl;
         auto build_index_info = (BuildIndexInfo*)c_build_index_info;
         std::string data_store_path(c_data_store_path),
             index_store_path(c_index_store_path);
         build_index_info->data_store_path = data_store_path;
         build_index_info->index_store_path = index_store_path;
         build_index_info->data_store_version = data_store_version;
-        std::cout << "yyyy" << std::endl;
 
         auto status = CStatus();
         status.error_code = Success;

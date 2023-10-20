@@ -16,7 +16,6 @@
 
 #include "index/VectorMemIndex.h"
 
-#include <sys/_types/_int64_t.h>
 #include <unistd.h>
 #include <cmath>
 #include <filesystem>
@@ -29,6 +28,7 @@
 #include "fmt/format.h"
 
 #include "index/Index.h"
+#include "index/IndexInfo.h"
 #include "index/Meta.h"
 #include "index/Utils.h"
 #include "exceptions/EasyAssert.h"
@@ -66,13 +66,16 @@ VectorMemIndex::VectorMemIndex(const IndexType& index_type,
     index_ = knowhere::IndexFactory::Instance().Create(GetIndexType());
 }
 
-VectorMemIndex::VectorMemIndex(const IndexType& index_type,
-                               const MetricType& metric_type,
+VectorMemIndex::VectorMemIndex(const CreateIndexInfo& create_index_info,
                                storage::FileManagerImplPtr file_manager,
                                std::shared_ptr<milvus_storage::Space> space)
-    : VectorIndex(index_type, metric_type), space_(space) {
-    AssertInfo(!is_unsupported(index_type, metric_type),
-               index_type + " doesn't support metric: " + metric_type);
+    : VectorIndex(create_index_info.index_type, create_index_info.metric_type),
+      space_(space),
+      create_index_info_(create_index_info) {
+    AssertInfo(!is_unsupported(create_index_info.index_type,
+                               create_index_info.metric_type),
+               create_index_info.index_type +
+                   " doesn't support metric: " + create_index_info.metric_type);
     if (file_manager != nullptr) {
         file_manager_ = std::dynamic_pointer_cast<storage::MemFileManagerImpl>(
             file_manager);
@@ -365,38 +368,44 @@ VectorMemIndex::BuildWithDataset(const DatasetPtr& dataset,
 
 void
 VectorMemIndex::BuildV2(const Config& config) {
-    auto field_name = GetValueFromConfig<std::string>(config, "field_name");
-    auto data_type = GetValueFromConfig<DataType>(config, "data_type");
-    auto dim_config = GetValueFromConfig<int64_t>(config, "dim");
-    AssertInfo(field_name.has_value(), "field name can not be empty");
-    AssertInfo(data_type.has_value(), "data type can not be empty");
-    AssertInfo(dim_config.has_value(), "dim name can not be empty");
+    auto field_name = create_index_info_.field_name;
+    LOG_SEGCORE_INFO_ << "field name: " << field_name;
+    auto field_type = create_index_info_.field_type;
+    auto dim = create_index_info_.dim;
     auto res = space_->ScanData();
     if (!res.ok()) {
-        PanicInfo("failed to create scan iterator");
+        PanicInfo(fmt::format("failed to create scan iterator: {}",
+                              res.status().ToString()));
     }
+
     auto reader = res.value();
     std::vector<storage::FieldDataPtr> field_datas;
-    for (auto rec = reader->Next(); rec != nullptr; rec = reader->Next()) {
+    for (auto rec : *reader) {
         if (!rec.ok()) {
-            PanicInfo("failed to read data");
+            PanicInfo(fmt::format("failed to read data: {}",
+                                  rec.status().ToString()));
         }
         auto data = rec.ValueUnsafe();
+        if (data == nullptr) {
+            break;
+        }
         auto total_num_rows = data->num_rows();
-        auto col_data = data->GetColumnByName(field_name.value());
-        auto field_data = storage::CreateFieldData(
-            data_type.value(), dim_config.value(), total_num_rows);
+        LOG_SEGCORE_INFO_ << "loop in reader num: " << total_num_rows
+                          << ", cols: " << data->num_columns();
+        auto col_data = data->GetColumnByName(field_name);
+        auto field_data =
+            storage::CreateFieldData(field_type, dim, total_num_rows);
+        field_data->FillFieldData(col_data);
         field_datas.push_back(field_data);
     }
     int64_t total_size = 0;
     int64_t total_num_rows = 0;
-    int64_t dim = 0;
     for (auto data : field_datas) {
         total_size += data->Size();
         total_num_rows += data->get_num_rows();
         AssertInfo(dim == 0 || dim == data->get_dim(),
                    "inconsistent dim value between field datas!");
-        dim = data->get_dim();
+        // dim = data->get_dim();
     }
 
     auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[total_size]);
@@ -412,6 +421,7 @@ VectorMemIndex::BuildV2(const Config& config) {
     build_config.update(config);
     build_config.erase("insert_files");
 
+    LOG_SEGCORE_INFO_ << "total num rows: " << total_num_rows;
     auto dataset = GenDataset(total_num_rows, dim, buf.get());
     BuildWithDataset(dataset, build_config);
 }

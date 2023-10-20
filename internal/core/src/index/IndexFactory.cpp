@@ -175,10 +175,10 @@ IndexFactory::CreateVectorIndex(const CreateIndexInfo& create_index_info,
 
     if (is_in_nm_list(index_type)) {
         return std::make_unique<VectorMemNMIndex>(
-            index_type, metric_type, file_manager, space);
+            create_index_info, file_manager, space);
     }
     // create mem index
     return std::make_unique<VectorMemIndex>(
-        index_type, metric_type, file_manager, space);
+        create_index_info, file_manager, space);
 }
 }  // namespace milvus::index

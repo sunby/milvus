@@ -55,6 +55,11 @@ ScalarIndexCreator::Build() {
     index_->Build(config_);
 }
 
+void
+ScalarIndexCreator::BuildV2() {
+    index_->BuildV2(config_);
+}
+
 milvus::BinarySet
 ScalarIndexCreator::Serialize() {
     return index_->Serialize(config_);

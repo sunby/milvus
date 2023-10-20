@@ -22,14 +22,24 @@ namespace milvus::indexbuilder {
 VecIndexCreator::VecIndexCreator(DataType data_type,
                                  Config& config,
                                  storage::FileManagerImplPtr file_manager)
-    : data_type_(data_type), config_(config) {
+    : VecIndexCreator(data_type, "", config, file_manager, nullptr) {
+}
+
+VecIndexCreator::VecIndexCreator(DataType data_type,
+                                 const std::string& field_name,
+                                 Config& config,
+                                 storage::FileManagerImplPtr file_manager,
+                                 std::shared_ptr<milvus_storage::Space> space)
+    : data_type_(data_type), config_(config), space_(space) {
     index::CreateIndexInfo index_info;
     index_info.field_type = data_type_;
     index_info.index_type = index::GetIndexTypeFromConfig(config_);
     index_info.metric_type = index::GetMetricTypeFromConfig(config_);
+    index_info.field_name = field_name;
+    index_info.dim = index::GetDimFromConfig(config);
 
-    index_ = index::IndexFactory::GetInstance().CreateIndex(index_info,
-                                                            file_manager);
+    index_ = index::IndexFactory::GetInstance().CreateIndex(
+        index_info, file_manager, space_);
     AssertInfo(index_ != nullptr,
                "[VecIndexCreator]Index is null after create index");
 }
@@ -47,6 +57,11 @@ VecIndexCreator::Build(const milvus::DatasetPtr& dataset) {
 void
 VecIndexCreator::Build() {
     index_->Build(config_);
+}
+
+void
+VecIndexCreator::BuildV2() {
+    index_->BuildV2(config_);
 }
 
 milvus::BinarySet

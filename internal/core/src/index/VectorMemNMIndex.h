@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "index/IndexInfo.h"
 #include "index/Utils.h"
 #include "index/VectorMemIndex.h"
 
@@ -36,12 +37,12 @@ class VectorMemNMIndex : public VectorMemIndex {
         AssertInfo(is_in_nm_list(index_type), "not valid nm index type");
     }
 
-    explicit VectorMemNMIndex(const IndexType& index_type,
-                              const MetricType& metric_type,
+    explicit VectorMemNMIndex(const CreateIndexInfo& create_index_info,
                               storage::FileManagerImplPtr file_manager,
                               std::shared_ptr<milvus_storage::Space> space)
-        : VectorMemIndex(index_type, metric_type, file_manager, space) {
-        AssertInfo(is_in_nm_list(index_type), "not valid nm index type");
+        : VectorMemIndex(create_index_info, file_manager, space) {
+        AssertInfo(is_in_nm_list(create_index_info.index_type),
+                   "not valid nm index type");
     }
     BinarySet
     Serialize(const Config& config) override;

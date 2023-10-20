@@ -26,6 +26,7 @@
 #include "index/VectorIndex.h"
 #include "storage/MemFileManagerImpl.h"
 #include "storage/space.h"
+#include "index/IndexInfo.h"
 
 namespace milvus::index {
 
@@ -35,8 +36,7 @@ class VectorMemIndex : public VectorIndex {
                             const MetricType& metric_type,
                             storage::FileManagerImplPtr file_manager = nullptr);
 
-    explicit VectorMemIndex(const IndexType& index_type,
-                            const MetricType& metric_type,
+    explicit VectorMemIndex(const CreateIndexInfo& create_index_info,
                             storage::FileManagerImplPtr file_manager,
                             std::shared_ptr<milvus_storage::Space> space);
     BinarySet
@@ -101,6 +101,8 @@ class VectorMemIndex : public VectorIndex {
     knowhere::Index<knowhere::IndexNode> index_;
     std::shared_ptr<storage::MemFileManagerImpl> file_manager_;
     std::shared_ptr<milvus_storage::Space> space_;
+
+    CreateIndexInfo create_index_info_;
 };
 
 using VectorMemIndexPtr = std::unique_ptr<VectorMemIndex>;

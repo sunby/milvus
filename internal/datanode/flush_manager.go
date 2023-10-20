@@ -348,15 +348,6 @@ func (m *rendezvousFlushManagerV2) flushBufferData(data *BufferData, segmentID U
 	}
 
 	fields := meta.Schema.Fields
-	fields = append(fields, &schemapb.FieldSchema{
-		FieldID:  common.RowIDField,
-		Name:     common.RowIDFieldName,
-		DataType: schemapb.DataType_Int64,
-	}, &schemapb.FieldSchema{
-		FieldID:  common.TimeStampField,
-		Name:     common.TimeStampFieldName,
-		DataType: schemapb.DataType_Int64,
-	})
 
 	arrowSchema, err := covertToArrowSchema(fields)
 	if err != nil {

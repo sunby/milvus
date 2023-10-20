@@ -14,7 +14,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <sys/_types/_int64_t.h>
 #include "common/CGoHelper.h"
 #include "common/LoadInfo.h"
 #include "segcore/load_field_data_c.h"

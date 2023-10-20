@@ -11,7 +11,6 @@
 
 #pragma once
 
-#include <sys/_types/_int64_t.h>
 #ifdef __cplusplus
 extern "C" {
 #endif

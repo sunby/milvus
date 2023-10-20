@@ -159,6 +159,7 @@ func (it *indexBuildTaskV2) BuildIndex(ctx context.Context) error {
 		return err
 	}
 
+	log.Info("[remove me] store infos", zap.String("store path", it.req.StorePath), zap.Int64("store version", it.req.StoreVersion))
 	err = buildIndexInfo.AppendIndexStorageInfo(it.req.StorePath, it.req.IndexStorePath, it.req.StoreVersion)
 	if err != nil {
 		log.Ctx(ctx).Warn("append storage info failed", zap.Error(err))
