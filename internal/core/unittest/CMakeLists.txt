@@ -25,6 +25,7 @@ set(MILVUS_TEST_FILES
         test_concurrent_vector.cpp
         test_c_api.cpp
         test_expr.cpp
+        test_float16.cpp
         test_growing.cpp
         test_growing_index.cpp
         test_indexing.cpp
@@ -54,11 +55,14 @@ set(MILVUS_TEST_FILES
         test_offset_ordered_map.cpp
         test_offset_ordered_array.cpp
         test_always_true_expr.cpp
-        test_plan_proto.cpp)
+        test_plan_proto.cpp
+        test_chunk_cache.cpp
+        )
 
 if ( BUILD_DISK_ANN STREQUAL "ON" )
     set(MILVUS_TEST_FILES
             ${MILVUS_TEST_FILES}
+            #need update aws-sdk-cpp, see more from https://github.com/aws/aws-sdk-cpp/issues/1757
             #test_minio_chunk_manager.cpp
             )
 endif()
@@ -68,7 +72,17 @@ if (LINUX OR APPLE)
             ${MILVUS_TEST_FILES}
             test_scalar_index_creator.cpp
             test_string_index.cpp
-            )
+            test_array.cpp test_array_expr.cpp)
+endif()
+
+if (DEFINED AZURE_BUILD_DIR)
+    set(MILVUS_TEST_FILES
+                ${MILVUS_TEST_FILES}
+                test_azure_chunk_manager.cpp
+                #need update aws-sdk-cpp, see more from https://github.com/aws/aws-sdk-cpp/issues/2119
+                #test_remote_chunk_manager.cpp
+                )
+    include_directories("${AZURE_BUILD_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/include")
 endif()
 
 if (LINUX)

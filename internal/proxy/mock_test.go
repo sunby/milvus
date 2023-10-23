@@ -22,6 +22,8 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/allocator"
@@ -29,6 +31,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/uniquegenerator"
 )
@@ -38,7 +41,7 @@ type mockTimestampAllocatorInterface struct {
 	mtx    sync.Mutex
 }
 
-func (tso *mockTimestampAllocatorInterface) AllocTimestamp(ctx context.Context, req *rootcoordpb.AllocTimestampRequest) (*rootcoordpb.AllocTimestampResponse, error) {
+func (tso *mockTimestampAllocatorInterface) AllocTimestamp(ctx context.Context, req *rootcoordpb.AllocTimestampRequest, opts ...grpc.CallOption) (*rootcoordpb.AllocTimestampResponse, error) {
 	tso.mtx.Lock()
 	defer tso.mtx.Unlock()
 
@@ -49,10 +52,7 @@ func (tso *mockTimestampAllocatorInterface) AllocTimestamp(ctx context.Context, 
 
 	tso.lastTs = ts
 	return &rootcoordpb.AllocTimestampResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-			Reason:    "",
-		},
+		Status:    merr.Success(),
 		Timestamp: ts,
 		Count:     req.Count,
 	}, nil
@@ -81,8 +81,7 @@ func newMockTsoAllocator() tsoAllocator {
 	return &mockTsoAllocator{}
 }
 
-type mockIDAllocatorInterface struct {
-}
+type mockIDAllocatorInterface struct{}
 
 func (m *mockIDAllocatorInterface) AllocOne() (UniqueID, error) {
 	return UniqueID(uniquegenerator.GetUniqueIntGeneratorIns().GetInt()), nil
@@ -207,6 +206,8 @@ func newMockDmlTask(ctx context.Context) *mockDmlTask {
 
 	return &mockDmlTask{
 		mockTask: newMockTask(ctx),
+		vchans:   vchans,
+		pchans:   pchans,
 	}
 }
 
@@ -252,7 +253,8 @@ func (ms *simpleMockMsgStream) Chan() <-chan *msgstream.MsgPack {
 func (ms *simpleMockMsgStream) AsProducer(channels []string) {
 }
 
-func (ms *simpleMockMsgStream) AsConsumer(channels []string, subName string, position mqwrapper.SubscriptionInitialPosition) {
+func (ms *simpleMockMsgStream) AsConsumer(ctx context.Context, channels []string, subName string, position mqwrapper.SubscriptionInitialPosition) error {
+	return nil
 }
 
 func (ms *simpleMockMsgStream) SetRepackFunc(repackFunc msgstream.RepackFunc) {
@@ -292,7 +294,7 @@ func (ms *simpleMockMsgStream) GetProduceChannels() []string {
 	return nil
 }
 
-func (ms *simpleMockMsgStream) Seek(offset []*msgstream.MsgPosition) error {
+func (ms *simpleMockMsgStream) Seek(ctx context.Context, offset []*msgstream.MsgPosition) error {
 	return nil
 }
 
@@ -304,6 +306,9 @@ func (ms *simpleMockMsgStream) CheckTopicValid(topic string) error {
 	return nil
 }
 
+func (ms *simpleMockMsgStream) EnableProduce(enabled bool) {
+}
+
 func newSimpleMockMsgStream() *simpleMockMsgStream {
 	return &simpleMockMsgStream{
 		msgChan:  make(chan *msgstream.MsgPack, 1024),
@@ -311,8 +316,7 @@ func newSimpleMockMsgStream() *simpleMockMsgStream {
 	}
 }
 
-type simpleMockMsgStreamFactory struct {
-}
+type simpleMockMsgStreamFactory struct{}
 
 func (factory *simpleMockMsgStreamFactory) Init(param *paramtable.ComponentParam) error {
 	return nil
@@ -429,7 +433,7 @@ func generateFieldData(dataType schemapb.DataType, fieldName string, numRows int
 			},
 		}
 	default:
-		//TODO::
+		// TODO::
 	}
 
 	return fieldData

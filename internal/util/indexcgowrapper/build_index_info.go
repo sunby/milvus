@@ -48,6 +48,7 @@ func NewBuildIndexInfo(config *indexpb.StorageConfig) (*BuildIndexInfo, error) {
 	cAccessValue := C.CString(config.SecretAccessKey)
 	cRootPath := C.CString(config.RootPath)
 	cStorageType := C.CString(config.StorageType)
+	cCloudProvider := C.CString(config.CloudProvider)
 	cIamEndPoint := C.CString(config.IAMEndpoint)
 	cRegion := C.CString(config.Region)
 	defer C.free(unsafe.Pointer(cAddress))
@@ -56,6 +57,7 @@ func NewBuildIndexInfo(config *indexpb.StorageConfig) (*BuildIndexInfo, error) {
 	defer C.free(unsafe.Pointer(cAccessValue))
 	defer C.free(unsafe.Pointer(cRootPath))
 	defer C.free(unsafe.Pointer(cStorageType))
+	defer C.free(unsafe.Pointer(cCloudProvider))
 	defer C.free(unsafe.Pointer(cIamEndPoint))
 	defer C.free(unsafe.Pointer(cRegion))
 	storageConfig := C.CStorageConfig{
@@ -65,11 +67,13 @@ func NewBuildIndexInfo(config *indexpb.StorageConfig) (*BuildIndexInfo, error) {
 		access_key_value: cAccessValue,
 		root_path:        cRootPath,
 		storage_type:     cStorageType,
+		cloud_provider:   cCloudProvider,
 		iam_endpoint:     cIamEndPoint,
 		useSSL:           C.bool(config.UseSSL),
 		useIAM:           C.bool(config.UseIAM),
 		region:           cRegion,
 		useVirtualHost:   C.bool(config.UseVirtualHost),
+		requestTimeoutMs: C.int64_t(config.RequestTimeoutMs),
 	}
 
 	status := C.NewBuildIndexInfo(&cBuildIndexInfo, storageConfig)
@@ -159,4 +163,11 @@ func (bi *BuildIndexInfo) AppendInsertFile(filePath string) error {
 
 	status := C.AppendInsertFilePath(bi.cBuildIndexInfo, cInsertFilePath)
 	return HandleCStatus(&status, "appendInsertFile failed")
+}
+
+func (bi *BuildIndexInfo) AppendIndexEngineVersion(indexEngineVersion int32) error {
+	cIndexEngineVersion := C.int32_t(indexEngineVersion)
+
+	status := C.AppendIndexEngineVersionToBuildInfo(bi.cBuildIndexInfo, cIndexEngineVersion)
+	return HandleCStatus(&status, "AppendIndexEngineVersion failed")
 }

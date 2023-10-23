@@ -8,10 +8,16 @@ image:
     tag: master-latest
     pullPolicy: IfNotPresent
 
+indexNode:
+  resources:
+    requests:
+      cpu: 2
+    limits:
+      cpu: 8
+
 etcd: 
   replicaCount: 3
   image:
-    debug: true
     repository: milvusdb/etcd
     tag: 3.5.5-r2
 
@@ -131,6 +137,9 @@ pulsar:
 
 extraConfigFiles:
   user.yaml: |+
-    dataNode:
-      memory:
-        forceSyncEnable: false
+    dataCoord:
+      compaction:
+        indexBasedCompaction: false
+    indexCoord:
+      scheduler:
+        interval: 100        

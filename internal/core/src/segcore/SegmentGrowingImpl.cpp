@@ -19,10 +19,9 @@
 #include <type_traits>
 
 #include "common/Consts.h"
+#include "common/EasyAssert.h"
 #include "common/Types.h"
 #include "common/macro.h"
-#include "exceptions/EasyAssert.h"
-#include "fmt/core.h"
 #include "nlohmann/json.hpp"
 #include "query/PlanNode.h"
 #include "query/SearchOnSealed.h"
@@ -307,7 +306,7 @@ SegmentGrowingImpl::LoadFieldDataV2(const LoadFieldDataInfo& infos) {
     insert_record_.ack_responder_.AddSegment(reserved_offset,
                                              reserved_offset + num_rows);
 }
-Status
+SegcoreError
 SegmentGrowingImpl::Delete(int64_t reserved_begin,
                            int64_t size,
                            const IdArray* ids,
@@ -317,6 +316,15 @@ SegmentGrowingImpl::Delete(int64_t reserved_begin,
     auto& field_meta = schema_->operator[](field_id);
     std::vector<PkType> pks(size);
     ParsePksFromIDs(pks, field_meta.get_data_type(), *ids);
+
+    // filter out the deletions that the primary key not exists
+    auto end = std::remove_if(pks.begin(), pks.end(), [&](const PkType& pk) {
+        return !insert_record_.contain(pk);
+    });
+    size = end - pks.begin();
+    if (size == 0) {
+        return SegcoreError::success();
+    }
 
     // step 1: sort timestamp
     std::vector<std::tuple<Timestamp, PkType>> ordering(size);
@@ -335,7 +343,7 @@ SegmentGrowingImpl::Delete(int64_t reserved_begin,
 
     // step 2: fill delete record
     deleted_record_.push(sort_pks, sort_timestamps.data());
-    return Status::OK();
+    return SegcoreError::success();
 }
 
 int64_t
@@ -412,7 +420,6 @@ std::unique_ptr<DataArray>
 SegmentGrowingImpl::bulk_subscript(FieldId field_id,
                                    const int64_t* seg_offsets,
                                    int64_t count) const {
-    // TODO: support more types
     auto vec_ptr = insert_record_.get_field_data_base(field_id);
     auto& field_meta = schema_->operator[](field_id);
     if (field_meta.is_vector()) {
@@ -431,8 +438,15 @@ SegmentGrowingImpl::bulk_subscript(FieldId field_id,
                                               seg_offsets,
                                               count,
                                               output.data());
+        } else if (field_meta.get_data_type() == DataType::VECTOR_FLOAT16) {
+            bulk_subscript_impl<Float16Vector>(field_id,
+                                               field_meta.get_sizeof(),
+                                               vec_ptr,
+                                               seg_offsets,
+                                               count,
+                                               output.data());
         } else {
-            PanicInfo("logical error");
+            PanicInfo(DataTypeInvalid, "logical error");
         }
         return CreateVectorDataArrayFrom(output.data(), count, field_meta);
     }
@@ -494,8 +508,16 @@ SegmentGrowingImpl::bulk_subscript(FieldId field_id,
                 vec_ptr, seg_offsets, count, output.data());
             return CreateScalarDataArrayFrom(output.data(), count, field_meta);
         }
+        case DataType::ARRAY: {
+            // element
+            FixedVector<ScalarArray> output(count);
+            bulk_subscript_impl(*vec_ptr, seg_offsets, count, output.data());
+            return CreateScalarDataArrayFrom(output.data(), count, field_meta);
+        }
         default: {
-            PanicInfo("unsupported type");
+            PanicInfo(
+                DataTypeInvalid,
+                fmt::format("unsupported type {}", field_meta.get_data_type()));
         }
     }
 }
@@ -559,6 +581,23 @@ SegmentGrowingImpl::bulk_subscript_impl(const VectorBase* vec_raw,
 }
 
 void
+SegmentGrowingImpl::bulk_subscript_impl(const VectorBase& vec_raw,
+                                        const int64_t* seg_offsets,
+                                        int64_t count,
+                                        void* output_raw) const {
+    auto vec_ptr = dynamic_cast<const ConcurrentVector<Array>*>(&vec_raw);
+    AssertInfo(vec_ptr, "Pointer of vec_raw is nullptr");
+    auto& vec = *vec_ptr;
+    auto output = reinterpret_cast<ScalarArray*>(output_raw);
+    for (int64_t i = 0; i < count; ++i) {
+        auto offset = seg_offsets[i];
+        if (offset != INVALID_SEG_OFFSET) {
+            output[i] = vec[offset].output_data();
+        }
+    }
+}
+
+void
 SegmentGrowingImpl::bulk_subscript(SystemFieldType system_type,
                                    const int64_t* seg_offsets,
                                    int64_t count,
@@ -573,7 +612,7 @@ SegmentGrowingImpl::bulk_subscript(SystemFieldType system_type,
                 &this->insert_record_.row_ids_, seg_offsets, count, output);
             break;
         default:
-            PanicInfo("unknown subscript fields");
+            PanicInfo(DataTypeInvalid, "unknown subscript fields");
     }
 }
 
@@ -590,7 +629,8 @@ SegmentGrowingImpl::search_ids(const IdArray& id_array,
 
     auto res_id_arr = std::make_unique<IdArray>();
     std::vector<SegOffset> res_offsets;
-    for (auto pk : pks) {
+    res_offsets.reserve(pks.size());
+    for (auto& pk : pks) {
         auto segOffsets = insert_record_.search_pk(pk, timestamp);
         for (auto offset : segOffsets) {
             switch (data_type) {
@@ -601,11 +641,12 @@ SegmentGrowingImpl::search_ids(const IdArray& id_array,
                 }
                 case DataType::VARCHAR: {
                     res_id_arr->mutable_str_id()->add_data(
-                        std::get<std::string>(pk));
+                        std::get<std::string>(std::move(pk)));
                     break;
                 }
                 default: {
-                    PanicInfo("unsupported type");
+                    PanicInfo(DataTypeInvalid,
+                              fmt::format("unsupported type {}", data_type));
                 }
             }
             res_offsets.push_back(offset);

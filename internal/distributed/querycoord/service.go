@@ -24,10 +24,7 @@ import (
 	"time"
 
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
-	"github.com/milvus-io/milvus/internal/util/componentutil"
-	"github.com/milvus-io/milvus/internal/util/dependency"
-	"github.com/milvus-io/milvus/pkg/tracer"
-	"github.com/milvus-io/milvus/pkg/util/interceptor"
+	"github.com/tikv/client-go/v2/txnkv"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.uber.org/atomic"
@@ -39,15 +36,22 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	dcc "github.com/milvus-io/milvus/internal/distributed/datacoord/client"
 	rcc "github.com/milvus-io/milvus/internal/distributed/rootcoord/client"
+	"github.com/milvus-io/milvus/internal/distributed/utils"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	qc "github.com/milvus-io/milvus/internal/querycoordv2"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util/componentutil"
+	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/tracer"
+	"github.com/milvus-io/milvus/pkg/util"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/util/interceptor"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/tikv"
 )
 
 // Server is the grpc server of QueryCoord.
@@ -66,9 +70,10 @@ type Server struct {
 	factory dependency.Factory
 
 	etcdCli *clientv3.Client
+	tikvCli *txnkv.Client
 
-	dataCoord types.DataCoord
-	rootCoord types.RootCoord
+	dataCoord types.DataCoordClient
+	rootCoord types.RootCoordClient
 }
 
 // NewServer create a new QueryCoord grpc server.
@@ -91,7 +96,6 @@ func NewServer(ctx context.Context, factory dependency.Factory) (*Server, error)
 
 // Run initializes and starts QueryCoord's grpc service.
 func (s *Server) Run() error {
-
 	if err := s.init(); err != nil {
 		return err
 	}
@@ -104,10 +108,13 @@ func (s *Server) Run() error {
 	return nil
 }
 
+var getTiKVClient = tikv.GetTiKVClient
+
 // init initializes QueryCoord's grpc service.
 func (s *Server) init() error {
-	etcdConfig := &paramtable.Get().EtcdCfg
-	Params := &paramtable.Get().QueryCoordGrpcServerCfg
+	params := paramtable.Get()
+	etcdConfig := &params.EtcdCfg
+	rpcParams := &params.QueryCoordGrpcServerCfg
 
 	etcdCli, err := etcd.GetEtcdClient(
 		etcdConfig.UseEmbedEtcd.GetAsBool(),
@@ -123,10 +130,21 @@ func (s *Server) init() error {
 	}
 	s.etcdCli = etcdCli
 	s.SetEtcdClient(etcdCli)
-	s.queryCoord.SetAddress(Params.GetAddress())
+	s.queryCoord.SetAddress(rpcParams.GetAddress())
+
+	if params.MetaStoreCfg.MetaStoreType.GetValue() == util.MetaStoreTypeTiKV {
+		log.Info("Connecting to tikv metadata storage.")
+		s.tikvCli, err = getTiKVClient(&paramtable.Get().TiKVCfg)
+		if err != nil {
+			log.Warn("QueryCoord failed to connect to tikv", zap.Error(err))
+			return err
+		}
+		s.SetTiKVClient(s.tikvCli)
+		log.Info("Connected to tikv. Using tikv as metadata storage.")
+	}
 
 	s.wg.Add(1)
-	go s.startGrpcLoop(Params.Port.GetAsInt())
+	go s.startGrpcLoop(rpcParams.Port.GetAsInt())
 	// wait for grpc server loop start
 	err = <-s.grpcErrChan
 	if err != nil {
@@ -142,15 +160,6 @@ func (s *Server) init() error {
 		}
 	}
 
-	if err = s.rootCoord.Init(); err != nil {
-		log.Error("QueryCoord RootCoordClient Init failed", zap.Error(err))
-		panic(err)
-	}
-
-	if err = s.rootCoord.Start(); err != nil {
-		log.Error("QueryCoord RootCoordClient Start failed", zap.Error(err))
-		panic(err)
-	}
 	// wait for master init or healthy
 	log.Debug("QueryCoord try to wait for RootCoord ready")
 	err = componentutil.WaitForComponentHealthy(s.loopCtx, s.rootCoord, "RootCoord", 1000000, time.Millisecond*200)
@@ -173,14 +182,6 @@ func (s *Server) init() error {
 		}
 	}
 
-	if err = s.dataCoord.Init(); err != nil {
-		log.Error("QueryCoord DataCoordClient Init failed", zap.Error(err))
-		panic(err)
-	}
-	if err = s.dataCoord.Start(); err != nil {
-		log.Error("QueryCoord DataCoordClient Start failed", zap.Error(err))
-		panic(err)
-	}
 	log.Debug("QueryCoord try to wait for DataCoord ready")
 	err = componentutil.WaitForComponentHealthy(s.loopCtx, s.dataCoord, "DataCoord", 1000000, time.Millisecond*200)
 	if err != nil {
@@ -201,19 +202,19 @@ func (s *Server) init() error {
 func (s *Server) startGrpcLoop(grpcPort int) {
 	defer s.wg.Done()
 	Params := &paramtable.Get().QueryCoordGrpcServerCfg
-	var kaep = keepalive.EnforcementPolicy{
+	kaep := keepalive.EnforcementPolicy{
 		MinTime:             5 * time.Second, // If a client pings more than once every 5 seconds, terminate the connection
 		PermitWithoutStream: true,            // Allow pings even when there are no active streams
 	}
 
-	var kasp = keepalive.ServerParameters{
+	kasp := keepalive.ServerParameters{
 		Time:    60 * time.Second, // Ping the client if it is idle for 60 seconds to ensure the connection is still active
 		Timeout: 10 * time.Second, // Wait 10 second for the ping ack before assuming the connection is dead
 	}
 	log.Debug("network", zap.String("port", strconv.Itoa(grpcPort)))
 	lis, err := net.Listen("tcp", ":"+strconv.Itoa(grpcPort))
 	if err != nil {
-		log.Debug("GrpcServer:failed to listen:", zap.String("error", err.Error()))
+		log.Debug("GrpcServer:failed to listen:", zap.Error(err))
 		s.grpcErrChan <- err
 		return
 	}
@@ -273,12 +274,12 @@ func (s *Server) Stop() error {
 	if s.etcdCli != nil {
 		defer s.etcdCli.Close()
 	}
-	err := s.queryCoord.Stop()
 	s.loopCancel()
 	if s.grpcServer != nil {
-		log.Debug("Graceful stop grpc server...")
-		s.grpcServer.GracefulStop()
+		utils.GracefulStopGRPCServer(s.grpcServer)
 	}
+	err := s.queryCoord.Stop()
+
 	return err
 }
 
@@ -287,31 +288,35 @@ func (s *Server) SetEtcdClient(etcdClient *clientv3.Client) {
 	s.queryCoord.SetEtcdClient(etcdClient)
 }
 
+func (s *Server) SetTiKVClient(client *txnkv.Client) {
+	s.queryCoord.SetTiKVClient(client)
+}
+
 // SetRootCoord sets the RootCoord's client for QueryCoord component.
-func (s *Server) SetRootCoord(m types.RootCoord) error {
-	s.queryCoord.SetRootCoord(m)
+func (s *Server) SetRootCoord(m types.RootCoordClient) error {
+	s.queryCoord.SetRootCoordClient(m)
 	return nil
 }
 
 // SetDataCoord sets the DataCoord's client for QueryCoord component.
-func (s *Server) SetDataCoord(d types.DataCoord) error {
-	s.queryCoord.SetDataCoord(d)
+func (s *Server) SetDataCoord(d types.DataCoordClient) error {
+	s.queryCoord.SetDataCoordClient(d)
 	return nil
 }
 
 // GetComponentStates gets the component states of QueryCoord.
 func (s *Server) GetComponentStates(ctx context.Context, req *milvuspb.GetComponentStatesRequest) (*milvuspb.ComponentStates, error) {
-	return s.queryCoord.GetComponentStates(ctx)
+	return s.queryCoord.GetComponentStates(ctx, req)
 }
 
 // GetTimeTickChannel gets the time tick channel of QueryCoord.
 func (s *Server) GetTimeTickChannel(ctx context.Context, req *internalpb.GetTimeTickChannelRequest) (*milvuspb.StringResponse, error) {
-	return s.queryCoord.GetTimeTickChannel(ctx)
+	return s.queryCoord.GetTimeTickChannel(ctx, req)
 }
 
 // GetStatisticsChannel gets the statistics channel of QueryCoord.
 func (s *Server) GetStatisticsChannel(ctx context.Context, req *internalpb.GetStatisticsChannelRequest) (*milvuspb.StringResponse, error) {
-	return s.queryCoord.GetStatisticsChannel(ctx)
+	return s.queryCoord.GetStatisticsChannel(ctx, req)
 }
 
 // ShowCollections shows the collections in the QueryCoord.

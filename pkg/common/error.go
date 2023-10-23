@@ -22,10 +22,8 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
-var (
-	// ErrNodeIDNotMatch stands for the error that grpc target id and node session id not match.
-	ErrNodeIDNotMatch = errors.New("target node id not match")
-)
+// ErrNodeIDNotMatch stands for the error that grpc target id and node session id not match.
+var ErrNodeIDNotMatch = errors.New("target node id not match")
 
 // WrapNodeIDNotMatchError wraps `ErrNodeIDNotMatch` with targetID and sessionID.
 func WrapNodeIDNotMatchError(targetID, nodeID int64) error {
@@ -54,23 +52,4 @@ func NewIgnorableError(err error) error {
 func IsIgnorableError(err error) bool {
 	_, ok := err.(*IgnorableError)
 	return ok
-}
-
-var _ error = &KeyNotExistError{}
-
-func NewKeyNotExistError(key string) error {
-	return &KeyNotExistError{key: key}
-}
-
-func IsKeyNotExistError(err error) bool {
-	_, ok := err.(*KeyNotExistError)
-	return ok
-}
-
-type KeyNotExistError struct {
-	key string
-}
-
-func (k *KeyNotExistError) Error() string {
-	return fmt.Sprintf("there is no value on key = %s", k.key)
 }

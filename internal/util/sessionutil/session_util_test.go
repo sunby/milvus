@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"math/rand"
 	"net/url"
 	"os"
@@ -24,6 +23,7 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/embed"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/v3client"
+	"go.uber.org/atomic"
 	"go.uber.org/zap"
 
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
@@ -32,6 +32,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 func TestGetServerIDConcurrently(t *testing.T) {
@@ -54,7 +55,7 @@ func TestGetServerIDConcurrently(t *testing.T) {
 	defer etcdKV.RemoveWithPrefix("")
 
 	var wg sync.WaitGroup
-	var muList = sync.Mutex{}
+	muList := sync.Mutex{}
 
 	s := NewSession(ctx, metaRoot, etcdCli)
 	res := make([]int64, 0)
@@ -97,7 +98,7 @@ func TestInit(t *testing.T) {
 
 	s := NewSession(ctx, metaRoot, etcdCli)
 	s.Init("inittest", "testAddr", false, false)
-	assert.NotEqual(t, int64(0), s.leaseID)
+	assert.NotEqual(t, int64(0), s.LeaseID)
 	assert.NotEqual(t, int64(0), s.ServerID)
 	s.Register()
 	sessions, _, err := s.GetSessions("inittest")
@@ -122,7 +123,7 @@ func TestUpdateSessions(t *testing.T) {
 	defer etcdKV.RemoveWithPrefix("")
 
 	var wg sync.WaitGroup
-	var muList = sync.Mutex{}
+	muList := sync.Mutex{}
 
 	s := NewSession(ctx, metaRoot, etcdCli, WithResueNodeID(false))
 
@@ -194,39 +195,55 @@ func TestSessionLivenessCheck(t *testing.T) {
 	etcdCli, err := etcd.GetRemoteEtcdClient(etcdEndpoints)
 	require.NoError(t, err)
 	s := NewSession(context.Background(), metaRoot, etcdCli)
-	ctx := context.Background()
+	s.Register()
 	ch := make(chan struct{})
 	s.liveCh = ch
 	signal := make(chan struct{}, 1)
 
-	flag := false
-
-	s.LivenessCheck(ctx, func() {
-		flag = true
+	flag := atomic.NewBool(false)
+	s.LivenessCheck(context.Background(), func() {
+		flag.Store(true)
 		signal <- struct{}{}
 	})
+	assert.False(t, flag.Load())
 
-	assert.False(t, flag)
+	// test liveCh receive event, liveness won't exit, callback won't trigger
 	ch <- struct{}{}
+	assert.False(t, flag.Load())
 
-	assert.False(t, flag)
+	// test close liveCh, liveness exit, callback should trigger
 	close(ch)
-
 	<-signal
-	assert.True(t, flag)
+	assert.True(t, flag.Load())
 
-	ctx, cancel := context.WithCancel(ctx)
-	cancel()
-	ch = make(chan struct{})
-	s.liveCh = ch
-	flag = false
+	// test context done, liveness exit, callback shouldn't trigger
+	metaRoot = fmt.Sprintf("%d/%s", rand.Int(), DefaultServiceRoot)
+	s1 := NewSession(context.Background(), metaRoot, etcdCli)
+	s1.Register()
+	ctx, cancel := context.WithCancel(context.Background())
+	flag.Store(false)
 
-	s.LivenessCheck(ctx, func() {
-		flag = true
+	s1.LivenessCheck(ctx, func() {
+		flag.Store(true)
 		signal <- struct{}{}
 	})
+	cancel()
+	assert.False(t, flag.Load())
 
-	assert.False(t, flag)
+	// test context done, liveness start failed, callback should trigger
+	metaRoot = fmt.Sprintf("%d/%s", rand.Int(), DefaultServiceRoot)
+	s2 := NewSession(context.Background(), metaRoot, etcdCli)
+	s2.Register()
+	ctx, cancel = context.WithCancel(context.Background())
+	signal = make(chan struct{}, 1)
+	flag.Store(false)
+	cancel()
+	s2.LivenessCheck(ctx, func() {
+		flag.Store(true)
+		signal <- struct{}{}
+	})
+	<-signal
+	assert.True(t, flag.Load())
 }
 
 func TestWatcherHandleWatchResp(t *testing.T) {
@@ -365,9 +382,7 @@ func TestWatcherHandleWatchResp(t *testing.T) {
 		assert.Panics(t, func() {
 			w.handleWatchResponse(wresp)
 		})
-
 	})
-
 }
 
 func TestSession_Registered(t *testing.T) {
@@ -385,10 +400,12 @@ func TestSession_String(t *testing.T) {
 
 func TestSesssionMarshal(t *testing.T) {
 	s := &Session{
-		ServerID:   1,
-		ServerName: "test",
-		Address:    "localhost",
-		Version:    common.Version,
+		SessionRaw: SessionRaw{
+			ServerID:   1,
+			ServerName: "test",
+			Address:    "localhost",
+		},
+		Version: common.Version,
 	}
 
 	bs, err := json.Marshal(s)
@@ -430,7 +447,7 @@ type SessionWithVersionSuite struct {
 
 // SetupSuite setup suite env
 func (suite *SessionWithVersionSuite) SetupSuite() {
-	dir, err := ioutil.TempDir(os.TempDir(), "milvus_ut")
+	dir, err := os.MkdirTemp(os.TempDir(), "milvus_ut")
 	suite.Require().NoError(err)
 	suite.tmpDir = dir
 	suite.T().Log("using tmp dir:", dir)
@@ -491,7 +508,6 @@ func (suite *SessionWithVersionSuite) SetupTest() {
 	s3.Register()
 
 	suite.sessions = append(suite.sessions, s3)
-
 }
 
 func (suite *SessionWithVersionSuite) TearDownTest() {
@@ -603,8 +619,7 @@ func TestSessionProcessActiveStandBy(t *testing.T) {
 	defer etcdKV.RemoveWithPrefix("")
 
 	var wg sync.WaitGroup
-	ch := make(chan struct{})
-	signal := make(chan struct{}, 1)
+	signal := make(chan struct{})
 	flag := false
 
 	// register session 1, will be active
@@ -614,15 +629,16 @@ func TestSessionProcessActiveStandBy(t *testing.T) {
 	s1.SetEnableActiveStandBy(true)
 	s1.Register()
 	wg.Add(1)
-	s1.liveCh = ch
 	s1.ProcessActiveStandBy(func() error {
 		log.Debug("Session 1 become active")
 		wg.Done()
 		return nil
 	})
+	wg.Wait()
 	s1.LivenessCheck(ctx1, func() {
+		log.Debug("Session 1 livenessCheck callback")
 		flag = true
-		signal <- struct{}{}
+		close(signal)
 		s1.cancelKeepAlive()
 	})
 	assert.False(t, s1.isStandby.Load().(bool))
@@ -641,18 +657,31 @@ func TestSessionProcessActiveStandBy(t *testing.T) {
 	})
 	assert.True(t, s2.isStandby.Load().(bool))
 
-	//assert.True(t, s2.watchingPrimaryKeyLock)
+	// assert.True(t, s2.watchingPrimaryKeyLock)
 	// stop session 1, session 2 will take over primary service
 	log.Debug("Stop session 1, session 2 will take over primary service")
 	assert.False(t, flag)
-	ch <- struct{}{}
-	assert.False(t, flag)
+
 	s1.safeCloseLiveCh()
-	<-signal
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, _ = s1.etcdCli.Revoke(ctx, *s1.LeaseID)
+	}
+	select {
+	case <-signal:
+		log.Debug("receive s1 signal")
+	case <-time.After(10 * time.Second):
+		log.Debug("wait to fail Liveness Check  timeout")
+		t.FailNow()
+	}
 	assert.True(t, flag)
+	log.Debug("session s1 stop")
 
 	wg.Wait()
+	log.Debug("session s2 wait done")
 	assert.False(t, s2.isStandby.Load().(bool))
+	s2.Stop()
 }
 
 func TestSessionEventType_String(t *testing.T) {
@@ -671,6 +700,42 @@ func TestSessionEventType_String(t *testing.T) {
 			assert.Equalf(t, tt.want, tt.t.String(), "String()")
 		})
 	}
+}
+
+func TestServerInfoOp(t *testing.T) {
+	t.Run("test with specified pid", func(t *testing.T) {
+		pid := 9999999
+		serverID := int64(999)
+
+		filePath := GetServerInfoFilePath(pid)
+		defer os.RemoveAll(filePath)
+
+		saveServerInfoInternal(typeutil.QueryCoordRole, serverID, pid)
+		saveServerInfoInternal(typeutil.DataCoordRole, serverID, pid)
+		saveServerInfoInternal(typeutil.ProxyRole, serverID, pid)
+
+		sessions := GetSessions(pid)
+		assert.Equal(t, 3, len(sessions))
+		assert.ElementsMatch(t, sessions, []string{
+			"querycoord-999",
+			"datacoord-999",
+			"proxy-999",
+		})
+
+		RemoveServerInfoFile(pid)
+		sessions = GetSessions(pid)
+		assert.Equal(t, 0, len(sessions))
+	})
+
+	t.Run("test with os pid", func(t *testing.T) {
+		serverID := int64(9999)
+		filePath := GetServerInfoFilePath(os.Getpid())
+		defer os.RemoveAll(filePath)
+
+		SaveServerInfo(typeutil.QueryCoordRole, serverID)
+		sessions := GetSessions(os.Getpid())
+		assert.Equal(t, 1, len(sessions))
+	})
 }
 
 func TestSession_apply(t *testing.T) {
@@ -718,7 +783,7 @@ type SessionSuite struct {
 
 func (s *SessionSuite) SetupSuite() {
 	paramtable.Init()
-	dir, err := ioutil.TempDir(os.TempDir(), "milvus_ut")
+	dir, err := os.MkdirTemp(os.TempDir(), "milvus_ut")
 	s.Require().NoError(err)
 	s.tmpDir = dir
 	s.T().Log("using tmp dir:", dir)
@@ -920,17 +985,15 @@ func (s *SessionSuite) TestKeepAliveRetryActiveCancel() {
 
 	// Register
 	ch, err := session.registerService()
-	if err != nil {
-		panic(err)
-	}
+	s.Require().NoError(err)
 	session.liveCh = make(chan struct{})
 	session.processKeepAliveResponse(ch)
 	session.LivenessCheck(ctx, nil)
 	// active cancel, should not retry connect
 	session.cancelKeepAlive()
 
-	// sleep a while wait goroutine process
-	time.Sleep(time.Millisecond * 100)
+	// wait workers exit
+	session.wg.Wait()
 	// expected Disconnected = true, means session is closed
 	assert.Equal(s.T(), true, session.Disconnected())
 }

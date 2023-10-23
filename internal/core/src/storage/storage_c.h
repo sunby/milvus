@@ -30,6 +30,9 @@ InitLocalChunkManagerSingleton(const char* path);
 CStatus
 InitRemoteChunkManagerSingleton(CStorageConfig c_storage_config);
 
+CStatus
+InitChunkCacheSingleton(const char* c_dir_path, const char* read_ahead_policy);
+
 void
 CleanRemoteChunkManagerSingleton();
 

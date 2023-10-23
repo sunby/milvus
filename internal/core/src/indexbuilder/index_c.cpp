@@ -21,7 +21,7 @@
 #include <malloc.h>
 #endif
 
-#include "exceptions/EasyAssert.h"
+#include "common/EasyAssert.h"
 #include "indexbuilder/VecIndexCreator.h"
 #include "indexbuilder/index_c.h"
 #include "indexbuilder/IndexFactory.h"
@@ -32,7 +32,9 @@
 #include "pb/index_cgo_msg.pb.h"
 #include "storage/Util.h"
 #include "storage/space.h"
+#include "index/Meta.h"
 
+using namespace milvus;
 CStatus
 CreateIndex(enum CDataType dtype,
             const char* serialized_type_params,
@@ -58,9 +60,14 @@ CreateIndex(enum CDataType dtype,
             config[param.key()] = param.value();
         }
 
+        config[milvus::index::INDEX_ENGINE_VERSION] = std::to_string(
+            knowhere::Version::GetCurrentVersion().VersionNumber());
+
         auto& index_factory = milvus::indexbuilder::IndexFactory::GetInstance();
         auto index =
-            index_factory.CreateIndex(milvus::DataType(dtype), config, nullptr);
+            index_factory.CreateIndex(milvus::DataType(dtype),
+                                      config,
+                                      milvus::storage::FileManagerContext());
 
         *res_index = index.release();
         status.error_code = Success;
@@ -90,6 +97,12 @@ CreateIndexV2(CIndex* res_index, CBuildIndexInfo c_build_index_info) {
         AssertInfo(index_type.has_value(), "index type is empty");
         index_info.index_type = index_type.value();
 
+        auto engine_version = build_index_info->index_engine_version;
+
+        index_info.index_engine_version = engine_version;
+        config[milvus::index::INDEX_ENGINE_VERSION] =
+            std::to_string(engine_version);
+
         // get metric type
         if (milvus::datatype_is_vector(field_type)) {
             auto metric_type = milvus::index::GetValueFromConfig<std::string>(
@@ -111,14 +124,13 @@ CreateIndexV2(CIndex* res_index, CBuildIndexInfo c_build_index_info) {
                                               build_index_info->index_version};
         auto chunk_manager = milvus::storage::CreateChunkManager(
             build_index_info->storage_config);
-        auto file_manager = milvus::storage::CreateFileManager(
-            index_info.index_type, field_meta, index_meta, chunk_manager);
-        AssertInfo(file_manager != nullptr, "create file manager failed!");
+
+        milvus::storage::FileManagerContext fileManagerContext(
+            field_meta, index_meta, chunk_manager);
 
         auto index =
             milvus::indexbuilder::IndexFactory::GetInstance().CreateIndex(
-                build_index_info->field_type, config, file_manager);
-
+                build_index_info->field_type, config, fileManagerContext);
         index->Build();
         *res_index = index.release();
         auto status = CStatus();
@@ -386,12 +398,15 @@ NewBuildIndexInfo(CBuildIndexInfo* c_build_index_info,
         storage_config.root_path = std::string(c_storage_config.root_path);
         storage_config.storage_type =
             std::string(c_storage_config.storage_type);
+        storage_config.cloud_provider =
+            std::string(c_storage_config.cloud_provider);
         storage_config.iam_endpoint =
             std::string(c_storage_config.iam_endpoint);
         storage_config.useSSL = c_storage_config.useSSL;
         storage_config.useIAM = c_storage_config.useIAM;
         storage_config.region = c_storage_config.region;
         storage_config.useVirtualHost = c_storage_config.useVirtualHost;
+        storage_config.requestTimeoutMs = c_storage_config.requestTimeoutMs;
 
         *c_build_index_info = build_index_info.release();
         auto status = CStatus();
@@ -563,10 +578,23 @@ AppendInsertFilePath(CBuildIndexInfo c_build_index_info,
         status.error_msg = "";
         return status;
     } catch (std::exception& e) {
+        return milvus::FailureCStatus(&e);
+    }
+}
+
+CStatus
+AppendIndexEngineVersionToBuildInfo(CBuildIndexInfo c_load_index_info,
+                                    int32_t index_engine_version) {
+    try {
+        auto build_index_info = (BuildIndexInfo*)c_load_index_info;
+        build_index_info->index_engine_version = index_engine_version;
+
         auto status = CStatus();
-        status.error_code = UnexpectedError;
-        status.error_msg = strdup(e.what());
+        status.error_code = Success;
+        status.error_msg = "";
         return status;
+    } catch (std::exception& e) {
+        return milvus::FailureCStatus(&e);
     }
 }
 

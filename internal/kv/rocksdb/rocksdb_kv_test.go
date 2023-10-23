@@ -23,8 +23,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/milvus-io/milvus/internal/kv/predicates"
 	rocksdbkv "github.com/milvus-io/milvus/internal/kv/rocksdb"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
 func TestRocksdbKV(t *testing.T) {
@@ -188,7 +191,6 @@ func TestRocksdbKV_Prefix(t *testing.T) {
 	val, err = rocksdbKV.Load("abcd")
 	assert.NoError(t, err)
 	assert.Equal(t, val, "123")
-
 }
 
 func TestRocksdbKV_Txn(t *testing.T) {
@@ -215,30 +217,6 @@ func TestRocksdbKV_Txn(t *testing.T) {
 	assert.Equal(t, len(keys), 3)
 	assert.Equal(t, len(vals), 3)
 
-	removePrefix := []string{"abc", "abd"}
-	rocksdbKV.MultiRemoveWithPrefix(removePrefix)
-
-	keys, vals, err = rocksdbKV.LoadWithPrefix("")
-	assert.NoError(t, err)
-	assert.Equal(t, len(keys), 0)
-	assert.Equal(t, len(vals), 0)
-
-	err = rocksdbKV.MultiSave(kvs)
-	assert.NoError(t, err)
-	keys, vals, err = rocksdbKV.LoadWithPrefix("")
-	assert.NoError(t, err)
-	assert.Equal(t, len(keys), 3)
-	assert.Equal(t, len(vals), 3)
-
-	// test delete the whole table
-	removePrefix = []string{"", "hello"}
-	rocksdbKV.MultiRemoveWithPrefix(removePrefix)
-
-	keys, vals, err = rocksdbKV.LoadWithPrefix("")
-	assert.NoError(t, err)
-	assert.Equal(t, len(keys), 0)
-	assert.Equal(t, len(vals), 0)
-
 	err = rocksdbKV.MultiSave(kvs)
 	assert.NoError(t, err)
 	keys, vals, err = rocksdbKV.LoadWithPrefix("")
@@ -247,7 +225,7 @@ func TestRocksdbKV_Txn(t *testing.T) {
 	assert.Equal(t, len(vals), 3)
 
 	// test remove and save
-	removePrefix = []string{"abc", "abd"}
+	removePrefix := []string{"abc", "abd"}
 	kvs2 := map[string]string{
 		"abfad": "12345",
 	}
@@ -388,4 +366,21 @@ func TestHasPrefix(t *testing.T) {
 	has, err = db.HasPrefix("key")
 	assert.NoError(t, err)
 	assert.False(t, has)
+}
+
+func TestPredicates(t *testing.T) {
+	dir := t.TempDir()
+	db, err := rocksdbkv.NewRocksdbKV(dir)
+
+	require.NoError(t, err)
+	defer db.Close()
+	defer db.RemoveWithPrefix("")
+
+	err = db.MultiSaveAndRemove(map[string]string{}, []string{}, predicates.ValueEqual("a", "b"))
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, merr.ErrServiceUnavailable)
+
+	err = db.MultiSaveAndRemoveWithPrefix(map[string]string{}, []string{}, predicates.ValueEqual("a", "b"))
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, merr.ErrServiceUnavailable)
 }

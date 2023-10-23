@@ -21,6 +21,12 @@ enum SegmentType {
   Compacted = 3;
 }
 
+enum SegmentLevel {
+  Legacy = 0; // zero value for legacy logic
+  L0 = 1; // L0 segment, contains delta data for current channel
+  L1 = 2; // L1 segment, normal segment, with no extra compaction attribute
+}
+
 service DataCoord {
   rpc GetComponentStates(milvus.GetComponentStatesRequest) returns (milvus.ComponentStates) {}
   rpc GetTimeTickChannel(internal.GetTimeTickChannelRequest) returns(milvus.StringResponse) {}
@@ -54,7 +60,7 @@ service DataCoord {
   rpc GetCompactionStateWithPlans(milvus.GetCompactionPlansRequest) returns (milvus.GetCompactionPlansResponse) {}
 
   rpc WatchChannels(WatchChannelsRequest) returns (WatchChannelsResponse) {}
-  rpc GetFlushState(milvus.GetFlushStateRequest) returns (milvus.GetFlushStateResponse) {}
+  rpc GetFlushState(GetFlushStateRequest) returns (milvus.GetFlushStateResponse) {}
   rpc DropVirtualChannel(DropVirtualChannelRequest) returns (DropVirtualChannelResponse) {}
 
   rpc SetSegmentState(SetSegmentStateRequest) returns (SetSegmentStateResponse) {}
@@ -83,7 +89,7 @@ service DataCoord {
   rpc GetIndexBuildProgress(index.GetIndexBuildProgressRequest) returns (index.GetIndexBuildProgressResponse) {}
 
   rpc GcConfirm(GcConfirmRequest) returns (GcConfirmResponse) {}
-  
+
   rpc ReportDataNodeTtMsgs(ReportDataNodeTtMsgsRequest) returns (common.Status) {}
 }
 
@@ -105,9 +111,14 @@ service DataNode {
   // https://wiki.lfaidata.foundation/display/MIL/MEP+24+--+Support+bulk+load
   rpc Import(ImportTaskRequest) returns(common.Status) {}
 
+  // Deprecated
   rpc ResendSegmentStats(ResendSegmentStatsRequest) returns(ResendSegmentStatsResponse) {}
 
   rpc AddImportSegment(AddImportSegmentRequest) returns(AddImportSegmentResponse) {}
+
+  rpc FlushChannels(FlushChannelsRequest) returns(common.Status) {}
+  rpc NotifyChannelOperation(ChannelOperationsRequest) returns(common.Status) {}
+  rpc CheckChannelOperationProgress(ChannelWatchInfo) returns(ChannelOperationProgressResponse) {}
 }
 
 message FlushRequest {
@@ -125,6 +136,13 @@ message FlushResponse {
   repeated int64 segmentIDs = 4; // newly sealed segments
   repeated int64 flushSegmentIDs = 5; // old flushed segment
   int64 timeOfSeal = 6;
+  uint64 flush_ts = 7;
+}
+
+message FlushChannelsRequest {
+  common.MsgBase base = 1;
+  uint64 flush_ts = 2;
+  repeated string channels = 3;
 }
 
 message SegmentIDRequest {
@@ -248,6 +266,7 @@ message FlushSegmentsRequest {
   int64 dbID = 2;
   int64 collectionID = 3;
   repeated int64 segmentIDs = 4; // segments to flush
+  string channelName = 5; // vchannel name to flush
 }
 
 message SegmentMsg{
@@ -284,7 +303,13 @@ message SegmentInfo {
   // For compatibility reasons, this flag of an old compacted segment may still be False.
   // As for new fields added in the message, they will be populated with their respective field types' default values.
   bool compacted = 19;
-  int64 storage_version = 20;
+
+  // Segment level, indicating compaction segment level
+  // Available value: Legacy, L0, L1
+  // For legacy level, it represent old segment before segment level introduced
+  // so segments with Legacy level shall be treated as L1 segment
+  SegmentLevel level = 20;
+  int64 storage_version = 21;
 }
 
 message SegmentStartPosition {
@@ -431,8 +456,9 @@ message ChannelWatchInfo {
     int64 timeoutTs = 4;
     // the schema of the collection to watch, to avoid get schema rpc issues.
     schema.CollectionSchema schema = 5;
-    // watch progress
+    // watch progress, deprecated
     int32 progress = 6;
+    int64 opID = 7;
 }
 
 enum CompactionType {
@@ -440,6 +466,11 @@ enum CompactionType {
   reserved 1;
   MergeCompaction = 2;
   MixCompaction = 3;
+  // compactionV2
+  SingleCompaction = 4;
+  MinorCompaction = 5;
+  MajorCompaction = 6;
+  Level0DeleteCompaction = 7;
 }
 
 message CompactionStateRequest {
@@ -505,7 +536,7 @@ message WatchChannelsRequest {
   int64 collectionID = 1;
   repeated string channelNames = 2;
   repeated common.KeyDataPair start_positions = 3;
-  schema.CollectionSchema schema = 4; 
+  schema.CollectionSchema schema = 4;
   uint64 create_timestamp = 5;
 }
 
@@ -678,4 +709,23 @@ message GcConfirmResponse {
 message ReportDataNodeTtMsgsRequest {
   common.MsgBase base = 1;
   repeated msg.DataNodeTtMsg msgs = 2; // -1 means whole collection.
+}
+
+message GetFlushStateRequest {
+  repeated int64 segmentIDs = 1;
+  uint64 flush_ts = 2;
+  string db_name = 3;
+  string collection_name = 4;
+  int64 collectionID = 5;
+}
+
+message ChannelOperationsRequest {
+  repeated ChannelWatchInfo infos = 1;
+}
+
+message ChannelOperationProgressResponse {
+  common.Status status = 1;
+  int64 opID = 2;
+  ChannelWatchState state = 3;
+  int32 progress = 4;
 }

@@ -27,7 +27,8 @@
 #include "arrow/type_fwd.h"
 #include "common/Json.h"
 #include "common/Types.h"
-#include "exceptions/EasyAssert.h"
+#include "common/EasyAssert.h"
+#include "fmt/core.h"
 #include "pb/plan.pb.h"
 #include "query/ExprImpl.h"
 #include "query/Relational.h"
@@ -117,7 +118,8 @@ ExecExprVisitor::visit(LogicalUnaryExpr& expr) {
             break;
         }
         default: {
-            PanicInfo("Invalid Unary Op");
+            PanicInfo(OpTypeInvalid,
+                      fmt::format("Invalid Unary Op {}", expr.op_type_));
         }
     }
     AssertInfo(res.size() == row_count_,
@@ -164,7 +166,8 @@ ExecExprVisitor::visit(LogicalBinaryExpr& expr) {
             break;
         }
         default: {
-            PanicInfo("Invalid Binary Op");
+            PanicInfo(OpTypeInvalid,
+                      fmt::format("Invalid Binary Op {}", expr.op_type_));
         }
     }
     AssertInfo(res.size() == row_count_,
@@ -440,7 +443,8 @@ ExecExprVisitor::ExecUnaryRangeVisitorDispatcherImpl(UnaryRangeExpr& expr_raw)
         }
         // TODO: PostfixMatch
         default: {
-            PanicInfo("unsupported range node");
+            PanicInfo(OpTypeInvalid,
+                      fmt::format("unsupported range node {}", op));
         }
     }
 }
@@ -494,11 +498,71 @@ ExecExprVisitor::ExecUnaryRangeVisitorDispatcher(UnaryRangeExpr& expr_raw)
             }
 
             default: {
-                PanicInfo("unsupported range node");
+                PanicInfo(
+                    OpTypeInvalid,
+                    fmt::format("unsupported range node {}", expr.op_type_));
             }
         }
     }
     return ExecUnaryRangeVisitorDispatcherImpl<T>(expr_raw);
+}
+
+template <typename T>
+bool
+CompareTwoJsonArray(T arr1, const proto::plan::Array& arr2) {
+    int json_array_length = 0;
+    if constexpr (std::is_same_v<
+                      T,
+                      simdjson::simdjson_result<simdjson::ondemand::array>>) {
+        json_array_length = arr1.count_elements();
+    }
+    if constexpr (std::is_same_v<T,
+                                 std::vector<simdjson::simdjson_result<
+                                     simdjson::ondemand::value>>>) {
+        json_array_length = arr1.size();
+    }
+    if (arr2.array_size() != json_array_length) {
+        return false;
+    }
+    int i = 0;
+    for (auto&& it : arr1) {
+        switch (arr2.array(i).val_case()) {
+            case proto::plan::GenericValue::kBoolVal: {
+                auto val = it.template get<bool>();
+                if (val.error() || val.value() != arr2.array(i).bool_val()) {
+                    return false;
+                }
+                break;
+            }
+            case proto::plan::GenericValue::kInt64Val: {
+                auto val = it.template get<int64_t>();
+                if (val.error() || val.value() != arr2.array(i).int64_val()) {
+                    return false;
+                }
+                break;
+            }
+            case proto::plan::GenericValue::kFloatVal: {
+                auto val = it.template get<double>();
+                if (val.error() || val.value() != arr2.array(i).float_val()) {
+                    return false;
+                }
+                break;
+            }
+            case proto::plan::GenericValue::kStringVal: {
+                auto val = it.template get<std::string_view>();
+                if (val.error() || val.value() != arr2.array(i).string_val()) {
+                    return false;
+                }
+                break;
+            }
+            default:
+                PanicInfo(DataTypeInvalid,
+                          fmt::format("unsupported data type {}",
+                                      arr2.array(i).val_case()));
+        }
+        i++;
+    }
+    return true;
 }
 
 template <typename ExprValueType>
@@ -547,56 +611,209 @@ ExecExprVisitor::ExecUnaryRangeVisitorDispatcherJson(UnaryRangeExpr& expr_raw)
     switch (op) {
         case OpType::Equal: {
             auto elem_func = [&](const milvus::Json& json) {
-                UnaryRangeJSONCompare(x.value() == val);
+                if constexpr (std::is_same_v<GetType, proto::plan::Array>) {
+                    auto doc = json.doc();
+                    auto array = doc.at_pointer(pointer).get_array();
+                    if (array.error()) {
+                        return false;
+                    }
+                    return CompareTwoJsonArray(array, val);
+                } else {
+                    UnaryRangeJSONCompare(x.value() == val);
+                }
             };
             return ExecRangeVisitorImpl<milvus::Json>(
                 field_id, index_func, elem_func);
         }
         case OpType::NotEqual: {
             auto elem_func = [&](const milvus::Json& json) {
-                UnaryRangeJSONCompareNotEqual(x.value() != val);
+                if constexpr (std::is_same_v<GetType, proto::plan::Array>) {
+                    auto doc = json.doc();
+                    auto array = doc.at_pointer(pointer).get_array();
+                    if (array.error()) {
+                        return false;
+                    }
+                    return !CompareTwoJsonArray(array, val);
+                } else {
+                    UnaryRangeJSONCompareNotEqual(x.value() != val);
+                }
             };
             return ExecRangeVisitorImpl<milvus::Json>(
                 field_id, index_func, elem_func);
         }
         case OpType::GreaterEqual: {
             auto elem_func = [&](const milvus::Json& json) {
-                UnaryRangeJSONCompare(x.value() >= val);
+                if constexpr (std::is_same_v<GetType, proto::plan::Array>) {
+                    return false;
+                } else {
+                    UnaryRangeJSONCompare(x.value() >= val);
+                }
             };
             return ExecRangeVisitorImpl<milvus::Json>(
                 field_id, index_func, elem_func);
         }
         case OpType::GreaterThan: {
             auto elem_func = [&](const milvus::Json& json) {
-                UnaryRangeJSONCompare(x.value() > val);
+                if constexpr (std::is_same_v<GetType, proto::plan::Array>) {
+                    return false;
+                } else {
+                    UnaryRangeJSONCompare(x.value() > val);
+                }
             };
             return ExecRangeVisitorImpl<milvus::Json>(
                 field_id, index_func, elem_func);
         }
         case OpType::LessEqual: {
             auto elem_func = [&](const milvus::Json& json) {
-                UnaryRangeJSONCompare(x.value() <= val);
+                if constexpr (std::is_same_v<GetType, proto::plan::Array>) {
+                    return false;
+                } else {
+                    UnaryRangeJSONCompare(x.value() <= val);
+                }
             };
             return ExecRangeVisitorImpl<milvus::Json>(
                 field_id, index_func, elem_func);
         }
         case OpType::LessThan: {
             auto elem_func = [&](const milvus::Json& json) {
-                UnaryRangeJSONCompare(x.value() < val);
+                if constexpr (std::is_same_v<GetType, proto::plan::Array>) {
+                    return false;
+                } else {
+                    UnaryRangeJSONCompare(x.value() < val);
+                }
             };
             return ExecRangeVisitorImpl<milvus::Json>(
                 field_id, index_func, elem_func);
         }
         case OpType::PrefixMatch: {
             auto elem_func = [&](const milvus::Json& json) {
-                UnaryRangeJSONCompare(Match(ExprValueType(x.value()), val, op));
+                if constexpr (std::is_same_v<GetType, proto::plan::Array>) {
+                    return false;
+                } else {
+                    UnaryRangeJSONCompare(
+                        Match(ExprValueType(x.value()), val, op));
+                }
             };
             return ExecRangeVisitorImpl<milvus::Json>(
                 field_id, index_func, elem_func);
         }
         // TODO: PostfixMatch
         default: {
-            PanicInfo("unsupported range node");
+            PanicInfo(OpTypeInvalid,
+                      fmt::format("unsupported range node {}", op));
+        }
+    }
+}
+
+template <typename ExprValueType>
+auto
+ExecExprVisitor::ExecUnaryRangeVisitorDispatcherArray(UnaryRangeExpr& expr_raw)
+    -> BitsetType {
+    using Index = index::ScalarIndex<milvus::ArrayView>;
+    auto& expr = static_cast<UnaryRangeExprImpl<ExprValueType>&>(expr_raw);
+
+    auto op = expr.op_type_;
+    auto val = expr.value_;
+    auto field_id = expr.column_.field_id;
+    auto index_func = [=](Index* index) { return TargetBitmap{}; };
+    int index = -1;
+    if (expr.column_.nested_path.size() > 0) {
+        index = std::stoi(expr.column_.nested_path[0]);
+    }
+    using GetType =
+        std::conditional_t<std::is_same_v<ExprValueType, std::string>,
+                           std::string_view,
+                           ExprValueType>;
+
+    switch (op) {
+        case OpType::Equal: {
+            auto elem_func = [&](const milvus::ArrayView& array) {
+                if constexpr (std::is_same_v<GetType, proto::plan::Array>) {
+                    return array.is_same_array(val);
+                } else {
+                    auto array_data = array.template get_data<GetType>(index);
+                    return array_data == val;
+                }
+            };
+            return ExecRangeVisitorImpl<milvus::ArrayView>(
+                field_id, index_func, elem_func);
+        }
+        case OpType::NotEqual: {
+            auto elem_func = [&](const milvus::ArrayView& array) {
+                if constexpr (std::is_same_v<GetType, proto::plan::Array>) {
+                    return !array.is_same_array(val);
+                } else {
+                    auto array_data = array.template get_data<GetType>(index);
+                    return array_data != val;
+                }
+            };
+            return ExecRangeVisitorImpl<milvus::ArrayView>(
+                field_id, index_func, elem_func);
+        }
+        case OpType::GreaterEqual: {
+            auto elem_func = [&](const milvus::ArrayView& array) {
+                if constexpr (std::is_same_v<GetType, proto::plan::Array>) {
+                    return false;
+                } else {
+                    auto array_data = array.template get_data<GetType>(index);
+                    return array_data >= val;
+                }
+            };
+            return ExecRangeVisitorImpl<milvus::ArrayView>(
+                field_id, index_func, elem_func);
+        }
+        case OpType::GreaterThan: {
+            auto elem_func = [&](const milvus::ArrayView& array) {
+                if constexpr (std::is_same_v<GetType, proto::plan::Array>) {
+                    return false;
+                } else {
+                    auto array_data = array.template get_data<GetType>(index);
+                    return array_data > val;
+                }
+            };
+            return ExecRangeVisitorImpl<milvus::ArrayView>(
+                field_id, index_func, elem_func);
+        }
+        case OpType::LessEqual: {
+            auto elem_func = [&](const milvus::ArrayView& array) {
+                if constexpr (std::is_same_v<GetType, proto::plan::Array>) {
+                    return false;
+                } else {
+                    auto array_data = array.template get_data<GetType>(index);
+                    return array_data <= val;
+                }
+            };
+            return ExecRangeVisitorImpl<milvus::ArrayView>(
+                field_id, index_func, elem_func);
+        }
+        case OpType::LessThan: {
+            auto elem_func = [&](const milvus::ArrayView& array) {
+                if constexpr (std::is_same_v<GetType, proto::plan::Array>) {
+                    return false;
+                } else {
+                    auto array_data = array.template get_data<GetType>(index);
+                    return array_data < val;
+                }
+            };
+            return ExecRangeVisitorImpl<milvus::ArrayView>(
+                field_id, index_func, elem_func);
+        }
+        case OpType::PrefixMatch: {
+            auto elem_func = [&](const milvus::ArrayView& array) {
+                if constexpr (std::is_same_v<GetType, proto::plan::Array>) {
+                    return false;
+                } else {
+                    auto array_data = array.template get_data<GetType>(index);
+                    return Match(array_data, val, op);
+                }
+            };
+            return ExecRangeVisitorImpl<milvus::ArrayView>(
+                field_id, index_func, elem_func);
+        }
+        // TODO: PostfixMatch
+        default: {
+            PanicInfo(OpTypeInvalid,
+                      fmt::format("unsupported range node {}", op));
         }
     }
 }
@@ -687,7 +904,9 @@ ExecExprVisitor::ExecBinaryArithOpEvalRangeVisitorDispatcher(
                         expr.column_.field_id, index_func, elem_func);
                 }
                 default: {
-                    PanicInfo("unsupported arithmetic operation");
+                    PanicInfo(
+                        OpTypeInvalid,
+                        fmt::format("unsupported arithmetic operation {}", op));
                 }
             }
         }
@@ -754,12 +973,17 @@ ExecExprVisitor::ExecBinaryArithOpEvalRangeVisitorDispatcher(
                         expr.column_.field_id, index_func, elem_func);
                 }
                 default: {
-                    PanicInfo("unsupported arithmetic operation");
+                    PanicInfo(
+                        OpTypeInvalid,
+                        fmt::format("unsupported arithmetic operation {}", op));
                 }
             }
         }
         default: {
-            PanicInfo("unsupported range node with arithmetic operation");
+            PanicInfo(
+                OpTypeInvalid,
+                fmt::format(
+                    "unsupported range node with arithmetic operation {}", op));
         }
     }
 }
@@ -873,8 +1097,27 @@ ExecExprVisitor::ExecBinaryArithOpEvalRangeVisitorDispatcherJson(
                     return ExecDataRangeVisitorImpl<milvus::Json>(
                         expr.column_.field_id, index_func, elem_func);
                 }
+                case ArithOpType::ArrayLength: {
+                    auto index_func = [val, right_operand](Index* index,
+                                                           size_t offset) {
+                        return false;
+                    };
+                    auto elem_func = [&](const milvus::Json& json) {
+                        int array_length = 0;
+                        auto doc = json.doc();
+                        auto array = doc.at_pointer(pointer).get_array();
+                        if (!array.error()) {
+                            array_length = array.count_elements();
+                        }
+                        return array_length == val;
+                    };
+                    return ExecDataRangeVisitorImpl<milvus::Json>(
+                        expr.column_.field_id, index_func, elem_func);
+                }
                 default: {
-                    PanicInfo("unsupported arithmetic operation");
+                    PanicInfo(
+                        OpTypeInvalid,
+                        fmt::format("unsupported arithmetic operation {}", op));
                 }
             }
         }
@@ -941,13 +1184,228 @@ ExecExprVisitor::ExecBinaryArithOpEvalRangeVisitorDispatcherJson(
                     return ExecDataRangeVisitorImpl<milvus::Json>(
                         expr.column_.field_id, index_func, elem_func);
                 }
+                case ArithOpType::ArrayLength: {
+                    auto index_func = [val, right_operand](Index* index,
+                                                           size_t offset) {
+                        return false;
+                    };
+                    auto elem_func = [&](const milvus::Json& json) {
+                        int array_length = 0;
+                        auto doc = json.doc();
+                        auto array = doc.at_pointer(pointer).get_array();
+                        if (!array.error()) {
+                            array_length = array.count_elements();
+                        }
+                        return array_length != val;
+                    };
+                    return ExecDataRangeVisitorImpl<milvus::Json>(
+                        expr.column_.field_id, index_func, elem_func);
+                }
                 default: {
-                    PanicInfo("unsupported arithmetic operation");
+                    PanicInfo(
+                        OpTypeInvalid,
+                        fmt::format("unsupported arithmetic operation {}", op));
                 }
             }
         }
         default: {
-            PanicInfo("unsupported range node with arithmetic operation");
+            PanicInfo(
+                OpTypeInvalid,
+                fmt::format(
+                    "unsupported range node with arithmetic operation {}", op));
+        }
+    }
+}  // namespace milvus::query
+
+template <typename ExprValueType>
+auto
+ExecExprVisitor::ExecBinaryArithOpEvalRangeVisitorDispatcherArray(
+    BinaryArithOpEvalRangeExpr& expr_raw) -> BitsetType {
+    auto& expr =
+        static_cast<BinaryArithOpEvalRangeExprImpl<ExprValueType>&>(expr_raw);
+    using Index = index::ScalarIndex<milvus::ArrayView>;
+
+    auto arith_op = expr.arith_op_;
+    auto right_operand = expr.right_operand_;
+    auto op = expr.op_type_;
+    auto val = expr.value_;
+    int index = -1;
+    if (expr.column_.nested_path.size() > 0) {
+        index = std::stoi(expr.column_.nested_path[0]);
+    }
+    using GetType =
+        std::conditional_t<std::is_same_v<ExprValueType, std::string>,
+                           std::string_view,
+                           ExprValueType>;
+
+    switch (op) {
+        case OpType::Equal: {
+            switch (arith_op) {
+                case ArithOpType::Add: {
+                    auto index_func = [val, right_operand](Index* index,
+                                                           size_t offset) {
+                        return false;
+                    };
+                    auto elem_func = [&](const milvus::ArrayView& array) {
+                        auto value = array.get_data<GetType>(index);
+                        return value + right_operand == val;
+                    };
+                    return ExecDataRangeVisitorImpl<milvus::ArrayView>(
+                        expr.column_.field_id, index_func, elem_func);
+                }
+                case ArithOpType::Sub: {
+                    auto index_func = [val, right_operand](Index* index,
+                                                           size_t offset) {
+                        return false;
+                    };
+                    auto elem_func = [&](const milvus::ArrayView& array) {
+                        auto value = array.get_data<GetType>(index);
+                        return value - right_operand == val;
+                    };
+                    return ExecDataRangeVisitorImpl<milvus::ArrayView>(
+                        expr.column_.field_id, index_func, elem_func);
+                }
+                case ArithOpType::Mul: {
+                    auto index_func = [val, right_operand](Index* index,
+                                                           size_t offset) {
+                        return false;
+                    };
+                    auto elem_func = [&](const milvus::ArrayView& array) {
+                        auto value = array.get_data<GetType>(index);
+                        return value * right_operand == val;
+                    };
+                    return ExecDataRangeVisitorImpl<milvus::ArrayView>(
+                        expr.column_.field_id, index_func, elem_func);
+                }
+                case ArithOpType::Div: {
+                    auto index_func = [val, right_operand](Index* index,
+                                                           size_t offset) {
+                        return false;
+                    };
+                    auto elem_func = [&](const milvus::ArrayView& array) {
+                        auto value = array.get_data<GetType>(index);
+                        return value / right_operand == val;
+                    };
+                    return ExecDataRangeVisitorImpl<milvus::ArrayView>(
+                        expr.column_.field_id, index_func, elem_func);
+                }
+                case ArithOpType::Mod: {
+                    auto index_func = [val, right_operand](Index* index,
+                                                           size_t offset) {
+                        return false;
+                    };
+                    auto elem_func = [&](const milvus::ArrayView& array) {
+                        auto value = array.get_data<GetType>(index);
+                        return static_cast<ExprValueType>(
+                                   fmod(value, right_operand)) == val;
+                    };
+                    return ExecDataRangeVisitorImpl<milvus::ArrayView>(
+                        expr.column_.field_id, index_func, elem_func);
+                }
+                case ArithOpType::ArrayLength: {
+                    auto index_func = [val, right_operand](Index* index,
+                                                           size_t offset) {
+                        return false;
+                    };
+                    auto elem_func = [&](const milvus::ArrayView& array) {
+                        return array.length() == val;
+                    };
+                    return ExecDataRangeVisitorImpl<milvus::ArrayView>(
+                        expr.column_.field_id, index_func, elem_func);
+                }
+                default: {
+                    PanicInfo(
+                        OpTypeInvalid,
+                        fmt::format("unsupported arithmetic operation {}", op));
+                }
+            }
+        }
+        case OpType::NotEqual: {
+            switch (arith_op) {
+                case ArithOpType::Add: {
+                    auto index_func = [val, right_operand](Index* index,
+                                                           size_t offset) {
+                        return false;
+                    };
+                    auto elem_func = [&](const milvus::ArrayView& array) {
+                        auto value = array.get_data<GetType>(index);
+                        return value + right_operand != val;
+                    };
+                    return ExecDataRangeVisitorImpl<milvus::ArrayView>(
+                        expr.column_.field_id, index_func, elem_func);
+                }
+                case ArithOpType::Sub: {
+                    auto index_func = [val, right_operand](Index* index,
+                                                           size_t offset) {
+                        return false;
+                    };
+                    auto elem_func = [&](const milvus::ArrayView& array) {
+                        auto value = array.get_data<GetType>(index);
+                        return value - right_operand != val;
+                    };
+                    return ExecDataRangeVisitorImpl<milvus::ArrayView>(
+                        expr.column_.field_id, index_func, elem_func);
+                }
+                case ArithOpType::Mul: {
+                    auto index_func = [val, right_operand](Index* index,
+                                                           size_t offset) {
+                        return false;
+                    };
+                    auto elem_func = [&](const milvus::ArrayView& array) {
+                        auto value = array.get_data<GetType>(index);
+                        return value * right_operand != val;
+                    };
+                    return ExecDataRangeVisitorImpl<milvus::ArrayView>(
+                        expr.column_.field_id, index_func, elem_func);
+                }
+                case ArithOpType::Div: {
+                    auto index_func = [val, right_operand](Index* index,
+                                                           size_t offset) {
+                        return false;
+                    };
+                    auto elem_func = [&](const milvus::ArrayView& array) {
+                        auto value = array.get_data<GetType>(index);
+                        return value / right_operand != val;
+                    };
+                    return ExecDataRangeVisitorImpl<milvus::ArrayView>(
+                        expr.column_.field_id, index_func, elem_func);
+                }
+                case ArithOpType::Mod: {
+                    auto index_func = [val, right_operand](Index* index,
+                                                           size_t offset) {
+                        return false;
+                    };
+                    auto elem_func = [&](const milvus::ArrayView& array) {
+                        auto value = array.get_data<GetType>(index);
+                        return static_cast<ExprValueType>(
+                                   fmod(value, right_operand)) != val;
+                    };
+                    return ExecDataRangeVisitorImpl<milvus::ArrayView>(
+                        expr.column_.field_id, index_func, elem_func);
+                }
+                case ArithOpType::ArrayLength: {
+                    auto index_func = [val, right_operand](Index* index,
+                                                           size_t offset) {
+                        return false;
+                    };
+                    auto elem_func = [&](const milvus::ArrayView& array) {
+                        return array.length() != val;
+                    };
+                    return ExecDataRangeVisitorImpl<milvus::ArrayView>(
+                        expr.column_.field_id, index_func, elem_func);
+                }
+                default: {
+                    PanicInfo(
+                        OpTypeInvalid,
+                        fmt::format("unsupported arithmetic operation {}", op));
+                }
+            }
+        }
+        default: {
+            PanicInfo(
+                OpTypeInvalid,
+                fmt::format(
+                    "unsupported range node with arithmetic operation {}", op));
         }
     }
 }  // namespace milvus::query
@@ -1092,6 +1550,60 @@ ExecExprVisitor::ExecBinaryRangeVisitorDispatcherJson(BinaryRangeExpr& expr_raw)
     }
 }
 
+template <typename ExprValueType>
+auto
+ExecExprVisitor::ExecBinaryRangeVisitorDispatcherArray(
+    BinaryRangeExpr& expr_raw) -> BitsetType {
+    using Index = index::ScalarIndex<milvus::ArrayView>;
+    using GetType =
+        std::conditional_t<std::is_same_v<ExprValueType, std::string>,
+                           std::string_view,
+                           ExprValueType>;
+
+    auto& expr = static_cast<BinaryRangeExprImpl<ExprValueType>&>(expr_raw);
+    bool lower_inclusive = expr.lower_inclusive_;
+    bool upper_inclusive = expr.upper_inclusive_;
+    ExprValueType val1 = expr.lower_value_;
+    ExprValueType val2 = expr.upper_value_;
+    int index = -1;
+    if (expr.column_.nested_path.size() > 0) {
+        index = std::stoi(expr.column_.nested_path[0]);
+    }
+
+    // no json index now
+    auto index_func = [=](Index* index) { return TargetBitmap{}; };
+
+    if (lower_inclusive && upper_inclusive) {
+        auto elem_func = [&](const milvus::ArrayView& array) {
+            auto value = array.get_data<GetType>(index);
+            return val1 <= value && value <= val2;
+        };
+        return ExecRangeVisitorImpl<milvus::ArrayView>(
+            expr.column_.field_id, index_func, elem_func);
+    } else if (lower_inclusive && !upper_inclusive) {
+        auto elem_func = [&](const milvus::ArrayView& array) {
+            auto value = array.get_data<GetType>(index);
+            return val1 <= value && value < val2;
+        };
+        return ExecRangeVisitorImpl<milvus::ArrayView>(
+            expr.column_.field_id, index_func, elem_func);
+    } else if (!lower_inclusive && upper_inclusive) {
+        auto elem_func = [&](const milvus::ArrayView& array) {
+            auto value = array.get_data<GetType>(index);
+            return val1 < value && value <= val2;
+        };
+        return ExecRangeVisitorImpl<milvus::ArrayView>(
+            expr.column_.field_id, index_func, elem_func);
+    } else {
+        auto elem_func = [&](const milvus::ArrayView& array) {
+            auto value = array.get_data<GetType>(index);
+            return val1 < value && value < val2;
+        };
+        return ExecRangeVisitorImpl<milvus::ArrayView>(
+            expr.column_.field_id, index_func, elem_func);
+    }
+}
+
 void
 ExecExprVisitor::visit(UnaryRangeExpr& expr) {
     auto& field_meta = segment_.get_schema()[expr.column_.field_id];
@@ -1150,14 +1662,47 @@ ExecExprVisitor::visit(UnaryRangeExpr& expr) {
                     res =
                         ExecUnaryRangeVisitorDispatcherJson<std::string>(expr);
                     break;
+                case proto::plan::GenericValue::ValCase::kArrayVal:
+                    res =
+                        ExecUnaryRangeVisitorDispatcherJson<proto::plan::Array>(
+                            expr);
+                    break;
                 default:
                     PanicInfo(
+                        DataTypeInvalid,
+                        fmt::format("unknown data type: {}", expr.val_case_));
+            }
+            break;
+        }
+        case DataType::ARRAY: {
+            switch (expr.val_case_) {
+                case proto::plan::GenericValue::ValCase::kBoolVal:
+                    res = ExecUnaryRangeVisitorDispatcherArray<bool>(expr);
+                    break;
+                case proto::plan::GenericValue::ValCase::kInt64Val:
+                    res = ExecUnaryRangeVisitorDispatcherArray<int64_t>(expr);
+                    break;
+                case proto::plan::GenericValue::ValCase::kFloatVal:
+                    res = ExecUnaryRangeVisitorDispatcherArray<double>(expr);
+                    break;
+                case proto::plan::GenericValue::ValCase::kStringVal:
+                    res =
+                        ExecUnaryRangeVisitorDispatcherArray<std::string>(expr);
+                    break;
+                case proto::plan::GenericValue::ValCase::kArrayVal:
+                    res = ExecUnaryRangeVisitorDispatcherArray<
+                        proto::plan::Array>(expr);
+                    break;
+                default:
+                    PanicInfo(
+                        DataTypeInvalid,
                         fmt::format("unknown data type: {}", expr.val_case_));
             }
             break;
         }
         default:
-            PanicInfo(fmt::format("unsupported data type: {}",
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported data type: {}",
                                   expr.column_.data_type));
     }
     AssertInfo(res.size() == row_count_,
@@ -1216,6 +1761,28 @@ ExecExprVisitor::visit(BinaryArithOpEvalRangeExpr& expr) {
                 }
                 default: {
                     PanicInfo(
+                        DataTypeInvalid,
+                        fmt::format("unsupported value type {} in expression",
+                                    expr.val_case_));
+                }
+            }
+            break;
+        }
+        case DataType::ARRAY: {
+            switch (expr.val_case_) {
+                case proto::plan::GenericValue::ValCase::kInt64Val: {
+                    res = ExecBinaryArithOpEvalRangeVisitorDispatcherArray<
+                        int64_t>(expr);
+                    break;
+                }
+                case proto::plan::GenericValue::ValCase::kFloatVal: {
+                    res = ExecBinaryArithOpEvalRangeVisitorDispatcherArray<
+                        double>(expr);
+                    break;
+                }
+                default: {
+                    PanicInfo(
+                        DataTypeInvalid,
                         fmt::format("unsupported value type {} in expression",
                                     expr.val_case_));
                 }
@@ -1223,7 +1790,8 @@ ExecExprVisitor::visit(BinaryArithOpEvalRangeExpr& expr) {
             break;
         }
         default:
-            PanicInfo(fmt::format("unsupported data type: {}",
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported data type: {}",
                                   expr.column_.data_type));
     }
     AssertInfo(res.size() == row_count_,
@@ -1276,10 +1844,6 @@ ExecExprVisitor::visit(BinaryRangeExpr& expr) {
         }
         case DataType::JSON: {
             switch (expr.val_case_) {
-                case proto::plan::GenericValue::ValCase::kBoolVal: {
-                    res = ExecBinaryRangeVisitorDispatcherJson<bool>(expr);
-                    break;
-                }
                 case proto::plan::GenericValue::ValCase::kInt64Val: {
                     res = ExecBinaryRangeVisitorDispatcherJson<int64_t>(expr);
                     break;
@@ -1295,6 +1859,31 @@ ExecExprVisitor::visit(BinaryRangeExpr& expr) {
                 }
                 default: {
                     PanicInfo(
+                        DataTypeInvalid,
+                        fmt::format("unsupported value type {} in expression",
+                                    expr.val_case_));
+                }
+            }
+            break;
+        }
+        case DataType::ARRAY: {
+            switch (expr.val_case_) {
+                case proto::plan::GenericValue::ValCase::kInt64Val: {
+                    res = ExecBinaryRangeVisitorDispatcherArray<int64_t>(expr);
+                    break;
+                }
+                case proto::plan::GenericValue::ValCase::kFloatVal: {
+                    res = ExecBinaryRangeVisitorDispatcherArray<double>(expr);
+                    break;
+                }
+                case proto::plan::GenericValue::ValCase::kStringVal: {
+                    res = ExecBinaryRangeVisitorDispatcherArray<std::string>(
+                        expr);
+                    break;
+                }
+                default: {
+                    PanicInfo(
+                        DataTypeInvalid,
                         fmt::format("unsupported value type {} in expression",
                                     expr.val_case_));
                 }
@@ -1302,7 +1891,8 @@ ExecExprVisitor::visit(BinaryRangeExpr& expr) {
             break;
         }
         default:
-            PanicInfo(fmt::format("unsupported data type: {}",
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported data type: {}",
                                   expr.column_.data_type));
     }
     AssertInfo(res.size() == row_count_,
@@ -1320,7 +1910,7 @@ struct relational {
     template <typename... T>
     bool
     operator()(T const&...) const {
-        PanicInfo("incompatible operands");
+        PanicInfo(OpTypeInvalid, "incompatible operands");
     }
 };
 
@@ -1393,7 +1983,10 @@ ExecExprVisitor::ExecCompareLeftType(const FieldId& left_field_id,
                     left_raw_data, right_field_id, chunk_id, cmp_func);
                 break;
             default:
-                PanicInfo("unsupported left datatype of compare expr");
+                PanicInfo(
+                    DataTypeInvalid,
+                    fmt::format("unsupported right datatype {} of compare expr",
+                                right_field_type));
         }
         results.push_back(result);
     }
@@ -1444,7 +2037,10 @@ ExecExprVisitor::ExecCompareExprDispatcherForNonIndexedSegment(
                                                         expr.right_data_type_,
                                                         cmp_func);
         default:
-            PanicInfo("unsupported right datatype of compare expr");
+            PanicInfo(
+                DataTypeInvalid,
+                fmt::format("unsupported right datatype {} of compare expr",
+                            expr.left_data_type_));
     }
 }
 
@@ -1649,7 +2245,8 @@ ExecExprVisitor::ExecCompareExprDispatcher(CompareExpr& expr, Op op)
                     }
                 }
                 default:
-                    PanicInfo(fmt::format("unsupported data type: {}", type));
+                    PanicInfo(DataTypeInvalid,
+                              fmt::format("unsupported data type {}", type));
             }
         };
         auto left = getChunkData(
@@ -1717,7 +2314,8 @@ ExecExprVisitor::visit(CompareExpr& expr) {
             // case OpType::PostfixMatch: {
             // }
         default: {
-            PanicInfo("unsupported optype");
+            PanicInfo(OpTypeInvalid,
+                      fmt::format("unsupported optype {}", expr.op_type_));
         }
     }
     AssertInfo(res.size() == row_count_,
@@ -1761,7 +2359,9 @@ ExecExprVisitor::ExecTermVisitorImpl(TermExpr& expr_raw) -> BitsetType {
                 break;
             }
             default: {
-                PanicInfo("unsupported type");
+                PanicInfo(
+                    DataTypeInvalid,
+                    fmt::format("unsupported data type {}", expr.val_case_));
             }
         }
 
@@ -1773,7 +2373,7 @@ ExecExprVisitor::ExecTermVisitorImpl(TermExpr& expr_raw) -> BitsetType {
             bitset[_offset] = true;
             cached_offsets.push_back(_offset);
         }
-        // If enable plan_visitor pk index cache, pass offsets to it
+        // If enable plan_visitor pk index cache, pass offsets_ to it
         if (plan_visitor_ != nullptr) {
             plan_visitor_->SetExprUsePkIndex(true);
             plan_visitor_->SetExprCacheOffsets(std::move(cached_offsets));
@@ -1910,6 +2510,39 @@ ExecExprVisitor::ExecTermJsonFieldInVariable(TermExpr& expr_raw) -> BitsetType {
 
 template <typename ExprValueType>
 auto
+ExecExprVisitor::ExecTermArrayFieldInVariable(TermExpr& expr_raw)
+    -> BitsetType {
+    using Index = index::ScalarIndex<milvus::ArrayView>;
+    auto& expr = static_cast<TermExprImpl<ExprValueType>&>(expr_raw);
+    auto index_func = [](Index* index) { return TargetBitmap{}; };
+    int index = -1;
+    if (expr.column_.nested_path.size() > 0) {
+        index = std::stoi(expr.column_.nested_path[0]);
+    }
+    std::unordered_set<ExprValueType> term_set(expr.terms_.begin(),
+                                               expr.terms_.end());
+    using GetType =
+        std::conditional_t<std::is_same_v<ExprValueType, std::string>,
+                           std::string_view,
+                           ExprValueType>;
+
+    if (term_set.empty()) {
+        auto elem_func = [=](const milvus::ArrayView& array) { return false; };
+        return ExecRangeVisitorImpl<milvus::ArrayView>(
+            expr.column_.field_id, index_func, elem_func);
+    }
+
+    auto elem_func = [&term_set, &index](const milvus::ArrayView& array) {
+        auto value = array.get_data<GetType>(index);
+        return term_set.find(ExprValueType(value)) != term_set.end();
+    };
+
+    return ExecRangeVisitorImpl<milvus::ArrayView>(
+        expr.column_.field_id, index_func, elem_func);
+}
+
+template <typename ExprValueType>
+auto
 ExecExprVisitor::ExecTermJsonVariableInField(TermExpr& expr_raw) -> BitsetType {
     using Index = index::ScalarIndex<milvus::Json>;
     auto& expr = static_cast<TermExprImpl<ExprValueType>&>(expr_raw);
@@ -1947,12 +2580,53 @@ ExecExprVisitor::ExecTermJsonVariableInField(TermExpr& expr_raw) -> BitsetType {
 
 template <typename ExprValueType>
 auto
+ExecExprVisitor::ExecTermArrayVariableInField(TermExpr& expr_raw)
+    -> BitsetType {
+    using Index = index::ScalarIndex<milvus::ArrayView>;
+    auto& expr = static_cast<TermExprImpl<ExprValueType>&>(expr_raw);
+    auto index_func = [](Index* index) { return TargetBitmap{}; };
+
+    AssertInfo(expr.terms_.size() == 1,
+               "element length in json array must be one");
+    ExprValueType target_val = expr.terms_[0];
+
+    auto elem_func = [&target_val](const milvus::ArrayView& array) {
+        using GetType =
+            std::conditional_t<std::is_same_v<ExprValueType, std::string>,
+                               std::string_view,
+                               ExprValueType>;
+        for (int i = 0; i < array.length(); i++) {
+            auto val = array.template get_data<GetType>(i);
+            if (val == target_val) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    return ExecRangeVisitorImpl<milvus::ArrayView>(
+        expr.column_.field_id, index_func, elem_func);
+}
+
+template <typename ExprValueType>
+auto
 ExecExprVisitor::ExecTermVisitorImplTemplateJson(TermExpr& expr_raw)
     -> BitsetType {
     if (expr_raw.is_in_field_) {
         return ExecTermJsonVariableInField<ExprValueType>(expr_raw);
     } else {
         return ExecTermJsonFieldInVariable<ExprValueType>(expr_raw);
+    }
+}
+
+template <typename ExprValueType>
+auto
+ExecExprVisitor::ExecTermVisitorImplTemplateArray(TermExpr& expr_raw)
+    -> BitsetType {
+    if (expr_raw.is_in_field_) {
+        return ExecTermArrayVariableInField<ExprValueType>(expr_raw);
+    } else {
+        return ExecTermArrayFieldInVariable<ExprValueType>(expr_raw);
     }
 }
 
@@ -2018,13 +2692,39 @@ ExecExprVisitor::visit(TermExpr& expr) {
                     res = ExecTermVisitorImplTemplateJson<bool>(expr);
                     break;
                 default:
+                    PanicInfo(DataTypeInvalid,
+                              fmt::format("unsupported data type {}",
+                                          expr.val_case_));
+            }
+            break;
+        }
+        case DataType::ARRAY: {
+            switch (expr.val_case_) {
+                case proto::plan::GenericValue::ValCase::kBoolVal:
+                    res = ExecTermVisitorImplTemplateArray<bool>(expr);
+                    break;
+                case proto::plan::GenericValue::ValCase::kInt64Val:
+                    res = ExecTermVisitorImplTemplateArray<int64_t>(expr);
+                    break;
+                case proto::plan::GenericValue::ValCase::kFloatVal:
+                    res = ExecTermVisitorImplTemplateArray<double>(expr);
+                    break;
+                case proto::plan::GenericValue::ValCase::kStringVal:
+                    res = ExecTermVisitorImplTemplateArray<std::string>(expr);
+                    break;
+                case proto::plan::GenericValue::ValCase::VAL_NOT_SET:
+                    res = ExecTermVisitorImplTemplateArray<bool>(expr);
+                    break;
+                default:
                     PanicInfo(
+                        Unsupported,
                         fmt::format("unknown data type: {}", expr.val_case_));
             }
             break;
         }
         default:
-            PanicInfo(fmt::format("unsupported data type: {}",
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported data type {}",
                                   expr.column_.data_type));
     }
     AssertInfo(res.size() == row_count_,
@@ -2052,7 +2752,8 @@ ExecExprVisitor::visit(ExistsExpr& expr) {
             break;
         }
         default:
-            PanicInfo(fmt::format("unsupported data type {}",
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported data type {}",
                                   expr.column_.data_type));
     }
     AssertInfo(res.size() == row_count_,
@@ -2065,63 +2766,6 @@ ExecExprVisitor::visit(AlwaysTrueExpr& expr) {
     BitsetType res(row_count_);
     res.set();
     bitset_opt_ = std::move(res);
-}
-
-template <typename T>
-bool
-compareTwoJsonArray(T arr1, const proto::plan::Array& arr2) {
-    int json_array_length = 0;
-    if constexpr (std::is_same_v<
-                      T,
-                      simdjson::simdjson_result<simdjson::ondemand::array>>) {
-        json_array_length = arr1.count_elements();
-    }
-    if constexpr (std::is_same_v<T,
-                                 std::vector<simdjson::simdjson_result<
-                                     simdjson::ondemand::value>>>) {
-        json_array_length = arr1.size();
-    }
-    if (arr2.array_size() != json_array_length) {
-        return false;
-    }
-    int i = 0;
-    for (auto&& it : arr1) {
-        switch (arr2.array(i).val_case()) {
-            case proto::plan::GenericValue::kBoolVal: {
-                auto val = it.template get<bool>();
-                if (val.error() || val.value() != arr2.array(i).bool_val()) {
-                    return false;
-                }
-                break;
-            }
-            case proto::plan::GenericValue::kInt64Val: {
-                auto val = it.template get<int64_t>();
-                if (val.error() || val.value() != arr2.array(i).int64_val()) {
-                    return false;
-                }
-                break;
-            }
-            case proto::plan::GenericValue::kFloatVal: {
-                auto val = it.template get<double>();
-                if (val.error() || val.value() != arr2.array(i).float_val()) {
-                    return false;
-                }
-                break;
-            }
-            case proto::plan::GenericValue::kStringVal: {
-                auto val = it.template get<std::string_view>();
-                if (val.error() || val.value() != arr2.array(i).string_val()) {
-                    return false;
-                }
-                break;
-            }
-            default:
-                PanicInfo(fmt::format("unsupported data type {}",
-                                      arr2.array(i).val_case()));
-        }
-        i++;
-    }
-    return true;
 }
 
 template <typename ExprValueType>
@@ -2161,6 +2805,35 @@ ExecExprVisitor::ExecJsonContains(JsonContainsExpr& expr_raw) -> BitsetType {
         expr.column_.field_id, index_func, elem_func);
 }
 
+template <typename ExprValueType>
+auto
+ExecExprVisitor::ExecArrayContains(JsonContainsExpr& expr_raw) -> BitsetType {
+    using Index = index::ScalarIndex<milvus::ArrayView>;
+    auto& expr = static_cast<JsonContainsExprImpl<ExprValueType>&>(expr_raw);
+    AssertInfo(expr.column_.nested_path.size() == 0,
+               "[ExecArrayContains]nested path must be null");
+    auto index_func = [](Index* index) { return TargetBitmap{}; };
+    using GetType =
+        std::conditional_t<std::is_same_v<ExprValueType, std::string>,
+                           std::string_view,
+                           ExprValueType>;
+    std::unordered_set<GetType> elements;
+    for (auto const& element : expr.elements_) {
+        elements.insert(element);
+    }
+    auto elem_func = [&elements](const milvus::ArrayView& array) {
+        for (int i = 0; i < array.length(); ++i) {
+            if (elements.count(array.template get_data<GetType>(i)) > 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    return ExecRangeVisitorImpl<milvus::ArrayView>(
+        expr.column_.field_id, index_func, elem_func);
+}
+
 auto
 ExecExprVisitor::ExecJsonContainsArray(JsonContainsExpr& expr_raw)
     -> BitsetType {
@@ -2188,7 +2861,7 @@ ExecExprVisitor::ExecJsonContainsArray(JsonContainsExpr& expr_raw)
                 json_array.emplace_back(e);
             }
             for (auto const& element : elements) {
-                if (compareTwoJsonArray(json_array, element)) {
+                if (CompareTwoJsonArray(json_array, element)) {
                     return true;
                 }
             }
@@ -2264,13 +2937,14 @@ ExecExprVisitor::ExecJsonContainsWithDiffType(JsonContainsExpr& expr_raw)
                         if (val.error()) {
                             continue;
                         }
-                        if (compareTwoJsonArray(val, element.array_val())) {
+                        if (CompareTwoJsonArray(val, element.array_val())) {
                             return true;
                         }
                         break;
                     }
                     default:
-                        PanicInfo(fmt::format("unsupported data type {}",
+                        PanicInfo(DataTypeInvalid,
+                                  fmt::format("unsupported data type {}",
                                               element.val_case()));
                 }
             }
@@ -2324,6 +2998,41 @@ ExecExprVisitor::ExecJsonContainsAll(JsonContainsExpr& expr_raw) -> BitsetType {
         expr.column_.field_id, index_func, elem_func);
 }
 
+template <typename ExprValueType>
+auto
+ExecExprVisitor::ExecArrayContainsAll(JsonContainsExpr& expr_raw)
+    -> BitsetType {
+    using Index = index::ScalarIndex<milvus::ArrayView>;
+    auto& expr = static_cast<JsonContainsExprImpl<ExprValueType>&>(expr_raw);
+    AssertInfo(expr.column_.nested_path.size() == 0,
+               "[ExecArrayContains]nested path must be null");
+    auto index_func = [](Index* index) { return TargetBitmap{}; };
+    using GetType =
+        std::conditional_t<std::is_same_v<ExprValueType, std::string>,
+                           std::string_view,
+                           ExprValueType>;
+
+    std::unordered_set<GetType> elements;
+    for (auto const& element : expr.elements_) {
+        elements.insert(element);
+    }
+    //    auto elements = expr.elements_;
+    auto elem_func = [&elements](const milvus::ArrayView& array) {
+        std::unordered_set<GetType> tmp_elements(elements);
+        // Note: array can only be iterated once
+        for (int i = 0; i < array.length(); ++i) {
+            tmp_elements.erase(array.template get_data<GetType>(i));
+            if (tmp_elements.size() == 0) {
+                return true;
+            }
+        }
+        return tmp_elements.size() == 0;
+    };
+
+    return ExecRangeVisitorImpl<milvus::ArrayView>(
+        expr.column_.field_id, index_func, elem_func);
+}
+
 auto
 ExecExprVisitor::ExecJsonContainsAllArray(JsonContainsExpr& expr_raw)
     -> BitsetType {
@@ -2353,7 +3062,7 @@ ExecExprVisitor::ExecJsonContainsAllArray(JsonContainsExpr& expr_raw)
                 json_array.emplace_back(e);
             }
             for (int index = 0; index < elements.size(); ++index) {
-                if (compareTwoJsonArray(json_array, elements[index])) {
+                if (CompareTwoJsonArray(json_array, elements[index])) {
                     exist_elements_index.insert(index);
                 }
             }
@@ -2442,13 +3151,14 @@ ExecExprVisitor::ExecJsonContainsAllWithDiffType(JsonContainsExpr& expr_raw)
                             if (val.error()) {
                                 continue;
                             }
-                            if (compareTwoJsonArray(val, element.array_val())) {
+                            if (CompareTwoJsonArray(val, element.array_val())) {
                                 tmp_elements_index.erase(i);
                             }
                             break;
                         }
                         default:
-                            PanicInfo(fmt::format("unsupported data type {}",
+                            PanicInfo(DataTypeInvalid,
+                                      fmt::format("unsupported data type {}",
                                                   element.val_case()));
                     }
                     if (tmp_elements_index.size() == 0) {
@@ -2470,75 +3180,135 @@ void
 ExecExprVisitor::visit(JsonContainsExpr& expr) {
     auto& field_meta = segment_.get_schema()[expr.column_.field_id];
     AssertInfo(
-        expr.column_.data_type == DataType::JSON,
+        expr.column_.data_type == DataType::JSON ||
+            expr.column_.data_type == DataType::ARRAY,
         "[ExecExprVisitor]DataType of JsonContainsExpr isn't json data type");
     BitsetType res;
+    auto data_type = expr.column_.data_type;
     switch (expr.op_) {
         case proto::plan::JSONContainsExpr_JSONOp_Contains:
         case proto::plan::JSONContainsExpr_JSONOp_ContainsAny: {
-            if (expr.same_type_) {
+            if (datatype_is_array(data_type)) {
                 switch (expr.val_case_) {
                     case proto::plan::GenericValue::kBoolVal: {
-                        res = ExecJsonContains<bool>(expr);
+                        res = ExecArrayContains<bool>(expr);
                         break;
                     }
                     case proto::plan::GenericValue::kInt64Val: {
-                        res = ExecJsonContains<int64_t>(expr);
+                        res = ExecArrayContains<int64_t>(expr);
                         break;
                     }
                     case proto::plan::GenericValue::kFloatVal: {
-                        res = ExecJsonContains<double>(expr);
+                        res = ExecArrayContains<double>(expr);
                         break;
                     }
                     case proto::plan::GenericValue::kStringVal: {
-                        res = ExecJsonContains<std::string>(expr);
-                        break;
-                    }
-                    case proto::plan::GenericValue::kArrayVal: {
-                        res = ExecJsonContainsArray(expr);
+                        res = ExecArrayContains<std::string>(expr);
                         break;
                     }
                     default:
-                        PanicInfo(fmt::format("unsupported data type"));
+                        PanicInfo(DataTypeInvalid,
+                                  fmt::format("unsupported data type {}",
+                                              expr.val_case_));
                 }
-                break;
+            } else {
+                if (expr.same_type_) {
+                    switch (expr.val_case_) {
+                        case proto::plan::GenericValue::kBoolVal: {
+                            res = ExecJsonContains<bool>(expr);
+                            break;
+                        }
+                        case proto::plan::GenericValue::kInt64Val: {
+                            res = ExecJsonContains<int64_t>(expr);
+                            break;
+                        }
+                        case proto::plan::GenericValue::kFloatVal: {
+                            res = ExecJsonContains<double>(expr);
+                            break;
+                        }
+                        case proto::plan::GenericValue::kStringVal: {
+                            res = ExecJsonContains<std::string>(expr);
+                            break;
+                        }
+                        case proto::plan::GenericValue::kArrayVal: {
+                            res = ExecJsonContainsArray(expr);
+                            break;
+                        }
+                        default:
+                            PanicInfo(Unsupported,
+                                      fmt::format("unsupported value type {}",
+                                                  expr.val_case_));
+                    }
+                } else {
+                    res = ExecJsonContainsWithDiffType(expr);
+                }
             }
-            res = ExecJsonContainsWithDiffType(expr);
             break;
         }
         case proto::plan::JSONContainsExpr_JSONOp_ContainsAll: {
-            if (expr.same_type_) {
+            if (datatype_is_array(data_type)) {
                 switch (expr.val_case_) {
                     case proto::plan::GenericValue::kBoolVal: {
-                        res = ExecJsonContainsAll<bool>(expr);
+                        res = ExecArrayContainsAll<bool>(expr);
                         break;
                     }
                     case proto::plan::GenericValue::kInt64Val: {
-                        res = ExecJsonContainsAll<int64_t>(expr);
+                        res = ExecArrayContainsAll<int64_t>(expr);
                         break;
                     }
                     case proto::plan::GenericValue::kFloatVal: {
-                        res = ExecJsonContainsAll<double>(expr);
+                        res = ExecArrayContainsAll<double>(expr);
                         break;
                     }
                     case proto::plan::GenericValue::kStringVal: {
-                        res = ExecJsonContainsAll<std::string>(expr);
-                        break;
-                    }
-                    case proto::plan::GenericValue::kArrayVal: {
-                        res = ExecJsonContainsAllArray(expr);
+                        res = ExecArrayContainsAll<std::string>(expr);
                         break;
                     }
                     default:
-                        PanicInfo(fmt::format("unsupported data type"));
+                        PanicInfo(DataTypeInvalid,
+                                  fmt::format("unsupported data type {}",
+                                              expr.val_case_));
                 }
-                break;
+            } else {
+                if (expr.same_type_) {
+                    switch (expr.val_case_) {
+                        case proto::plan::GenericValue::kBoolVal: {
+                            res = ExecJsonContainsAll<bool>(expr);
+                            break;
+                        }
+                        case proto::plan::GenericValue::kInt64Val: {
+                            res = ExecJsonContainsAll<int64_t>(expr);
+                            break;
+                        }
+                        case proto::plan::GenericValue::kFloatVal: {
+                            res = ExecJsonContainsAll<double>(expr);
+                            break;
+                        }
+                        case proto::plan::GenericValue::kStringVal: {
+                            res = ExecJsonContainsAll<std::string>(expr);
+                            break;
+                        }
+                        case proto::plan::GenericValue::kArrayVal: {
+                            res = ExecJsonContainsAllArray(expr);
+                            break;
+                        }
+                        default:
+                            PanicInfo(
+                                Unsupported,
+                                fmt::format(
+                                    "unsupported value type {} in expression",
+                                    expr.val_case_));
+                    }
+                } else {
+                    res = ExecJsonContainsAllWithDiffType(expr);
+                }
             }
-            res = ExecJsonContainsAllWithDiffType(expr);
             break;
         }
         default:
-            PanicInfo(fmt::format("unsupported json contains type"));
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported json contains type {}",
+                                  expr.val_case_));
     }
     AssertInfo(res.size() == row_count_,
                "[ExecExprVisitor]Size of results not equal row count");

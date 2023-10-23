@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/cockroachdb/errors"
+
 	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
 )
 
@@ -14,7 +15,7 @@ var _ Factory = &CommonFactory{}
 // It contains a function field named newer, which is a function that creates
 // an mqwrapper.Client when called.
 type CommonFactory struct {
-	Newer             func() (mqwrapper.Client, error) // client constructor
+	Newer             func(context.Context) (mqwrapper.Client, error) // client constructor
 	DispatcherFactory ProtoUDFactory
 	ReceiveBufSize    int64
 	MQBufSize         int64
@@ -23,7 +24,7 @@ type CommonFactory struct {
 // NewMsgStream is used to generate a new Msgstream object
 func (f *CommonFactory) NewMsgStream(ctx context.Context) (ms MsgStream, err error) {
 	defer wrapError(&err, "NewMsgStream")
-	cli, err := f.Newer()
+	cli, err := f.Newer(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -33,7 +34,7 @@ func (f *CommonFactory) NewMsgStream(ctx context.Context) (ms MsgStream, err err
 // NewTtMsgStream is used to generate a new TtMsgstream object
 func (f *CommonFactory) NewTtMsgStream(ctx context.Context) (ms MsgStream, err error) {
 	defer wrapError(&err, "NewTtMsgStream")
-	cli, err := f.Newer()
+	cli, err := f.Newer(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +51,7 @@ func (f *CommonFactory) NewMsgStreamDisposer(ctx context.Context) func([]string,
 		if err != nil {
 			return err
 		}
-		msgs.AsConsumer(channels, subName, mqwrapper.SubscriptionPositionUnknown)
+		msgs.AsConsumer(ctx, channels, subName, mqwrapper.SubscriptionPositionUnknown)
 		msgs.Close()
 		return nil
 	}

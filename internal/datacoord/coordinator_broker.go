@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"go.uber.org/zap"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus/internal/types"
@@ -27,7 +29,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
-	"go.uber.org/zap"
 )
 
 const (
@@ -43,10 +44,10 @@ type Broker interface {
 }
 
 type CoordinatorBroker struct {
-	rootCoord types.RootCoord
+	rootCoord types.RootCoordClient
 }
 
-func NewCoordinatorBroker(rootCoord types.RootCoord) *CoordinatorBroker {
+func NewCoordinatorBroker(rootCoord types.RootCoordClient) *CoordinatorBroker {
 	return &CoordinatorBroker{
 		rootCoord: rootCoord,
 	}

@@ -26,6 +26,7 @@ struct CreateIndexInfo {
     MetricType metric_type;
     std::string field_name;
     int64_t dim;
+    IndexVersion index_engine_version;
 };
 
 }  // namespace milvus::index

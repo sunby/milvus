@@ -22,31 +22,29 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
-
-	"github.com/milvus-io/milvus/pkg/util/merr"
-
-	"google.golang.org/grpc/credentials"
-
-	management "github.com/milvus-io/milvus/internal/http"
-	"github.com/milvus-io/milvus/internal/proxy/accesslog"
-	"github.com/milvus-io/milvus/internal/util/componentutil"
-	"github.com/milvus-io/milvus/internal/util/dependency"
-	"github.com/milvus-io/milvus/pkg/tracer"
-	"github.com/milvus-io/milvus/pkg/util/interceptor"
-	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
-	"github.com/soheilhy/cmux"
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 
 	"github.com/gin-gonic/gin"
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	grpc_auth "github.com/grpc-ecosystem/go-grpc-middleware/auth"
+	"github.com/soheilhy/cmux"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.uber.org/atomic"
+	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/federpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
@@ -54,23 +52,25 @@ import (
 	"github.com/milvus-io/milvus/internal/distributed/proxy/httpserver"
 	qcc "github.com/milvus-io/milvus/internal/distributed/querycoord/client"
 	rcc "github.com/milvus-io/milvus/internal/distributed/rootcoord/client"
+	"github.com/milvus-io/milvus/internal/distributed/utils"
+	management "github.com/milvus-io/milvus/internal/http"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/proxypb"
 	"github.com/milvus-io/milvus/internal/proxy"
+	"github.com/milvus-io/milvus/internal/proxy/accesslog"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util/componentutil"
+	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/tracer"
+	"github.com/milvus-io/milvus/pkg/util"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/util/interceptor"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
+	"github.com/milvus-io/milvus/pkg/util/merr"
+	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.uber.org/atomic"
-	"go.uber.org/zap"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/health/grpc_health_v1"
-	"google.golang.org/grpc/keepalive"
-	"google.golang.org/grpc/status"
 )
 
 var (
@@ -97,14 +97,13 @@ type Server struct {
 	serverID atomic.Int64
 
 	etcdCli          *clientv3.Client
-	rootCoordClient  types.RootCoord
-	dataCoordClient  types.DataCoord
-	queryCoordClient types.QueryCoord
+	rootCoordClient  types.RootCoordClient
+	dataCoordClient  types.DataCoordClient
+	queryCoordClient types.QueryCoordClient
 }
 
 // NewServer create a Proxy server.
 func NewServer(ctx context.Context, factory dependency.Factory) (*Server, error) {
-
 	var err error
 	server := &Server{
 		ctx: ctx,
@@ -118,9 +117,11 @@ func NewServer(ctx context.Context, factory dependency.Factory) (*Server, error)
 }
 
 func authenticate(c *gin.Context) {
+	c.Set(httpserver.ContextUsername, "")
 	if !proxy.Params.CommonCfg.AuthorizationEnabled.GetAsBool() {
 		return
 	}
+	// TODO fubang
 	username, password, ok := httpserver.ParseUsernamePassword(c)
 	if ok {
 		if proxy.PasswordVerify(c, username, password) {
@@ -129,7 +130,16 @@ func authenticate(c *gin.Context) {
 			return
 		}
 	}
-	c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{httpserver.HTTPReturnCode: httpserver.Code(merr.ErrNeedAuthenticate), httpserver.HTTPReturnMessage: merr.ErrNeedAuthenticate.Error()})
+	rawToken := httpserver.GetAuthorization(c)
+	if rawToken != "" && !strings.Contains(rawToken, util.CredentialSeperator) {
+		user, err := proxy.VerifyAPIKey(rawToken)
+		if err == nil {
+			c.Set(httpserver.ContextUsername, user)
+			return
+		}
+		log.Warn("fail to verify apikey", zap.Error(err))
+	}
+	c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{httpserver.HTTPReturnCode: merr.Code(merr.ErrNeedAuthenticate), httpserver.HTTPReturnMessage: merr.ErrNeedAuthenticate.Error()})
 }
 
 // registerHTTPServer register the http server, panic when failed
@@ -193,12 +203,12 @@ func (s *Server) startExternalRPCServer(grpcExternalPort int, errChan chan error
 func (s *Server) startExternalGrpc(grpcPort int, errChan chan error) {
 	defer s.wg.Done()
 	Params := &paramtable.Get().ProxyGrpcServerCfg
-	var kaep = keepalive.EnforcementPolicy{
+	kaep := keepalive.EnforcementPolicy{
 		MinTime:             5 * time.Second, // If a client pings more than once every 5 seconds, terminate the connection
 		PermitWithoutStream: true,            // Allow pings even when there are no active streams
 	}
 
-	var kasp = keepalive.ServerParameters{
+	kasp := keepalive.ServerParameters{
 		Time:    60 * time.Second, // Ping the client if it is idle for 60 seconds to ensure the connection is still active
 		Timeout: 10 * time.Second, // Wait 10 second for the ping ack before assuming the connection is dead
 	}
@@ -248,7 +258,7 @@ func (s *Server) startExternalGrpc(grpcPort int, errChan chan error) {
 		}
 
 		certPool := x509.NewCertPool()
-		rootBuf, err := ioutil.ReadFile(Params.CaPemPath.GetValue())
+		rootBuf, err := os.ReadFile(Params.CaPemPath.GetValue())
 		if err != nil {
 			log.Warn("failed read ca pem", zap.Error(err))
 			errChan <- err
@@ -288,12 +298,12 @@ func (s *Server) startExternalGrpc(grpcPort int, errChan chan error) {
 func (s *Server) startInternalGrpc(grpcPort int, errChan chan error) {
 	defer s.wg.Done()
 	Params := &paramtable.Get().ProxyGrpcServerCfg
-	var kaep = keepalive.EnforcementPolicy{
+	kaep := keepalive.EnforcementPolicy{
 		MinTime:             5 * time.Second, // If a client pings more than once every 5 seconds, terminate the connection
 		PermitWithoutStream: true,            // Allow pings even when there are no active streams
 	}
 
-	var kasp = keepalive.ServerParameters{
+	kasp := keepalive.ServerParameters{
 		Time:    60 * time.Second, // Ping the client if it is idle for 60 seconds to ensure the connection is still active
 		Timeout: 10 * time.Second, // Wait 10 second for the ping ack before assuming the connection is dead
 	}
@@ -469,7 +479,7 @@ func (s *Server) init() error {
 				}
 
 				certPool := x509.NewCertPool()
-				rootBuf, err := ioutil.ReadFile(Params.CaPemPath.GetValue())
+				rootBuf, err := os.ReadFile(Params.CaPemPath.GetValue())
 				if err != nil {
 					log.Error("failed read ca pem", zap.Error(err))
 					return err
@@ -492,7 +502,6 @@ func (s *Server) init() error {
 				}
 			}
 		}
-
 	}
 	{
 		s.startExternalRPCServer(Params.Port.GetAsInt(), errChan)
@@ -520,13 +529,6 @@ func (s *Server) init() error {
 		log.Debug("create RootCoord client for Proxy done")
 	}
 
-	log.Debug("init RootCoord client for Proxy")
-	if err := s.rootCoordClient.Init(); err != nil {
-		log.Warn("failed to init RootCoord client for Proxy", zap.Error(err))
-		return err
-	}
-	log.Debug("init RootCoord client for Proxy done")
-
 	log.Debug("Proxy wait for RootCoord to be healthy")
 	if err := componentutil.WaitForComponentHealthy(s.ctx, s.rootCoordClient, "RootCoord", 1000000, time.Millisecond*200); err != nil {
 		log.Warn("Proxy failed to wait for RootCoord to be healthy", zap.Error(err))
@@ -549,13 +551,6 @@ func (s *Server) init() error {
 		log.Debug("create DataCoord client for Proxy done")
 	}
 
-	log.Debug("init DataCoord client for Proxy")
-	if err := s.dataCoordClient.Init(); err != nil {
-		log.Warn("failed to init DataCoord client for Proxy", zap.Error(err))
-		return err
-	}
-	log.Debug("init DataCoord client for Proxy done")
-
 	log.Debug("Proxy wait for DataCoord to be healthy")
 	if err := componentutil.WaitForComponentHealthy(s.ctx, s.dataCoordClient, "DataCoord", 1000000, time.Millisecond*200); err != nil {
 		log.Warn("Proxy failed to wait for DataCoord to be healthy", zap.Error(err))
@@ -577,13 +572,6 @@ func (s *Server) init() error {
 		}
 		log.Debug("create QueryCoord client for Proxy done")
 	}
-
-	log.Debug("init QueryCoord client for Proxy")
-	if err := s.queryCoordClient.Init(); err != nil {
-		log.Warn("failed to init QueryCoord client for Proxy", zap.Error(err))
-		return err
-	}
-	log.Debug("init QueryCoord client for Proxy done")
 
 	log.Debug("Proxy wait for QueryCoord to be healthy")
 	if err := componentutil.WaitForComponentHealthy(s.ctx, s.queryCoordClient, "QueryCoord", 1000000, time.Millisecond*200); err != nil {
@@ -653,15 +641,13 @@ func (s *Server) Stop() error {
 	go func() {
 		defer gracefulWg.Done()
 		if s.grpcInternalServer != nil {
-			log.Debug("Graceful stop grpc internal server...")
-			s.grpcInternalServer.GracefulStop()
+			utils.GracefulStopGRPCServer(s.grpcInternalServer)
 		}
 		if s.tcpServer != nil {
 			log.Info("Graceful stop Proxy tcp server...")
 			s.tcpServer.Close()
 		} else if s.grpcExternalServer != nil {
-			log.Info("Graceful stop grpc external server...")
-			s.grpcExternalServer.GracefulStop()
+			utils.GracefulStopGRPCServer(s.grpcExternalServer)
 			if s.httpServer != nil {
 				log.Info("Graceful stop grpc http server...")
 				s.httpServer.Close()
@@ -682,12 +668,12 @@ func (s *Server) Stop() error {
 
 // GetComponentStates get the component states
 func (s *Server) GetComponentStates(ctx context.Context, request *milvuspb.GetComponentStatesRequest) (*milvuspb.ComponentStates, error) {
-	return s.proxy.GetComponentStates(ctx)
+	return s.proxy.GetComponentStates(ctx, request)
 }
 
 // GetStatisticsChannel get the statistics channel
 func (s *Server) GetStatisticsChannel(ctx context.Context, request *internalpb.GetStatisticsChannelRequest) (*milvuspb.StringResponse, error) {
-	return s.proxy.GetStatisticsChannel(ctx)
+	return s.proxy.GetStatisticsChannel(ctx, request)
 }
 
 // InvalidateCollectionMetaCache notifies Proxy to clear all the meta cache of specific collection.
@@ -858,7 +844,6 @@ func (s *Server) GetPersistentSegmentInfo(ctx context.Context, request *milvuspb
 // GetQuerySegmentInfo notifies Proxy to get query segment info.
 func (s *Server) GetQuerySegmentInfo(ctx context.Context, request *milvuspb.GetQuerySegmentInfoRequest) (*milvuspb.GetQuerySegmentInfoResponse, error) {
 	return s.proxy.GetQuerySegmentInfo(ctx, request)
-
 }
 
 func (s *Server) Dummy(ctx context.Context, request *milvuspb.DummyRequest) (*milvuspb.DummyResponse, error) {
@@ -895,19 +880,13 @@ func (s *Server) AlterAlias(ctx context.Context, request *milvuspb.AlterAliasReq
 
 func (s *Server) DescribeAlias(ctx context.Context, request *milvuspb.DescribeAliasRequest) (*milvuspb.DescribeAliasResponse, error) {
 	return &milvuspb.DescribeAliasResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_UnexpectedError,
-			Reason:    "TODO: implement me",
-		},
+		Status: merr.Status(merr.WrapErrServiceUnavailable("DescribeAlias unimplemented")),
 	}, nil
 }
 
 func (s *Server) ListAliases(ctx context.Context, request *milvuspb.ListAliasesRequest) (*milvuspb.ListAliasesResponse, error) {
 	return &milvuspb.ListAliasesResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_UnexpectedError,
-			Reason:    "TODO: implement me",
-		},
+		Status: merr.Status(merr.WrapErrServiceUnavailable("ListAliases unimplemented")),
 	}, nil
 }
 
@@ -925,7 +904,7 @@ func (s *Server) GetCompactionStateWithPlans(ctx context.Context, req *milvuspb.
 	return s.proxy.GetCompactionStateWithPlans(ctx, req)
 }
 
-// GetFlushState gets the flush state of multiple segments
+// GetFlushState gets the flush state of the collection based on the provided flush ts and segment IDs.
 func (s *Server) GetFlushState(ctx context.Context, req *milvuspb.GetFlushStateRequest) (*milvuspb.GetFlushStateResponse, error) {
 	return s.proxy.GetFlushState(ctx, req)
 }
@@ -956,11 +935,11 @@ func (s *Server) Check(ctx context.Context, req *grpc_health_v1.HealthCheckReque
 	ret := &grpc_health_v1.HealthCheckResponse{
 		Status: grpc_health_v1.HealthCheckResponse_NOT_SERVING,
 	}
-	state, err := s.proxy.GetComponentStates(ctx)
+	state, err := s.proxy.GetComponentStates(ctx, &milvuspb.GetComponentStatesRequest{})
 	if err != nil {
 		return ret, err
 	}
-	if state.Status.ErrorCode != commonpb.ErrorCode_Success {
+	if state.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
 		return ret, nil
 	}
 	if state.State.StateCode != commonpb.StateCode_Healthy {
@@ -975,11 +954,11 @@ func (s *Server) Watch(req *grpc_health_v1.HealthCheckRequest, server grpc_healt
 	ret := &grpc_health_v1.HealthCheckResponse{
 		Status: grpc_health_v1.HealthCheckResponse_NOT_SERVING,
 	}
-	state, err := s.proxy.GetComponentStates(s.ctx)
+	state, err := s.proxy.GetComponentStates(s.ctx, nil)
 	if err != nil {
 		return server.Send(ret)
 	}
-	if state.Status.ErrorCode != commonpb.ErrorCode_Success {
+	if state.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
 		return server.Send(ret)
 	}
 	if state.State.StateCode != commonpb.StateCode_Healthy {
@@ -1058,7 +1037,7 @@ func (s *Server) GetProxyMetrics(ctx context.Context, request *milvuspb.GetMetri
 func (s *Server) GetVersion(ctx context.Context, request *milvuspb.GetVersionRequest) (*milvuspb.GetVersionResponse, error) {
 	buildTags := os.Getenv(metricsinfo.GitBuildTagsEnvKey)
 	return &milvuspb.GetVersionResponse{
-		Status:  merr.Status(nil),
+		Status:  merr.Success(),
 		Version: buildTags,
 	}, nil
 }
@@ -1097,19 +1076,13 @@ func (s *Server) ListResourceGroups(ctx context.Context, req *milvuspb.ListResou
 
 func (s *Server) ListIndexedSegment(ctx context.Context, req *federpb.ListIndexedSegmentRequest) (*federpb.ListIndexedSegmentResponse, error) {
 	return &federpb.ListIndexedSegmentResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_UnexpectedError,
-			Reason:    "not implemented",
-		},
+		Status: merr.Status(merr.WrapErrServiceUnavailable("ListIndexedSegment unimplemented")),
 	}, nil
 }
 
 func (s *Server) DescribeSegmentIndexData(ctx context.Context, req *federpb.DescribeSegmentIndexDataRequest) (*federpb.DescribeSegmentIndexDataResponse, error) {
 	return &federpb.DescribeSegmentIndexDataResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_UnexpectedError,
-			Reason:    "not implemented",
-		},
+		Status: merr.Status(merr.WrapErrServiceUnavailable("DescribeSegmentIndexData unimplemented")),
 	}, nil
 }
 
@@ -1135,4 +1108,8 @@ func (s *Server) ListDatabases(ctx context.Context, request *milvuspb.ListDataba
 
 func (s *Server) AllocTimestamp(ctx context.Context, req *milvuspb.AllocTimestampRequest) (*milvuspb.AllocTimestampResponse, error) {
 	return s.proxy.AllocTimestamp(ctx, req)
+}
+
+func (s *Server) ReplicateMessage(ctx context.Context, req *milvuspb.ReplicateMessageRequest) (*milvuspb.ReplicateMessageResponse, error) {
+	return s.proxy.ReplicateMessage(ctx, req)
 }

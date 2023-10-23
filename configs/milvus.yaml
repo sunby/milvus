@@ -45,8 +45,18 @@ etcd:
 
 metastore:
   # Default value: etcd
-  # Valid values: etcd
+  # Valid values: [etcd, tikv]
   type: etcd
+
+# Related configuration of tikv, used to store Milvus metadata.
+# Notice that when TiKV is enabled for metastore, you still need to have etcd for service discovery.
+# TiKV is a good option when the metadata size requires better horizontal scalability.
+tikv:
+  # Note that the default pd port of tikv is 2379, which conflicts with etcd.
+  endpoints: 127.0.0.1:2389
+  rootPath: by-dev # The root path where data is stored
+  metaSubPath: meta # metaRootPath = rootPath + '/' + metaSubPath
+  kvSubPath: kv # kvRootPath = rootPath + '/' + kvSubPath
 
 localStorage:
   path: /tmp/milvus/data/ # please adjust in embedded Milvus: /tmp/milvus/data/
@@ -84,6 +94,8 @@ minio:
   region: ""
   # Cloud whether use virtual host bucket mode
   useVirtualHost: false
+  # timeout for request time in milliseconds
+  requestTimeoutMs: 3000
 
 # Milvus supports four MQ: rocksmq(based on RockDB), natsmq(embedded nats-server), Pulsar and Kafka.
 # You can change your mq by setting mq.type field.
@@ -104,6 +116,7 @@ pulsar:
   tenant: public
   namespace: default
   requestTimeout: 60 # pulsar client global request timeout in seconds
+  enableClientMetrics: false # Whether to register pulsar client metrics into milvus metrics path.
 
 # If you want to enable kafka, needs to comment the pulsar configs
 # kafka:
@@ -112,6 +125,7 @@ pulsar:
 #   saslPassword:
 #   saslMechanisms: PLAIN
 #   securityProtocol: SASL_SSL
+#   readTimeout: 10 # read message timeout in seconds
 
 rocksmq:
   # The path where the message is stored in rocksmq
@@ -157,6 +171,9 @@ rootCoord:
   importTaskExpiration: 900 # (in seconds) Duration after which an import task will expire (be killed). Default 900 seconds (15 minutes).
   importTaskRetention: 86400 # (in seconds) Milvus will keep the record of import tasks for at least `importTaskRetention` seconds. Default 86400, seconds (24 hours).
   enableActiveStandby: false
+  # can specify ip for example
+  # ip: 127.0.0.1
+  ip: # if not specify address, will use the first unicastable address as local ip
   port: 53100
   grpc:
     serverMaxSendSize: 536870912
@@ -188,6 +205,9 @@ proxy:
   http:
     enabled: true # Whether to enable the http server
     debug_mode: false # Whether to enable http server debug mode
+  # can specify ip for example
+  # ip: 127.0.0.1
+  ip: # if not specify address, will use the first unicastable address as local ip
   port: 19530
   internalPort: 19529
   grpc:
@@ -214,6 +234,9 @@ queryCoord:
   heartbeatAvailableInterval: 10000 # 10s, Only QueryNodes which fetched heartbeats within the duration are available
   loadTimeoutSeconds: 600
   checkHandoffInterval: 5000
+  # can specify ip for example
+  # ip: 127.0.0.1
+  ip: # if not specify address, will use the first unicastable address as local ip
   port: 19531
   grpc:
     serverMaxSendSize: 536870912
@@ -248,8 +271,9 @@ queryNode:
   enableDisk: false # enable querynode load disk index, and search on disk index
   maxDiskUsagePercentage: 95
   cache:
-    enabled: true
-    memoryLimit: 2147483648 # 2 GB, 2 * 1024 *1024 *1024
+    enabled: true # deprecated, TODO: remove it
+    memoryLimit: 2147483648 # 2 GB, 2 * 1024 *1024 *1024 # deprecated, TODO: remove it
+    readAheadPolicy: willneed # The read ahead policy of chunk cache, options: `normal, random, sequential, willneed, dontneed`
   grouping:
     enabled: true
     maxNQ: 1000
@@ -281,6 +305,9 @@ queryNode:
       enableCrossUserGrouping: false # false by default Enable Cross user grouping when using user-task-polling policy. (close it if task of any user can not merge others).
       maxPendingTaskPerUser: 1024 # 50 by default, max pending task in scheduler per user.
 
+  # can specify ip for example
+  # ip: 127.0.0.1
+  ip: # if not specify address, will use the first unicastable address as local ip
   port: 21123
   grpc:
     serverMaxSendSize: 536870912
@@ -302,6 +329,9 @@ indexNode:
     buildParallel: 1
   enableDisk: true # enable index node build disk vector index
   maxDiskUsagePercentage: 95
+  # can specify ip for example
+  # ip: 127.0.0.1
+  ip: # if not specify address, will use the first unicastable address as local ip
   port: 21121
   grpc:
     serverMaxSendSize: 536870912
@@ -354,6 +384,9 @@ dataCoord:
     missingTolerance: 3600 # file meta missing tolerance duration in seconds, 3600
     dropTolerance: 10800 # file belongs to dropped entity tolerance duration in seconds. 10800
   enableActiveStandby: false
+  # can specify ip for example
+  # ip: 127.0.0.1
+  ip: # if not specify address, will use the first unicastable address as local ip
   port: 13333
   grpc:
     serverMaxSendSize: 536870912
@@ -371,6 +404,9 @@ dataNode:
     insertBufSize: 16777216 # Max buffer size to flush for a single segment.
     deleteBufBytes: 67108864 # Max buffer size to flush del for a single channel
     syncPeriod: 600 # The period to sync segments if buffer is not empty.
+  # can specify ip for example
+  # ip: 127.0.0.1
+  ip: # if not specify address, will use the first unicastable address as local ip
   port: 21124
   grpc:
     serverMaxSendSize: 536870912
@@ -384,6 +420,11 @@ dataNode:
     watermarkCluster: 0.5 # memory watermark for cluster, upon reaching this watermark, segments will be synced.
   timetick:
     byRPC: true
+  channel:
+    # specify the size of global work pool of all channels
+    # if this parameter <= 0, will set it as the maximum number of CPUs that can be executing
+    # suggest to set it bigger on large collection numbers to avoid blocking
+    workPoolSize: -1
 
 # Configures the system log output.
 log:
@@ -402,14 +443,14 @@ grpc:
   serverMaxSendSize: 536870912
   serverMaxRecvSize: 536870912
   client:
-    compressionEnabled: false
+    compressionEnabled: true
     dialTimeout: 200
     keepAliveTime: 10000
     keepAliveTimeout: 20000
-    maxMaxAttempts: 5
-    initialBackoff: 1
-    maxBackoff: 10
-    backoffMultiplier: 2
+    maxMaxAttempts: 10
+    initialBackOff: 0.2 # seconds
+    maxBackoff: 10 # seconds
+    backoffMultiplier: 2.0 # deprecated
   clientMaxSendSize: 268435456
   clientMaxRecvSize: 268435456
 
@@ -425,6 +466,7 @@ common:
     rootCoordTimeTick: rootcoord-timetick
     rootCoordStatistics: rootcoord-statistics
     rootCoordDml: rootcoord-dml
+    replicateMsg: replicate-msg
     rootCoordDelta: rootcoord-delta
     search: search
     searchResult: searchResult
@@ -492,6 +534,7 @@ common:
     threshold:
       info: 500 # minimum milliseconds for printing durations in info level
       warn: 1000 # minimum milliseconds for printing durations in warn level
+  ttMsgEnabled: true # Whether the instance disable sending ts messages
 
 # QuotaConfig, configurations of Milvus quota and limits.
 # By default, we enable:

@@ -25,6 +25,7 @@ import (
 
 	"github.com/cockroachdb/errors"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus/internal/allocator"
@@ -41,7 +42,7 @@ const (
 
 // DataCoord is a narrowed interface of DataCoordinator which only provide AssignSegmentID method
 type DataCoord interface {
-	AssignSegmentID(ctx context.Context, req *datapb.AssignSegmentIDRequest) (*datapb.AssignSegmentIDResponse, error)
+	AssignSegmentID(ctx context.Context, req *datapb.AssignSegmentIDRequest, opts ...grpc.CallOption) (*datapb.AssignSegmentIDResponse, error)
 }
 
 type segRequest struct {
@@ -319,13 +320,12 @@ func (sa *segIDAssigner) syncSegments() (bool, error) {
 	log.Debug("syncSegments call dataCoord.AssignSegmentID", zap.String("request", req.String()))
 
 	resp, err := sa.dataCoord.AssignSegmentID(context.Background(), req)
-
 	if err != nil {
 		return false, fmt.Errorf("syncSegmentID Failed:%w", err)
 	}
 
-	if resp.Status.ErrorCode != commonpb.ErrorCode_Success {
-		return false, fmt.Errorf("syncSegmentID Failed:%s", resp.Status.Reason)
+	if resp.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
+		return false, fmt.Errorf("syncSegmentID Failed:%s", resp.GetStatus().GetReason())
 	}
 
 	var errMsg string
@@ -333,8 +333,8 @@ func (sa *segIDAssigner) syncSegments() (bool, error) {
 	success := true
 	for _, segAssign := range resp.SegIDAssignments {
 		if segAssign.Status.GetErrorCode() != commonpb.ErrorCode_Success {
-			log.Warn("proxy", zap.String("SyncSegment Error", segAssign.Status.Reason))
-			errMsg += segAssign.Status.Reason
+			log.Warn("proxy", zap.String("SyncSegment Error", segAssign.GetStatus().GetReason()))
+			errMsg += segAssign.GetStatus().GetReason()
 			errMsg += "\n"
 			success = false
 			continue

@@ -11,6 +11,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
 	"github.com/milvus-io/milvus/pkg/util/merr"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
 
 type Consumer struct {
@@ -125,22 +126,13 @@ func (kc *Consumer) Chan() <-chan mqwrapper.Message {
 			for {
 				select {
 				case <-kc.closeCh:
-					log.Info("close consumer ", zap.String("topic", kc.topic), zap.String("groupID", kc.groupID))
-					start := time.Now()
-					err := kc.c.Close()
-					if err != nil {
-						log.Warn("failed to close ", zap.String("topic", kc.topic), zap.Error(err))
-					}
-					cost := time.Since(start).Milliseconds()
-					if cost > 200 {
-						log.Warn("close consumer costs too long time", zap.Any("topic", kc.topic), zap.String("groupID", kc.groupID), zap.Int64("time(ms)", cost))
-					}
 					if kc.msgChannel != nil {
 						close(kc.msgChannel)
 					}
 					return
 				default:
-					e, err := kc.c.ReadMessage(30 * time.Second)
+					readTimeout := paramtable.Get().KafkaCfg.ReadTimeout.GetAsDuration(time.Second)
+					e, err := kc.c.ReadMessage(readTimeout)
 					if err != nil {
 						// if we failed to read message in 30 Seconds, print out a warn message since there should always be a tt
 						log.Warn("consume msg failed", zap.Any("topic", kc.topic), zap.String("groupID", kc.groupID), zap.Error(err))
@@ -195,7 +187,8 @@ func (kc *Consumer) internalSeek(offset kafka.Offset, inclusive bool) error {
 	if err := kc.c.Seek(kafka.TopicPartition{
 		Topic:     &kc.topic,
 		Partition: mqwrapper.DefaultPartitionIdx,
-		Offset:    offset}, timeout); err != nil {
+		Offset:    offset,
+	}, timeout); err != nil {
 		return err
 	}
 	cost = time.Since(start).Milliseconds()
@@ -229,32 +222,43 @@ func (kc *Consumer) GetLatestMsgID() (mqwrapper.MessageID, error) {
 }
 
 func (kc *Consumer) CheckTopicValid(topic string) error {
-	latestMsgID, err := kc.GetLatestMsgID()
+	_, err := kc.GetLatestMsgID()
 	log.With(zap.String("topic", kc.topic))
 	// check topic is existed
 	if err != nil {
 		switch v := err.(type) {
 		case kafka.Error:
-			if v.Code() == kafka.ErrUnknownTopic || v.Code() == kafka.ErrUnknownPartition || v.Code() == kafka.ErrUnknownTopicOrPart {
-				return merr.WrapErrTopicNotFound(topic, "topic get latest msg ID failed, topic or partition does not exists")
+			if v.Code() == kafka.ErrUnknownTopic || v.Code() == kafka.ErrUnknownTopicOrPart {
+				return merr.WrapErrMqTopicNotFound(topic, err.Error())
 			}
+			return merr.WrapErrMqInternal(err)
 		default:
 			return err
 		}
 	}
 
-	// check topic is empty
-	if !latestMsgID.AtEarliestPosition() {
-		return merr.WrapErrTopicNotEmpty(topic, "topic is not empty")
-	}
-	log.Info("created topic is empty")
-
 	return nil
+}
+
+func (kc *Consumer) closeInternal() {
+	log.Info("close consumer ", zap.String("topic", kc.topic), zap.String("groupID", kc.groupID))
+	start := time.Now()
+	err := kc.c.Close()
+	if err != nil {
+		log.Warn("failed to close ", zap.String("topic", kc.topic), zap.Error(err))
+	}
+	cost := time.Since(start).Milliseconds()
+	if cost > 200 {
+		log.Warn("close consumer costs too long time", zap.Any("topic", kc.topic), zap.String("groupID", kc.groupID), zap.Int64("time(ms)", cost))
+	}
 }
 
 func (kc *Consumer) Close() {
 	kc.closeOnce.Do(func() {
 		close(kc.closeCh)
-		kc.wg.Wait() // wait worker exist and close the client
+		// wait work goroutine exit
+		kc.wg.Wait()
+		// close the client
+		kc.closeInternal()
 	})
 }

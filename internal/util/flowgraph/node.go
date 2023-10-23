@@ -21,16 +21,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/milvus-io/milvus/pkg/util/timerecord"
+	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/pkg/log"
-	"go.uber.org/zap"
+	"github.com/milvus-io/milvus/pkg/util/timerecord"
 )
 
 const (
 	// TODO: better to be configured
 	nodeCtxTtInterval = 2 * time.Minute
 	enableTtChecker   = true
+	// blockAll should wait no more than 10 seconds
+	blockAllWait = 10 * time.Second
 )
 
 // Node is the interface defines the behavior of flowgraph
@@ -74,7 +76,13 @@ func (nodeCtx *nodeCtx) Start() {
 func (nodeCtx *nodeCtx) Block() {
 	// input node operate function will be blocking
 	if !nodeCtx.node.IsInputNode() {
+		startTs := time.Now()
 		nodeCtx.blockMutex.Lock()
+		if time.Since(startTs) >= blockAllWait {
+			log.Warn("flow graph wait for long time",
+				zap.String("name", nodeCtx.node.Name()),
+				zap.Duration("wait time", time.Since(startTs)))
+		}
 	}
 }
 
@@ -197,6 +205,11 @@ func (node *BaseNode) Operate(in []Msg) []Msg {
 func (node *BaseNode) IsValidInMsg(in []Msg) bool {
 	if in == nil {
 		log.Info("type assertion failed because it's nil")
+		return false
+	}
+
+	if len(in) == 0 {
+		// avoid printing too many logs.
 		return false
 	}
 

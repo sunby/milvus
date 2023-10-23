@@ -17,8 +17,11 @@
 package pipeline
 
 import (
+	"context"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus/pkg/log"
@@ -26,7 +29,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
 	"github.com/milvus-io/milvus/pkg/util/tsoutil"
-	"go.uber.org/zap"
 )
 
 type StreamPipeline interface {
@@ -68,7 +70,7 @@ func (p *streamPipeline) ConsumeMsgStream(position *msgpb.MsgPosition) error {
 	}
 
 	start := time.Now()
-	p.input, err = p.dispatcher.Register(p.vChannel, position, mqwrapper.SubscriptionPositionUnknown)
+	p.input, err = p.dispatcher.Register(context.TODO(), p.vChannel, position, mqwrapper.SubscriptionPositionUnknown)
 	if err != nil {
 		log.Error("dispatcher register failed", zap.String("channel", position.ChannelName))
 		return WrapErrRegDispather(err)

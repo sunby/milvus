@@ -192,8 +192,8 @@ var _ Cache = (*MetaCache)(nil)
 
 // MetaCache implements Cache, provides collection meta cache based on internal RootCoord
 type MetaCache struct {
-	rootCoord  types.RootCoord
-	queryCoord types.QueryCoord
+	rootCoord  types.RootCoordClient
+	queryCoord types.QueryCoordClient
 
 	collInfo       map[string]map[string]*collectionInfo // database -> collection -> collection_info
 	credMap        map[string]*internalpb.CredentialInfo // cache for credential, lazy load
@@ -209,7 +209,7 @@ type MetaCache struct {
 var globalMetaCache Cache
 
 // InitMetaCache initializes globalMetaCache
-func InitMetaCache(ctx context.Context, rootCoord types.RootCoord, queryCoord types.QueryCoord, shardMgr shardClientMgr) error {
+func InitMetaCache(ctx context.Context, rootCoord types.RootCoordClient, queryCoord types.QueryCoordClient, shardMgr shardClientMgr) error {
 	var err error
 	globalMetaCache, err = NewMetaCache(rootCoord, queryCoord, shardMgr)
 	if err != nil {
@@ -229,7 +229,7 @@ func InitMetaCache(ctx context.Context, rootCoord types.RootCoord, queryCoord ty
 }
 
 // NewMetaCache creates a MetaCache with provided RootCoord and QueryNode
-func NewMetaCache(rootCoord types.RootCoord, queryCoord types.QueryCoord, shardMgr shardClientMgr) (*MetaCache, error) {
+func NewMetaCache(rootCoord types.RootCoordClient, queryCoord types.QueryCoordClient, shardMgr shardClientMgr) (*MetaCache, error) {
 	return &MetaCache{
 		rootCoord:      rootCoord,
 		queryCoord:     queryCoord,
@@ -497,7 +497,6 @@ func (m *MetaCache) GetPartitions(ctx context.Context, database, collectionName 
 			ret[k] = v.partitionID
 		}
 		return ret, nil
-
 	}
 
 	defer m.mu.RUnlock()
@@ -621,8 +620,8 @@ func (m *MetaCache) showPartitions(ctx context.Context, dbName string, collectio
 	if err != nil {
 		return nil, err
 	}
-	if partitions.Status.ErrorCode != commonpb.ErrorCode_Success {
-		return nil, fmt.Errorf("%s", partitions.Status.Reason)
+	if partitions.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
+		return nil, fmt.Errorf("%s", partitions.GetStatus().GetReason())
 	}
 
 	if len(partitions.PartitionIDs) != len(partitions.PartitionNames) {
@@ -808,27 +807,28 @@ func (m *MetaCache) GetShards(ctx context.Context, withCache bool, database, col
 		if err != nil {
 			return retry.Unrecoverable(err)
 		}
-		if resp.Status.ErrorCode == commonpb.ErrorCode_Success {
+		if resp.GetStatus().GetErrorCode() == commonpb.ErrorCode_Success {
 			return nil
 		}
 		// do not retry unless got NoReplicaAvailable from querycoord
-		if resp.Status.ErrorCode != commonpb.ErrorCode_NoReplicaAvailable {
-			return retry.Unrecoverable(fmt.Errorf("fail to get shard leaders from QueryCoord: %s", resp.Status.Reason))
+		err2 := merr.Error(resp.GetStatus())
+		if resp.GetStatus().GetErrorCode() != commonpb.ErrorCode_NoReplicaAvailable {
+			return retry.Unrecoverable(err2)
 		}
-		return fmt.Errorf("fail to get shard leaders from QueryCoord: %s", resp.Status.Reason)
+		return err2
 	})
 	if err != nil {
 		return nil, err
 	}
-	if resp.Status.ErrorCode != commonpb.ErrorCode_Success {
-		return nil, fmt.Errorf("fail to get shard leaders from QueryCoord: %s", resp.Status.Reason)
+	if resp.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
+		return nil, merr.Error(resp.GetStatus())
 	}
 
 	shards := parseShardLeaderList2QueryNode(resp.GetShards())
 
 	info, err = m.getFullCollectionInfo(ctx, database, collectionName, collectionID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get shards, collectionName %s, colectionID %d not found", collectionName, collectionID)
+		return nil, err
 	}
 	// lock leader
 	info.leaderMutex.Lock()

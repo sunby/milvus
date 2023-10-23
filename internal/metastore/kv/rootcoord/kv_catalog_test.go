@@ -10,6 +10,12 @@ import (
 
 	"github.com/cockroachdb/errors"
 	"github.com/golang/protobuf/proto"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/atomic"
+	"golang.org/x/exp/maps"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
@@ -23,12 +29,8 @@ import (
 	"github.com/milvus-io/milvus/pkg/util"
 	"github.com/milvus-io/milvus/pkg/util/crypto"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
-	"github.com/stretchr/testify/require"
-	"go.uber.org/atomic"
-	"golang.org/x/exp/maps"
 )
 
 var (
@@ -664,15 +666,27 @@ func TestCatalog_DropPartitionV2(t *testing.T) {
 	t.Run("failed to load collection", func(t *testing.T) {
 		ctx := context.Background()
 
-		snapshot := kv.NewMockSnapshotKV()
-		snapshot.LoadFunc = func(key string, ts typeutil.Timestamp) (string, error) {
-			return "", errors.New("mock")
-		}
+		snapshot := mocks.NewSnapShotKV(t)
+		snapshot.On("Load",
+			mock.Anything, mock.Anything).Return("not in codec format", nil)
 
 		kc := Catalog{Snapshot: snapshot}
 
 		err := kc.DropPartition(ctx, 0, 100, 101, 0)
 		assert.Error(t, err)
+	})
+
+	t.Run("failed to load collection, no key found", func(t *testing.T) {
+		ctx := context.Background()
+
+		snapshot := mocks.NewSnapShotKV(t)
+		snapshot.On("Load",
+			mock.Anything, mock.Anything).Return("", merr.WrapErrIoKeyNotFound("partition"))
+
+		kc := Catalog{Snapshot: snapshot}
+
+		err := kc.DropPartition(ctx, 0, 100, 101, 0)
+		assert.NoError(t, err)
 	})
 
 	t.Run("partition version after 210", func(t *testing.T) {
@@ -1423,7 +1437,6 @@ func TestRBAC_Credential(t *testing.T) {
 						fmt.Sprintf("%s/%s", CredentialPrefix, "user3"),
 						"random",
 					}
-
 				}
 				return nil
 			},
@@ -1481,7 +1494,7 @@ func TestRBAC_Role(t *testing.T) {
 			otherError  = fmt.Errorf("mock load error")
 		)
 
-		kvmock.EXPECT().Load(notExistKey).Return("", common.NewKeyNotExistError(notExistKey)).Once()
+		kvmock.EXPECT().Load(notExistKey).Return("", merr.WrapErrIoKeyNotFound(notExistKey)).Once()
 		kvmock.EXPECT().Load(errorKey).Return("", otherError).Once()
 		kvmock.EXPECT().Load(mock.Anything).Return("", nil).Once()
 		kvmock.EXPECT().Remove(mock.Anything).Call.Return(nil).Once()
@@ -1525,7 +1538,7 @@ func TestRBAC_Role(t *testing.T) {
 			otherError  = fmt.Errorf("mock load error")
 		)
 
-		kvmock.EXPECT().Load(notExistKey).Return("", common.NewKeyNotExistError(notExistKey)).Once()
+		kvmock.EXPECT().Load(notExistKey).Return("", merr.WrapErrIoKeyNotFound(notExistKey)).Once()
 		kvmock.EXPECT().Load(errorKey).Return("", otherError).Once()
 		kvmock.EXPECT().Load(mock.Anything).Return("", nil).Once()
 		kvmock.EXPECT().Save(mock.Anything, mock.Anything).Call.Return(nil).Once()
@@ -1572,7 +1585,7 @@ func TestRBAC_Role(t *testing.T) {
 			otherError   = fmt.Errorf("mock load error")
 		)
 
-		kvmock.EXPECT().Load(notExistPath).Return("", common.NewKeyNotExistError(notExistName)).Once()
+		kvmock.EXPECT().Load(notExistPath).Return("", merr.WrapErrIoKeyNotFound(notExistName)).Once()
 		kvmock.EXPECT().Load(errorPath).Return("", otherError).Once()
 		kvmock.EXPECT().Load(mock.Anything).Return("", nil).Once()
 		kvmock.EXPECT().Save(mock.Anything, mock.Anything).Call.Return(nil).Once()
@@ -1679,7 +1692,7 @@ func TestRBAC_Role(t *testing.T) {
 		kvmock.EXPECT().Load(errorRoleSavepath).Return("", nil)
 
 		// Catalog.save() returns nil
-		kvmock.EXPECT().Load(noErrorRoleSavepath).Return("", common.NewKeyNotExistError(noErrorRoleSavepath))
+		kvmock.EXPECT().Load(noErrorRoleSavepath).Return("", merr.WrapErrIoKeyNotFound(noErrorRoleSavepath))
 
 		// Catalog.remove() returns error
 		kvmock.EXPECT().Load(errorRoleRemovepath).Return("", errors.New("not exists"))
@@ -1717,9 +1730,7 @@ func TestRBAC_Role(t *testing.T) {
 	})
 
 	t.Run("test ListRole", func(t *testing.T) {
-		var (
-			loadWithPrefixReturn atomic.Bool
-		)
+		var loadWithPrefixReturn atomic.Bool
 
 		t.Run("test entity!=nil", func(t *testing.T) {
 			var (
@@ -1984,10 +1995,8 @@ func TestRBAC_Role(t *testing.T) {
 						assert.Error(t, err)
 						assert.Empty(t, res)
 					}
-
 				})
 			}
-
 		})
 	})
 	t.Run("test ListUserRole", func(t *testing.T) {
@@ -2100,19 +2109,19 @@ func TestRBAC_Grant(t *testing.T) {
 			})
 		kvmock.EXPECT().Load(keyNotExistRoleKey).Call.
 			Return("", func(key string) error {
-				return common.NewKeyNotExistError(key)
+				return merr.WrapErrIoKeyNotFound(key)
 			})
 		kvmock.EXPECT().Load(keyNotExistRoleKeyWithDb).Call.
 			Return("", func(key string) error {
-				return common.NewKeyNotExistError(key)
+				return merr.WrapErrIoKeyNotFound(key)
 			})
 		kvmock.EXPECT().Load(errorSaveRoleKey).Call.
 			Return("", func(key string) error {
-				return common.NewKeyNotExistError(key)
+				return merr.WrapErrIoKeyNotFound(key)
 			})
 		kvmock.EXPECT().Load(errorSaveRoleKeyWithDb).Call.
 			Return("", func(key string) error {
-				return common.NewKeyNotExistError(key)
+				return merr.WrapErrIoKeyNotFound(key)
 			})
 		kvmock.EXPECT().Save(keyNotExistRoleKeyWithDb, mock.Anything).Return(nil)
 		kvmock.EXPECT().Save(errorSaveRoleKeyWithDb, mock.Anything).Return(errors.New("mock save error role"))
@@ -2130,11 +2139,11 @@ func TestRBAC_Grant(t *testing.T) {
 			})
 		kvmock.EXPECT().Load(keyNotExistPrivilegeKey).Call.
 			Return("", func(key string) error {
-				return common.NewKeyNotExistError(key)
+				return merr.WrapErrIoKeyNotFound(key)
 			})
 		kvmock.EXPECT().Load(keyNotExistPrivilegeKey2WithDb).Call.
 			Return("", func(key string) error {
-				return common.NewKeyNotExistError(key)
+				return merr.WrapErrIoKeyNotFound(key)
 			})
 		kvmock.EXPECT().Load(mock.Anything).Call.Return("", nil)
 
@@ -2176,7 +2185,8 @@ func TestRBAC_Grant(t *testing.T) {
 						DbName:     util.DefaultDBName,
 						Grantor: &milvuspb.GrantorEntity{
 							User:      &milvuspb.UserEntity{Name: test.userName},
-							Privilege: &milvuspb.PrivilegeEntity{Name: test.privilegeName}},
+							Privilege: &milvuspb.PrivilegeEntity{Name: test.privilegeName},
+						},
 					}, milvuspb.OperatePrivilegeType_Grant)
 
 					if test.isValid {
@@ -2195,7 +2205,7 @@ func TestRBAC_Grant(t *testing.T) {
 		})
 
 		t.Run("test Revoke", func(t *testing.T) {
-			var invalidPrivilegeRemove = "p-remove"
+			invalidPrivilegeRemove := "p-remove"
 			invalidPrivilegeRemoveKey := funcutil.HandleTenantForEtcdKey(GranteeIDPrefix, tenant, fmt.Sprintf("%s/%s", validRoleValue, invalidPrivilegeRemove))
 
 			kvmock.EXPECT().Load(invalidPrivilegeRemoveKey).Call.Return("", nil)
@@ -2233,7 +2243,8 @@ func TestRBAC_Grant(t *testing.T) {
 						DbName:     util.DefaultDBName,
 						Grantor: &milvuspb.GrantorEntity{
 							User:      &milvuspb.UserEntity{Name: test.userName},
-							Privilege: &milvuspb.PrivilegeEntity{Name: test.privilegeName}},
+							Privilege: &milvuspb.PrivilegeEntity{Name: test.privilegeName},
+						},
 					}, milvuspb.OperatePrivilegeType_Revoke)
 
 					if test.isValid {
@@ -2306,7 +2317,6 @@ func TestRBAC_Grant(t *testing.T) {
 		kvmock.EXPECT().LoadWithPrefix(invalidRoleKey).Call.Return(nil, nil, errors.New("mock loadWithPrefix error"))
 		kvmock.EXPECT().LoadWithPrefix(mock.Anything).Call.Return(
 			func(key string) []string {
-
 				// Mock kv_catalog.go:ListGrant:L871
 				if strings.Contains(key, GranteeIDPrefix) {
 					return []string{
@@ -2344,21 +2354,25 @@ func TestRBAC_Grant(t *testing.T) {
 			{false, &milvuspb.GrantEntity{
 				Object:     &milvuspb.ObjectEntity{Name: "random"},
 				ObjectName: "random2",
-				Role:       &milvuspb.RoleEntity{Name: "role1"}}, "valid role with not exist entity"},
+				Role:       &milvuspb.RoleEntity{Name: "role1"},
+			}, "valid role with not exist entity"},
 			{true, &milvuspb.GrantEntity{
 				Object:     &milvuspb.ObjectEntity{Name: "obj1"},
 				ObjectName: "obj_name1",
-				Role:       &milvuspb.RoleEntity{Name: "role1"}}, "valid role with valid entity"},
+				Role:       &milvuspb.RoleEntity{Name: "role1"},
+			}, "valid role with valid entity"},
 			{true, &milvuspb.GrantEntity{
 				Object:     &milvuspb.ObjectEntity{Name: "obj1"},
 				ObjectName: "obj_name2",
 				DbName:     "foo",
-				Role:       &milvuspb.RoleEntity{Name: "role1"}}, "valid role and dbName with valid entity"},
+				Role:       &milvuspb.RoleEntity{Name: "role1"},
+			}, "valid role and dbName with valid entity"},
 			{false, &milvuspb.GrantEntity{
 				Object:     &milvuspb.ObjectEntity{Name: "obj1"},
 				ObjectName: "obj_name2",
 				DbName:     "foo2",
-				Role:       &milvuspb.RoleEntity{Name: "role1"}}, "valid role and invalid dbName with valid entity"},
+				Role:       &milvuspb.RoleEntity{Name: "role1"},
+			}, "valid role and invalid dbName with valid entity"},
 		}
 
 		for _, test := range tests {
@@ -2375,7 +2389,6 @@ func TestRBAC_Grant(t *testing.T) {
 				} else {
 					assert.Error(t, err)
 				}
-
 			})
 		}
 	})

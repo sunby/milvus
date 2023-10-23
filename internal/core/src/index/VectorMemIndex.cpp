@@ -31,7 +31,7 @@
 #include "index/IndexInfo.h"
 #include "index/Meta.h"
 #include "index/Utils.h"
-#include "exceptions/EasyAssert.h"
+#include "common/EasyAssert.h"
 #include "config/ConfigKnowhere.h"
 #include "knowhere/factory.h"
 #include "knowhere/comp/time_recorder.h"
@@ -47,27 +47,31 @@
 #include "storage/MemFileManagerImpl.h"
 #include "storage/ThreadPools.h"
 #include "storage/Util.h"
-#include "utils/File.h"
+#include "common/File.h"
 #include "common/Tracer.h"
 #include "storage/space.h"
 
 namespace milvus::index {
 
-VectorMemIndex::VectorMemIndex(const IndexType& index_type,
-                               const MetricType& metric_type,
-                               storage::FileManagerImplPtr file_manager)
+VectorMemIndex::VectorMemIndex(
+    const IndexType& index_type,
+    const MetricType& metric_type,
+    const IndexVersion& version,
+    const storage::FileManagerContext& file_manager_context)
     : VectorIndex(index_type, metric_type) {
     AssertInfo(!is_unsupported(index_type, metric_type),
                index_type + " doesn't support metric: " + metric_type);
-    if (file_manager != nullptr) {
-        file_manager_ = std::dynamic_pointer_cast<storage::MemFileManagerImpl>(
-            file_manager);
+    if (file_manager_context.Valid()) {
+        file_manager_ =
+            std::make_shared<storage::MemFileManagerImpl>(file_manager_context);
+        AssertInfo(file_manager_ != nullptr, "create file manager failed!");
     }
-    index_ = knowhere::IndexFactory::Instance().Create(GetIndexType());
+    CheckCompatible(version);
+    index_ = knowhere::IndexFactory::Instance().Create(GetIndexType(), version);
 }
 
 VectorMemIndex::VectorMemIndex(const CreateIndexInfo& create_index_info,
-                               storage::FileManagerImplPtr file_manager,
+                               const storage::FileManagerContext& file_manager_context,
                                std::shared_ptr<milvus_storage::Space> space)
     : VectorIndex(create_index_info.index_type, create_index_info.metric_type),
       space_(space),
@@ -76,11 +80,14 @@ VectorMemIndex::VectorMemIndex(const CreateIndexInfo& create_index_info,
                                create_index_info.metric_type),
                create_index_info.index_type +
                    " doesn't support metric: " + create_index_info.metric_type);
-    if (file_manager != nullptr) {
-        file_manager_ = std::dynamic_pointer_cast<storage::MemFileManagerImpl>(
-            file_manager);
+    if (file_manager_context.Valid()) {
+        file_manager_ =
+            std::make_shared<storage::MemFileManagerImpl>(file_manager_context);
+        AssertInfo(file_manager_ != nullptr, "create file manager failed!");
     }
-    index_ = knowhere::IndexFactory::Instance().Create(GetIndexType());
+    auto version = create_index_info.index_engine_version;
+    CheckCompatible(version);
+    index_ = knowhere::IndexFactory::Instance().Create(GetIndexType(), version);
 }
 
 BinarySet
@@ -116,9 +123,8 @@ VectorMemIndex::Serialize(const Config& config) {
     knowhere::BinarySet ret;
     auto stat = index_.Serialize(ret);
     if (stat != knowhere::Status::success)
-        PanicCodeInfo(
-            ErrorCodeEnum::UnexpectedError,
-            "failed to serialize index, " + KnowhereStatusString(stat));
+        PanicInfo(ErrorCode::UnexpectedError,
+                  "failed to serialize index, " + KnowhereStatusString(stat));
     Disassemble(ret);
 
     return ret;
@@ -127,11 +133,10 @@ VectorMemIndex::Serialize(const Config& config) {
 void
 VectorMemIndex::LoadWithoutAssemble(const BinarySet& binary_set,
                                     const Config& config) {
-    auto stat = index_.Deserialize(binary_set);
+    auto stat = index_.Deserialize(binary_set, config);
     if (stat != knowhere::Status::success)
-        PanicCodeInfo(
-            ErrorCodeEnum::UnexpectedError,
-            "failed to Deserialize index, " + KnowhereStatusString(stat));
+        PanicInfo(ErrorCode::UnexpectedError,
+                  "failed to Deserialize index, " + KnowhereStatusString(stat));
     SetDim(index_.Dim());
 }
 
@@ -160,7 +165,7 @@ VectorMemIndex::LoadV2(const Config& config) {
     std::map<std::string, storage::FieldDataPtr> index_datas{};
 
     if (!res.ok() && !res.status().IsFileNotFound()) {
-        PanicCodeInfo(ErrorCodeEnum::UnexpectedError, "failed to read blob");
+        PanicInfo(DataFormatBroken, "failed to read blob");
     }
     bool slice_meta_exist = res.ok();
 
@@ -168,14 +173,14 @@ VectorMemIndex::LoadV2(const Config& config) {
         -> std::unique_ptr<storage::DataCodec> {
         auto res = space_->GetBlobByteSize(file_name);
         if (!res.ok()) {
-            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+            PanicInfo(DataFormatBroken,
                           "unable to read index blob");
         }
         auto index_blob_data =
             std::shared_ptr<uint8_t[]>(new uint8_t[res.value()]);
         auto status = space_->ReadBlob(file_name, index_blob_data.get());
         if (!status.ok()) {
-            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+            PanicInfo(DataFormatBroken,
                           "unable to read index blob");
         }
         return storage::DeserializeFileData(index_blob_data, res.value());
@@ -187,7 +192,7 @@ VectorMemIndex::LoadV2(const Config& config) {
         auto status =
             space_->ReadBlob(INDEX_FILE_SLICE_META, slice_meta_data.get());
         if (!status.ok()) {
-            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+            PanicInfo(DataFormatBroken,
                           "unable to read slice meta");
         }
         auto raw_slice_meta =
@@ -360,8 +365,8 @@ VectorMemIndex::BuildWithDataset(const DatasetPtr& dataset,
     knowhere::TimeRecorder rc("BuildWithoutIds", 1);
     auto stat = index_.Build(*dataset, index_config);
     if (stat != knowhere::Status::success)
-        PanicCodeInfo(ErrorCodeEnum::BuildIndexError,
-                      "failed to build index, " + KnowhereStatusString(stat));
+        PanicInfo(ErrorCode::IndexBuildError,
+                  "failed to build index, " + KnowhereStatusString(stat));
     rc.ElapseFromBegin("Done");
     SetDim(index_.Dim());
 }
@@ -374,7 +379,7 @@ VectorMemIndex::BuildV2(const Config& config) {
     auto dim = create_index_info_.dim;
     auto res = space_->ScanData();
     if (!res.ok()) {
-        PanicInfo(fmt::format("failed to create scan iterator: {}",
+        PanicInfo(IndexBuildError, fmt::format("failed to create scan iterator: {}",
                               res.status().ToString()));
     }
 
@@ -382,7 +387,7 @@ VectorMemIndex::BuildV2(const Config& config) {
     std::vector<storage::FieldDataPtr> field_datas;
     for (auto rec : *reader) {
         if (!rec.ok()) {
-            PanicInfo(fmt::format("failed to read data: {}",
+            PanicInfo(IndexBuildError,fmt::format("failed to read data: {}",
                                   rec.status().ToString()));
         }
         auto data = rec.ValueUnsafe();
@@ -472,8 +477,8 @@ VectorMemIndex::AddWithDataset(const DatasetPtr& dataset,
     knowhere::TimeRecorder rc("AddWithDataset", 1);
     auto stat = index_.Add(*dataset, index_config);
     if (stat != knowhere::Status::success)
-        PanicCodeInfo(ErrorCodeEnum::BuildIndexError,
-                      "failed to append index, " + KnowhereStatusString(stat));
+        PanicInfo(ErrorCode::IndexBuildError,
+                  "failed to append index, " + KnowhereStatusString(stat));
     rc.ElapseFromBegin("Done");
 }
 
@@ -502,10 +507,10 @@ VectorMemIndex::Query(const DatasetPtr dataset,
             auto res = index_.RangeSearch(*dataset, search_conf, bitset);
             milvus::tracer::AddEvent("finish_knowhere_index_range_search");
             if (!res.has_value()) {
-                PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
-                              fmt::format("failed to range search: {}: {}",
-                                          KnowhereStatusString(res.error()),
-                                          res.what()));
+                PanicInfo(ErrorCode::UnexpectedError,
+                          fmt::format("failed to range search: {}: {}",
+                                      KnowhereStatusString(res.error()),
+                                      res.what()));
             }
             auto result = ReGenRangeSearchResult(
                 res.value(), topk, num_queries, GetMetricType());
@@ -516,10 +521,10 @@ VectorMemIndex::Query(const DatasetPtr dataset,
             auto res = index_.Search(*dataset, search_conf, bitset);
             milvus::tracer::AddEvent("finish_knowhere_index_search");
             if (!res.has_value()) {
-                PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
-                              fmt::format("failed to search: {}: {}",
-                                          KnowhereStatusString(res.error()),
-                                          res.what()));
+                PanicInfo(ErrorCode::UnexpectedError,
+                          fmt::format("failed to search: {}: {}",
+                                      KnowhereStatusString(res.error()),
+                                      res.what()));
             }
             return res.value();
         }
@@ -558,9 +563,8 @@ std::vector<uint8_t>
 VectorMemIndex::GetVector(const DatasetPtr dataset) const {
     auto res = index_.GetVectorByIds(*dataset);
     if (!res.has_value()) {
-        PanicCodeInfo(
-            ErrorCodeEnum::UnexpectedError,
-            "failed to get vector, " + KnowhereStatusString(res.error()));
+        PanicInfo(ErrorCode::UnexpectedError,
+                  "failed to get vector, " + KnowhereStatusString(res.error()));
     }
     auto index_type = GetIndexType();
     auto tensor = res.value()->GetTensor();
@@ -678,9 +682,9 @@ VectorMemIndex::LoadFromFile(const Config& config) {
     conf[kEnableMmap] = true;
     auto stat = index_.DeserializeFromFile(filepath.value(), conf);
     if (stat != knowhere::Status::success) {
-        PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
-                      fmt::format("failed to Deserialize index: {}",
-                                  KnowhereStatusString(stat)));
+        PanicInfo(ErrorCode::UnexpectedError,
+                  fmt::format("failed to Deserialize index: {}",
+                              KnowhereStatusString(stat)));
     }
 
     auto dim = index_.Dim();
@@ -717,7 +721,7 @@ VectorMemIndex::LoadFromFileV2(const Config& config) {
     auto res = space_->GetBlobByteSize(std::string(INDEX_FILE_SLICE_META));
 
     if (!res.ok() && !res.status().IsFileNotFound()) {
-        PanicCodeInfo(ErrorCodeEnum::UnexpectedError, "failed to read blob");
+        PanicInfo(DataFormatBroken, "failed to read blob");
     }
     bool slice_meta_exist = res.ok();
 
@@ -725,14 +729,14 @@ VectorMemIndex::LoadFromFileV2(const Config& config) {
         -> std::unique_ptr<storage::DataCodec> {
         auto res = space_->GetBlobByteSize(file_name);
         if (!res.ok()) {
-            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+            PanicInfo(DataFormatBroken,
                           "unable to read index blob");
         }
         auto index_blob_data =
             std::shared_ptr<uint8_t[]>(new uint8_t[res.value()]);
         auto status = space_->ReadBlob(file_name, index_blob_data.get());
         if (!status.ok()) {
-            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+            PanicInfo(DataFormatBroken,
                           "unable to read index blob");
         }
         return storage::DeserializeFileData(index_blob_data, res.value());
@@ -744,7 +748,7 @@ VectorMemIndex::LoadFromFileV2(const Config& config) {
         auto status =
             space_->ReadBlob(INDEX_FILE_SLICE_META, slice_meta_data.get());
         if (!status.ok()) {
-            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+            PanicInfo(DataFormatBroken,
                           "unable to read slice meta");
         }
         auto raw_slice_meta =
@@ -783,7 +787,7 @@ VectorMemIndex::LoadFromFileV2(const Config& config) {
     conf[kEnableMmap] = true;
     auto stat = index_.DeserializeFromFile(filepath.value(), conf);
     if (stat != knowhere::Status::success) {
-        PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+        PanicInfo(DataFormatBroken,
                       fmt::format("failed to Deserialize index: {}",
                                   KnowhereStatusString(stat)));
     }

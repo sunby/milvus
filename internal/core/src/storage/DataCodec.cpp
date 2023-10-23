@@ -20,7 +20,7 @@
 #include "storage/InsertData.h"
 #include "storage/IndexData.h"
 #include "storage/BinlogReader.h"
-#include "exceptions/EasyAssert.h"
+#include "common/EasyAssert.h"
 #include "common/Consts.h"
 
 namespace milvus::storage {
@@ -86,14 +86,16 @@ DeserializeRemoteFileData(BinlogReaderPtr reader) {
             return index_data;
         }
         default:
-            PanicInfo("unsupported event type");
+            PanicInfo(
+                DataFormatBroken,
+                fmt::format("unsupported event type {}", header.event_type_));
     }
 }
 
 // For now, no file header in file data
 std::unique_ptr<DataCodec>
 DeserializeLocalFileData(BinlogReaderPtr reader) {
-    PanicInfo("not supported");
+    PanicInfo(NotImplemented, "not supported");
 }
 
 std::unique_ptr<DataCodec>
@@ -109,7 +111,8 @@ DeserializeFileData(const std::shared_ptr<uint8_t[]> input_data,
             return DeserializeLocalFileData(binlog_reader);
         }
         default:
-            PanicInfo("unsupported medium type");
+            PanicInfo(DataFormatBroken,
+                      fmt::format("unsupported medium type {}", medium_type));
     }
 }
 

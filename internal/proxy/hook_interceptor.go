@@ -7,16 +7,21 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cockroachdb/errors"
+	"go.uber.org/zap"
+	"google.golang.org/grpc"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/hook"
 	"github.com/milvus-io/milvus/pkg/config"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
-	"go.uber.org/zap"
-	"google.golang.org/grpc"
 )
 
-type defaultHook struct {
+type defaultHook struct{}
+
+func (d defaultHook) VerifyAPIKey(key string) (string, error) {
+	return "", errors.New("default hook, can't verify api key")
 }
 
 func (d defaultHook) Init(params map[string]string) error {
@@ -123,10 +128,11 @@ func UnaryServerHookInterceptor() grpc.UnaryServerInterceptor {
 }
 
 func updateProxyFunctionCallMetric(fullMethod string) {
-	if fullMethod == "" {
+	strs := strings.Split(fullMethod, "/")
+	method := strs[len(strs)-1]
+	if method == "" {
 		return
 	}
-	method := strings.Split(fullMethod, "/")[0]
 	metrics.ProxyFunctionCall.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), method, metrics.TotalLabel).Inc()
 	metrics.ProxyFunctionCall.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), method, metrics.FailLabel).Inc()
 }
@@ -137,4 +143,26 @@ func getCurrentUser(ctx context.Context) string {
 		log.Warn("fail to get current user", zap.Error(err))
 	}
 	return username
+}
+
+// MockAPIHook is a mock hook for api key verification, ONLY FOR TEST
+type MockAPIHook struct {
+	defaultHook
+	mockErr error
+	apiUser string
+}
+
+func (m MockAPIHook) VerifyAPIKey(apiKey string) (string, error) {
+	return m.apiUser, m.mockErr
+}
+
+func SetMockAPIHook(apiUser string, mockErr error) {
+	if apiUser == "" && mockErr == nil {
+		hoo = defaultHook{}
+		return
+	}
+	hoo = MockAPIHook{
+		mockErr: mockErr,
+		apiUser: apiUser,
+	}
 }

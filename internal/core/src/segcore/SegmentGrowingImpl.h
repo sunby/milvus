@@ -28,11 +28,9 @@
 #include "InsertRecord.h"
 #include "SealedIndexingRecord.h"
 #include "SegmentGrowing.h"
-
-#include "exceptions/EasyAssert.h"
+#include "common/Types.h"
+#include "common/EasyAssert.h"
 #include "query/PlanNode.h"
-#include "query/deprecated/GeneralQuery.h"
-#include "utils/Status.h"
 #include "common/IndexMeta.h"
 
 namespace milvus::segcore {
@@ -49,8 +47,13 @@ class SegmentGrowingImpl : public SegmentGrowing {
            const Timestamp* timestamps,
            const InsertData* insert_data) override;
 
+    bool
+    Contain(const PkType& pk) const override {
+        return insert_record_.contain(pk);
+    }
+
     // TODO: add id into delete log, possibly bitmap
-    Status
+    SegcoreError
     Delete(int64_t reserved_offset,
            int64_t size,
            const IdArray* pks,
@@ -152,6 +155,13 @@ class SegmentGrowingImpl : public SegmentGrowing {
     template <typename S, typename T = S>
     void
     bulk_subscript_impl(const VectorBase* vec_raw,
+                        const int64_t* seg_offsets,
+                        int64_t count,
+                        void* output_raw) const;
+
+    // for scalar array vectors
+    void
+    bulk_subscript_impl(const VectorBase& vec_raw,
                         const int64_t* seg_offsets,
                         int64_t count,
                         void* output_raw) const;

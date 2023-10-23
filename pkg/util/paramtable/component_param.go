@@ -33,9 +33,9 @@ const (
 	DefaultIndexSliceSize                      = 16
 	DefaultGracefulTime                        = 5000 // ms
 	DefaultGracefulStopTimeout                 = 1800 // s
-	DefaultHighPriorityThreadCoreCoefficient   = 100
-	DefaultMiddlePriorityThreadCoreCoefficient = 50
-	DefaultLowPriorityThreadCoreCoefficient    = 10
+	DefaultHighPriorityThreadCoreCoefficient   = 10
+	DefaultMiddlePriorityThreadCoreCoefficient = 5
+	DefaultLowPriorityThreadCoreCoefficient    = 1
 
 	DefaultSessionTTL        = 60 // s
 	DefaultSessionRetryTimes = 30
@@ -162,6 +162,7 @@ type commonConfig struct {
 	RootCoordTimeTick   ParamItem `refreshable:"true"`
 	RootCoordStatistics ParamItem `refreshable:"true"`
 	RootCoordDml        ParamItem `refreshable:"false"`
+	ReplicateMsgChannel ParamItem `refreshable:"false"`
 
 	QueryCoordTimeTick ParamItem `refreshable:"true"`
 
@@ -212,12 +213,13 @@ type commonConfig struct {
 
 	MetricsPort ParamItem `refreshable:"false"`
 
-	//lock related params
+	// lock related params
 	EnableLockMetrics        ParamItem `refreshable:"false"`
 	LockSlowLogInfoThreshold ParamItem `refreshable:"true"`
 	LockSlowLogWarnThreshold ParamItem `refreshable:"true"`
 
 	EnableStorageV2 ParamItem `refreshable:"false"`
+	TTMsgEnabled ParamItem `refreshable:"true"`
 }
 
 func (p *commonConfig) init(base *BaseTable) {
@@ -267,6 +269,16 @@ func (p *commonConfig) init(base *BaseTable) {
 		Export:       true,
 	}
 	p.RootCoordDml.Init(base.mgr)
+
+	p.ReplicateMsgChannel = ParamItem{
+		Key:          "msgChannel.chanNamePrefix.replicateMsg",
+		Version:      "2.3.2",
+		FallbackKeys: []string{"common.chanNamePrefix.replicateMsg"},
+		PanicIfEmpty: true,
+		Formatter:    chanNamePrefix,
+		Export:       true,
+	}
+	p.ReplicateMsgChannel.Init(base.mgr)
 
 	p.QueryCoordTimeTick = ParamItem{
 		Key:          "msgChannel.chanNamePrefix.queryTimeTick",
@@ -613,14 +625,22 @@ like the old password verification when updating the credential`,
 		Doc:          "minimum milliseconds for printing durations in warn level",
 		Export:       true,
 	}
-
 	p.LockSlowLogWarnThreshold.Init(base.mgr)
+
 	p.EnableStorageV2 = ParamItem{
 		Key:          "common.storage.enablev2",
 		Version:      "2.3.1",
 		DefaultValue: "false",
 	}
 	p.EnableStorageV2.Init(base.mgr)
+
+	p.TTMsgEnabled = ParamItem{
+		Key:          "common.ttMsgEnabled",
+		Version:      "2.3.2",
+		DefaultValue: "true",
+		Doc:          "Whether the instance disable sending ts messages",
+	}
+	p.TTMsgEnabled.Init(base.mgr)
 }
 
 type traceConfig struct {
@@ -982,7 +1002,7 @@ So adjust at your risk!`,
 	p.MaxTaskNum = ParamItem{
 		Key:          "proxy.maxTaskNum",
 		Version:      "2.2.0",
-		DefaultValue: "1024",
+		DefaultValue: "10000",
 		Doc:          "max task number of proxy task queue",
 		Export:       true,
 	}
@@ -1096,7 +1116,7 @@ please adjust in embedded Milvus: false`,
 	p.ShardLeaderCacheInterval = ParamItem{
 		Key:          "proxy.shardLeaderCacheInterval",
 		Version:      "2.2.4",
-		DefaultValue: "10",
+		DefaultValue: "3",
 		Doc:          "time interval to update shard leader cache, in seconds",
 	}
 	p.ShardLeaderCacheInterval.Init(base.mgr)
@@ -1152,11 +1172,11 @@ type queryCoordConfig struct {
 	TaskMergeCap     ParamItem `refreshable:"false"`
 	TaskExecutionCap ParamItem `refreshable:"true"`
 
-	//---- Handoff ---
-	//Deprecated: Since 2.2.2
+	// ---- Handoff ---
+	// Deprecated: Since 2.2.2
 	AutoHandoff ParamItem `refreshable:"true"`
 
-	//---- Balance ---
+	// ---- Balance ---
 	AutoBalance                         ParamItem `refreshable:"true"`
 	Balancer                            ParamItem `refreshable:"true"`
 	GlobalRowCountFactor                ParamItem `refreshable:"true"`
@@ -1183,18 +1203,19 @@ type queryCoordConfig struct {
 	// Deprecated: Since 2.2.2, use different interval for different checker
 	CheckInterval ParamItem `refreshable:"true"`
 
-	NextTargetSurviveTime      ParamItem `refreshable:"true"`
-	UpdateNextTargetInterval   ParamItem `refreshable:"false"`
-	CheckNodeInReplicaInterval ParamItem `refreshable:"false"`
-	CheckResourceGroupInterval ParamItem `refreshable:"false"`
-	EnableRGAutoRecover        ParamItem `refreshable:"true"`
-	CheckHealthInterval        ParamItem `refreshable:"false"`
-	CheckHealthRPCTimeout      ParamItem `refreshable:"true"`
-	BrokerTimeout              ParamItem `refreshable:"false"`
+	NextTargetSurviveTime       ParamItem `refreshable:"true"`
+	UpdateNextTargetInterval    ParamItem `refreshable:"false"`
+	CheckNodeInReplicaInterval  ParamItem `refreshable:"false"`
+	CheckResourceGroupInterval  ParamItem `refreshable:"false"`
+	EnableRGAutoRecover         ParamItem `refreshable:"true"`
+	CheckHealthInterval         ParamItem `refreshable:"false"`
+	CheckHealthRPCTimeout       ParamItem `refreshable:"true"`
+	BrokerTimeout               ParamItem `refreshable:"false"`
+	CollectionRecoverTimesLimit ParamItem `refreshable:"true"`
 }
 
 func (p *queryCoordConfig) init(base *BaseTable) {
-	//---- Task ---
+	// ---- Task ---
 	p.RetryNum = ParamItem{
 		Key:          "queryCoord.task.retrynum",
 		Version:      "2.2.0",
@@ -1492,6 +1513,16 @@ func (p *queryCoordConfig) init(base *BaseTable) {
 		Export:       true,
 	}
 	p.BrokerTimeout.Init(base.mgr)
+
+	p.CollectionRecoverTimesLimit = ParamItem{
+		Key:          "queryCoord.collectionRecoverTimes",
+		Version:      "2.3.3",
+		DefaultValue: "3",
+		PanicIfEmpty: true,
+		Doc:          "if collection recover times reach the limit during loading state, release it",
+		Export:       true,
+	}
+	p.CollectionRecoverTimesLimit.Init(base.mgr)
 }
 
 // /////////////////////////////////////////////////////////////////////////////
@@ -1526,6 +1557,9 @@ type queryNodeConfig struct {
 	CacheEnabled     ParamItem `refreshable:"false"`
 	CacheMemoryLimit ParamItem `refreshable:"false"`
 	MmapDirPath      ParamItem `refreshable:"false"`
+
+	// chunk cache
+	ReadAheadPolicy ParamItem `refreshable:"false"`
 
 	GroupEnabled         ParamItem `refreshable:"true"`
 	MaxReceiveChanSize   ParamItem `refreshable:"false"`
@@ -1712,6 +1746,14 @@ func (p *queryNodeConfig) init(base *BaseTable) {
 		Doc:          "The folder that storing data files for mmap, setting to a path will enable Milvus to load data with mmap",
 	}
 	p.MmapDirPath.Init(base.mgr)
+
+	p.ReadAheadPolicy = ParamItem{
+		Key:          "queryNode.cache.readAheadPolicy",
+		Version:      "2.3.2",
+		DefaultValue: "willneed",
+		Doc:          "The read ahead policy of chunk cache, options: `normal, random, sequential, willneed, dontneed`",
+	}
+	p.ReadAheadPolicy.Init(base.mgr)
 
 	p.GroupEnabled = ParamItem{
 		Key:          "queryNode.grouping.enabled",
@@ -1937,6 +1979,7 @@ type dataCoordConfig struct {
 	WatchTimeoutInterval         ParamItem `refreshable:"false"`
 	ChannelBalanceSilentDuration ParamItem `refreshable:"true"`
 	ChannelBalanceInterval       ParamItem `refreshable:"true"`
+	ChannelOperationRPCTimeout   ParamItem `refreshable:"true"`
 
 	// --- SEGMENTS ---
 	SegmentMaxSize                 ParamItem `refreshable:"false"`
@@ -2013,6 +2056,15 @@ func (p *dataCoordConfig) init(base *BaseTable) {
 		Export:       true,
 	}
 	p.ChannelBalanceInterval.Init(base.mgr)
+
+	p.ChannelOperationRPCTimeout = ParamItem{
+		Key:          "dataCoord.channel.notifyChannelOperationTimeout",
+		Version:      "2.2.3",
+		DefaultValue: "5",
+		Doc:          "Timeout notifing channel operations (in seconds).",
+		Export:       true,
+	}
+	p.ChannelOperationRPCTimeout.Init(base.mgr)
 
 	p.SegmentMaxSize = ParamItem{
 		Key:          "dataCoord.segment.maxSize",
@@ -2348,8 +2400,11 @@ type dataNodeConfig struct {
 	// watchEvent
 	WatchEventTicklerInterval ParamItem `refreshable:"false"`
 
-	// io concurrency to fetch stats logs
+	// io concurrency to add segment
 	IOConcurrency ParamItem `refreshable:"false"`
+
+	// Concurrency to handle compaction file read
+	FileReadConcurrency ParamItem `refreshable:"false"`
 
 	// memory management
 	MemoryForceSyncEnable     ParamItem `refreshable:"true"`
@@ -2365,6 +2420,9 @@ type dataNodeConfig struct {
 
 	// Skip BF
 	SkipBFStatsLoad ParamItem `refreshable:"true"`
+
+	// channel
+	ChannelWorkPoolSize ParamItem `refreshable:"true"`
 }
 
 func (p *dataNodeConfig) init(base *BaseTable) {
@@ -2477,9 +2535,16 @@ func (p *dataNodeConfig) init(base *BaseTable) {
 	p.IOConcurrency = ParamItem{
 		Key:          "dataNode.dataSync.ioConcurrency",
 		Version:      "2.0.0",
-		DefaultValue: "10",
+		DefaultValue: "16",
 	}
 	p.IOConcurrency.Init(base.mgr)
+
+	p.FileReadConcurrency = ParamItem{
+		Key:          "dataNode.multiRead.concurrency",
+		Version:      "2.0.0",
+		DefaultValue: "16",
+	}
+	p.FileReadConcurrency.Init(base.mgr)
 
 	p.DataNodeTimeTickByRPC = ParamItem{
 		Key:          "datanode.timetick.byRPC",
@@ -2512,6 +2577,14 @@ func (p *dataNodeConfig) init(base *BaseTable) {
 		DefaultValue: "18000",
 	}
 	p.BulkInsertTimeoutSeconds.Init(base.mgr)
+
+	p.ChannelWorkPoolSize = ParamItem{
+		Key:          "datanode.channel.workPoolSize",
+		Version:      "2.3.2",
+		PanicIfEmpty: false,
+		DefaultValue: "-1",
+	}
+	p.ChannelWorkPoolSize.Init(base.mgr)
 }
 
 // /////////////////////////////////////////////////////////////////////////////
@@ -2600,12 +2673,15 @@ func (p *integrationTestConfig) init(base *BaseTable) {
 func (params *ComponentParam) Save(key string, value string) error {
 	return params.baseTable.Save(key, value)
 }
+
 func (params *ComponentParam) Remove(key string) error {
 	return params.baseTable.Remove(key)
 }
+
 func (params *ComponentParam) Reset(key string) error {
 	return params.baseTable.Reset(key)
 }
+
 func (params *ComponentParam) GetWithDefault(key string, dft string) string {
 	return params.baseTable.GetWithDefault(key, dft)
 }

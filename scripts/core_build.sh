@@ -90,32 +90,21 @@ BUILD_OUTPUT_DIR="${ROOT_DIR}/cmake_build"
 BUILD_TYPE="Release"
 BUILD_UNITTEST="OFF"
 INSTALL_PREFIX="${CPP_SRC_DIR}/output"
-MAKE_CLEAN="OFF"
 BUILD_COVERAGE="OFF"
-DB_PATH="/tmp/milvus"
-PROFILING="OFF"
 RUN_CPPLINT="OFF"
 CUDA_COMPILER=/usr/local/cuda/bin/nvcc
 GPU_VERSION="OFF" #defaults to CPU version
-WITH_PROMETHEUS="ON"
 CUDA_ARCH="DEFAULT"
-CUSTOM_THIRDPARTY_PATH=""
 EMBEDDED_MILVUS="OFF"
 BUILD_DISK_ANN="OFF"
 USE_ASAN="OFF"
-OPEN_SIMD="OFF"
 USE_DYNAMIC_SIMD="OFF"
+INDEX_ENGINE="KNOWHERE"
 
-while getopts "p:d:t:s:f:n:i:y:a:ulrcghzmeb" arg; do
+while getopts "p:d:t:s:f:n:i:y:a:x:ulrcghzmebZ" arg; do
   case $arg in
-  f)
-    CUSTOM_THIRDPARTY_PATH=$OPTARG
-    ;;
   p)
     INSTALL_PREFIX=$OPTARG
-    ;;
-  d)
-    DB_PATH=$OPTARG
     ;;
   t)
     BUILD_TYPE=$OPTARG # BUILD_TYPE
@@ -127,22 +116,11 @@ while getopts "p:d:t:s:f:n:i:y:a:ulrcghzmeb" arg; do
   l)
     RUN_CPPLINT="ON"
     ;;
-  r)
-    if [[ -d ${BUILD_OUTPUT_DIR} ]]; then
-      MAKE_CLEAN="ON"
-    fi
-    ;;
   c)
     BUILD_COVERAGE="ON"
     ;;
-  z)
-    PROFILING="ON"
-    ;;
   g)
     GPU_VERSION="ON"
-    ;;
-  e)
-    WITH_PROMETHEUS="OFF"
     ;;
   s)
     CUDA_ARCH=$OPTARG
@@ -155,40 +133,41 @@ while getopts "p:d:t:s:f:n:i:y:a:ulrcghzmeb" arg; do
     ;;
   a)
     ENV_VAL=$OPTARG
-    if [[ ${ENV_VAL} == 'true' ]]; then
+    if [[ ${ENV_VAL} == 'ON' ]]; then
         echo "Set USE_ASAN to ON"
         USE_ASAN="ON"
         BUILD_TYPE=Debug
     fi
     ;;
-  i)
-    OPEN_SIMD=$OPTARG
-    ;;
   y)
     USE_DYNAMIC_SIMD=$OPTARG
+    ;;
+  Z)
+    BUILD_WITHOUT_AZURE="on"
+    ;;
+  x)
+    INDEX_ENGINE=$OPTARG
     ;;
   h) # help
     echo "
 
 parameter:
--f: custom paths of thirdparty downloaded files(default: NULL)
 -p: install prefix(default: $(pwd)/milvus)
 -d: db data path(default: /tmp/milvus)
 -t: build type(default: Debug)
 -u: building unit test options(default: OFF)
 -l: run cpplint, clang-format and clang-tidy(default: OFF)
--r: remove previous build directory(default: OFF)
 -c: code coverage(default: OFF)
--z: profiling(default: OFF)
 -g: build GPU version(default: OFF)
 -e: build without prometheus(default: OFF)
 -s: build with CUDA arch(default:DEFAULT), for example '-gencode=compute_61,code=sm_61;-gencode=compute_75,code=sm_75'
 -b: build embedded milvus(default: OFF)
 -a: build milvus with AddressSanitizer(default: false)
+-Z: build milvus without azure-sdk-for-cpp, so cannot use azure blob
 -h: help
 
 usage:
-./core_build.sh -p \${INSTALL_PREFIX} -t \${BUILD_TYPE} -s \${CUDA_ARCH} -f\${CUSTOM_THIRDPARTY_PATH} [-u] [-l] [-r] [-c] [-z] [-g] [-m] [-e] [-h] [-b]
+./core_build.sh -p \${INSTALL_PREFIX} -t \${BUILD_TYPE} -s \${CUDA_ARCH} [-u] [-l] [-r] [-c] [-z] [-g] [-m] [-e] [-h] [-b]
                 "
     exit 0
     ;;
@@ -199,30 +178,39 @@ usage:
   esac
 done
 
+if [ -z "$BUILD_WITHOUT_AZURE" ]; then
+  AZURE_BUILD_DIR="${ROOT_DIR}/cmake_build/azure"
+  if [ ! -d ${AZURE_BUILD_DIR} ]; then
+    mkdir -p ${AZURE_BUILD_DIR}
+  fi
+  pushd ${AZURE_BUILD_DIR}
+  env bash ${ROOT_DIR}/scripts/azure_build.sh ${ROOT_DIR}
+  if [ ! -e libblob-chunk-manager* ]; then
+    cat vcpkg-bootstrap.log
+    exit 1
+  fi
+  popd
+  SYSTEM_NAME=$(uname -s)
+  if [[ ${SYSTEM_NAME} == "Darwin" ]]; then
+    SYSTEM_NAME="osx"
+  elif [[ ${SYSTEM_NAME} == "Linux" ]]; then
+    SYSTEM_NAME="linux"
+  fi
+  ARCHITECTURE=$(uname -m)
+  if [[ ${ARCHITECTURE} == "x86_64" ]]; then
+    ARCHITECTURE="x64"
+  elif [[ ${ARCHITECTURE} == "aarch64" ]]; then
+    ARCHITECTURE="arm64"
+  fi
+  VCPKG_TARGET_TRIPLET=${ARCHITECTURE}-${SYSTEM_NAME}
+fi
+
 if [[ ! -d ${BUILD_OUTPUT_DIR} ]]; then
   mkdir ${BUILD_OUTPUT_DIR}
 fi
 source ${ROOT_DIR}/scripts/setenv.sh
 
 CMAKE_GENERATOR="Unix Makefiles"
-
-# MSYS system
-if [ "$MSYSTEM" == "MINGW64" ] ; then
-  BUILD_COVERAGE=OFF
-  PROFILING=OFF
-  GPU_VERSION=OFF
-  WITH_PROMETHEUS=OFF
-  CUDA_ARCH=OFF
-
-  # extra default cmake args for msys
-  CMAKE_GENERATOR="MSYS Makefiles"
-
-  # clang tools path
-  export CLANG_TOOLS_PATH=/mingw64/bin
-
-  # using system blas
-  export OpenBLAS_HOME="$(cygpath -w /mingw64)"
-fi
 
 # UBUNTU system build diskann index
 if [ "$OS_NAME" == "ubuntu20.04" ] ; then
@@ -235,13 +223,6 @@ pushd ${BUILD_OUTPUT_DIR}
 # Force update the variables each time
 make rebuild_cache >/dev/null 2>&1
 
-
-if [[ ${MAKE_CLEAN} == "ON" ]]; then
-  echo "Runing make clean in ${BUILD_OUTPUT_DIR} ..."
-  make clean
-  exit 0
-fi
-
 CPU_ARCH=$(get_cpu_arch $CPU_TARGET)
 
 arch=$(uname -m)
@@ -250,23 +231,22 @@ ${CMAKE_EXTRA_ARGS} \
 -DBUILD_UNIT_TEST=${BUILD_UNITTEST} \
 -DCMAKE_INSTALL_PREFIX=${INSTALL_PREFIX}
 -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
--DOpenBLAS_SOURCE=AUTO \
 -DCMAKE_CUDA_COMPILER=${CUDA_COMPILER} \
 -DCMAKE_LIBRARY_ARCHITECTURE=${arch} \
 -DBUILD_COVERAGE=${BUILD_COVERAGE} \
--DMILVUS_DB_PATH=${DB_PATH} \
--DENABLE_CPU_PROFILING=${PROFILING} \
 -DMILVUS_GPU_VERSION=${GPU_VERSION} \
--DMILVUS_WITH_PROMETHEUS=${WITH_PROMETHEUS} \
 -DMILVUS_CUDA_ARCH=${CUDA_ARCH} \
--DCUSTOM_THIRDPARTY_DOWNLOAD_PATH=${CUSTOM_THIRDPARTY_PATH} \
 -DEMBEDDED_MILVUS=${EMBEDDED_MILVUS} \
 -DBUILD_DISK_ANN=${BUILD_DISK_ANN} \
 -DUSE_ASAN=${USE_ASAN} \
--DOPEN_SIMD=${OPEN_SIMD} \
--DUSE_DYNAMIC_SIMD=${USE_DYNAMIC_SIMD}
+-DUSE_DYNAMIC_SIMD=${USE_DYNAMIC_SIMD} \
 -DCPU_ARCH=${CPU_ARCH} \
-${CPP_SRC_DIR}"
+-DINDEX_ENGINE=${INDEX_ENGINE} "
+if [ -z "$BUILD_WITHOUT_AZURE" ]; then
+CMAKE_CMD=${CMAKE_CMD}"-DAZURE_BUILD_DIR=${AZURE_BUILD_DIR} \
+-DVCPKG_TARGET_TRIPLET=${VCPKG_TARGET_TRIPLET} "
+fi
+CMAKE_CMD=${CMAKE_CMD}"${CPP_SRC_DIR}"
 
 echo "CC $CC"
 echo ${CMAKE_CMD}

@@ -33,7 +33,6 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	milvus_storage "github.com/milvus-io/milvus-storage/go/storage"
@@ -915,7 +914,6 @@ func (m *rendezvousFlushManager) flushBufferData(data *BufferData, segmentID Uni
 
 	// binlogs
 	for _, blob := range binLogBlobs {
-		defer func() { logidx++ }()
 		fieldID, err := strconv.ParseInt(blob.GetKey(), 10, 64)
 		if err != nil {
 			log.Error("Flush failed ... cannot parse string to fieldID ..", zap.Error(err))
@@ -933,6 +931,8 @@ func (m *rendezvousFlushManager) flushBufferData(data *BufferData, segmentID Uni
 			LogPath:       key,
 			LogSize:       int64(fieldMemorySize[fieldID]),
 		}
+
+		logidx += 1
 	}
 
 	// pk stats binlog
@@ -957,8 +957,8 @@ func (m *rendezvousFlushManager) flushBufferData(data *BufferData, segmentID Uni
 		kvs[key] = pkStatsBlob.Value
 		field2Stats[fieldID] = &datapb.Binlog{
 			EntriesNum:    0,
-			TimestampFrom: 0, //TODO
-			TimestampTo:   0, //TODO,
+			TimestampFrom: 0, // TODO
+			TimestampTo:   0, // TODO,
 			LogPath:       key,
 			LogSize:       int64(len(pkStatsBlob.Value)),
 		}
@@ -975,8 +975,8 @@ func (m *rendezvousFlushManager) flushBufferData(data *BufferData, segmentID Uni
 
 // notify flush manager del buffer data
 func (m *rendezvousFlushManager) flushDelData(data *DelDataBuf, segmentID UniqueID,
-	pos *msgpb.MsgPosition) error {
-
+	pos *msgpb.MsgPosition,
+) error {
 	// del signal with empty data
 	if data == nil || data.delData == nil {
 		m.handleDeleteTask(segmentID, &flushBufferDeleteTask{}, nil, pos)
@@ -1025,7 +1025,7 @@ func (m *rendezvousFlushManager) injectFlush(injection *taskInjection, segments 
 // fetch meta info for segment
 func (m *rendezvousFlushManager) getSegmentMeta(segmentID UniqueID, pos *msgpb.MsgPosition) (UniqueID, UniqueID, *etcdpb.CollectionMeta, error) {
 	if !m.hasSegment(segmentID, true) {
-		return -1, -1, nil, fmt.Errorf("no such segment %d in the channel", segmentID)
+		return -1, -1, nil, merr.WrapErrSegmentNotFound(segmentID, "segment not found during flush")
 	}
 
 	// fetch meta information of segment
@@ -1095,7 +1095,7 @@ func getSyncTaskID(pos *msgpb.MsgPosition) string {
 // close cleans up all the left members
 func (m *rendezvousFlushManager) close() {
 	m.dispatcher.Range(func(segmentID int64, queue *orderFlushQueue) bool {
-		//assertion ok
+		// assertion ok
 		queue.injectMut.Lock()
 		for i := 0; i < len(queue.injectCh); i++ {
 			go queue.handleInject(<-queue.injectCh)
@@ -1222,9 +1222,9 @@ func dropVirtualChannelFunc(dsService *dataSyncService, opts ...retry.Option) fl
 	return func(packs []*segmentFlushPack) {
 		req := &datapb.DropVirtualChannelRequest{
 			Base: commonpbutil.NewMsgBase(
-				commonpbutil.WithMsgType(0), //TODO msg type
-				commonpbutil.WithMsgID(0),   //TODO msg id
-				commonpbutil.WithSourceID(paramtable.GetNodeID()),
+				commonpbutil.WithMsgType(0), // TODO msg type
+				commonpbutil.WithMsgID(0),   // TODO msg id
+				commonpbutil.WithSourceID(dsService.serverID),
 			),
 			ChannelName: dsService.vchannelName,
 		}
@@ -1297,21 +1297,14 @@ func dropVirtualChannelFunc(dsService *dataSyncService, opts ...retry.Option) fl
 		req.Segments = segments
 
 		err := retry.Do(context.Background(), func() error {
-			rsp, err := dsService.dataCoord.DropVirtualChannel(context.Background(), req)
-			// should be network issue, return error and retry
+			err := dsService.broker.DropVirtualChannel(context.Background(), req)
 			if err != nil {
-				return fmt.Errorf(err.Error())
-			}
-
-			// meta error, datanode handles a virtual channel does not belong here
-			if rsp.GetStatus().GetErrorCode() == commonpb.ErrorCode_MetaFailed {
-				log.Warn("meta error found, skip sync and start to drop virtual channel", zap.String("channel", dsService.vchannelName))
-				return nil
-			}
-
-			// retry for other error
-			if rsp.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
-				return fmt.Errorf("data service DropVirtualChannel failed, reason = %s", rsp.GetStatus().GetReason())
+				// meta error, datanode handles a virtual channel does not belong here
+				if errors.Is(err, merr.ErrChannelNotFound) {
+					log.Warn("meta error found, skip sync and start to drop virtual channel", zap.String("channel", dsService.vchannelName))
+					return nil
+				}
+				return err
 			}
 			dsService.channel.transferNewSegments(lo.Map(startPos, func(pos *datapb.SegmentStartPosition, _ int) UniqueID {
 				return pos.GetSegmentID()
@@ -1497,7 +1490,7 @@ func flushNotifyFunc(dsService *dataSyncService, opts ...retry.Option) notifyMet
 			Base: commonpbutil.NewMsgBase(
 				commonpbutil.WithMsgType(0),
 				commonpbutil.WithMsgID(0),
-				commonpbutil.WithSourceID(dsService.serverID),
+				commonpbutil.WithSourceID(paramtable.GetNodeID()),
 			),
 			SegmentID:           pack.segmentID,
 			CollectionID:        dsService.collectionID,
@@ -1513,30 +1506,25 @@ func flushNotifyFunc(dsService *dataSyncService, opts ...retry.Option) notifyMet
 			Channel:        dsService.vchannelName,
 		}
 		err := retry.Do(context.Background(), func() error {
-			rsp, err := dsService.dataCoord.SaveBinlogPaths(context.Background(), req)
-			// should be network issue, return error and retry
-			if err != nil {
-				return err
-			}
-
+			err := dsService.broker.SaveBinlogPaths(context.Background(), req)
 			// Segment not found during stale segment flush. Segment might get compacted already.
 			// Stop retry and still proceed to the end, ignoring this error.
-			if !pack.flushed && rsp.GetErrorCode() == commonpb.ErrorCode_SegmentNotFound {
+			if !pack.flushed && errors.Is(err, merr.ErrSegmentNotFound) {
 				log.Warn("stale segment not found, could be compacted",
 					zap.Int64("segmentID", pack.segmentID))
 				log.Warn("failed to SaveBinlogPaths",
 					zap.Int64("segmentID", pack.segmentID),
-					zap.Error(errors.New(rsp.GetReason())))
+					zap.Error(err))
 				return nil
 			}
 			// meta error, datanode handles a virtual channel does not belong here
-			if rsp.GetErrorCode() == commonpb.ErrorCode_MetaFailed {
+			if errors.IsAny(err, merr.ErrSegmentNotFound, merr.ErrChannelNotFound) {
 				log.Warn("meta error found, skip sync and start to drop virtual channel", zap.String("channel", dsService.vchannelName))
 				return nil
 			}
 
-			if rsp.ErrorCode != commonpb.ErrorCode_Success {
-				return fmt.Errorf("data service save bin log path failed, reason = %s", rsp.Reason)
+			if err != nil {
+				return err
 			}
 
 			dsService.channel.transferNewSegments(lo.Map(startPos, func(pos *datapb.SegmentStartPosition, _ int) UniqueID {

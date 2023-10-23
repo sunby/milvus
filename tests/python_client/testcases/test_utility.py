@@ -94,7 +94,8 @@ class TestUtilityParams(TestcaseBase):
             self.utility_wrap.has_collection(
                 c_name,
                 check_task=CheckTasks.err_res,
-                check_items={ct.err_code: 1, ct.err_msg: "Invalid collection name"})
+                check_items={ct.err_code: 1100,
+                             ct.err_msg: "collection name should not be empty: invalid parameter"})
         # elif not isinstance(c_name, str): self.utility_wrap.has_collection(c_name, check_task=CheckTasks.err_res,
         # check_items={ct.err_code: 1, ct.err_msg: "illegal"})
 
@@ -112,7 +113,8 @@ class TestUtilityParams(TestcaseBase):
             self.utility_wrap.has_partition(
                 c_name, p_name,
                 check_task=CheckTasks.err_res,
-                check_items={ct.err_code: 1, ct.err_msg: "Invalid"})
+                check_items={ct.err_code: 1100,
+                             ct.err_msg: "collection name should not be empty: invalid parameter"})
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_has_partition_name_invalid(self, get_invalid_partition_name):
@@ -134,9 +136,11 @@ class TestUtilityParams(TestcaseBase):
     @pytest.mark.tags(CaseLabel.L2)
     def test_drop_collection_name_invalid(self, get_invalid_collection_name):
         self._connect()
-        error = f'`collection_name` value {get_invalid_collection_name} is illegal'
+        error1 = {ct.err_code: 1, ct.err_msg: f"`collection_name` value {get_invalid_collection_name} is illegal"}
+        error2 = {ct.err_code: 1100, ct.err_msg: f"Invalid collection name: {get_invalid_collection_name}."}
+        error = error1 if get_invalid_collection_name in [[], 1, [1, '2', 3], (1,), {1: 1}, None, ""] else error2
         self.utility_wrap.drop_collection(get_invalid_collection_name, check_task=CheckTasks.err_res,
-                                          check_items={ct.err_code: 1, ct.err_msg: error})
+                                          check_items=error)
 
     # TODO: enable
     @pytest.mark.tags(CaseLabel.L2)
@@ -241,7 +245,7 @@ class TestUtilityParams(TestcaseBase):
         self.collection_wrap.construct_from_dataframe(c_name, df, primary_field=ct.default_int64_field_name)
         self.collection_wrap.create_index(ct.default_float_vec_field_name, index_params=ct.default_flat_index)
         self.collection_wrap.load()
-        error = {ct.err_code: 1, ct.err_msg: "describe collection failed: can't find collection"}
+        error = {ct.err_code: 4, ct.err_msg: "collection default:not_existed_name: collection not found"}
         self.utility_wrap.loading_progress("not_existed_name", check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L2)
@@ -285,7 +289,7 @@ class TestUtilityParams(TestcaseBase):
         self.utility_wrap.wait_for_loading_complete(
             c_name,
             check_task=CheckTasks.err_res,
-            check_items={ct.err_code: 1, ct.err_msg: "can't find collection"})
+            check_items={ct.err_code: 4, ct.err_msg: f"collection default:{c_name}: collection not found"})
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_wait_for_loading_partition_not_existed(self):
@@ -299,7 +303,7 @@ class TestUtilityParams(TestcaseBase):
         self.utility_wrap.wait_for_loading_complete(
             collection_w.name, partition_names=[ct.default_tag],
             check_task=CheckTasks.err_res,
-            check_items={ct.err_code: 15, ct.err_msg: f'partitionID of partitionName:{ct.default_tag} can not be find'})
+            check_items={ct.err_code: 200, ct.err_msg: f'partition={ct.default_tag}: partition not found'})
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_drop_collection_not_existed(self):
@@ -584,9 +588,11 @@ class TestUtilityParams(TestcaseBase):
         new_collection_name = get_invalid_value_collection_name
         self.utility_wrap.rename_collection(old_collection_name, new_collection_name,
                                             check_task=CheckTasks.err_res,
-                                            check_items={"err_code": 9,
-                                                         "err_msg": "collection {} was not "
-                                                                    "loaded into memory)".format(collection_w.name)})
+                                            check_items={"err_code": 1100,
+                                                         "err_msg": "Invalid collection name: %s. the first "
+                                                                    "character of a collection name must be an "
+                                                                    "underscore or letter: invalid parameter"
+                                                                    % new_collection_name})
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_rename_collection_not_existed_collection(self):
@@ -601,9 +607,9 @@ class TestUtilityParams(TestcaseBase):
         new_collection_name = cf.gen_unique_str(prefix)
         self.utility_wrap.rename_collection(old_collection_name, new_collection_name,
                                             check_task=CheckTasks.err_res,
-                                            check_items={"err_code": 1,
-                                                         "err_msg": "can't find collection: {}".format(
-                                                             collection_w.name)})
+                                            check_items={"err_code": 4,
+                                                         "err_msg": "collection 1:test_collection_non_exist: "
+                                                                    "collection not found"})
 
     @pytest.mark.tags(CaseLabel.L1)
     def test_rename_collection_existed_collection_name(self):
@@ -617,10 +623,10 @@ class TestUtilityParams(TestcaseBase):
         old_collection_name = collection_w.name
         self.utility_wrap.rename_collection(old_collection_name, old_collection_name,
                                             check_task=CheckTasks.err_res,
-                                            check_items={"err_code": 1,
-                                                         "err_msg": "duplicated new collection name :{} with other "
-                                                                    "collection name or alias".format(
-                                                             collection_w.name)})
+                                            check_items={"err_code": 65535,
+                                                         "err_msg": "duplicated new collection name default:{}"
+                                                                    " with other collection name or"
+                                                                    " alias".format(collection_w.name)})
 
     @pytest.mark.tags(CaseLabel.L1)
     def test_rename_collection_existed_collection_alias(self):
@@ -636,8 +642,8 @@ class TestUtilityParams(TestcaseBase):
         self.utility_wrap.create_alias(old_collection_name, alias)
         self.utility_wrap.rename_collection(old_collection_name, alias,
                                             check_task=CheckTasks.err_res,
-                                            check_items={"err_code": 1,
-                                                         "err_msg": "duplicated new collection name :{} with "
+                                            check_items={"err_code": 65535,
+                                                         "err_msg": "duplicated new collection name default:{} with "
                                                                     "other collection name or alias".format(alias)})
 
     @pytest.mark.tags(CaseLabel.L1)
@@ -809,7 +815,7 @@ class TestUtilityBase(TestcaseBase):
         self.utility_wrap.index_building_progress(
             c_name,
             check_task=CheckTasks.err_res,
-            check_items={ct.err_code: 1, ct.err_msg: "can't find collection"})
+            check_items={ct.err_code: 4, ct.err_msg: "collection not found"})
 
     @pytest.mark.tags(CaseLabel.L1)
     def test_index_process_collection_empty(self):
@@ -837,7 +843,7 @@ class TestUtilityBase(TestcaseBase):
         cw = self.init_collection_wrap(name=c_name)
         data = cf.gen_default_list_data(nb)
         cw.insert(data=data)
-        error = {ct.err_code: 25, ct.err_msg: "there is no index on collection"}
+        error = {ct.err_code: 700, ct.err_msg: f"{c_name}: index not found"}
         self.utility_wrap.index_building_progress(c_name, check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L1)
@@ -898,7 +904,7 @@ class TestUtilityBase(TestcaseBase):
         self.utility_wrap.wait_for_index_building_complete(
             c_name,
             check_task=CheckTasks.err_res,
-            check_items={ct.err_code: 1, ct.err_msg: "can't find collection"})
+            check_items={ct.err_code: 4, ct.err_msg: "collection not found"})
 
     @pytest.mark.tags(CaseLabel.L1)
     def test_wait_index_collection_empty(self):
@@ -948,9 +954,8 @@ class TestUtilityBase(TestcaseBase):
         assert collection_w.num_entities == ct.default_nb
         self.utility_wrap.loading_progress(collection_w.name,
                                            check_task=CheckTasks.err_res,
-                                           check_items={ct.err_code: 1,
-                                                        ct.err_msg: 'fail to show collections from '
-                                                                    'the querycoord, no data'})
+                                           check_items={ct.err_code: 101,
+                                                        ct.err_msg: 'collection not loaded'})
 
     @pytest.mark.tags(CaseLabel.L1)
     @pytest.mark.parametrize("nb", [ct.default_nb, 5000])
@@ -1924,7 +1929,7 @@ class TestUtilityAdvanced(TestcaseBase):
         # load balance
         self.utility_wrap.load_balance(collection_w.name, src_node_id, dst_node_ids, sealed_segment_ids,
                                        check_task=CheckTasks.err_res,
-                                       check_items={ct.err_code: 1, ct.err_msg: "no available queryNode to allocate"})
+                                       check_items={ct.err_code: 1, ct.err_msg: "destination node not found in the same replica"})
 
     @pytest.mark.tags(CaseLabel.L1)
     @pytest.mark.xfail(reason="issue: https://github.com/milvus-io/milvus/issues/19441")
@@ -2760,7 +2765,7 @@ class TestUtilityRBAC(TestcaseBase):
         self.utility_wrap.init_role("public")
         self.utility_wrap.role_grant("Collection", c_name, "Insert")
 
-    @pytest.mark.tags(CaseLabel.L2)
+    @pytest.mark.tags(CaseLabel.RBAC)
     def test_revoke_user_after_delete_user(self, host, port):
         """
         target: test revoke user with deleted user
@@ -4721,7 +4726,7 @@ class TestUtilityNegativeRbac(TestcaseBase):
         # collection flush with db_b permission
         self.database_wrap.using_database(db_b)
         collection_w.flush(check_task=CheckTasks.err_res,
-                           check_items={ct.err_code: 1, ct.err_msg: "can't find collection"})
+                           check_items={ct.err_code: 4, ct.err_msg: "collection not found"})
         self.database_wrap.using_database(db_a)
         collection_w.flush(check_task=CheckTasks.check_permission_deny)
 
@@ -4892,6 +4897,29 @@ class TestUtilityNegativeRbac(TestcaseBase):
         # operate collection in the default db
         self.database_wrap.using_database(ct.default_db)
         collection_w.flush(check_task=CheckTasks.check_permission_deny)
+
+    @pytest.mark.tags(CaseLabel.RBAC)
+    def test_create_over_max_roles(self, host, port):
+        """
+        target: test create roles over max num
+        method: test create role with random name
+        expected: raise exception
+        """
+        self.connection_wrap.connect(host=host, port=port, user=ct.default_user,
+                                     password=ct.default_password, check_task=ct.CheckTasks.ccr)
+        # 2 original roles: admin, public
+        for i in range(ct.max_role_num - 2):
+            role_name = "role_" + str(i)
+            self.utility_wrap.init_role(role_name, check_task=CheckTasks.check_role_property,
+                                        check_items={exp_name: role_name})
+            self.utility_wrap.create_role()
+            assert self.utility_wrap.role_is_exist()[0]
+
+        # now total 10 roles, create a new one will report error
+        self.utility_wrap.init_role("role_11")
+        error = {ct.err_code: 35,
+                 ct.err_msg: "unable to create role because the number of roles has reached the limit"}
+        self.utility_wrap.create_role(check_task=CheckTasks.err_res, check_items=error)
 
 
 @pytest.mark.tags(CaseLabel.L3)

@@ -25,11 +25,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/milvus-io/milvus/pkg/log"
-
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
@@ -41,6 +40,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
 	"github.com/milvus-io/milvus/pkg/common"
+	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/util"
 	"github.com/milvus-io/milvus/pkg/util/crypto"
@@ -349,6 +349,7 @@ func TestValidatePrimaryKey(t *testing.T) {
 func TestValidateFieldType(t *testing.T) {
 	type testCase struct {
 		dt       schemapb.DataType
+		et       schemapb.DataType
 		validate bool
 	}
 	cases := []testCase{
@@ -396,6 +397,80 @@ func TestValidateFieldType(t *testing.T) {
 			dt:       schemapb.DataType_VarChar,
 			validate: true,
 		},
+		{
+			dt:       schemapb.DataType_String,
+			validate: false,
+		},
+		{
+			dt:       schemapb.DataType_Array,
+			et:       schemapb.DataType_Bool,
+			validate: true,
+		},
+		{
+			dt:       schemapb.DataType_Array,
+			et:       schemapb.DataType_Int8,
+			validate: true,
+		},
+		{
+			dt:       schemapb.DataType_Array,
+			et:       schemapb.DataType_Int16,
+			validate: true,
+		},
+		{
+			dt:       schemapb.DataType_Array,
+			et:       schemapb.DataType_Int32,
+			validate: true,
+		},
+		{
+			dt:       schemapb.DataType_Array,
+			et:       schemapb.DataType_Int64,
+			validate: true,
+		},
+		{
+			dt:       schemapb.DataType_Array,
+			et:       schemapb.DataType_Float,
+			validate: true,
+		},
+		{
+			dt:       schemapb.DataType_Array,
+			et:       schemapb.DataType_Double,
+			validate: true,
+		},
+		{
+			dt:       schemapb.DataType_Array,
+			et:       schemapb.DataType_VarChar,
+			validate: true,
+		},
+		{
+			dt:       schemapb.DataType_Array,
+			et:       schemapb.DataType_String,
+			validate: false,
+		},
+		{
+			dt:       schemapb.DataType_Array,
+			et:       schemapb.DataType_None,
+			validate: false,
+		},
+		{
+			dt:       schemapb.DataType_Array,
+			et:       schemapb.DataType_JSON,
+			validate: false,
+		},
+		{
+			dt:       schemapb.DataType_Array,
+			et:       schemapb.DataType_Array,
+			validate: false,
+		},
+		{
+			dt:       schemapb.DataType_Array,
+			et:       schemapb.DataType_FloatVector,
+			validate: false,
+		},
+		{
+			dt:       schemapb.DataType_Array,
+			et:       schemapb.DataType_BinaryVector,
+			validate: false,
+		},
 	}
 
 	for _, tc := range cases {
@@ -403,7 +478,8 @@ func TestValidateFieldType(t *testing.T) {
 			sch := &schemapb.CollectionSchema{
 				Fields: []*schemapb.FieldSchema{
 					{
-						DataType: tc.dt,
+						DataType:    tc.dt,
+						ElementType: tc.et,
 					},
 				},
 			}
@@ -833,7 +909,7 @@ func TestPasswordVerify(t *testing.T) {
 	invokedCount := 0
 
 	mockedRootCoord := newMockRootCoord()
-	mockedRootCoord.GetGetCredentialFunc = func(ctx context.Context, req *rootcoordpb.GetCredentialRequest) (*rootcoordpb.GetCredentialResponse, error) {
+	mockedRootCoord.GetGetCredentialFunc = func(ctx context.Context, req *rootcoordpb.GetCredentialRequest, opts ...grpc.CallOption) (*rootcoordpb.GetCredentialResponse, error) {
 		invokedCount++
 		return nil, fmt.Errorf("get cred not found credential")
 	}
@@ -872,7 +948,7 @@ func Test_isCollectionIsLoaded(t *testing.T) {
 	ctx := context.Background()
 	t.Run("normal", func(t *testing.T) {
 		collID := int64(1)
-		qc := &mocks.MockQueryCoord{}
+		qc := &mocks.MockQueryCoordClient{}
 		successStatus := &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}
 		qc.EXPECT().LoadCollection(mock.Anything, mock.Anything).Return(successStatus, nil)
 		qc.EXPECT().GetShardLeaders(mock.Anything, mock.Anything).Return(&querypb.GetShardLeadersResponse{
@@ -896,7 +972,7 @@ func Test_isCollectionIsLoaded(t *testing.T) {
 
 	t.Run("error", func(t *testing.T) {
 		collID := int64(1)
-		qc := &mocks.MockQueryCoord{}
+		qc := &mocks.MockQueryCoordClient{}
 		successStatus := &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}
 		qc.EXPECT().LoadCollection(mock.Anything, mock.Anything).Return(successStatus, nil)
 		qc.EXPECT().GetShardLeaders(mock.Anything, mock.Anything).Return(&querypb.GetShardLeadersResponse{
@@ -920,7 +996,7 @@ func Test_isCollectionIsLoaded(t *testing.T) {
 
 	t.Run("fail", func(t *testing.T) {
 		collID := int64(1)
-		qc := &mocks.MockQueryCoord{}
+		qc := &mocks.MockQueryCoordClient{}
 		successStatus := &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}
 		qc.EXPECT().LoadCollection(mock.Anything, mock.Anything).Return(successStatus, nil)
 		qc.EXPECT().GetShardLeaders(mock.Anything, mock.Anything).Return(&querypb.GetShardLeadersResponse{
@@ -951,7 +1027,7 @@ func Test_isPartitionIsLoaded(t *testing.T) {
 	t.Run("normal", func(t *testing.T) {
 		collID := int64(1)
 		partID := int64(2)
-		qc := &mocks.MockQueryCoord{}
+		qc := &mocks.MockQueryCoordClient{}
 		successStatus := &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}
 		qc.EXPECT().LoadCollection(mock.Anything, mock.Anything).Return(successStatus, nil)
 		qc.EXPECT().GetShardLeaders(mock.Anything, mock.Anything).Return(&querypb.GetShardLeadersResponse{
@@ -965,10 +1041,7 @@ func Test_isPartitionIsLoaded(t *testing.T) {
 			},
 		}, nil)
 		qc.EXPECT().ShowPartitions(mock.Anything, mock.Anything).Return(&querypb.ShowPartitionsResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-				Reason:    "",
-			},
+			Status:       merr.Success(),
 			PartitionIDs: []int64{partID},
 		}, nil)
 		loaded, err := isPartitionLoaded(ctx, qc, collID, []int64{partID})
@@ -979,7 +1052,7 @@ func Test_isPartitionIsLoaded(t *testing.T) {
 	t.Run("error", func(t *testing.T) {
 		collID := int64(1)
 		partID := int64(2)
-		qc := &mocks.MockQueryCoord{}
+		qc := &mocks.MockQueryCoordClient{}
 		successStatus := &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}
 		qc.EXPECT().LoadCollection(mock.Anything, mock.Anything).Return(successStatus, nil)
 		qc.EXPECT().GetShardLeaders(mock.Anything, mock.Anything).Return(&querypb.GetShardLeadersResponse{
@@ -993,10 +1066,7 @@ func Test_isPartitionIsLoaded(t *testing.T) {
 			},
 		}, nil)
 		qc.EXPECT().ShowPartitions(mock.Anything, mock.Anything).Return(&querypb.ShowPartitionsResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-				Reason:    "",
-			},
+			Status:       merr.Success(),
 			PartitionIDs: []int64{partID},
 		}, errors.New("error"))
 		loaded, err := isPartitionLoaded(ctx, qc, collID, []int64{partID})
@@ -1007,7 +1077,7 @@ func Test_isPartitionIsLoaded(t *testing.T) {
 	t.Run("fail", func(t *testing.T) {
 		collID := int64(1)
 		partID := int64(2)
-		qc := &mocks.MockQueryCoord{}
+		qc := &mocks.MockQueryCoordClient{}
 		successStatus := &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}
 		qc.EXPECT().LoadCollection(mock.Anything, mock.Anything).Return(successStatus, nil)
 		qc.EXPECT().GetShardLeaders(mock.Anything, mock.Anything).Return(&querypb.GetShardLeadersResponse{
@@ -1334,9 +1404,7 @@ func Test_InsertTaskCheckPrimaryFieldData(t *testing.T) {
 			},
 		},
 		result: &milvuspb.MutationResult{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status: merr.Success(),
 		},
 	}
 
@@ -1378,9 +1446,7 @@ func Test_InsertTaskCheckPrimaryFieldData(t *testing.T) {
 			},
 		},
 		result: &milvuspb.MutationResult{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status: merr.Success(),
 		},
 	}
 	_, err = checkPrimaryFieldData(case2.schema, case2.result, case2.insertMsg, true)
@@ -1420,9 +1486,7 @@ func Test_InsertTaskCheckPrimaryFieldData(t *testing.T) {
 			},
 		},
 		result: &milvuspb.MutationResult{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status: merr.Success(),
 		},
 	}
 	_, err = checkPrimaryFieldData(case3.schema, case3.result, case3.insertMsg, true)
@@ -1466,9 +1530,7 @@ func Test_InsertTaskCheckPrimaryFieldData(t *testing.T) {
 			},
 		},
 		result: &milvuspb.MutationResult{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status: merr.Success(),
 		},
 	}
 	case4.schema.Fields[0].IsPrimaryKey = true
@@ -1507,9 +1569,7 @@ func Test_UpsertTaskCheckPrimaryFieldData(t *testing.T) {
 			},
 		},
 		result: &milvuspb.MutationResult{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status: merr.Success(),
 		},
 	}
 	_, err := checkPrimaryFieldData(case1.schema, case1.result, case1.insertMsg, false)
@@ -1552,9 +1612,7 @@ func Test_UpsertTaskCheckPrimaryFieldData(t *testing.T) {
 			},
 		},
 		result: &milvuspb.MutationResult{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status: merr.Success(),
 		},
 	}
 	_, err = checkPrimaryFieldData(case2.schema, case2.result, case2.insertMsg, false)
@@ -1594,9 +1652,7 @@ func Test_UpsertTaskCheckPrimaryFieldData(t *testing.T) {
 			},
 		},
 		result: &milvuspb.MutationResult{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status: merr.Success(),
 		},
 	}
 	_, err = checkPrimaryFieldData(case3.schema, case3.result, case3.insertMsg, false)
@@ -1639,15 +1695,13 @@ func Test_UpsertTaskCheckPrimaryFieldData(t *testing.T) {
 			},
 		},
 		result: &milvuspb.MutationResult{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status: merr.Success(),
 		},
 	}
 	case4.schema.Fields[0].IsPrimaryKey = true
 	case4.schema.Fields[0].AutoID = true
 	_, err = checkPrimaryFieldData(case4.schema, case4.result, case4.insertMsg, false)
-	assert.Equal(t, commonpb.ErrorCode_UpsertAutoIDTrue, case4.result.Status.ErrorCode)
+	assert.ErrorIs(t, merr.Error(case4.result.GetStatus()), merr.ErrParameterInvalid)
 	assert.NotEqual(t, nil, err)
 
 	// primary field data is nil, GetPrimaryFieldData fail
@@ -1685,9 +1739,7 @@ func Test_UpsertTaskCheckPrimaryFieldData(t *testing.T) {
 			},
 		},
 		result: &milvuspb.MutationResult{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status: merr.Success(),
 		},
 	}
 	case5.schema.Fields[0].IsPrimaryKey = true
@@ -1736,9 +1788,7 @@ func Test_UpsertTaskCheckPrimaryFieldData(t *testing.T) {
 			},
 		},
 		result: &milvuspb.MutationResult{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status: merr.Success(),
 		},
 	}
 	case6.schema.Fields[0].IsPrimaryKey = true
@@ -1805,7 +1855,7 @@ func Test_MaxQueryResultWindow(t *testing.T) {
 }
 
 func Test_GetPartitionProgressFailed(t *testing.T) {
-	qc := mocks.NewMockQueryCoord(t)
+	qc := mocks.NewMockQueryCoordClient(t)
 	qc.EXPECT().ShowPartitions(mock.Anything, mock.Anything).Return(&querypb.ShowPartitionsResponse{
 		Status: &commonpb.Status{
 			ErrorCode: commonpb.ErrorCode_UnexpectedError,
@@ -1936,5 +1986,104 @@ func Test_CheckDynamicFieldData(t *testing.T) {
 		}
 		err := checkDynamicFieldData(schema, insertMsg)
 		assert.NoError(t, err)
+	})
+}
+
+func Test_validateMaxCapacityPerRow(t *testing.T) {
+	t.Run("normal case", func(t *testing.T) {
+		arrayField := &schemapb.FieldSchema{
+			DataType:    schemapb.DataType_Array,
+			ElementType: schemapb.DataType_VarChar,
+			TypeParams: []*commonpb.KeyValuePair{
+				{
+					Key:   common.MaxLengthKey,
+					Value: "100",
+				},
+				{
+					Key:   common.MaxCapacityKey,
+					Value: "10",
+				},
+			},
+		}
+
+		err := validateMaxCapacityPerRow("collection", arrayField)
+		assert.NoError(t, err)
+	})
+
+	t.Run("no max capacity", func(t *testing.T) {
+		arrayField := &schemapb.FieldSchema{
+			DataType:    schemapb.DataType_Array,
+			ElementType: schemapb.DataType_Int64,
+		}
+
+		err := validateMaxCapacityPerRow("collection", arrayField)
+		assert.Error(t, err)
+	})
+
+	t.Run("max capacity not int", func(t *testing.T) {
+		arrayField := &schemapb.FieldSchema{
+			DataType:    schemapb.DataType_Array,
+			ElementType: schemapb.DataType_Int64,
+			TypeParams: []*commonpb.KeyValuePair{
+				{
+					Key:   common.MaxCapacityKey,
+					Value: "six",
+				},
+			},
+		}
+
+		err := validateMaxCapacityPerRow("collection", arrayField)
+		assert.Error(t, err)
+	})
+
+	t.Run("max capacity exceed max", func(t *testing.T) {
+		arrayField := &schemapb.FieldSchema{
+			DataType:    schemapb.DataType_Array,
+			ElementType: schemapb.DataType_Int64,
+			TypeParams: []*commonpb.KeyValuePair{
+				{
+					Key:   common.MaxCapacityKey,
+					Value: "4097",
+				},
+			},
+		}
+
+		err := validateMaxCapacityPerRow("collection", arrayField)
+		assert.Error(t, err)
+	})
+}
+
+func TestSendReplicateMessagePack(t *testing.T) {
+	ctx := context.Background()
+	mockStream := msgstream.NewMockMsgStream(t)
+
+	t.Run("empty case", func(t *testing.T) {
+		SendReplicateMessagePack(ctx, nil, nil)
+	})
+
+	t.Run("produce fail", func(t *testing.T) {
+		mockStream.EXPECT().Produce(mock.Anything).Return(errors.New("produce error")).Once()
+		SendReplicateMessagePack(ctx, mockStream, &milvuspb.CreateDatabaseRequest{
+			Base: &commonpb.MsgBase{ReplicateInfo: &commonpb.ReplicateInfo{
+				IsReplicate:  true,
+				MsgTimestamp: 100,
+			}},
+		})
+	})
+
+	t.Run("unknown request", func(t *testing.T) {
+		SendReplicateMessagePack(ctx, mockStream, &milvuspb.ListDatabasesRequest{})
+	})
+
+	t.Run("normal case", func(t *testing.T) {
+		mockStream.EXPECT().Produce(mock.Anything).Return(nil)
+
+		SendReplicateMessagePack(ctx, mockStream, &milvuspb.CreateDatabaseRequest{})
+		SendReplicateMessagePack(ctx, mockStream, &milvuspb.DropDatabaseRequest{})
+		SendReplicateMessagePack(ctx, mockStream, &milvuspb.FlushRequest{})
+		SendReplicateMessagePack(ctx, mockStream, &milvuspb.LoadCollectionRequest{})
+		SendReplicateMessagePack(ctx, mockStream, &milvuspb.ReleaseCollectionRequest{})
+		SendReplicateMessagePack(ctx, mockStream, &milvuspb.CreateIndexRequest{})
+		SendReplicateMessagePack(ctx, mockStream, &milvuspb.DropIndexRequest{})
 	})
 }

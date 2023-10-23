@@ -46,17 +46,26 @@ import (
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/internal/util/importutil"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
+	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/tikv"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 func TestMain(m *testing.M) {
 	paramtable.Init()
 	rand.Seed(time.Now().UnixNano())
-	os.Exit(m.Run())
+	parameters := []string{"tikv", "etcd"}
+	var code int
+	for _, v := range parameters {
+		paramtable.Get().Save(paramtable.Get().MetaStoreCfg.MetaStoreType.Key, v)
+		code = m.Run()
+	}
+	os.Exit(code)
 }
 
 func TestRootCoord_CreateDatabase(t *testing.T) {
@@ -792,7 +801,7 @@ func TestRootCoord_UpdateChannelTimeTick(t *testing.T) {
 		defaultTs := Timestamp(101)
 
 		ticker := newRocksMqTtSynchronizer()
-		ticker.addSession(&sessionutil.Session{ServerID: source})
+		ticker.addSession(&sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: source}})
 
 		ctx := context.Background()
 		c := newTestCore(withHealthyCode(),
@@ -951,7 +960,7 @@ func TestRootCoord_GetMetrics(t *testing.T) {
 			withMetricsCacheManager())
 		resp, err := c.GetMetrics(ctx, req)
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	})
 
 	t.Run("get system info metrics from cache", func(t *testing.T) {
@@ -962,13 +971,13 @@ func TestRootCoord_GetMetrics(t *testing.T) {
 		c := newTestCore(withHealthyCode(),
 			withMetricsCacheManager())
 		c.metricsCacheManager.UpdateSystemInfoMetrics(&milvuspb.GetMetricsResponse{
-			Status:        succStatus(),
+			Status:        merr.Success(),
 			Response:      "cached response",
 			ComponentName: "cached component",
 		})
 		resp, err := c.GetMetrics(ctx, req)
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	})
 
 	t.Run("get system info metrics, cache miss", func(t *testing.T) {
@@ -981,7 +990,7 @@ func TestRootCoord_GetMetrics(t *testing.T) {
 		c.metricsCacheManager.InvalidateSystemInfoMetrics()
 		resp, err := c.GetMetrics(ctx, req)
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	})
 
 	t.Run("get system info metrics", func(t *testing.T) {
@@ -993,7 +1002,7 @@ func TestRootCoord_GetMetrics(t *testing.T) {
 			withMetricsCacheManager())
 		resp, err := c.getSystemInfoMetrics(ctx, req)
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	})
 }
 
@@ -1044,10 +1053,11 @@ func TestCore_Import(t *testing.T) {
 		meta.GetPartitionByNameFunc = func(collID UniqueID, partitionName string, ts Timestamp) (UniqueID, error) {
 			return 0, errors.New("mock GetPartitionByNameFunc error")
 		}
-		_, err := c.Import(ctx, &milvuspb.ImportRequest{
+		resp, err := c.Import(ctx, &milvuspb.ImportRequest{
 			CollectionName: "a-good-name",
 		})
-		assert.Error(t, err)
+		assert.NoError(t, err)
+		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrPartitionNotFound)
 	})
 
 	t.Run("normal case", func(t *testing.T) {
@@ -1091,7 +1101,7 @@ func TestCore_Import(t *testing.T) {
 			},
 		})
 		assert.NotNil(t, resp)
-		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.GetStatus().GetErrorCode())
+		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrParameterInvalid)
 	})
 
 	// Remove the following case after bulkinsert can support partition key
@@ -1144,11 +1154,70 @@ func TestCore_Import(t *testing.T) {
 		meta.GetCollectionByNameFunc = func(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error) {
 			return coll.Clone(), nil
 		}
-		_, err := c.Import(ctx, &milvuspb.ImportRequest{
+		resp, err := c.Import(ctx, &milvuspb.ImportRequest{
 			CollectionName: "a-good-name",
 			PartitionName:  "p1",
 		})
-		assert.Error(t, err)
+		assert.NoError(t, err)
+		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrParameterInvalid)
+	})
+
+	t.Run("backup should set partition name", func(t *testing.T) {
+		ctx := context.Background()
+		c := newTestCore(withHealthyCode(),
+			withMeta(meta))
+		meta.GetCollectionIDByNameFunc = func(name string) (UniqueID, error) {
+			return 100, nil
+		}
+		meta.GetCollectionVirtualChannelsFunc = func(colID int64) []string {
+			return []string{"ch-1", "ch-2"}
+		}
+		meta.GetPartitionByNameFunc = func(collID UniqueID, partitionName string, ts Timestamp) (UniqueID, error) {
+			return 101, nil
+		}
+		coll := &model.Collection{
+			CollectionID: 100,
+			Name:         "a-good-name",
+			Fields: []*model.Field{
+				{
+					FieldID:        101,
+					Name:           "test_field_name_1",
+					IsPrimaryKey:   false,
+					IsPartitionKey: true,
+					DataType:       schemapb.DataType_Int64,
+				},
+			},
+		}
+		meta.GetCollectionByNameFunc = func(ctx context.Context, collectionName string, ts Timestamp) (*model.Collection, error) {
+			return coll.Clone(), nil
+		}
+		resp1, err := c.Import(ctx, &milvuspb.ImportRequest{
+			CollectionName: "a-good-name",
+			Options: []*commonpb.KeyValuePair{
+				{
+					Key:   importutil.BackupFlag,
+					Value: "true",
+				},
+			},
+		})
+		assert.NoError(t, err)
+		assert.ErrorIs(t, merr.Error(resp1.GetStatus()), merr.ErrParameterInvalid)
+
+		meta.GetPartitionByNameFunc = func(collID UniqueID, partitionName string, ts Timestamp) (UniqueID, error) {
+			return common.InvalidPartitionID, fmt.Errorf("partition ID not found for partition name '%s'", partitionName)
+		}
+		resp2, _ := c.Import(ctx, &milvuspb.ImportRequest{
+			CollectionName: "a-good-name",
+			PartitionName:  "a-bad-name",
+			Options: []*commonpb.KeyValuePair{
+				{
+					Key:   importutil.BackupFlag,
+					Value: "true",
+				},
+			},
+		})
+		assert.NoError(t, err)
+		assert.ErrorIs(t, merr.Error(resp2.GetStatus()), merr.ErrPartitionNotFound)
 	})
 }
 
@@ -1268,7 +1337,7 @@ func TestCore_ListImportTasks(t *testing.T) {
 					CollectionID: ti3.CollectionId,
 				}, nil
 			}
-			return nil, errors.New("GetCollectionByName error")
+			return nil, merr.WrapErrCollectionNotFound(collectionName)
 		}
 
 		ctx := context.Background()
@@ -1306,7 +1375,7 @@ func TestCore_ListImportTasks(t *testing.T) {
 		})
 		assert.NoError(t, err)
 		assert.Equal(t, 0, len(resp.GetTasks()))
-		assert.Equal(t, commonpb.ErrorCode_IllegalCollectionName, resp.GetStatus().GetErrorCode())
+		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrCollectionNotFound)
 
 		// list the latest 2 tasks
 		resp, err = c.ListImportTasks(ctx, &milvuspb.ListImportTasksRequest{
@@ -1332,8 +1401,8 @@ func TestCore_ListImportTasks(t *testing.T) {
 func TestCore_ReportImport(t *testing.T) {
 	paramtable.Get().Save(Params.RootCoordCfg.ImportTaskSubPath.Key, "importtask")
 	var countLock sync.RWMutex
-	var globalCount = typeutil.UniqueID(0)
-	var idAlloc = func(count uint32) (typeutil.UniqueID, typeutil.UniqueID, error) {
+	globalCount := typeutil.UniqueID(0)
+	idAlloc := func(count uint32) (typeutil.UniqueID, typeutil.UniqueID, error) {
 		countLock.Lock()
 		defer countLock.Unlock()
 		globalCount++
@@ -1382,44 +1451,36 @@ func TestCore_ReportImport(t *testing.T) {
 				StateCode: commonpb.StateCode_Healthy,
 			},
 			SubcomponentStates: nil,
-			Status:             succStatus(),
+			Status:             merr.Success(),
 		}, nil
 	}
 	dc.WatchChannelsFunc = func(ctx context.Context, req *datapb.WatchChannelsRequest) (*datapb.WatchChannelsResponse, error) {
-		return &datapb.WatchChannelsResponse{Status: succStatus()}, nil
+		return &datapb.WatchChannelsResponse{Status: merr.Success()}, nil
 	}
 	dc.FlushFunc = func(ctx context.Context, req *datapb.FlushRequest) (*datapb.FlushResponse, error) {
-		return &datapb.FlushResponse{Status: succStatus()}, nil
+		return &datapb.FlushResponse{Status: merr.Success()}, nil
 	}
 
 	mockCallImportServiceErr := false
 	callImportServiceFn := func(ctx context.Context, req *datapb.ImportTaskRequest) (*datapb.ImportTaskResponse, error) {
 		if mockCallImportServiceErr {
 			return &datapb.ImportTaskResponse{
-				Status: &commonpb.Status{
-					ErrorCode: commonpb.ErrorCode_Success,
-				},
+				Status: merr.Success(),
 			}, errors.New("mock err")
 		}
 		return &datapb.ImportTaskResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status: merr.Success(),
 		}, nil
 	}
 
 	callGetSegmentStates := func(ctx context.Context, req *datapb.GetSegmentStatesRequest) (*datapb.GetSegmentStatesResponse, error) {
 		return &datapb.GetSegmentStatesResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status: merr.Success(),
 		}, nil
 	}
 
 	callUnsetIsImportingState := func(context.Context, *datapb.UnsetIsImportingStateRequest) (*commonpb.Status, error) {
-		return &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		}, nil
+		return merr.Success(), nil
 	}
 
 	t.Run("not healthy", func(t *testing.T) {
@@ -1490,7 +1551,7 @@ func TestCore_Rbac(t *testing.T) {
 	}
 
 	// not healthy.
-	c.stateCode.Store(commonpb.StateCode_Abnormal)
+	c.UpdateStateCode(commonpb.StateCode_Abnormal)
 
 	{
 		resp, err := c.CreateCredential(ctx, &internalpb.CredentialInfo{})
@@ -1513,13 +1574,13 @@ func TestCore_Rbac(t *testing.T) {
 	{
 		resp, err := c.GetCredential(ctx, &rootcoordpb.GetCredentialRequest{})
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_NotReadyServe, resp.Status.ErrorCode)
+		assert.Equal(t, commonpb.ErrorCode_NotReadyServe, resp.GetStatus().GetErrorCode())
 	}
 
 	{
 		resp, err := c.ListCredUsers(ctx, &milvuspb.ListCredUsersRequest{})
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_NotReadyServe, resp.Status.ErrorCode)
+		assert.Equal(t, commonpb.ErrorCode_NotReadyServe, resp.GetStatus().GetErrorCode())
 	}
 
 	{
@@ -1543,13 +1604,13 @@ func TestCore_Rbac(t *testing.T) {
 	{
 		resp, err := c.SelectRole(ctx, &milvuspb.SelectRoleRequest{})
 		assert.NoError(t, err)
-		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	}
 
 	{
 		resp, err := c.SelectUser(ctx, &milvuspb.SelectUserRequest{})
 		assert.NoError(t, err)
-		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	}
 
 	{
@@ -1561,13 +1622,13 @@ func TestCore_Rbac(t *testing.T) {
 	{
 		resp, err := c.SelectGrant(ctx, &milvuspb.SelectGrantRequest{})
 		assert.NoError(t, err)
-		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	}
 
 	{
 		resp, err := c.ListPolicy(ctx, &internalpb.ListPolicyRequest{})
 		assert.NoError(t, err)
-		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	}
 }
 
@@ -1586,10 +1647,15 @@ func TestCore_sendMinDdlTsAsTt(t *testing.T) {
 		withDdlTsLockManager(ddlManager),
 		withScheduler(sched))
 
-	c.stateCode.Store(commonpb.StateCode_Healthy)
+	c.UpdateStateCode(commonpb.StateCode_Healthy)
 	c.session.ServerID = TestRootCoordID
+
+	_ = paramtable.Get().Save(paramtable.Get().CommonCfg.TTMsgEnabled.Key, "false")
+	c.sendMinDdlTsAsTt() // disable ts msg
+	_ = paramtable.Get().Save(paramtable.Get().CommonCfg.TTMsgEnabled.Key, "true")
+
 	c.sendMinDdlTsAsTt() // no session.
-	ticker.addSession(&sessionutil.Session{ServerID: TestRootCoordID})
+	ticker.addSession(&sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: TestRootCoordID}})
 	c.sendMinDdlTsAsTt()
 	sched.GetMinDdlTsFunc = func() Timestamp {
 		return typeutil.ZeroTimestamp
@@ -1606,7 +1672,7 @@ func TestCore_sendMinDdlTsAsTt(t *testing.T) {
 
 func TestCore_startTimeTickLoop(t *testing.T) {
 	ticker := newRocksMqTtSynchronizer()
-	ticker.addSession(&sessionutil.Session{ServerID: TestRootCoordID})
+	ticker.addSession(&sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: TestRootCoordID}})
 	ddlManager := newMockDdlTsLockManager()
 	ddlManager.GetMinDdlTsFunc = func() Timestamp {
 		return 100
@@ -1656,15 +1722,17 @@ func TestRootcoord_EnableActiveStandby(t *testing.T) {
 	core, err := NewCore(ctx, coreFactory)
 	core.etcdCli = etcdCli
 	assert.NoError(t, err)
+	core.SetTiKVClient(tikv.SetupLocalTxn())
+
 	err = core.Init()
 	assert.NoError(t, err)
-	assert.Equal(t, commonpb.StateCode_StandBy, core.stateCode.Load().(commonpb.StateCode))
+	assert.Equal(t, commonpb.StateCode_StandBy, core.GetStateCode())
 	err = core.Start()
 	assert.NoError(t, err)
 	core.session.TriggerKill = false
 	err = core.Register()
 	assert.NoError(t, err)
-	assert.Equal(t, commonpb.StateCode_Healthy, core.stateCode.Load().(commonpb.StateCode))
+	assert.Equal(t, commonpb.StateCode_Healthy, core.GetStateCode())
 	resp, err := core.DescribeCollection(ctx, &milvuspb.DescribeCollectionRequest{
 		Base: &commonpb.MsgBase{
 			MsgType:   commonpb.MsgType_DescribeCollection,
@@ -1672,7 +1740,8 @@ func TestRootcoord_EnableActiveStandby(t *testing.T) {
 			Timestamp: 0,
 			SourceID:  paramtable.GetNodeID(),
 		},
-		CollectionName: "unexist"})
+		CollectionName: "unexist",
+	})
 	assert.NoError(t, err)
 	assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	err = core.Stop()
@@ -1704,15 +1773,17 @@ func TestRootcoord_DisableActiveStandby(t *testing.T) {
 	core, err := NewCore(ctx, coreFactory)
 	core.etcdCli = etcdCli
 	assert.NoError(t, err)
+	core.SetTiKVClient(tikv.SetupLocalTxn())
+
 	err = core.Init()
 	assert.NoError(t, err)
-	assert.Equal(t, commonpb.StateCode_Initializing, core.stateCode.Load().(commonpb.StateCode))
+	assert.Equal(t, commonpb.StateCode_Initializing, core.GetStateCode())
 	err = core.Start()
 	assert.NoError(t, err)
 	core.session.TriggerKill = false
 	err = core.Register()
 	assert.NoError(t, err)
-	assert.Equal(t, commonpb.StateCode_Healthy, core.stateCode.Load().(commonpb.StateCode))
+	assert.Equal(t, commonpb.StateCode_Healthy, core.GetStateCode())
 	resp, err := core.DescribeCollection(ctx, &milvuspb.DescribeCollectionRequest{
 		Base: &commonpb.MsgBase{
 			MsgType:   commonpb.MsgType_DescribeCollection,
@@ -1720,7 +1791,8 @@ func TestRootcoord_DisableActiveStandby(t *testing.T) {
 			Timestamp: 0,
 			SourceID:  paramtable.GetNodeID(),
 		},
-		CollectionName: "unexist"})
+		CollectionName: "unexist",
+	})
 	assert.NoError(t, err)
 	assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	err = core.Stop()
@@ -1811,7 +1883,7 @@ func TestRootCoord_RBACError(t *testing.T) {
 	t.Run("get credential failed", func(t *testing.T) {
 		resp, err := c.GetCredential(ctx, &rootcoordpb.GetCredentialRequest{Username: "foo"})
 		assert.NoError(t, err)
-		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	})
 	t.Run("update credential failed", func(t *testing.T) {
 		resp, err := c.UpdateCredential(ctx, &internalpb.CredentialInfo{})
@@ -1826,7 +1898,7 @@ func TestRootCoord_RBACError(t *testing.T) {
 	t.Run("list credential failed", func(t *testing.T) {
 		resp, err := c.ListCredUsers(ctx, &milvuspb.ListCredUsersRequest{})
 		assert.NoError(t, err)
-		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	})
 	t.Run("create role failed", func(t *testing.T) {
 		resp, err := c.CreateRole(ctx, &milvuspb.CreateRoleRequest{Entity: &milvuspb.RoleEntity{Name: "foo"}})
@@ -1860,24 +1932,24 @@ func TestRootCoord_RBACError(t *testing.T) {
 		{
 			resp, err := c.SelectRole(ctx, &milvuspb.SelectRoleRequest{Role: &milvuspb.RoleEntity{Name: "foo"}})
 			assert.NoError(t, err)
-			assert.NotEqual(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+			assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 		}
 		{
 			resp, err := c.SelectRole(ctx, &milvuspb.SelectRoleRequest{})
 			assert.NoError(t, err)
-			assert.NotEqual(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+			assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 		}
 	})
 	t.Run("select user failed", func(t *testing.T) {
 		{
 			resp, err := c.SelectUser(ctx, &milvuspb.SelectUserRequest{User: &milvuspb.UserEntity{Name: "foo"}})
 			assert.NoError(t, err)
-			assert.NotEqual(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+			assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 		}
 		{
 			resp, err := c.SelectUser(ctx, &milvuspb.SelectUserRequest{})
 			assert.NoError(t, err)
-			assert.NotEqual(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+			assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 		}
 	})
 	t.Run("operate privilege failed", func(t *testing.T) {
@@ -1946,12 +2018,12 @@ func TestRootCoord_RBACError(t *testing.T) {
 		{
 			resp, err := c.SelectGrant(ctx, &milvuspb.SelectGrantRequest{})
 			assert.NoError(t, err)
-			assert.NotEqual(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+			assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 		}
 		{
 			resp, err := c.SelectGrant(ctx, &milvuspb.SelectGrantRequest{Entity: &milvuspb.GrantEntity{Role: &milvuspb.RoleEntity{Name: "foo"}}})
 			assert.NoError(t, err)
-			assert.NotEqual(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+			assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 		}
 		mockMeta := c.meta.(*mockMetaTable)
 		mockMeta.SelectRoleFunc = func(tenant string, entity *milvuspb.RoleEntity, includeUserInfo bool) ([]*milvuspb.RoleResult, error) {
@@ -1960,12 +2032,12 @@ func TestRootCoord_RBACError(t *testing.T) {
 		{
 			resp, err := c.SelectGrant(ctx, &milvuspb.SelectGrantRequest{Entity: &milvuspb.GrantEntity{Role: &milvuspb.RoleEntity{Name: "foo"}, Object: &milvuspb.ObjectEntity{Name: "CollectionFoo"}}})
 			assert.NoError(t, err)
-			assert.NotEqual(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+			assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 		}
 		{
 			resp, err := c.SelectGrant(ctx, &milvuspb.SelectGrantRequest{Entity: &milvuspb.GrantEntity{Role: &milvuspb.RoleEntity{Name: "foo"}, Object: &milvuspb.ObjectEntity{Name: "Collection"}}})
 			assert.NoError(t, err)
-			assert.NotEqual(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+			assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 		}
 		mockMeta.SelectRoleFunc = func(tenant string, entity *milvuspb.RoleEntity, includeUserInfo bool) ([]*milvuspb.RoleResult, error) {
 			return nil, errors.New("mock error")
@@ -1975,7 +2047,7 @@ func TestRootCoord_RBACError(t *testing.T) {
 	t.Run("list policy failed", func(t *testing.T) {
 		resp, err := c.ListPolicy(ctx, &internalpb.ListPolicyRequest{})
 		assert.NoError(t, err)
-		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 
 		mockMeta := c.meta.(*mockMetaTable)
 		mockMeta.ListPolicyFunc = func(tenant string) ([]string, error) {
@@ -1983,7 +2055,7 @@ func TestRootCoord_RBACError(t *testing.T) {
 		}
 		resp, err = c.ListPolicy(ctx, &internalpb.ListPolicyRequest{})
 		assert.NoError(t, err)
-		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 		mockMeta.ListPolicyFunc = func(tenant string) ([]string, error) {
 			return []string{}, errors.New("mock error")
 		}
@@ -1995,8 +2067,7 @@ func TestCore_Stop(t *testing.T) {
 		c := &Core{}
 		err := c.Stop()
 		assert.NoError(t, err)
-		code, ok := c.stateCode.Load().(commonpb.StateCode)
-		assert.True(t, ok)
+		code := c.GetStateCode()
 		assert.Equal(t, commonpb.StateCode_Abnormal, code)
 	})
 
@@ -2006,8 +2077,7 @@ func TestCore_Stop(t *testing.T) {
 		c.ctx, c.cancel = context.WithCancel(context.Background())
 		err := c.Stop()
 		assert.NoError(t, err)
-		code, ok := c.stateCode.Load().(commonpb.StateCode)
-		assert.True(t, ok)
+		code := c.GetStateCode()
 		assert.Equal(t, commonpb.StateCode_Abnormal, code)
 	})
 }
@@ -2041,7 +2111,8 @@ func (s *RootCoordSuite) TestRestore() {
 	meta.EXPECT().ListDatabases(mock.Anything, mock.Anything).
 		Return([]*model.Database{
 			{Name: "available_colls_db"},
-			{Name: "not_available_colls_db"}}, nil)
+			{Name: "not_available_colls_db"},
+		}, nil)
 
 	meta.EXPECT().ListCollections(mock.Anything, "available_colls_db", mock.Anything, false).
 		Return([]*model.Collection{

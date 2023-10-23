@@ -25,16 +25,18 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"google.golang.org/grpc"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
 type mockDataCoord struct {
 	expireTime Timestamp
 }
 
-func (mockD *mockDataCoord) AssignSegmentID(ctx context.Context, req *datapb.AssignSegmentIDRequest) (*datapb.AssignSegmentIDResponse, error) {
+func (mockD *mockDataCoord) AssignSegmentID(ctx context.Context, req *datapb.AssignSegmentIDRequest, opts ...grpc.CallOption) (*datapb.AssignSegmentIDResponse, error) {
 	assigns := make([]*datapb.SegmentIDAssignment, 0, len(req.SegmentIDRequests))
 	maxPerCnt := 100
 	for _, r := range req.SegmentIDRequests {
@@ -53,19 +55,14 @@ func (mockD *mockDataCoord) AssignSegmentID(ctx context.Context, req *datapb.Ass
 				PartitionID:  r.PartitionID,
 				ExpireTime:   mockD.expireTime,
 
-				Status: &commonpb.Status{
-					ErrorCode: commonpb.ErrorCode_Success,
-					Reason:    "",
-				},
+				Status: merr.Success(),
 			}
 			assigns = append(assigns, result)
 		}
 	}
 
 	return &datapb.AssignSegmentIDResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:           merr.Success(),
 		SegIDAssignments: assigns,
 	}, nil
 }
@@ -74,8 +71,7 @@ type mockDataCoord2 struct {
 	expireTime Timestamp
 }
 
-func (mockD *mockDataCoord2) AssignSegmentID(ctx context.Context, req *datapb.AssignSegmentIDRequest) (*datapb.AssignSegmentIDResponse, error) {
-
+func (mockD *mockDataCoord2) AssignSegmentID(ctx context.Context, req *datapb.AssignSegmentIDRequest, opts ...grpc.CallOption) (*datapb.AssignSegmentIDResponse, error) {
 	return &datapb.AssignSegmentIDResponse{
 		Status: &commonpb.Status{
 			ErrorCode: commonpb.ErrorCode_UnexpectedError,
@@ -120,7 +116,6 @@ func TestSegmentAllocator1(t *testing.T) {
 	_, err = segAllocator.GetSegmentID(1, 1, "abc", 10, 1001)
 	assert.Error(t, err)
 	wg.Wait()
-
 }
 
 var curLastTick2 = Timestamp(200)
@@ -160,7 +155,6 @@ func TestSegmentAllocator2(t *testing.T) {
 	_, err = segAllocator.GetSegmentID(1, 1, "abc", segCountPerRPC-10, getLastTick2())
 	assert.Error(t, err)
 	wg.Wait()
-
 }
 
 func TestSegmentAllocator3(t *testing.T) {
@@ -188,7 +182,7 @@ type mockDataCoord3 struct {
 	expireTime Timestamp
 }
 
-func (mockD *mockDataCoord3) AssignSegmentID(ctx context.Context, req *datapb.AssignSegmentIDRequest) (*datapb.AssignSegmentIDResponse, error) {
+func (mockD *mockDataCoord3) AssignSegmentID(ctx context.Context, req *datapb.AssignSegmentIDRequest, opts ...grpc.CallOption) (*datapb.AssignSegmentIDResponse, error) {
 	assigns := make([]*datapb.SegmentIDAssignment, 0, len(req.SegmentIDRequests))
 	for i, r := range req.SegmentIDRequests {
 		errCode := commonpb.ErrorCode_Success
@@ -214,9 +208,7 @@ func (mockD *mockDataCoord3) AssignSegmentID(ctx context.Context, req *datapb.As
 	}
 
 	return &datapb.AssignSegmentIDResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:           merr.Success(),
 		SegIDAssignments: assigns,
 	}, nil
 }
@@ -246,8 +238,7 @@ type mockDataCoord5 struct {
 	expireTime Timestamp
 }
 
-func (mockD *mockDataCoord5) AssignSegmentID(ctx context.Context, req *datapb.AssignSegmentIDRequest) (*datapb.AssignSegmentIDResponse, error) {
-
+func (mockD *mockDataCoord5) AssignSegmentID(ctx context.Context, req *datapb.AssignSegmentIDRequest, opts ...grpc.CallOption) (*datapb.AssignSegmentIDResponse, error) {
 	return &datapb.AssignSegmentIDResponse{
 		Status: &commonpb.Status{
 			ErrorCode: commonpb.ErrorCode_UnexpectedError,
@@ -320,5 +311,4 @@ func TestSegmentAllocator6(t *testing.T) {
 	}
 	wg.Wait()
 	assert.True(t, success)
-
 }

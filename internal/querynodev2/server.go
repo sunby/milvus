@@ -41,6 +41,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/samber/lo"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 
@@ -48,10 +49,12 @@ import (
 	grpcquerynodeclient "github.com/milvus-io/milvus/internal/distributed/querynode/client"
 	"github.com/milvus-io/milvus/internal/querynodev2/cluster"
 	"github.com/milvus-io/milvus/internal/querynodev2/delegator"
+	"github.com/milvus-io/milvus/internal/querynodev2/optimizers"
 	"github.com/milvus-io/milvus/internal/querynodev2/pipeline"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
 	"github.com/milvus-io/milvus/internal/querynodev2/tasks"
 	"github.com/milvus-io/milvus/internal/querynodev2/tsafe"
+	"github.com/milvus-io/milvus/internal/registry"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/dependency"
@@ -66,7 +69,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/lifetime"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
-	"github.com/samber/lo"
 )
 
 // make sure QueryNode implements types.QueryNode
@@ -127,7 +129,7 @@ type QueryNode struct {
 		knnPool *conc.Pool*/
 
 	// parameter turning hook
-	queryHook queryHook
+	queryHook optimizers.QueryHook
 }
 
 // NewQueryNode will return a QueryNode with abnormal state.
@@ -145,11 +147,17 @@ func NewQueryNode(ctx context.Context, factory dependency.Factory) *QueryNode {
 }
 
 func (node *QueryNode) initSession() error {
-	node.session = sessionutil.NewSession(node.ctx, paramtable.Get().EtcdCfg.MetaRootPath.GetValue(), node.etcdCli)
+	minimalIndexVersion, currentIndexVersion := getIndexEngineVersion()
+	node.session = sessionutil.NewSession(node.ctx,
+		paramtable.Get().EtcdCfg.MetaRootPath.GetValue(),
+		node.etcdCli,
+		sessionutil.WithIndexEngineVersion(minimalIndexVersion, currentIndexVersion),
+	)
 	if node.session == nil {
 		return fmt.Errorf("session is nil, the etcd client connection may have failed")
 	}
 	node.session.Init(typeutil.QueryNodeRole, node.address, false, true)
+	sessionutil.SaveServerInfo(typeutil.QueryNodeRole, node.session.ServerID)
 	paramtable.SetNodeID(node.session.ServerID)
 	log.Info("QueryNode init session", zap.Int64("nodeID", paramtable.GetNodeID()), zap.String("node address", node.session.Address))
 	return nil
@@ -207,7 +215,7 @@ func (node *QueryNode) InitSegcore() error {
 	cIndexSliceSize := C.int64_t(paramtable.Get().CommonCfg.IndexSliceSize.GetAsInt64())
 	C.InitIndexSliceSize(cIndexSliceSize)
 
-	//set up thread pool for different priorities
+	// set up thread pool for different priorities
 	cHighPriorityThreadCoreCoefficient := C.int64_t(paramtable.Get().CommonCfg.HighPriorityThreadCoreCoefficient.GetAsInt64())
 	C.InitHighPriorityThreadCoreCoefficient(cHighPriorityThreadCoreCoefficient)
 	cMiddlePriorityThreadCoreCoefficient := C.int64_t(paramtable.Get().CommonCfg.MiddlePriorityThreadCoreCoefficient.GetAsInt64())
@@ -221,8 +229,30 @@ func (node *QueryNode) InitSegcore() error {
 	localDataRootPath := filepath.Join(paramtable.Get().LocalStorageCfg.Path.GetValue(), typeutil.QueryNodeRole)
 	initcore.InitLocalChunkManager(localDataRootPath)
 
+	err := initcore.InitRemoteChunkManager(paramtable.Get())
+	if err != nil {
+		return err
+	}
+
+	mmapDirPath := paramtable.Get().QueryNodeCfg.MmapDirPath.GetValue()
+	if len(mmapDirPath) == 0 {
+		mmapDirPath = paramtable.Get().LocalStorageCfg.Path.GetValue()
+	}
+	chunkCachePath := path.Join(mmapDirPath, "chunk_cache")
+	policy := paramtable.Get().QueryNodeCfg.ReadAheadPolicy.GetValue()
+	err = initcore.InitChunkCache(chunkCachePath, policy)
+	if err != nil {
+		return err
+	}
+	log.Info("InitChunkCache done", zap.String("dir", chunkCachePath), zap.String("policy", policy))
+
 	initcore.InitTraceConfig(paramtable.Get())
-	return initcore.InitRemoteChunkManager(paramtable.Get())
+	return nil
+}
+
+func getIndexEngineVersion() (minimal, current int32) {
+	cMinimal, cCurrent := C.GetMinimalIndexVersion(), C.GetCurrentIndexVersion()
+	return int32(cMinimal), int32(cCurrent)
 }
 
 func (node *QueryNode) CloseSegcore() {
@@ -362,13 +392,15 @@ func (node *QueryNode) Init() error {
 // Start mainly start QueryNode's query service.
 func (node *QueryNode) Start() error {
 	node.startOnce.Do(func() {
-		node.scheduler.Start(node.ctx)
+		node.scheduler.Start()
 
 		paramtable.SetCreateTime(time.Now())
 		paramtable.SetUpdateTime(time.Now())
 		mmapDirPath := paramtable.Get().QueryNodeCfg.MmapDirPath.GetValue()
 		mmapEnabled := len(mmapDirPath) > 0
 		node.UpdateStateCode(commonpb.StateCode_Healthy)
+
+		registry.GetInMemoryResolver().RegisterQueryNode(paramtable.GetNodeID(), node)
 		log.Info("query node start successfully",
 			zap.Int64("queryNodeID", paramtable.GetNodeID()),
 			zap.String("Address", node.address),
@@ -421,12 +453,14 @@ func (node *QueryNode) Stop() error {
 				case <-time.After(time.Second):
 				}
 			}
-
 		}
 
 		node.UpdateStateCode(commonpb.StateCode_Abnormal)
 		node.lifetime.Wait()
 		node.cancel()
+		if node.scheduler != nil {
+			node.scheduler.Stop()
+		}
 		if node.pipelineManager != nil {
 			node.pipelineManager.Close()
 		}
@@ -463,13 +497,6 @@ func (node *QueryNode) SetAddress(address string) {
 	node.address = address
 }
 
-type queryHook interface {
-	Run(map[string]any) error
-	Init(string) error
-	InitTuningConfig(map[string]string) error
-	DeleteTuningConfig(string) error
-}
-
 // initHook initializes parameter tuning hook.
 func (node *QueryNode) initHook() error {
 	path := paramtable.Get().QueryNodeCfg.SoPath.GetValue()
@@ -489,7 +516,7 @@ func (node *QueryNode) initHook() error {
 		return fmt.Errorf("fail to find the 'QueryNodePlugin' object in the plugin, error: %s", err.Error())
 	}
 
-	hoo, ok := h.(queryHook)
+	hoo, ok := h.(optimizers.QueryHook)
 	if !ok {
 		return fmt.Errorf("fail to convert the `Hook` interface")
 	}

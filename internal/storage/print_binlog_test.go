@@ -18,21 +18,20 @@ package storage
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/golang/protobuf/proto"
-	"github.com/milvus-io/milvus/pkg/common"
-	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/proto/etcdpb"
+	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 	"github.com/milvus-io/milvus/pkg/util/uniquegenerator"
 )
 
@@ -73,7 +72,7 @@ func TestPrintBinlogFilesInt64(t *testing.T) {
 	assert.NoError(t, err)
 	w.Close()
 
-	fd, err := ioutil.TempFile("", "binlog_int64.db")
+	fd, err := os.CreateTemp("", "binlog_int64.db")
 	defer os.RemoveAll(fd.Name())
 	assert.NoError(t, err)
 	num, err := fd.Write(buf)
@@ -81,7 +80,6 @@ func TestPrintBinlogFilesInt64(t *testing.T) {
 	assert.Equal(t, num, len(buf))
 	err = fd.Close()
 	assert.NoError(t, err)
-
 }
 
 func TestPrintBinlogFiles(t *testing.T) {

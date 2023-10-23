@@ -1,3 +1,4 @@
+
 // Licensed to the LF AI & Data foundation under one
 // or more contributor license agreements. See the NOTICE file
 // distributed with this work for additional information
@@ -18,10 +19,14 @@
 #include <memory>
 #include "arrow/array/builder_binary.h"
 #include "arrow/type_fwd.h"
-#include "exceptions/EasyAssert.h"
+#include "common/EasyAssert.h"
 #include "common/Consts.h"
-#include "fmt/core.h"
+#include "fmt/format.h"
+#ifdef AZURE_BUILD_DIR
+#include "storage/AzureChunkManager.h"
+#endif
 #include "storage/FieldData.h"
+#include "storage/InsertData.h"
 #include "storage/FieldDataInterface.h"
 #include "storage/ThreadPools.h"
 #include "storage/LocalChunkManager.h"
@@ -33,7 +38,30 @@
 namespace milvus::storage {
 
 std::map<std::string, ChunkManagerType> ChunkManagerType_Map = {
-    {"local", ChunkManagerType::Local}, {"minio", ChunkManagerType::Minio}};
+    {"local", ChunkManagerType::Local},
+    {"minio", ChunkManagerType::Minio},
+    {"remote", ChunkManagerType::Remote}};
+
+enum class CloudProviderType : int8_t {
+    UNKNOWN = 0,
+    AWS = 1,
+    GCP = 2,
+    ALIYUN = 3,
+    AZURE = 4,
+};
+
+std::map<std::string, CloudProviderType> CloudProviderType_Map = {
+    {"aws", CloudProviderType::AWS},
+    {"gcp", CloudProviderType::GCP},
+    {"aliyun", CloudProviderType::ALIYUN},
+    {"azure", CloudProviderType::AZURE}};
+
+std::map<std::string, int> ReadAheadPolicy_Map = {
+    {"normal", MADV_NORMAL},
+    {"random", MADV_RANDOM},
+    {"sequential", MADV_SEQUENTIAL},
+    {"willneed", MADV_WILLNEED},
+    {"dontneed", MADV_DONTNEED}};
 
 StorageType
 ReadMediumType(BinlogReaderPtr reader) {
@@ -123,13 +151,15 @@ AddPayloadToArrowBuilder(std::shared_ptr<arrow::ArrayBuilder> builder,
                 builder, double_data, length);
             break;
         }
+        case DataType::VECTOR_FLOAT16:
         case DataType::VECTOR_BINARY:
         case DataType::VECTOR_FLOAT: {
             add_vector_payload(builder, const_cast<uint8_t*>(raw_data), length);
             break;
         }
         default: {
-            PanicInfo("unsupported data type");
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported data type {}", data_type));
         }
     }
 }
@@ -199,7 +229,9 @@ CreateArrowBuilder(DataType data_type) {
             return std::make_shared<arrow::BinaryBuilder>();
         }
         default: {
-            PanicInfo("unsupported numeric data type");
+            PanicInfo(
+                DataTypeInvalid,
+                fmt::format("unsupported numeric data type {}", data_type));
         }
     }
 }
@@ -217,8 +249,15 @@ CreateArrowBuilder(DataType data_type, int dim) {
             return std::make_shared<arrow::FixedSizeBinaryBuilder>(
                 arrow::fixed_size_binary(dim / 8));
         }
+        case DataType::VECTOR_FLOAT16: {
+            AssertInfo(dim > 0, "invalid dim value");
+            return std::make_shared<arrow::FixedSizeBinaryBuilder>(
+                arrow::fixed_size_binary(dim * sizeof(float16)));
+        }
         default: {
-            PanicInfo("unsupported vector data type");
+            PanicInfo(
+                DataTypeInvalid,
+                fmt::format("unsupported vector data type {}", data_type));
         }
     }
 }
@@ -256,7 +295,9 @@ CreateArrowSchema(DataType data_type) {
             return arrow::schema({arrow::field("val", arrow::binary())});
         }
         default: {
-            PanicInfo("unsupported numeric data type");
+            PanicInfo(
+                DataTypeInvalid,
+                fmt::format("unsupported numeric data type {}", data_type));
         }
     }
 }
@@ -274,8 +315,15 @@ CreateArrowSchema(DataType data_type, int dim) {
             return arrow::schema(
                 {arrow::field("val", arrow::fixed_size_binary(dim / 8))});
         }
+        case DataType::VECTOR_FLOAT16: {
+            AssertInfo(dim > 0, "invalid dim value");
+            return arrow::schema({arrow::field(
+                "val", arrow::fixed_size_binary(dim * sizeof(float16)))});
+        }
         default: {
-            PanicInfo("unsupported vector data type");
+            PanicInfo(
+                DataTypeInvalid,
+                fmt::format("unsupported vector data type {}", data_type));
         }
     }
 }
@@ -290,8 +338,12 @@ GetDimensionFromFileMetaData(const parquet::ColumnDescriptor* schema,
         case DataType::VECTOR_BINARY: {
             return schema->type_length() * 8;
         }
+        case DataType::VECTOR_FLOAT16: {
+            return schema->type_length() / sizeof(float16);
+        }
         default:
-            PanicInfo("unsupported data type");
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported data type {}", data_type));
     }
 }
 
@@ -316,7 +368,8 @@ GetDimensionFromArrowArray(std::shared_ptr<arrow::Array> data,
             return array->byte_width() * 8;
         }
         default:
-            PanicInfo("unsupported data type");
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported data type {}", data_type));
     }
 }
 
@@ -398,6 +451,25 @@ EncodeAndUploadIndexSlice2(std::shared_ptr<milvus_storage::Space> space,
     return std::make_pair(std::move(object_key), serialized_index_size);
 }
 
+std::pair<std::string, size_t>
+EncodeAndUploadFieldSlice(ChunkManager* chunk_manager,
+                          uint8_t* buf,
+                          int64_t element_count,
+                          FieldDataMeta field_data_meta,
+                          const FieldMeta& field_meta,
+                          std::string object_key) {
+    auto field_data =
+        CreateFieldData(field_meta.get_data_type(), field_meta.get_dim(), 0);
+    field_data->FillFieldData(buf, element_count);
+    auto insertData = std::make_shared<InsertData>(field_data);
+    insertData->SetFieldDataMeta(field_data_meta);
+    auto serialized_index_data = insertData->serialize_to_remote_file();
+    auto serialized_index_size = serialized_index_data.size();
+    chunk_manager->Write(
+        object_key, serialized_index_data.data(), serialized_index_size);
+    return std::make_pair(std::move(object_key), serialized_index_size);
+}
+
 // /**
 //  * Returns the current resident set size (physical memory use) measured
 //  * in bytes, or zero if the value cannot be determined on this OS.
@@ -466,13 +538,13 @@ GetObjectData(std::shared_ptr<milvus_storage::Space> space,
         [&](const std::string& file) -> std::vector<FieldDataPtr> {
         auto res = space->ScanData();
         if (!res.ok()) {
-            PanicInfo("failed to create scan iterator");
+            PanicInfo(DataFormatBroken,"failed to create scan iterator");
         }
         auto reader = res.value();
         std::vector<FieldDataPtr> datas;
         for (auto rec = reader->Next(); rec != nullptr; rec = reader->Next()) {
             if (!rec.ok()) {
-                PanicInfo("failed to read data");
+                PanicInfo(DataFormatBroken, "failed to read data");
             }
             auto data = rec.ValueUnsafe();
             auto total_num_rows = data->num_rows();
@@ -609,36 +681,36 @@ CreateChunkManager(const StorageConfig& storage_config) {
         case ChunkManagerType::Minio: {
             return std::make_shared<MinioChunkManager>(storage_config);
         }
+        case ChunkManagerType::Remote: {
+            auto cloud_provider_type =
+                CloudProviderType_Map[storage_config.cloud_provider];
+            switch (cloud_provider_type) {
+                case CloudProviderType::AWS: {
+                    return std::make_shared<AwsChunkManager>(storage_config);
+                }
+                case CloudProviderType::GCP: {
+                    return std::make_shared<GcpChunkManager>(storage_config);
+                }
+                case CloudProviderType::ALIYUN: {
+                    return std::make_shared<AliyunChunkManager>(storage_config);
+                }
+#ifdef AZURE_BUILD_DIR
+                case CloudProviderType::AZURE: {
+                    return std::make_shared<AzureChunkManager>(storage_config);
+                }
+#endif
+                default: {
+                    return std::make_shared<MinioChunkManager>(storage_config);
+                }
+            }
+        }
+
         default: {
-            PanicInfo("unsupported");
+            PanicInfo(ConfigInvalid,
+                      fmt::format("unsupported storage_config.storage_type {}",
+                                  fmt::underlying(storage_type)));
         }
     }
-}
-
-FileManagerImplPtr
-CreateFileManager(IndexType index_type,
-                  const FieldDataMeta& field_meta,
-                  const IndexMeta& index_meta,
-                  ChunkManagerPtr cm) {
-    if (is_in_disk_list(index_type)) {
-        return std::make_shared<DiskFileManagerImpl>(
-            field_meta, index_meta, cm);
-    }
-
-    return std::make_shared<MemFileManagerImpl>(field_meta, index_meta, cm);
-}
-
-FileManagerImplPtr
-CreateFileManager(IndexType index_type,
-                  const FieldDataMeta& field_meta,
-                  const IndexMeta& index_meta,
-                  std::shared_ptr<milvus_storage::Space> space) {
-    if (is_in_disk_list(index_type)) {
-        return std::make_shared<DiskFileManagerImpl>(
-            field_meta, index_meta, space);
-    }
-
-    return std::make_shared<MemFileManagerImpl>(field_meta, index_meta, space);
 }
 
 FieldDataPtr
@@ -664,14 +736,20 @@ CreateFieldData(const DataType& type, int64_t dim, int64_t total_num_rows) {
                                                             total_num_rows);
         case DataType::JSON:
             return std::make_shared<FieldData<Json>>(type, total_num_rows);
+        case DataType::ARRAY:
+            return std::make_shared<FieldData<Array>>(type, total_num_rows);
         case DataType::VECTOR_FLOAT:
             return std::make_shared<FieldData<FloatVector>>(
                 dim, type, total_num_rows);
         case DataType::VECTOR_BINARY:
             return std::make_shared<FieldData<BinaryVector>>(
                 dim, type, total_num_rows);
+        case DataType::VECTOR_FLOAT16:
+            return std::make_shared<FieldData<Float16Vector>>(
+                dim, type, total_num_rows);
         default:
-            throw NotSupportedDataTypeException(
+            throw SegcoreError(
+                DataTypeInvalid,
                 "CreateFieldData not support data type " + datatype_name(type));
     }
 }

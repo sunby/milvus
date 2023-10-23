@@ -34,7 +34,6 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/parser/planparserv2"
 	"github.com/milvus-io/milvus/internal/proto/planpb"
-
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/types"
 	typeutil2 "github.com/milvus-io/milvus/internal/util/typeutil"
@@ -59,8 +58,10 @@ const (
 
 	defaultMaxVarCharLength = 65535
 
-	// DefaultIndexType name of default index type for scalar field
-	DefaultIndexType = "STL_SORT"
+	defaultMaxArrayCapacity = 4096
+
+	// DefaultArithmeticIndexType name of default index type for scalar field
+	DefaultArithmeticIndexType = "STL_SORT"
 
 	// DefaultStringIndexType name of default index type for varChar/string field
 	DefaultStringIndexType = "Trie"
@@ -82,6 +83,12 @@ func isNumber(c uint8) bool {
 		return false
 	}
 	return true
+}
+
+func isVectorType(dataType schemapb.DataType) bool {
+	return dataType == schemapb.DataType_FloatVector ||
+		dataType == schemapb.DataType_BinaryVector ||
+		dataType == schemapb.DataType_Float16Vector
 }
 
 func validateMaxQueryResultWindow(offset int64, limit int64) error {
@@ -120,24 +127,24 @@ func validateCollectionNameOrAlias(entity, entityType string) error {
 	entity = strings.TrimSpace(entity)
 
 	if entity == "" {
-		return fmt.Errorf("collection %s should not be empty", entityType)
+		return merr.WrapErrParameterInvalidMsg("collection %s should not be empty", entityType)
 	}
 
 	invalidMsg := fmt.Sprintf("Invalid collection %s: %s. ", entityType, entity)
 	if len(entity) > Params.ProxyCfg.MaxNameLength.GetAsInt() {
-		return fmt.Errorf("%s the length of a collection %s must be less than %s characters", invalidMsg, entityType,
+		return merr.WrapErrParameterInvalidMsg("%s the length of a collection %s must be less than %s characters", invalidMsg, entityType,
 			Params.ProxyCfg.MaxNameLength.GetValue())
 	}
 
 	firstChar := entity[0]
 	if firstChar != '_' && !isAlpha(firstChar) {
-		return fmt.Errorf("%s the first character of a collection %s must be an underscore or letter", invalidMsg, entityType)
+		return merr.WrapErrParameterInvalidMsg("%s the first character of a collection %s must be an underscore or letter", invalidMsg, entityType)
 	}
 
 	for i := 1; i < len(entity); i++ {
 		c := entity[i]
 		if c != '_' && !isAlpha(c) && !isNumber(c) {
-			return fmt.Errorf("%s collection %s can only contain numbers, letters and underscores", invalidMsg, entityType)
+			return merr.WrapErrParameterInvalidMsg("%s collection %s can only contain numbers, letters and underscores", invalidMsg, entityType)
 		}
 	}
 	return nil
@@ -150,19 +157,19 @@ func ValidateResourceGroupName(entity string) error {
 
 	invalidMsg := fmt.Sprintf("Invalid resource group name %s.", entity)
 	if len(entity) > Params.ProxyCfg.MaxNameLength.GetAsInt() {
-		return fmt.Errorf("%s the length of a resource group name must be less than %s characters",
+		return merr.WrapErrParameterInvalidMsg("%s the length of a resource group name must be less than %s characters",
 			invalidMsg, Params.ProxyCfg.MaxNameLength.GetValue())
 	}
 
 	firstChar := entity[0]
 	if firstChar != '_' && !isAlpha(firstChar) {
-		return fmt.Errorf("%s the first character of a resource group name must be an underscore or letter", invalidMsg)
+		return merr.WrapErrParameterInvalidMsg("%s the first character of a resource group name must be an underscore or letter", invalidMsg)
 	}
 
 	for i := 1; i < len(entity); i++ {
 		c := entity[i]
 		if c != '_' && !isAlpha(c) && !isNumber(c) {
-			return fmt.Errorf("%s resource group name can only contain numbers, letters and underscores", invalidMsg)
+			return merr.WrapErrParameterInvalidMsg("%s resource group name can only contain numbers, letters and underscores", invalidMsg)
 		}
 	}
 	return nil
@@ -170,24 +177,24 @@ func ValidateResourceGroupName(entity string) error {
 
 func ValidateDatabaseName(dbName string) error {
 	if dbName == "" {
-		return merr.WrapErrInvalidedDatabaseName(dbName, "database name couldn't be empty")
+		return merr.WrapErrDatabaseNameInvalid(dbName, "database name couldn't be empty")
 	}
 
 	if len(dbName) > Params.ProxyCfg.MaxNameLength.GetAsInt() {
-		return merr.WrapErrInvalidedDatabaseName(dbName,
+		return merr.WrapErrDatabaseNameInvalid(dbName,
 			fmt.Sprintf("the length of a database name must be less than %d characters", Params.ProxyCfg.MaxNameLength.GetAsInt()))
 	}
 
 	firstChar := dbName[0]
 	if firstChar != '_' && !isAlpha(firstChar) {
-		return merr.WrapErrInvalidedDatabaseName(dbName,
+		return merr.WrapErrDatabaseNameInvalid(dbName,
 			"the first character of a database name must be an underscore or letter")
 	}
 
 	for i := 1; i < len(dbName); i++ {
 		c := dbName[i]
 		if c != '_' && !isAlpha(c) && !isNumber(c) {
-			return merr.WrapErrInvalidedDatabaseName(dbName,
+			return merr.WrapErrDatabaseNameInvalid(dbName,
 				"database name can only contain numbers, letters and underscores")
 		}
 	}
@@ -237,23 +244,33 @@ func validatePartitionTag(partitionTag string, strictCheck bool) error {
 	return nil
 }
 
+func validateStringIndexType(indexType string) bool {
+	// compatible with the index type marisa-trie of attu versions prior to 2.3.0
+	return indexType == DefaultStringIndexType || indexType == "marisa-trie"
+}
+
+func validateArithmeticIndexType(indexType string) bool {
+	// compatible with the index type Asceneding of attu versions prior to 2.3.0
+	return indexType == DefaultArithmeticIndexType || indexType == "Asceneding"
+}
+
 func validateFieldName(fieldName string) error {
 	fieldName = strings.TrimSpace(fieldName)
 
 	if fieldName == "" {
-		return errors.New("field name should not be empty")
+		return merr.WrapErrFieldNameInvalid(fieldName, "field name should not be empty")
 	}
 
 	invalidMsg := "Invalid field name: " + fieldName + ". "
 	if len(fieldName) > Params.ProxyCfg.MaxNameLength.GetAsInt() {
 		msg := invalidMsg + "The length of a field name must be less than " + Params.ProxyCfg.MaxNameLength.GetValue() + " characters."
-		return errors.New(msg)
+		return merr.WrapErrFieldNameInvalid(fieldName, msg)
 	}
 
 	firstChar := fieldName[0]
 	if firstChar != '_' && !isAlpha(firstChar) {
 		msg := invalidMsg + "The first character of a field name must be an underscore or letter."
-		return errors.New(msg)
+		return merr.WrapErrFieldNameInvalid(fieldName, msg)
 	}
 
 	fieldNameSize := len(fieldName)
@@ -261,7 +278,7 @@ func validateFieldName(fieldName string) error {
 		c := fieldName[i]
 		if c != '_' && !isAlpha(c) && !isNumber(c) {
 			msg := invalidMsg + "Field name cannot only contain numbers, letters, and underscores."
-			return errors.New(msg)
+			return merr.WrapErrFieldNameInvalid(fieldName, msg)
 		}
 	}
 	return nil
@@ -306,7 +323,7 @@ func validateMaxLengthPerRow(collectionName string, field *schemapb.FieldSchema)
 			return err
 		}
 		if maxLengthPerRow > defaultMaxVarCharLength || maxLengthPerRow <= 0 {
-			return fmt.Errorf("the maximum length specified for a VarChar shoule be in (0, 65535]")
+			return merr.WrapErrParameterInvalidMsg("the maximum length specified for a VarChar should be in (0, 65535]")
 		}
 		exist = true
 	}
@@ -318,8 +335,32 @@ func validateMaxLengthPerRow(collectionName string, field *schemapb.FieldSchema)
 	return nil
 }
 
+func validateMaxCapacityPerRow(collectionName string, field *schemapb.FieldSchema) error {
+	exist := false
+	for _, param := range field.TypeParams {
+		if param.Key != common.MaxCapacityKey {
+			continue
+		}
+
+		maxCapacityPerRow, err := strconv.ParseInt(param.Value, 10, 64)
+		if err != nil {
+			return fmt.Errorf("the value of %s must be an integer", common.MaxCapacityKey)
+		}
+		if maxCapacityPerRow > defaultMaxArrayCapacity || maxCapacityPerRow <= 0 {
+			return fmt.Errorf("the maximum capacity specified for a Array should be in (0, 4096]")
+		}
+		exist = true
+	}
+	// if not exist type params max_length, return error
+	if !exist {
+		return fmt.Errorf("type param(max_capacity) should be specified for array field of collection %s", collectionName)
+	}
+
+	return nil
+}
+
 func validateVectorFieldMetricType(field *schemapb.FieldSchema) error {
-	if (field.DataType != schemapb.DataType_FloatVector) && (field.DataType != schemapb.DataType_BinaryVector) {
+	if !isVectorType(field.DataType) {
 		return nil
 	}
 	for _, params := range field.IndexParams {
@@ -342,6 +383,19 @@ func validateDuplicatedFieldName(fields []*schemapb.FieldSchema) error {
 	return nil
 }
 
+func validateElementType(dataType schemapb.DataType) error {
+	switch dataType {
+	case schemapb.DataType_Bool, schemapb.DataType_Int8, schemapb.DataType_Int16, schemapb.DataType_Int32,
+		schemapb.DataType_Int64, schemapb.DataType_Float, schemapb.DataType_Double, schemapb.DataType_VarChar:
+		return nil
+	case schemapb.DataType_String:
+		return errors.New("string data type not supported yet, please use VarChar type instead")
+	case schemapb.DataType_None:
+		return errors.New("element data type None is not valid")
+	}
+	return fmt.Errorf("element type %s is not supported", dataType.String())
+}
+
 func validateFieldType(schema *schemapb.CollectionSchema) error {
 	for _, field := range schema.GetFields() {
 		switch field.GetDataType() {
@@ -349,6 +403,10 @@ func validateFieldType(schema *schemapb.CollectionSchema) error {
 			return errors.New("string data type not supported yet, please use VarChar type instead")
 		case schemapb.DataType_None:
 			return errors.New("data type None is not valid")
+		case schemapb.DataType_Array:
+			if err := validateElementType(field.GetElementType()); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -432,7 +490,7 @@ func isVector(dataType schemapb.DataType) (bool, error) {
 		schemapb.DataType_Float, schemapb.DataType_Double:
 		return false, nil
 
-	case schemapb.DataType_FloatVector, schemapb.DataType_BinaryVector:
+	case schemapb.DataType_FloatVector, schemapb.DataType_BinaryVector, schemapb.DataType_Float16Vector:
 		return true, nil
 	}
 
@@ -443,7 +501,7 @@ func validateMetricType(dataType schemapb.DataType, metricTypeStrRaw string) err
 	metricTypeStr := strings.ToUpper(metricTypeStrRaw)
 	switch metricTypeStr {
 	case metric.L2, metric.IP, metric.COSINE:
-		if dataType == schemapb.DataType_FloatVector {
+		if dataType == schemapb.DataType_FloatVector || dataType == schemapb.DataType_Float16Vector {
 			return nil
 		}
 	case metric.JACCARD, metric.HAMMING, metric.SUBSTRUCTURE, metric.SUPERSTRUCTURE:
@@ -474,7 +532,7 @@ func validateSchema(coll *schemapb.CollectionSchema) error {
 				return fmt.Errorf("there are more than one primary key, field name = %s, %s", coll.Fields[primaryIdx].Name, field.Name)
 			}
 			if field.DataType != schemapb.DataType_Int64 {
-				return fmt.Errorf("type of primary key shoule be int64")
+				return fmt.Errorf("type of primary key should be int64")
 			}
 			primaryIdx = idx
 		}
@@ -519,10 +577,9 @@ func validateSchema(coll *schemapb.CollectionSchema) error {
 				if err4 != nil {
 					return err4
 				}
-			} else {
-				// in C++, default type will be specified
-				// do nothing
 			}
+			// in C++, default type will be specified
+			// do nothing
 		} else {
 			if len(field.IndexParams) != 0 {
 				return fmt.Errorf("index params is not empty for scalar field: %s(%d)", field.Name, field.FieldID)
@@ -548,7 +605,7 @@ func validateMultipleVectorFields(schema *schemapb.CollectionSchema) error {
 	for i := range schema.Fields {
 		name := schema.Fields[i].Name
 		dType := schema.Fields[i].DataType
-		isVec := dType == schemapb.DataType_BinaryVector || dType == schemapb.DataType_FloatVector
+		isVec := dType == schemapb.DataType_BinaryVector || dType == schemapb.DataType_FloatVector || dType == schemapb.DataType_Float16Vector
 		if isVec && vecExist && !enableMultipleVectorFields {
 			return fmt.Errorf(
 				"multiple vector fields is not supported, fields name: %s, %s",
@@ -675,27 +732,23 @@ func ValidateUsername(username string) error {
 	username = strings.TrimSpace(username)
 
 	if username == "" {
-		return errors.New("username should not be empty")
+		return merr.WrapErrParameterInvalidMsg("username must be not empty")
 	}
 
-	invalidMsg := "Invalid username: " + username + ". "
 	if len(username) > Params.ProxyCfg.MaxUsernameLength.GetAsInt() {
-		msg := invalidMsg + "The length of username must be less than " + Params.ProxyCfg.MaxUsernameLength.GetValue() + " characters."
-		return errors.New(msg)
+		return merr.WrapErrParameterInvalidMsg("invalid username %s with length %d, the length of username must be less than %d", username, len(username), Params.ProxyCfg.MaxUsernameLength.GetValue())
 	}
 
 	firstChar := username[0]
 	if !isAlpha(firstChar) {
-		msg := invalidMsg + "The first character of username must be a letter."
-		return errors.New(msg)
+		return merr.WrapErrParameterInvalidMsg("invalid user name %s, the first character must be a letter, but got %s", username, firstChar)
 	}
 
 	usernameSize := len(username)
 	for i := 1; i < usernameSize; i++ {
 		c := username[i]
 		if c != '_' && !isAlpha(c) && !isNumber(c) {
-			msg := invalidMsg + "Username should only contain numbers, letters, and underscores."
-			return errors.New(msg)
+			return merr.WrapErrParameterInvalidMsg("invalid user name %s, username must contain only numbers, letters and underscores, but got %s", username, c)
 		}
 	}
 	return nil
@@ -703,9 +756,9 @@ func ValidateUsername(username string) error {
 
 func ValidatePassword(password string) error {
 	if len(password) < Params.ProxyCfg.MinPasswordLength.GetAsInt() || len(password) > Params.ProxyCfg.MaxPasswordLength.GetAsInt() {
-		msg := "The length of password must be great than " + Params.ProxyCfg.MinPasswordLength.GetValue() +
-			" and less than " + Params.ProxyCfg.MaxPasswordLength.GetValue() + " characters."
-		return errors.New(msg)
+		return merr.WrapErrParameterInvalidRange(Params.ProxyCfg.MinPasswordLength.GetAsInt(),
+			Params.ProxyCfg.MaxPasswordLength.GetAsInt(),
+			len(password), "invalid password length")
 	}
 	return nil
 }
@@ -841,6 +894,19 @@ func GetCurDBNameFromContextOrDefault(ctx context.Context) string {
 	return dbNameData[0]
 }
 
+func NewContextWithMetadata(ctx context.Context, username string, dbName string) context.Context {
+	originValue := fmt.Sprintf("%s%s%s", username, util.CredentialSeperator, username)
+	authKey := strings.ToLower(util.HeaderAuthorize)
+	authValue := crypto.Base64Encode(originValue)
+	dbKey := strings.ToLower(util.HeaderDBName)
+	contextMap := map[string]string{
+		authKey: authValue,
+		dbKey:   dbName,
+	}
+	md := metadata.New(contextMap)
+	return metadata.NewIncomingContext(ctx, md)
+}
+
 func GetRole(username string) ([]string, error) {
 	if globalMetaCache == nil {
 		return []string{}, merr.WrapErrServiceUnavailable("internal: Milvus Proxy is not ready yet. please wait")
@@ -850,6 +916,18 @@ func GetRole(username string) ([]string, error) {
 
 func PasswordVerify(ctx context.Context, username, rawPwd string) bool {
 	return passwordVerify(ctx, username, rawPwd, globalMetaCache)
+}
+
+func VerifyAPIKey(rawToken string) (string, error) {
+	if hoo == nil {
+		return "", merr.WrapErrServiceInternal("internal: Milvus Proxy is not ready yet. please wait")
+	}
+	user, err := hoo.VerifyAPIKey(rawToken)
+	if err != nil {
+		log.Warn("fail to verify apikey", zap.String("api_key", rawToken), zap.Error(err))
+		return "", merr.WrapErrParameterInvalidMsg("invalid apikey: [%s]", rawToken)
+	}
+	return user, nil
 }
 
 // PasswordVerify verify password
@@ -879,6 +957,18 @@ func passwordVerify(ctx context.Context, username, rawPwd string, globalMetaCach
 	log.Debug("get credential miss cache, update cache with", zap.Any("credential", credInfo))
 	globalMetaCache.UpdateCredential(credInfo)
 	return true
+}
+
+func translatePkOutputFields(schema *schemapb.CollectionSchema) ([]string, []int64) {
+	pkNames := []string{}
+	fieldIDs := []int64{}
+	for _, field := range schema.Fields {
+		if field.IsPrimaryKey {
+			pkNames = append(pkNames, field.GetName())
+			fieldIDs = append(fieldIDs, field.GetFieldID())
+		}
+	}
+	return pkNames, fieldIDs
 }
 
 // Support wildcard in output fields:
@@ -985,7 +1075,7 @@ func validateIndexName(indexName string) error {
 	return nil
 }
 
-func isCollectionLoaded(ctx context.Context, qc types.QueryCoord, collID int64) (bool, error) {
+func isCollectionLoaded(ctx context.Context, qc types.QueryCoordClient, collID int64) (bool, error) {
 	// get all loading collections
 	resp, err := qc.ShowCollections(ctx, &querypb.ShowCollectionsRequest{
 		CollectionIDs: nil,
@@ -993,8 +1083,8 @@ func isCollectionLoaded(ctx context.Context, qc types.QueryCoord, collID int64) 
 	if err != nil {
 		return false, err
 	}
-	if resp.Status.ErrorCode != commonpb.ErrorCode_Success {
-		return false, errors.New(resp.Status.Reason)
+	if resp.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
+		return false, merr.Error(resp.GetStatus())
 	}
 
 	for _, loadedCollID := range resp.GetCollectionIDs() {
@@ -1005,7 +1095,7 @@ func isCollectionLoaded(ctx context.Context, qc types.QueryCoord, collID int64) 
 	return false, nil
 }
 
-func isPartitionLoaded(ctx context.Context, qc types.QueryCoord, collID int64, partIDs []int64) (bool, error) {
+func isPartitionLoaded(ctx context.Context, qc types.QueryCoordClient, collID int64, partIDs []int64) (bool, error) {
 	// get all loading collections
 	resp, err := qc.ShowPartitions(ctx, &querypb.ShowPartitionsRequest{
 		CollectionID: collID,
@@ -1014,8 +1104,8 @@ func isPartitionLoaded(ctx context.Context, qc types.QueryCoord, collID int64, p
 	if err != nil {
 		return false, err
 	}
-	if resp.Status.ErrorCode != commonpb.ErrorCode_Success {
-		return false, errors.New(resp.Status.Reason)
+	if resp.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
+		return false, merr.Error(resp.GetStatus())
 	}
 
 	for _, loadedPartID := range resp.GetPartitionIDs() {
@@ -1133,8 +1223,9 @@ func checkPrimaryFieldData(schema *schemapb.CollectionSchema, result *milvuspb.M
 			// upsert has not supported when autoID == true
 			log.Info("can not upsert when auto id enabled",
 				zap.String("primaryFieldSchemaName", primaryFieldSchema.Name))
-			result.Status.ErrorCode = commonpb.ErrorCode_UpsertAutoIDTrue
-			return nil, fmt.Errorf("upsert can not assign primary field data when auto id enabled %v", primaryFieldSchema.Name)
+			err := merr.WrapErrParameterInvalidMsg(fmt.Sprintf("upsert can not assign primary field data when auto id enabled %v", primaryFieldSchema.GetName()))
+			result.Status = merr.Status(err)
+			return nil, err
 		}
 		primaryFieldData, err = typeutil.GetPrimaryFieldData(insertMsg.GetFieldsData(), primaryFieldSchema)
 		if err != nil {
@@ -1169,7 +1260,7 @@ func getPartitionKeyFieldData(fieldSchema *schemapb.FieldSchema, insertMsg *msgs
 
 func getCollectionProgress(
 	ctx context.Context,
-	queryCoord types.QueryCoord,
+	queryCoord types.QueryCoordClient,
 	msgBase *commonpb.MsgBase,
 	collectionID int64,
 ) (loadProgress int64, refreshProgress int64, err error) {
@@ -1181,32 +1272,22 @@ func getCollectionProgress(
 		CollectionIDs: []int64{collectionID},
 	})
 	if err != nil {
-		log.Warn("fail to show collections", zap.Int64("collection_id", collectionID), zap.Error(err))
+		log.Warn("fail to show collections",
+			zap.Int64("collectionID", collectionID),
+			zap.Error(err),
+		)
 		return
 	}
 
-	if resp.Status.ErrorCode == commonpb.ErrorCode_InsufficientMemoryToLoad {
-		err = ErrInsufficientMemory
-		log.Warn("detected insufficientMemoryError when getCollectionProgress", zap.Int64("collection_id", collectionID), zap.String("reason", resp.GetStatus().GetReason()))
-		return
-	}
-
-	if resp.Status.ErrorCode != commonpb.ErrorCode_Success {
-		err = merr.Error(resp.GetStatus())
-		log.Warn("fail to show collections", zap.Int64("collection_id", collectionID),
-			zap.String("reason", resp.Status.Reason))
-		return
-	}
-
-	if len(resp.InMemoryPercentages) == 0 {
-		errMsg := "fail to show collections from the querycoord, no data"
-		err = errors.New(errMsg)
-		log.Warn(errMsg, zap.Int64("collection_id", collectionID))
+	err = merr.Error(resp.GetStatus())
+	if err != nil {
+		log.Warn("fail to show collections",
+			zap.Int64("collectionID", collectionID),
+			zap.Error(err))
 		return
 	}
 
 	loadProgress = resp.GetInMemoryPercentages()[0]
-
 	if len(resp.GetRefreshProgress()) > 0 { // Compatibility for new Proxy with old QueryCoord
 		refreshProgress = resp.GetRefreshProgress()[0]
 	}
@@ -1216,7 +1297,7 @@ func getCollectionProgress(
 
 func getPartitionProgress(
 	ctx context.Context,
-	queryCoord types.QueryCoord,
+	queryCoord types.QueryCoordClient,
 	msgBase *commonpb.MsgBase,
 	partitionNames []string,
 	collectionName string,
@@ -1251,34 +1332,17 @@ func getPartitionProgress(
 			zap.Error(err))
 		return
 	}
-	if resp.GetStatus().GetErrorCode() == commonpb.ErrorCode_InsufficientMemoryToLoad {
-		err = ErrInsufficientMemory
-		log.Warn("detected insufficientMemoryError when getPartitionProgress",
-			zap.Int64("collection_id", collectionID),
-			zap.String("collection_name", collectionName),
-			zap.Strings("partition_names", partitionNames),
-			zap.String("reason", resp.GetStatus().GetReason()),
-		)
-		return
-	}
 
-	if resp.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
+	err = merr.Error(resp.GetStatus())
+	if err != nil {
 		err = merr.Error(resp.GetStatus())
 		log.Warn("fail to show partitions",
-			zap.String("collection_name", collectionName),
-			zap.Strings("partition_names", partitionNames),
-			zap.String("reason", resp.Status.Reason))
+			zap.String("collectionName", collectionName),
+			zap.Strings("partitionNames", partitionNames),
+			zap.Error(err))
 		return
 	}
 
-	if len(resp.InMemoryPercentages) != len(partitionIDs) {
-		errMsg := "fail to show partitions from the querycoord, invalid data num"
-		err = errors.New(errMsg)
-		log.Warn(errMsg, zap.Int64("collection_id", collectionID),
-			zap.String("collection_name", collectionName),
-			zap.Strings("partition_names", partitionNames))
-		return
-	}
 	for _, p := range resp.InMemoryPercentages {
 		loadProgress += p
 	}
@@ -1439,4 +1503,77 @@ func checkDynamicFieldData(schema *schemapb.CollectionSchema, insertMsg *msgstre
 	dynamicData := autoGenDynamicFieldData(defaultData)
 	insertMsg.FieldsData = append(insertMsg.FieldsData, dynamicData)
 	return nil
+}
+
+func SendReplicateMessagePack(ctx context.Context, replicateMsgStream msgstream.MsgStream, request interface{ GetBase() *commonpb.MsgBase }) {
+	if replicateMsgStream == nil || request == nil {
+		log.Warn("replicate msg stream or request is nil", zap.Any("request", request))
+		return
+	}
+	msgBase := request.GetBase()
+	ts := msgBase.GetTimestamp()
+	if msgBase.GetReplicateInfo().GetIsReplicate() {
+		ts = msgBase.GetReplicateInfo().GetMsgTimestamp()
+	}
+	getBaseMsg := func(ctx context.Context, ts uint64) msgstream.BaseMsg {
+		return msgstream.BaseMsg{
+			Ctx:            ctx,
+			HashValues:     []uint32{0},
+			BeginTimestamp: ts,
+			EndTimestamp:   ts,
+		}
+	}
+
+	var tsMsg msgstream.TsMsg
+	switch r := request.(type) {
+	case *milvuspb.CreateDatabaseRequest:
+		tsMsg = &msgstream.CreateDatabaseMsg{
+			BaseMsg:               getBaseMsg(ctx, ts),
+			CreateDatabaseRequest: *r,
+		}
+	case *milvuspb.DropDatabaseRequest:
+		tsMsg = &msgstream.DropDatabaseMsg{
+			BaseMsg:             getBaseMsg(ctx, ts),
+			DropDatabaseRequest: *r,
+		}
+	case *milvuspb.FlushRequest:
+		tsMsg = &msgstream.FlushMsg{
+			BaseMsg:      getBaseMsg(ctx, ts),
+			FlushRequest: *r,
+		}
+	case *milvuspb.LoadCollectionRequest:
+		tsMsg = &msgstream.LoadCollectionMsg{
+			BaseMsg:               getBaseMsg(ctx, ts),
+			LoadCollectionRequest: *r,
+		}
+	case *milvuspb.ReleaseCollectionRequest:
+		tsMsg = &msgstream.ReleaseCollectionMsg{
+			BaseMsg:                  getBaseMsg(ctx, ts),
+			ReleaseCollectionRequest: *r,
+		}
+	case *milvuspb.CreateIndexRequest:
+		tsMsg = &msgstream.CreateIndexMsg{
+			BaseMsg:            getBaseMsg(ctx, ts),
+			CreateIndexRequest: *r,
+		}
+	case *milvuspb.DropIndexRequest:
+		tsMsg = &msgstream.DropIndexMsg{
+			BaseMsg:          getBaseMsg(ctx, ts),
+			DropIndexRequest: *r,
+		}
+	default:
+		log.Warn("unknown request", zap.Any("request", request))
+		return
+	}
+	msgPack := &msgstream.MsgPack{
+		BeginTs: ts,
+		EndTs:   ts,
+		Msgs:    []msgstream.TsMsg{tsMsg},
+	}
+	msgErr := replicateMsgStream.Produce(msgPack)
+	// ignore the error if the msg stream failed to produce the msg,
+	// because it can be manually fixed in this error
+	if msgErr != nil {
+		log.Warn("send replicate msg failed", zap.Any("pack", msgPack), zap.Error(msgErr))
+	}
 }

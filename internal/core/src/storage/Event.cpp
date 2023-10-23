@@ -15,12 +15,15 @@
 // limitations under the License.
 
 #include "storage/Event.h"
+#include "fmt/format.h"
+#include "nlohmann/json.hpp"
 #include "storage/PayloadReader.h"
 #include "storage/PayloadWriter.h"
-#include "exceptions/EasyAssert.h"
-#include "utils/Json.h"
+#include "common/EasyAssert.h"
+#include "common/Json.h"
 #include "common/Consts.h"
 #include "common/FieldMeta.h"
+#include "common/Array.h"
 
 namespace milvus::storage {
 
@@ -45,8 +48,8 @@ GetEventHeaderSize(EventHeader& header) {
 }
 
 int
-GetEventFixPartSize(EventType EventTypeCode) {
-    switch (EventTypeCode) {
+GetEventFixPartSize(EventType event_type) {
+    switch (event_type) {
         case EventType::DescriptorEvent: {
             DescriptorEventData data;
             return GetFixPartSize(data);
@@ -62,7 +65,8 @@ GetEventFixPartSize(EventType EventTypeCode) {
             return GetFixPartSize(data);
         }
         default:
-            PanicInfo("unsupported event type");
+            PanicInfo(DataFormatBroken,
+                      fmt::format("unsupported event type {}", event_type));
     }
 }
 
@@ -138,8 +142,8 @@ DescriptorEventDataFixPart::Serialize() {
 
 DescriptorEventData::DescriptorEventData(BinlogReaderPtr reader) {
     fix_part = DescriptorEventDataFixPart(reader);
-    for (auto i = int8_t(EventType::DescriptorEvent);
-         i < int8_t(EventType::EventTypeEnd);
+    for (auto i = static_cast<int8_t>(EventType::DescriptorEvent);
+         i < static_cast<int8_t>(EventType::EventTypeEnd);
          i++) {
         post_header_lengths.push_back(GetEventFixPartSize(EventType(i)));
     }
@@ -152,8 +156,8 @@ DescriptorEventData::DescriptorEventData(BinlogReaderPtr reader) {
     ast = reader->Read(extra_length, extra_bytes.data());
     assert(ast.ok());
 
-    milvus::json json =
-        milvus::json::parse(extra_bytes.begin(), extra_bytes.end());
+    nlohmann::json json =
+        nlohmann::json::parse(extra_bytes.begin(), extra_bytes.end());
     if (json.contains(ORIGIN_SIZE_KEY)) {
         extras[ORIGIN_SIZE_KEY] = json[ORIGIN_SIZE_KEY];
     }
@@ -165,7 +169,7 @@ DescriptorEventData::DescriptorEventData(BinlogReaderPtr reader) {
 std::vector<uint8_t>
 DescriptorEventData::Serialize() {
     auto fix_part_data = fix_part.Serialize();
-    milvus::json extras_json;
+    nlohmann::json extras_json;
     for (auto v : extras) {
         extras_json.emplace(v.first, v.second);
     }
@@ -229,7 +233,19 @@ BaseEventData::Serialize() {
             }
             break;
         }
-        case DataType::ARRAY:
+        case DataType::ARRAY: {
+            for (size_t offset = 0; offset < field_data->get_num_rows();
+                 ++offset) {
+                auto array =
+                    static_cast<const Array*>(field_data->RawValue(offset));
+                auto array_string = array->output_data().SerializeAsString();
+
+                payload_writer->add_one_binary_payload(
+                    reinterpret_cast<const uint8_t*>(array_string.c_str()),
+                    array_string.size());
+            }
+            break;
+        }
         case DataType::JSON: {
             for (size_t offset = 0; offset < field_data->get_num_rows();
                  ++offset) {

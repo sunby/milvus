@@ -4,19 +4,18 @@ import (
 	"context"
 	"testing"
 
-	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
 
 func TestCreateDatabaseTask(t *testing.T) {
 	paramtable.Init()
 	rc := NewRootCoordMock()
-	rc.Start()
-	defer rc.Stop()
+	defer rc.Close()
 
 	ctx := context.Background()
 	task := &createDatabaseTask{
@@ -46,6 +45,7 @@ func TestCreateDatabaseTask(t *testing.T) {
 		err = task.Execute(ctx)
 		assert.NoError(t, err)
 
+		task.Base = nil
 		err = task.OnEnqueue()
 		assert.NoError(t, err)
 		assert.Equal(t, paramtable.GetNodeID(), task.GetBase().GetSourceID())
@@ -62,8 +62,7 @@ func TestCreateDatabaseTask(t *testing.T) {
 func TestDropDatabaseTask(t *testing.T) {
 	paramtable.Init()
 	rc := NewRootCoordMock()
-	rc.Start()
-	defer rc.Stop()
+	defer rc.Close()
 
 	ctx := context.Background()
 	task := &dropDatabaseTask{
@@ -100,6 +99,7 @@ func TestDropDatabaseTask(t *testing.T) {
 		err = task.Execute(ctx)
 		assert.NoError(t, err)
 
+		task.Base = nil
 		err = task.OnEnqueue()
 		assert.NoError(t, err)
 		assert.Equal(t, paramtable.GetNodeID(), task.GetBase().GetSourceID())
@@ -116,8 +116,7 @@ func TestDropDatabaseTask(t *testing.T) {
 func TestListDatabaseTask(t *testing.T) {
 	paramtable.Init()
 	rc := NewRootCoordMock()
-	rc.Start()
-	defer rc.Stop()
+	defer rc.Close()
 
 	ctx := context.Background()
 	task := &listDatabaseTask{

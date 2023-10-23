@@ -20,9 +20,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/cockroachdb/errors"
 	"github.com/google/btree"
-	"github.com/milvus-io/milvus/pkg/common"
+
+	"github.com/milvus-io/milvus/internal/kv/predicates"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
 // MemoryKV implements BaseKv interface and relies on underling btree.BTree.
@@ -82,7 +83,7 @@ func (kv *MemoryKV) Load(key string) (string, error) {
 	defer kv.RUnlock()
 	item := kv.tree.Get(memoryKVItem{key: key})
 	if item == nil {
-		return "", common.NewKeyNotExistError(key)
+		return "", merr.WrapErrIoKeyNotFound(key)
 	}
 	return item.(memoryKVItem).value.String(), nil
 }
@@ -93,7 +94,7 @@ func (kv *MemoryKV) LoadBytes(key string) ([]byte, error) {
 	defer kv.RUnlock()
 	item := kv.tree.Get(memoryKVItem{key: key})
 	if item == nil {
-		return []byte{}, common.NewKeyNotExistError(key)
+		return nil, merr.WrapErrIoKeyNotFound(key)
 	}
 	return item.(memoryKVItem).value.ByteSlice(), nil
 }
@@ -217,7 +218,10 @@ func (kv *MemoryKV) MultiRemove(keys []string) error {
 }
 
 // MultiSaveAndRemove saves and removes given key-value pairs in MemoryKV atomicly.
-func (kv *MemoryKV) MultiSaveAndRemove(saves map[string]string, removals []string) error {
+func (kv *MemoryKV) MultiSaveAndRemove(saves map[string]string, removals []string, preds ...predicates.Predicate) error {
+	if len(preds) > 0 {
+		return merr.WrapErrServiceUnavailable("predicates not supported")
+	}
 	kv.Lock()
 	defer kv.Unlock()
 	for key, value := range saves {
@@ -282,13 +286,11 @@ func (kv *MemoryKV) LoadBytesWithPrefix(key string) ([]string, [][]byte, error) 
 func (kv *MemoryKV) Close() {
 }
 
-// MultiRemoveWithPrefix not implemented
-func (kv *MemoryKV) MultiRemoveWithPrefix(keys []string) error {
-	return errors.New("not implement")
-}
-
 // MultiSaveAndRemoveWithPrefix saves key-value pairs in @saves, & remove key with prefix in @removals in MemoryKV atomically.
-func (kv *MemoryKV) MultiSaveAndRemoveWithPrefix(saves map[string]string, removals []string) error {
+func (kv *MemoryKV) MultiSaveAndRemoveWithPrefix(saves map[string]string, removals []string, preds ...predicates.Predicate) error {
+	if len(preds) > 0 {
+		return merr.WrapErrServiceUnavailable("predicates not supported")
+	}
 	kv.Lock()
 	defer kv.Unlock()
 

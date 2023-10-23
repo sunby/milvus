@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	uatomic "go.uber.org/atomic"
+	"google.golang.org/grpc"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
@@ -48,7 +49,7 @@ import (
 var dbName = GetCurDBNameFromContextOrDefault(context.Background())
 
 type MockRootCoordClientInterface struct {
-	types.RootCoord
+	types.RootCoordClient
 	Error       bool
 	AccessCount int32
 
@@ -64,15 +65,13 @@ func (m *MockRootCoordClientInterface) GetAccessCount() int {
 	return int(ret)
 }
 
-func (m *MockRootCoordClientInterface) ShowPartitions(ctx context.Context, in *milvuspb.ShowPartitionsRequest) (*milvuspb.ShowPartitionsResponse, error) {
+func (m *MockRootCoordClientInterface) ShowPartitions(ctx context.Context, in *milvuspb.ShowPartitionsRequest, opts ...grpc.CallOption) (*milvuspb.ShowPartitionsResponse, error) {
 	if m.Error {
 		return nil, errors.New("mocked error")
 	}
 	if in.CollectionName == "collection1" {
 		return &milvuspb.ShowPartitionsResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status:               merr.Success(),
 			PartitionIDs:         []typeutil.UniqueID{1, 2},
 			CreatedTimestamps:    []uint64{100, 200},
 			CreatedUtcTimestamps: []uint64{100, 200},
@@ -81,9 +80,7 @@ func (m *MockRootCoordClientInterface) ShowPartitions(ctx context.Context, in *m
 	}
 	if in.CollectionName == "collection2" {
 		return &milvuspb.ShowPartitionsResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status:               merr.Success(),
 			PartitionIDs:         []typeutil.UniqueID{3, 4},
 			CreatedTimestamps:    []uint64{201, 202},
 			CreatedUtcTimestamps: []uint64{201, 202},
@@ -92,9 +89,7 @@ func (m *MockRootCoordClientInterface) ShowPartitions(ctx context.Context, in *m
 	}
 	if in.CollectionName == "errorCollection" {
 		return &milvuspb.ShowPartitionsResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status:               merr.Success(),
 			PartitionIDs:         []typeutil.UniqueID{5, 6},
 			CreatedTimestamps:    []uint64{201},
 			CreatedUtcTimestamps: []uint64{201},
@@ -112,16 +107,14 @@ func (m *MockRootCoordClientInterface) ShowPartitions(ctx context.Context, in *m
 	}, nil
 }
 
-func (m *MockRootCoordClientInterface) DescribeCollection(ctx context.Context, in *milvuspb.DescribeCollectionRequest) (*milvuspb.DescribeCollectionResponse, error) {
+func (m *MockRootCoordClientInterface) DescribeCollection(ctx context.Context, in *milvuspb.DescribeCollectionRequest, opts ...grpc.CallOption) (*milvuspb.DescribeCollectionResponse, error) {
 	if m.Error {
 		return nil, errors.New("mocked error")
 	}
 	m.IncAccessCount()
 	if in.CollectionName == "collection1" || in.CollectionID == 1 {
 		return &milvuspb.DescribeCollectionResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status:       merr.Success(),
 			CollectionID: typeutil.UniqueID(1),
 			Schema: &schemapb.CollectionSchema{
 				AutoID: true,
@@ -132,9 +125,7 @@ func (m *MockRootCoordClientInterface) DescribeCollection(ctx context.Context, i
 	}
 	if in.CollectionName == "collection2" || in.CollectionID == 2 {
 		return &milvuspb.DescribeCollectionResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status:       merr.Success(),
 			CollectionID: typeutil.UniqueID(2),
 			Schema: &schemapb.CollectionSchema{
 				AutoID: true,
@@ -145,9 +136,7 @@ func (m *MockRootCoordClientInterface) DescribeCollection(ctx context.Context, i
 	}
 	if in.CollectionName == "errorCollection" {
 		return &milvuspb.DescribeCollectionResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status:       merr.Success(),
 			CollectionID: typeutil.UniqueID(3),
 			Schema: &schemapb.CollectionSchema{
 				AutoID: true,
@@ -163,7 +152,7 @@ func (m *MockRootCoordClientInterface) DescribeCollection(ctx context.Context, i
 	}, nil
 }
 
-func (m *MockRootCoordClientInterface) GetCredential(ctx context.Context, req *rootcoordpb.GetCredentialRequest) (*rootcoordpb.GetCredentialResponse, error) {
+func (m *MockRootCoordClientInterface) GetCredential(ctx context.Context, req *rootcoordpb.GetCredentialRequest, opts ...grpc.CallOption) (*rootcoordpb.GetCredentialResponse, error) {
 	if m.Error {
 		return nil, errors.New("mocked error")
 	}
@@ -171,9 +160,7 @@ func (m *MockRootCoordClientInterface) GetCredential(ctx context.Context, req *r
 	if req.Username == "mockUser" {
 		encryptedPassword, _ := crypto.PasswordEncrypt("mockPass")
 		return &rootcoordpb.GetCredentialResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status:   merr.Success(),
 			Username: "mockUser",
 			Password: encryptedPassword,
 		}, nil
@@ -183,27 +170,23 @@ func (m *MockRootCoordClientInterface) GetCredential(ctx context.Context, req *r
 	return nil, err
 }
 
-func (m *MockRootCoordClientInterface) ListCredUsers(ctx context.Context, req *milvuspb.ListCredUsersRequest) (*milvuspb.ListCredUsersResponse, error) {
+func (m *MockRootCoordClientInterface) ListCredUsers(ctx context.Context, req *milvuspb.ListCredUsersRequest, opts ...grpc.CallOption) (*milvuspb.ListCredUsersResponse, error) {
 	if m.Error {
 		return nil, errors.New("mocked error")
 	}
 
 	return &milvuspb.ListCredUsersResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:    merr.Success(),
 		Usernames: []string{"mockUser"},
 	}, nil
 }
 
-func (m *MockRootCoordClientInterface) ListPolicy(ctx context.Context, in *internalpb.ListPolicyRequest) (*internalpb.ListPolicyResponse, error) {
+func (m *MockRootCoordClientInterface) ListPolicy(ctx context.Context, in *internalpb.ListPolicyRequest, opts ...grpc.CallOption) (*internalpb.ListPolicyResponse, error) {
 	if m.listPolicy != nil {
 		return m.listPolicy(ctx, in)
 	}
 	return &internalpb.ListPolicyResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status: merr.Success(),
 	}, nil
 }
 
@@ -211,7 +194,7 @@ func (m *MockRootCoordClientInterface) ListPolicy(ctx context.Context, in *inter
 func TestMetaCache_GetCollection(t *testing.T) {
 	ctx := context.Background()
 	rootCoord := &MockRootCoordClientInterface{}
-	queryCoord := &mocks.MockQueryCoord{}
+	queryCoord := &mocks.MockQueryCoordClient{}
 	mgr := newShardClientMgr()
 	err := InitMetaCache(ctx, rootCoord, queryCoord, mgr)
 	assert.NoError(t, err)
@@ -261,7 +244,7 @@ func TestMetaCache_GetCollection(t *testing.T) {
 func TestMetaCache_GetBasicCollectionInfo(t *testing.T) {
 	ctx := context.Background()
 	rootCoord := &MockRootCoordClientInterface{}
-	queryCoord := &mocks.MockQueryCoord{}
+	queryCoord := &mocks.MockQueryCoordClient{}
 	mgr := newShardClientMgr()
 	err := InitMetaCache(ctx, rootCoord, queryCoord, mgr)
 	assert.NoError(t, err)
@@ -295,7 +278,7 @@ func TestMetaCache_GetBasicCollectionInfo(t *testing.T) {
 func TestMetaCache_GetCollectionName(t *testing.T) {
 	ctx := context.Background()
 	rootCoord := &MockRootCoordClientInterface{}
-	queryCoord := &mocks.MockQueryCoord{}
+	queryCoord := &mocks.MockQueryCoordClient{}
 	mgr := newShardClientMgr()
 	err := InitMetaCache(ctx, rootCoord, queryCoord, mgr)
 	assert.NoError(t, err)
@@ -345,7 +328,7 @@ func TestMetaCache_GetCollectionName(t *testing.T) {
 func TestMetaCache_GetCollectionFailure(t *testing.T) {
 	ctx := context.Background()
 	rootCoord := &MockRootCoordClientInterface{}
-	queryCoord := &mocks.MockQueryCoord{}
+	queryCoord := &mocks.MockQueryCoordClient{}
 	mgr := newShardClientMgr()
 	err := InitMetaCache(ctx, rootCoord, queryCoord, mgr)
 	assert.NoError(t, err)
@@ -378,7 +361,7 @@ func TestMetaCache_GetCollectionFailure(t *testing.T) {
 func TestMetaCache_GetNonExistCollection(t *testing.T) {
 	ctx := context.Background()
 	rootCoord := &MockRootCoordClientInterface{}
-	queryCoord := &mocks.MockQueryCoord{}
+	queryCoord := &mocks.MockQueryCoordClient{}
 	mgr := newShardClientMgr()
 	err := InitMetaCache(ctx, rootCoord, queryCoord, mgr)
 	assert.NoError(t, err)
@@ -394,7 +377,7 @@ func TestMetaCache_GetNonExistCollection(t *testing.T) {
 func TestMetaCache_GetPartitionID(t *testing.T) {
 	ctx := context.Background()
 	rootCoord := &MockRootCoordClientInterface{}
-	queryCoord := &mocks.MockQueryCoord{}
+	queryCoord := &mocks.MockQueryCoordClient{}
 	mgr := newShardClientMgr()
 	err := InitMetaCache(ctx, rootCoord, queryCoord, mgr)
 	assert.NoError(t, err)
@@ -416,7 +399,7 @@ func TestMetaCache_GetPartitionID(t *testing.T) {
 func TestMetaCache_ConcurrentTest1(t *testing.T) {
 	ctx := context.Background()
 	rootCoord := &MockRootCoordClientInterface{}
-	queryCoord := &mocks.MockQueryCoord{}
+	queryCoord := &mocks.MockQueryCoordClient{}
 	mgr := newShardClientMgr()
 	err := InitMetaCache(ctx, rootCoord, queryCoord, mgr)
 	assert.NoError(t, err)
@@ -470,7 +453,7 @@ func TestMetaCache_ConcurrentTest1(t *testing.T) {
 func TestMetaCache_GetPartitionError(t *testing.T) {
 	ctx := context.Background()
 	rootCoord := &MockRootCoordClientInterface{}
-	queryCoord := &mocks.MockQueryCoord{}
+	queryCoord := &mocks.MockQueryCoordClient{}
 	mgr := newShardClientMgr()
 	err := InitMetaCache(ctx, rootCoord, queryCoord, mgr)
 	assert.NoError(t, err)
@@ -503,15 +486,10 @@ func TestMetaCache_GetShards(t *testing.T) {
 	)
 
 	rootCoord := &MockRootCoordClientInterface{}
-	qc := getQueryCoord()
-	qc.EXPECT().Init().Return(nil)
+	qc := getQueryCoordClient()
 	shardMgr := newShardClientMgr()
 	err := InitMetaCache(ctx, rootCoord, qc, shardMgr)
 	require.Nil(t, err)
-
-	qc.Init()
-	qc.Start()
-	defer qc.Stop()
 
 	t.Run("No collection in meta cache", func(t *testing.T) {
 		shards, err := globalMetaCache.GetShards(ctx, true, dbName, "non-exists", 0)
@@ -536,9 +514,7 @@ func TestMetaCache_GetShards(t *testing.T) {
 
 	t.Run("without shardLeaders in collection info", func(t *testing.T) {
 		qc.EXPECT().GetShardLeaders(mock.Anything, mock.Anything).Return(&querypb.GetShardLeadersResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status: merr.Success(),
 			Shards: []*querypb.ShardLeadersList{
 				{
 					ChannelName: "channel-1",
@@ -580,15 +556,10 @@ func TestMetaCache_ClearShards(t *testing.T) {
 	)
 
 	rootCoord := &MockRootCoordClientInterface{}
-	qc := getQueryCoord()
-	qc.EXPECT().Init().Return(nil)
+	qc := getQueryCoordClient()
 	mgr := newShardClientMgr()
 	err := InitMetaCache(ctx, rootCoord, qc, mgr)
 	require.Nil(t, err)
-
-	qc.Init()
-	qc.Start()
-	defer qc.Stop()
 
 	t.Run("Clear with no collection info", func(t *testing.T) {
 		globalMetaCache.DeprecateShardCache(dbName, "collection_not_exist")
@@ -600,9 +571,7 @@ func TestMetaCache_ClearShards(t *testing.T) {
 
 	t.Run("Clear valid collection valid cache", func(t *testing.T) {
 		qc.EXPECT().GetShardLeaders(mock.Anything, mock.Anything).Return(&querypb.GetShardLeadersResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status: merr.Success(),
 			Shards: []*querypb.ShardLeadersList{
 				{
 					ChannelName: "channel-1",
@@ -636,7 +605,7 @@ func TestMetaCache_ClearShards(t *testing.T) {
 
 func TestMetaCache_PolicyInfo(t *testing.T) {
 	client := &MockRootCoordClientInterface{}
-	qc := &mocks.MockQueryCoord{}
+	qc := &mocks.MockQueryCoordClient{}
 	mgr := newShardClientMgr()
 
 	t.Run("InitMetaCache", func(t *testing.T) {
@@ -648,9 +617,7 @@ func TestMetaCache_PolicyInfo(t *testing.T) {
 
 		client.listPolicy = func(ctx context.Context, in *internalpb.ListPolicyRequest) (*internalpb.ListPolicyResponse, error) {
 			return &internalpb.ListPolicyResponse{
-				Status: &commonpb.Status{
-					ErrorCode: commonpb.ErrorCode_Success,
-				},
+				Status:      merr.Success(),
 				PolicyInfos: []string{"policy1", "policy2", "policy3"},
 			}, nil
 		}
@@ -661,9 +628,7 @@ func TestMetaCache_PolicyInfo(t *testing.T) {
 	t.Run("GetPrivilegeInfo", func(t *testing.T) {
 		client.listPolicy = func(ctx context.Context, in *internalpb.ListPolicyRequest) (*internalpb.ListPolicyResponse, error) {
 			return &internalpb.ListPolicyResponse{
-				Status: &commonpb.Status{
-					ErrorCode: commonpb.ErrorCode_Success,
-				},
+				Status:      merr.Success(),
 				PolicyInfos: []string{"policy1", "policy2", "policy3"},
 				UserRoles:   []string{funcutil.EncodeUserRoleCache("foo", "role1"), funcutil.EncodeUserRoleCache("foo", "role2"), funcutil.EncodeUserRoleCache("foo2", "role2")},
 			}, nil
@@ -679,9 +644,7 @@ func TestMetaCache_PolicyInfo(t *testing.T) {
 	t.Run("GetPrivilegeInfo", func(t *testing.T) {
 		client.listPolicy = func(ctx context.Context, in *internalpb.ListPolicyRequest) (*internalpb.ListPolicyResponse, error) {
 			return &internalpb.ListPolicyResponse{
-				Status: &commonpb.Status{
-					ErrorCode: commonpb.ErrorCode_Success,
-				},
+				Status:      merr.Success(),
 				PolicyInfos: []string{"policy1", "policy2", "policy3"},
 				UserRoles:   []string{funcutil.EncodeUserRoleCache("foo", "role1"), funcutil.EncodeUserRoleCache("foo", "role2"), funcutil.EncodeUserRoleCache("foo2", "role2")},
 			}, nil
@@ -718,9 +681,7 @@ func TestMetaCache_PolicyInfo(t *testing.T) {
 	t.Run("Delete user or drop role", func(t *testing.T) {
 		client.listPolicy = func(ctx context.Context, in *internalpb.ListPolicyRequest) (*internalpb.ListPolicyResponse, error) {
 			return &internalpb.ListPolicyResponse{
-				Status: &commonpb.Status{
-					ErrorCode: commonpb.ErrorCode_Success,
-				},
+				Status:      merr.Success(),
 				PolicyInfos: []string{"policy1", "policy2", "policy3"},
 				UserRoles:   []string{funcutil.EncodeUserRoleCache("foo", "role1"), funcutil.EncodeUserRoleCache("foo", "role2"), funcutil.EncodeUserRoleCache("foo2", "role2"), funcutil.EncodeUserRoleCache("foo2", "role3")},
 			}, nil
@@ -745,9 +706,7 @@ func TestMetaCache_PolicyInfo(t *testing.T) {
 
 		client.listPolicy = func(ctx context.Context, in *internalpb.ListPolicyRequest) (*internalpb.ListPolicyResponse, error) {
 			return &internalpb.ListPolicyResponse{
-				Status: &commonpb.Status{
-					ErrorCode: commonpb.ErrorCode_Success,
-				},
+				Status:      merr.Success(),
 				PolicyInfos: []string{"policy1", "policy2", "policy3"},
 				UserRoles:   []string{funcutil.EncodeUserRoleCache("foo", "role1"), funcutil.EncodeUserRoleCache("foo", "role2"), funcutil.EncodeUserRoleCache("foo2", "role2"), funcutil.EncodeUserRoleCache("foo2", "role3")},
 			}, nil
@@ -762,15 +721,13 @@ func TestMetaCache_PolicyInfo(t *testing.T) {
 func TestMetaCache_RemoveCollection(t *testing.T) {
 	ctx := context.Background()
 	rootCoord := &MockRootCoordClientInterface{}
-	queryCoord := &mocks.MockQueryCoord{}
+	queryCoord := &mocks.MockQueryCoordClient{}
 	shardMgr := newShardClientMgr()
 	err := InitMetaCache(ctx, rootCoord, queryCoord, shardMgr)
 	assert.NoError(t, err)
 
 	queryCoord.EXPECT().ShowCollections(mock.Anything, mock.Anything).Return(&querypb.ShowCollectionsResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:              merr.Success(),
 		CollectionIDs:       []UniqueID{1, 2},
 		InMemoryPercentages: []int64{100, 50},
 	}, nil)
@@ -813,22 +770,18 @@ func TestMetaCache_ExpireShardLeaderCache(t *testing.T) {
 
 	ctx := context.Background()
 	rootCoord := &MockRootCoordClientInterface{}
-	queryCoord := &mocks.MockQueryCoord{}
+	queryCoord := &mocks.MockQueryCoordClient{}
 	shardMgr := newShardClientMgr()
 	err := InitMetaCache(ctx, rootCoord, queryCoord, shardMgr)
 	assert.NoError(t, err)
 
 	queryCoord.EXPECT().ShowCollections(mock.Anything, mock.Anything).Return(&querypb.ShowCollectionsResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:              merr.Success(),
 		CollectionIDs:       []UniqueID{1},
 		InMemoryPercentages: []int64{100},
 	}, nil)
 	queryCoord.EXPECT().GetShardLeaders(mock.Anything, mock.Anything).Return(&querypb.GetShardLeadersResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status: merr.Success(),
 		Shards: []*querypb.ShardLeadersList{
 			{
 				ChannelName: "channel-1",
@@ -843,9 +796,7 @@ func TestMetaCache_ExpireShardLeaderCache(t *testing.T) {
 
 	queryCoord.ExpectedCalls = nil
 	queryCoord.EXPECT().GetShardLeaders(mock.Anything, mock.Anything).Return(&querypb.GetShardLeadersResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status: merr.Success(),
 		Shards: []*querypb.ShardLeadersList{
 			{
 				ChannelName: "channel-1",
@@ -863,9 +814,7 @@ func TestMetaCache_ExpireShardLeaderCache(t *testing.T) {
 
 	queryCoord.ExpectedCalls = nil
 	queryCoord.EXPECT().GetShardLeaders(mock.Anything, mock.Anything).Return(&querypb.GetShardLeadersResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status: merr.Success(),
 		Shards: []*querypb.ShardLeadersList{
 			{
 				ChannelName: "channel-1",
@@ -883,9 +832,7 @@ func TestMetaCache_ExpireShardLeaderCache(t *testing.T) {
 
 	queryCoord.ExpectedCalls = nil
 	queryCoord.EXPECT().GetShardLeaders(mock.Anything, mock.Anything).Return(&querypb.GetShardLeadersResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status: merr.Success(),
 		Shards: []*querypb.ShardLeadersList{
 			{
 				ChannelName: "channel-1",

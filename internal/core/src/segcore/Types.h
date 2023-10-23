@@ -45,6 +45,7 @@ struct LoadIndexInfo {
     std::string blob_name;
     std::string uri;
     int64_t storage_version;
+    IndexVersion index_engine_version;
 };
 
 }  // namespace milvus::segcore

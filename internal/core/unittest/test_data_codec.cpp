@@ -21,7 +21,7 @@
 #include "storage/IndexData.h"
 #include "storage/Util.h"
 #include "common/Consts.h"
-#include "utils/Json.h"
+#include "common/Json.h"
 
 using namespace milvus;
 
@@ -302,6 +302,36 @@ TEST(storage, InsertDataBinaryVector) {
     ASSERT_EQ(data, new_data);
 }
 
+TEST(storage, InsertDataFloat16Vector) {
+    std::vector<float16> data = {1, 2, 3, 4, 5, 6, 7, 8};
+    int DIM = 2;
+    auto field_data = milvus::storage::CreateFieldData(
+        storage::DataType::VECTOR_FLOAT16, DIM);
+    field_data->FillFieldData(data.data(), data.size() / DIM);
+
+    storage::InsertData insert_data(field_data);
+    storage::FieldDataMeta field_data_meta{100, 101, 102, 103};
+    insert_data.SetFieldDataMeta(field_data_meta);
+    insert_data.SetTimestamps(0, 100);
+
+    auto serialized_bytes = insert_data.Serialize(storage::StorageType::Remote);
+    std::shared_ptr<uint8_t[]> serialized_data_ptr(serialized_bytes.data(),
+                                                   [&](uint8_t*) {});
+    auto new_insert_data = storage::DeserializeFileData(
+        serialized_data_ptr, serialized_bytes.size());
+    ASSERT_EQ(new_insert_data->GetCodecType(), storage::InsertDataType);
+    ASSERT_EQ(new_insert_data->GetTimeRage(),
+              std::make_pair(Timestamp(0), Timestamp(100)));
+    auto new_payload = new_insert_data->GetFieldData();
+    ASSERT_EQ(new_payload->get_data_type(), storage::DataType::VECTOR_FLOAT16);
+    ASSERT_EQ(new_payload->get_num_rows(), data.size() / DIM);
+    std::vector<float16> new_data(data.size());
+    memcpy(new_data.data(),
+           new_payload->Data(),
+           new_payload->get_num_rows() * sizeof(float16) * DIM);
+    ASSERT_EQ(data, new_data);
+}
+
 TEST(storage, IndexData) {
     std::vector<uint8_t> data = {1, 2, 3, 4, 5, 6, 7, 8};
     auto field_data = milvus::storage::CreateFieldData(storage::DataType::INT8);
@@ -328,4 +358,41 @@ TEST(storage, IndexData) {
     std::vector<uint8_t> new_data(data.size());
     memcpy(new_data.data(), new_field_data->Data(), new_field_data->Size());
     ASSERT_EQ(data, new_data);
+}
+
+TEST(storage, InsertDataStringArray) {
+    milvus::proto::schema::ScalarField field_string_data;
+    field_string_data.mutable_string_data()->add_data("test_array1");
+    field_string_data.mutable_string_data()->add_data("test_array2");
+    field_string_data.mutable_string_data()->add_data("test_array3");
+    field_string_data.mutable_string_data()->add_data("test_array4");
+    field_string_data.mutable_string_data()->add_data("test_array5");
+    auto string_array = Array(field_string_data);
+    FixedVector<Array> data = {string_array};
+    auto field_data =
+        milvus::storage::CreateFieldData(storage::DataType::ARRAY);
+    field_data->FillFieldData(data.data(), data.size());
+
+    storage::InsertData insert_data(field_data);
+    storage::FieldDataMeta field_data_meta{100, 101, 102, 103};
+    insert_data.SetFieldDataMeta(field_data_meta);
+    insert_data.SetTimestamps(0, 100);
+
+    auto serialized_bytes = insert_data.Serialize(storage::StorageType::Remote);
+    std::shared_ptr<uint8_t[]> serialized_data_ptr(serialized_bytes.data(),
+                                                   [&](uint8_t*) {});
+    auto new_insert_data = storage::DeserializeFileData(
+        serialized_data_ptr, serialized_bytes.size());
+    ASSERT_EQ(new_insert_data->GetCodecType(), storage::InsertDataType);
+    ASSERT_EQ(new_insert_data->GetTimeRage(),
+              std::make_pair(Timestamp(0), Timestamp(100)));
+    auto new_payload = new_insert_data->GetFieldData();
+    ASSERT_EQ(new_payload->get_data_type(), storage::DataType::ARRAY);
+    ASSERT_EQ(new_payload->get_num_rows(), data.size());
+    FixedVector<Array> new_data(data.size());
+    for (int i = 0; i < data.size(); ++i) {
+        new_data[i] = *static_cast<const Array*>(new_payload->RawValue(i));
+        ASSERT_EQ(new_payload->Size(i), data[i].byte_size());
+        ASSERT_TRUE(data[i].operator==(new_data[i]));
+    }
 }

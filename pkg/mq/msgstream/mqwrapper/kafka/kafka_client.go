@@ -1,10 +1,13 @@
 package kafka
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"sync"
+	"time"
 
+	"github.com/cockroachdb/errors"
 	"github.com/confluentinc/confluent-kafka-go/kafka"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
@@ -43,7 +46,6 @@ func getBasicConfig(address string) kafka.ConfigMap {
 func NewKafkaClientInstance(address string) *kafkaClient {
 	config := getBasicConfig(address)
 	return NewKafkaClientInstanceWithConfigMap(config, kafka.ConfigMap{}, kafka.ConfigMap{})
-
 }
 
 func NewKafkaClientInstanceWithConfigMap(config kafka.ConfigMap, extraConsumerConfig kafka.ConfigMap, extraProducerConfig kafka.ConfigMap) *kafkaClient {
@@ -54,8 +56,17 @@ func NewKafkaClientInstanceWithConfigMap(config kafka.ConfigMap, extraConsumerCo
 	return &kafkaClient{basicConfig: config, consumerConfig: extraConsumerConfig, producerConfig: extraProducerConfig}
 }
 
-func NewKafkaClientInstanceWithConfig(config *paramtable.KafkaConfig) *kafkaClient {
+func NewKafkaClientInstanceWithConfig(ctx context.Context, config *paramtable.KafkaConfig) (*kafkaClient, error) {
 	kafkaConfig := getBasicConfig(config.Address.GetValue())
+
+	// connection setup timeout, default as 30000ms
+	if deadline, ok := ctx.Deadline(); ok {
+		if deadline.Before(time.Now()) {
+			return nil, errors.New("context timeout when new kafka client")
+		}
+		timeout := time.Until(deadline).Milliseconds()
+		kafkaConfig.SetKey("socket.connection.setup.timeout.ms", timeout)
+	}
 
 	if (config.SaslUsername.GetValue() == "" && config.SaslPassword.GetValue() != "") ||
 		(config.SaslUsername.GetValue() != "" && config.SaslPassword.GetValue() == "") {
@@ -77,8 +88,10 @@ func NewKafkaClientInstanceWithConfig(config *paramtable.KafkaConfig) *kafkaClie
 		return kafkaConfigMap
 	}
 
-	return NewKafkaClientInstanceWithConfigMap(kafkaConfig, specExtraConfig(config.ConsumerExtraConfig.GetValue()), specExtraConfig(config.ProducerExtraConfig.GetValue()))
-
+	return NewKafkaClientInstanceWithConfigMap(
+		kafkaConfig,
+		specExtraConfig(config.ConsumerExtraConfig.GetValue()),
+		specExtraConfig(config.ProducerExtraConfig.GetValue())), nil
 }
 
 func cloneKafkaConfig(config kafka.ConfigMap) *kafka.ConfigMap {
@@ -137,7 +150,7 @@ func (kc *kafkaClient) newProducerConfig() *kafka.ConfigMap {
 	// we want to ensure tt send out as soon as possible
 	newConf.SetKey("linger.ms", 2)
 
-	//special producer config
+	// special producer config
 	kc.specialExtraConfig(newConf, kc.producerConfig)
 
 	return newConf
@@ -148,9 +161,9 @@ func (kc *kafkaClient) newConsumerConfig(group string, offset mqwrapper.Subscrip
 
 	newConf.SetKey("group.id", group)
 	newConf.SetKey("enable.auto.commit", false)
-	//Kafka default will not create topics if consumer's the topics don't exist.
-	//In order to compatible with other MQ, we need to enable the following configuration,
-	//meanwhile, some implementation also try to consume a non-exist topic, such as dataCoordTimeTick.
+	// Kafka default will not create topics if consumer's the topics don't exist.
+	// In order to compatible with other MQ, we need to enable the following configuration,
+	// meanwhile, some implementation also try to consume a non-exist topic, such as dataCoordTimeTick.
 	newConf.SetKey("allow.auto.create.topics", true)
 	kc.specialExtraConfig(newConf, kc.consumerConfig)
 

@@ -1,5 +1,6 @@
+import random
 import time
-
+import pandas as pd
 import pytest
 
 from base.client_base import TestcaseBase
@@ -17,9 +18,9 @@ query_res_tmp_expr = [{f'{ct.default_int64_field_name}': 0}]
 query_tmp_expr_str = [{f'{ct.default_string_field_name}': "0"}]
 exp_res = "exp_res"
 default_string_expr = "varchar in [ \"0\"]"
-default_invaild_string_exp = "varchar >= 0"
+default_invalid_string_exp = "varchar >= 0"
 index_name1 = cf.gen_unique_str("float")
-index_name2 = cf.gen_unique_str("varhar")
+index_name2 = cf.gen_unique_str("varchar")
 default_search_params = ct.default_search_params
 
 
@@ -45,6 +46,30 @@ class TestDeleteParams(TestcaseBase):
         # init collection with default_nb default data
         collection_w, _, _, ids = self.init_collection_general(prefix, insert_data=True, is_binary=is_binary)[0:4]
         expr = f'{ct.default_int64_field_name} in {ids[:half_nb]}'
+
+        # delete half of data
+        del_res = collection_w.delete(expr)[0]
+        assert del_res.delete_count == half_nb
+        # This flush will not persist the deleted ids, just delay the time to ensure that queryNode consumes deleteMsg
+        collection_w.num_entities
+
+        # query with deleted ids
+        collection_w.query(expr, check_task=CheckTasks.check_query_empty)
+
+    @pytest.mark.tags(CaseLabel.L0)
+    @pytest.mark.parametrize('is_binary', [False, True])
+    def test_delete_entities_with_range(self, is_binary):
+        """
+        target: test delete data from collection
+        method: 1.create and insert nb with flush
+                2.load collection
+                3.delete half of nb
+                4.query with deleted ids
+        expected: Query result is empty
+        """
+        # init collection with default_nb default data
+        collection_w, _, _, ids = self.init_collection_general(prefix, insert_data=True, auto_id=True, is_binary=is_binary)[0:4]
+        expr = f'{ct.default_int64_field_name} < {ids[half_nb]}'
 
         # delete half of data
         del_res = collection_w.delete(expr)[0]
@@ -159,32 +184,19 @@ class TestDeleteParams(TestcaseBase):
         collection_w.query(expr, check_task=CheckTasks.check_query_empty)
 
     @pytest.mark.tags(CaseLabel.L1)
-    def test_delete_expr_non_primary_key(self):
+    def test_delete_expr_with_vector(self):
         """
-        target: test delete with non-pk field
-        method: delete with expr field not pk
+        target: test delete with vector field
+        method: delete with expr vector field
         expected: raise exception
         """
-        collection_w = self.init_collection_general(prefix, nb=tmp_nb, insert_data=True, is_all_data_type=True, is_index=True)[0]
-        exprs = [
-            f"{ct.default_int32_field_name} in [1]",
-            f"{ct.default_int16_field_name} in [1]",
-            f"{ct.default_int8_field_name} in [1]",
-            f"{ct.default_bool_field_name} in [True]",
-            f"{ct.default_float_field_name} in [1.0]",
-            f"{ct.default_double_field_name} in [1.0]",
-            f"{ct.default_string_field_name} in [ \"0\"]",
-            f"{ct.default_float_vec_field_name} in [[0.1]]"
-        ]
+        collection_w = self.init_collection_general(prefix, nb=tmp_nb, insert_data=True,
+                                                    is_all_data_type=True, is_index=True)[0]
+        expr = f"{ct.default_float_vec_field_name} in [[0.1]]"
         error = {ct.err_code: 1,
-                 ct.err_msg: f"invalid expression, we only support to delete by pk"}
-        for expr in exprs:
-            collection_w.delete(expr, check_task=CheckTasks.err_res, check_items=error)
+                 ct.err_msg: f"failed to create expr plan, expr = {expr}"}
 
-        # query
-        _query_res_tmp_expr = [{ct.default_int64_field_name: 0, ct.default_string_field_name: '0'}]
-        collection_w.query(tmp_expr, output_fields=[ct.default_string_field_name], check_task=CheckTasks.check_query_results,
-                           check_items={exp_res: _query_res_tmp_expr})
+        collection_w.delete(expr, check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_delete_not_existed_values(self):
@@ -198,7 +210,7 @@ class TestDeleteParams(TestcaseBase):
 
         # No exception
         expr = f'{ct.default_int64_field_name} in {[tmp_nb]}'
-        collection_w.delete(expr=expr)[0]
+        collection_w.delete(expr=expr)
         collection_w.query(tmp_expr, check_task=CheckTasks.check_query_results,
                            check_items={exp_res: query_res_tmp_expr})
 
@@ -212,7 +224,7 @@ class TestDeleteParams(TestcaseBase):
         # init collection with tmp_nb default data
         collection_w = self.init_collection_general(prefix, nb=tmp_nb, insert_data=True)[0]
         expr = f'{ct.default_int64_field_name} in {[0, tmp_nb]}'
-        collection_w.delete(expr=expr)[0]
+        collection_w.delete(expr=expr)
         collection_w.query(expr, check_task=CheckTasks.check_query_empty)
 
     @pytest.mark.tags(CaseLabel.L2)
@@ -571,8 +583,8 @@ class TestDeleteOperation(TestcaseBase):
         collection_w = self.init_collection_general(prefix, nb=tmp_nb, insert_data=True)[0]
 
         # raise exception
-        error = {ct.err_code: 1,
-                 ct.err_msg: f"partitionID of partitionName:{ct.default_tag} can not be find"}
+        error = {ct.err_code: 200,
+                 ct.err_msg: f"Failed to get partition id: partition={ct.default_tag}: partition not found"}
         collection_w.delete(tmp_expr, partition_name=ct.default_tag,
                             check_task=CheckTasks.err_res, check_items=error)
 
@@ -666,8 +678,7 @@ class TestDeleteOperation(TestcaseBase):
         assert res.delete_count == 1
 
         # query without loading and raise exception
-        error = {ct.err_code: 1,
-                 ct.err_msg: f"collection {collection_w.name} was not loaded into memory"}
+        error = {ct.err_code: 65535, ct.err_msg: "collection not loaded"}
         collection_w.query(expr=tmp_expr, check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L1)
@@ -952,7 +963,6 @@ class TestDeleteOperation(TestcaseBase):
             expr = f'{ct.default_int64_field_name} in {ids[i * batch: (i + 1) * batch]}'
             res, _ = collection_w.delete(expr)
             assert res.delete_count == batch
-            assert collection_w.num_entities == tmp_nb
 
         # query with all ids
         expr = f'{ct.default_int64_field_name} in {ids}'
@@ -1139,6 +1149,31 @@ class TestDeleteOperation(TestcaseBase):
         collection_w.delete(expr)
 
         collection_w.query(expr, check_task=CheckTasks.check_query_empty)
+
+    @pytest.mark.tags(CaseLabel.L2)
+    @pytest.mark.skip("issue #26820")
+    @pytest.mark.parametrize("consistency_level", ["Bounded", "Session", "Eventually"])
+    def test_delete_flush_query_consistency_not_strong(self, consistency_level):
+        """
+        target: test delete, flush and query with Consistency level not strong
+        method: 1.delete ids
+                2.flush
+                3.query with Consistency level not strong
+        expected: query successfully
+        """
+        # init collection
+        collection_w = self.init_collection_general(prefix, True)[0]
+
+        # delete and flush
+        delete_ids = [i for i in range(ct.default_nb // 2)]
+        delete_expr = f"{ct.default_int64_field_name} in {delete_ids}"
+        res = collection_w.delete(delete_expr)[0]
+        assert res.delete_count == ct.default_nb // 2
+        collection_w.flush()
+
+        # query with Consistency level not strong
+        collection_w.query(expr=delete_expr, consistency_level=consistency_level,
+                           check_task=CheckTasks.check_query_empty)
 
 
 class TestDeleteString(TestcaseBase):
@@ -1558,7 +1593,6 @@ class TestDeleteString(TestcaseBase):
             expr = expr.replace("'", "\"")
             res, _ = collection_w.delete(expr)
             assert res.delete_count == batch
-            assert collection_w.num_entities == tmp_nb
 
         # query with all ids
         expr = f'{ct.default_string_field_name} in {ids}'
@@ -1729,8 +1763,8 @@ class TestDeleteString(TestcaseBase):
             self.init_collection_general(prefix, nb=tmp_nb, insert_data=True, primary_field=ct.default_string_field_name)[0]
         collection_w.load()
         error = {ct.err_code: 0,
-                 ct.err_msg: f"failed to create expr plan, expr = {default_invaild_string_exp}"}
-        collection_w.delete(expr=default_invaild_string_exp,
+                 ct.err_msg: f"failed to create expr plan, expr = {default_invalid_string_exp}"}
+        collection_w.delete(expr=default_invalid_string_exp,
                             check_task=CheckTasks.err_res, check_items=error)
 
     @pytest.mark.tags(CaseLabel.L1)
@@ -1804,6 +1838,7 @@ class TestDeleteString(TestcaseBase):
         df[2] = [""for _ in range(nb)] 
 
         collection_w.insert(df)
+        collection_w.flush()
         collection_w.create_index(ct.default_float_vec_field_name, index_params=ct.default_flat_index)
         collection_w.load()
         assert collection_w.num_entities == nb
@@ -1816,3 +1851,366 @@ class TestDeleteString(TestcaseBase):
         # load and query with id
         collection_w.load()
         collection_w.query(string_expr, check_task=CheckTasks.check_query_empty)
+
+
+class TestDeleteComplexExpr(TestcaseBase):
+    """
+    Test case of delete interface with complex expr
+    """
+
+    @pytest.mark.tags(CaseLabel.L0)
+    @pytest.mark.parametrize("expression", cf.gen_normal_expressions()[1:])
+    @pytest.mark.parametrize("enable_dynamic_field", [True, False])
+    def test_delete_normal_expressions(self, expression, enable_dynamic_field):
+        """
+        target: test delete entities using normal expression
+        method: delete using normal expression
+        expected: delete successfully
+        """
+        # init collection with nb default data
+        collection_w, _vectors, _, insert_ids = \
+            self.init_collection_general(prefix, True, enable_dynamic_field=enable_dynamic_field)[0:4]
+
+        # filter result with expression in collection
+        _vectors = _vectors[0]
+        expression = expression.replace("&&", "and").replace("||", "or")
+        filter_ids = []
+        for i, _id in enumerate(insert_ids):
+            if enable_dynamic_field:
+                int64 = _vectors[i][ct.default_int64_field_name]
+                float = _vectors[i][ct.default_float_field_name]
+            else:
+                int64 = _vectors.int64[i]
+                float = _vectors.float[i]
+            if not expression or eval(expression):
+                filter_ids.append(_id)
+
+        # delete with expressions
+        res = collection_w.delete(expression)[0]
+        assert res.delete_count == len(filter_ids)
+
+        # query to check
+        collection_w.query(f"int64 in {filter_ids}", check_task=CheckTasks.check_query_empty)
+
+    @pytest.mark.tags(CaseLabel.L1)
+    @pytest.mark.parametrize("field_name", ["varchar", "json_field['string']", "NewStr"])
+    @pytest.mark.parametrize("like", ["like", "LIKE"])
+    @pytest.mark.parametrize("enable_dynamic_field", [True, False])
+    def test_delete_string_expressions_like(self, field_name, like, enable_dynamic_field):
+        """
+        target: test delete expr like
+        method: delete using expression like
+        expected: delete successfully
+        """
+        if field_name == "NewStr" and enable_dynamic_field is False:
+            pytest.skip("only support when enable_dynamic_filed == True")
+        # init collection with nb default data
+        nb = 1000
+        collection_w, _vectors, _, insert_ids = \
+            self.init_collection_general(prefix, False, enable_dynamic_field=enable_dynamic_field)[0:4]
+
+        # insert
+        string_list = [cf.gen_str_by_length() for _ in range(nb)]
+        if enable_dynamic_field:
+            data = cf.gen_default_rows_data(nb)
+            for i in range(nb):
+                data[i][ct.default_json_field_name] = {"string": string_list[i]}
+                data[i]['NewStr'] = string_list[i]
+                data[i][ct.default_string_field_name] = string_list[i]
+        else:
+            data = cf.gen_default_dataframe_data(nb)
+            data[ct.default_json_field_name] = [{"string": string_list[i]} for i in range(nb)]
+            data[ct.default_string_field_name] = string_list
+        collection_w.insert(data)
+        collection_w.flush()
+        collection_w.load()
+
+        # delete with expressions
+        deleted_str = [s for s in string_list if s.startswith('a')]
+        expression = f"{field_name} {like} 'a%'"
+        res = collection_w.delete(expression)[0]
+        assert res.delete_count == len(deleted_str)
+
+        # query to check
+        collection_w.load()
+        collection_w.query("int64 >= 0", output_fields=['count(*)'],
+                           check_task=CheckTasks.check_query_results,
+                           check_items={'count(*)': nb - len(deleted_str)})
+
+    @pytest.mark.tags(CaseLabel.L2)
+    def test_delete_expr_empty_string(self):
+        """
+        target: test delete with expr empty
+        method: delete with expr=""
+        expected: raise exception
+        """
+        # init collection with nb default data
+        collection_w = self.init_collection_general(prefix, True)[0]
+
+        # delete
+        error = {ct.err_code: 1, ct.err_msg: "expr cannot be empty"}
+        collection_w.delete(expr="", check_task=CheckTasks.err_res, check_items=error)
+
+    @pytest.mark.tags(CaseLabel.L2)
+    def test_delete_complex_expr_before_load(self):
+        """
+        target: test delete before load
+        method: delete with any complex expr
+        expected: raise exception
+        """
+        # init collection with nb default data
+        collection_w = self.init_collection_general(prefix, False)[0]
+
+        # delete
+        error = {ct.err_code: 1, ct.err_msg: "collection not loaded: unrecoverable error"}
+        collection_w.delete(expr="int64 >= 0", check_task=CheckTasks.err_res, check_items=error)
+
+    @pytest.mark.tags(CaseLabel.L1)
+    @pytest.mark.parametrize("expr_prefix", ["json_contains", "JSON_CONTAINS"])
+    @pytest.mark.parametrize("field_name", ["json_field['list']", "list"])
+    @pytest.mark.parametrize("enable_dynamic_field", [True, False])
+    def test_delete_expr_json_contains_base(self, expr_prefix, field_name, enable_dynamic_field):
+        """
+        target: test delete expr using json_contains
+        method: delete using expression using json_contains
+        expected: delete successfully
+        """
+        if field_name == "list" and enable_dynamic_field is False:
+            pytest.skip("only support when enable_dynamic_filed == True")
+        # init collection with nb default data
+        collection_w = self.init_collection_general(prefix, False, enable_dynamic_field=enable_dynamic_field)[0]
+
+        # insert
+        listMix = [[i, i + 2] for i in range(ct.default_nb)] # only int
+        if enable_dynamic_field:
+            data = cf.gen_default_rows_data()
+            for i in range(ct.default_nb):
+                data[i][ct.default_json_field_name] = {"list": listMix[i]}
+                data[i]['list'] = listMix[i]
+        else:
+            data = cf.gen_default_dataframe_data()
+            data[ct.default_json_field_name] = [{"list": listMix[i]} for i in range(ct.default_nb)]
+        collection_w.insert(data)
+        collection_w.flush()
+        collection_w.load()
+
+        # delete with expressions
+        delete_ids = random.randint(2, ct.default_nb - 2)
+        expression = f"{expr_prefix}({field_name}, {delete_ids})"
+        res = collection_w.delete(expression)[0]
+        exp_ids = cf.assert_json_contains(expression, listMix)
+        assert res.delete_count == len(exp_ids)
+
+        # query to check
+        collection_w.query(expression, check_task=CheckTasks.check_query_empty)
+
+    @pytest.mark.tags(CaseLabel.L2)
+    @pytest.mark.parametrize("expr_prefix", ["json_contains_all", "JSON_CONTAINS_ALL",
+                                             "json_contains_any", "JSON_CONTAINS_ANY"])
+    @pytest.mark.parametrize("field_name", ["json_field['list']", "list"])
+    @pytest.mark.parametrize("enable_dynamic_field", [True, False])
+    def test_delete_expr_json_contains_all(self, expr_prefix, field_name, enable_dynamic_field):
+        """
+        target: test delete expr using json_contains
+        method: delete using expression using json_contains
+        expected: delete successfully
+        """
+        if field_name == "list" and enable_dynamic_field is False:
+            pytest.skip("only support when enable_dynamic_filed == True")
+        # init collection with nb default data
+        collection_w = self.init_collection_general(prefix, False, enable_dynamic_field=enable_dynamic_field)[0]
+
+        # insert
+        listMix = [[i, i * 0.00001, bool(i % 2), [i, str(i)]] for i in range(ct.default_nb)]  # mix int, float, list, bool
+        if enable_dynamic_field:
+            data = cf.gen_default_rows_data()
+            for i in range(ct.default_nb):
+                data[i][ct.default_json_field_name] = {"list": listMix[i]}
+                data[i]['list'] = listMix[i]
+        else:
+            data = cf.gen_default_dataframe_data()
+            data[ct.default_json_field_name] = [{"list": listMix[i]} for i in range(ct.default_nb)]
+        collection_w.insert(data)
+        collection_w.flush()
+        collection_w.load()
+
+        # delete with expressions
+        ids = random.randint(0, ct.default_nb)
+        delete_ids = [bool(ids % 2), ids]
+        expression = f"{expr_prefix}({field_name}, {delete_ids})"
+        res = collection_w.delete(expression)[0]
+        exp_ids = cf.assert_json_contains(expression, listMix)
+        assert res.delete_count == len(exp_ids)
+
+        # query to check
+        collection_w.query(expression, check_task=CheckTasks.check_query_empty)
+
+    @pytest.mark.tags(CaseLabel.L2)
+    @pytest.mark.parametrize("expressions",
+                             cf.gen_field_compare_expressions(["int64_1", "json_field['int'][0]"],
+                                                              ["int64_2", "json_field['int'][1]"]))
+    def test_delete_expr_compare_two_variables(self, expressions):
+        """
+        target: test delete expr using 2 variables
+        method: delete with expressions using compare 2 variables
+        expected: delete successfully
+        """
+        # init collection with nb default data
+        nb = 1000
+        dim = 32
+        fields = [cf.gen_int64_field("int64_1"), cf.gen_int64_field("int64_2"),
+                  cf.gen_json_field("json_field"), cf.gen_float_vec_field("float_vector", dim=dim)]
+        schema = cf.gen_collection_schema(fields=fields, primary_field="int64_1")
+        collection_w = self.init_collection_wrap(schema=schema)
+
+        # insert
+        int64_1_values = [i for i in range(nb)]
+        int64_2_values = [random.randint(0, nb) for _ in range(nb)]
+        vectors = cf.gen_vectors(nb, dim)
+        json_values = [[i, int64_2_values[i]] for i in range(nb)]
+        data = pd.DataFrame({
+            "int64_1": int64_1_values,
+            "int64_2": int64_2_values,
+            "json_field": [{"int": json_values[i]} for i in range(nb)],
+            "float_vector": vectors
+        })
+        collection_w.insert(data)
+        collection_w.flush()
+        collection_w.create_index("float_vector")
+        collection_w.load()
+
+        # delete with expressions
+        error = {ct.err_code: 1, ct.err_msg: f"failed to create expr plan, expr = {expressions}"}
+        collection_w.delete(expressions, check_task=CheckTasks.err_res, check_items=error)
+
+    @pytest.mark.tags(CaseLabel.L2)
+    @pytest.mark.parametrize("expression", cf.gen_json_field_expressions())
+    @pytest.mark.parametrize("enable_dynamic_field", [True, False])
+    def test_delete_expr_json_field(self, expression, enable_dynamic_field):
+        """
+        target: test delete entities using normal expression
+        method: delete using normal expression
+        expected: delete successfully
+        """
+        # init collection with nb default data
+        collection_w, _vectors, _, insert_ids = \
+            self.init_collection_general(prefix, True, enable_dynamic_field=enable_dynamic_field)[0:4]
+
+        # filter result with expression in collection
+        _vectors = _vectors[0]
+        expression = expression.replace("&&", "and").replace("||", "or")
+        filter_ids = []
+        json_field = {}
+        for i, _id in enumerate(insert_ids):
+            if enable_dynamic_field:
+                json_field['number'] = _vectors[i][ct.default_json_field_name]['number']
+                json_field['float'] = _vectors[i][ct.default_json_field_name]['float']
+            else:
+                json_field['number'] = _vectors[ct.default_json_field_name][i]['number']
+                json_field['float'] = _vectors[ct.default_json_field_name][i]['float']
+            if not expression or eval(expression):
+                filter_ids.append(_id)
+
+        # delete with expressions
+        res = collection_w.delete(expression)[0]
+        assert res.delete_count == len(filter_ids)
+
+        # query to check
+        collection_w.query(f"int64 in {filter_ids}", check_task=CheckTasks.check_query_empty)
+
+    @pytest.mark.tags(CaseLabel.L2)
+    @pytest.mark.parametrize("normal_expression, json_expression", zip(cf.gen_normal_expressions()[1:4],
+                                                                       cf.gen_json_field_expressions()[6:9]))
+    @pytest.mark.parametrize("enable_dynamic_field", [True, False])
+    def test_delete_expr_complex_mixed(self, normal_expression, json_expression, enable_dynamic_field):
+        """
+        target: test delete entities using normal expression
+        method: delete using normal expression
+        expected: delete successfully
+        """
+        # init collection with nb default data
+        collection_w, _vectors, _, insert_ids = \
+            self.init_collection_general(prefix, True, enable_dynamic_field=enable_dynamic_field)[0:4]
+
+        # filter result with expression in collection
+        expression = normal_expression + ' and ' + json_expression
+        _vectors = _vectors[0]
+        expression = expression.replace("&&", "and").replace("||", "or")
+        filter_ids = []
+        json_field = {}
+        for i, _id in enumerate(insert_ids):
+            if enable_dynamic_field:
+                json_field['number'] = _vectors[i][ct.default_json_field_name]['number']
+                json_field['float'] = _vectors[i][ct.default_json_field_name]['float']
+                int64 = _vectors[i][ct.default_int64_field_name]
+                float = _vectors[i][ct.default_float_field_name]
+            else:
+                json_field['number'] = _vectors[ct.default_json_field_name][i]['number']
+                json_field['float'] = _vectors[ct.default_json_field_name][i]['float']
+                int64 = _vectors.int64[i]
+                float = _vectors.float[i]
+            if not expression or eval(expression):
+                filter_ids.append(_id)
+
+        # delete with expressions
+        res = collection_w.delete(expression)[0]
+        assert res.delete_count == len(filter_ids)
+
+        # query to check
+        collection_w.query(f"int64 in {filter_ids}", check_task=CheckTasks.check_query_empty)
+
+    @pytest.mark.tags(CaseLabel.L1)
+    @pytest.mark.parametrize("expression", cf.gen_normal_string_expressions(["varchar", "json_field['string']", "NewStr"]))
+    @pytest.mark.parametrize("enable_dynamic_field", [True, False])
+    def test_delete_string_expressions_normal(self, expression, enable_dynamic_field):
+        """
+        target: test delete expr like
+        method: delete using expression like
+        expected: delete successfully
+        """
+        if "NewStr" in expression and enable_dynamic_field is False:
+            pytest.skip("only support when enable_dynamic_filed == True")
+        # init collection with nb default data
+        nb = 1000
+        collection_w, _vectors, _, insert_ids = \
+            self.init_collection_general(prefix, False, enable_dynamic_field=enable_dynamic_field)[0:4]
+
+        # insert
+        if enable_dynamic_field:
+            data = cf.gen_default_rows_data(nb)
+            for i in range(nb):
+                data[i][ct.default_json_field_name] = {"string": str(i)}
+                data[i]['NewStr'] = str(i)
+        else:
+            data = cf.gen_default_dataframe_data(nb)
+            data[ct.default_json_field_name] = [{"string": str(i)} for i in range(nb)]
+        collection_w.insert(data)
+        collection_w.flush()
+        collection_w.load()
+
+        # calculate the result
+        _vectors = data
+        expression = expression.replace("&&", "and").replace("||", "or")
+        filter_ids = []
+        json_field = {}
+        for i in range(nb):
+            if enable_dynamic_field:
+                json_field['string'] = _vectors[i][ct.default_json_field_name]['string']
+                varchar = _vectors[i][ct.default_string_field_name]
+                NewStr = _vectors[i]['NewStr']
+            else:
+                json_field['string'] = _vectors[ct.default_json_field_name][i]['string']
+                varchar = _vectors.varchar[i]
+            if not expression or eval(expression):
+                filter_ids.append(i)
+
+        # delete with expressions
+        res = collection_w.delete(expression)[0]
+        assert res.delete_count == len(filter_ids)
+
+        # query to check
+        collection_w.load()
+        collection_w.query("int64 >= 0", output_fields=['count(*)'],
+                           check_task=CheckTasks.check_query_results,
+                           check_items={'count(*)': nb - len(filter_ids)})
+

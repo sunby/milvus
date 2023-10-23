@@ -35,6 +35,7 @@ import (
 	. "github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
@@ -138,7 +139,8 @@ func (suite *TargetManagerSuite) SetupTest() {
 		suite.meta.PutCollection(&Collection{
 			CollectionLoadInfo: &querypb.CollectionLoadInfo{
 				CollectionID:  collection,
-				ReplicaNumber: 1},
+				ReplicaNumber: 1,
+			},
 		})
 		for _, partition := range suite.partitions[collection] {
 			suite.meta.PutPartition(&Partition{
@@ -183,7 +185,8 @@ func (suite *TargetManagerSuite) TestUpdateNextTarget() {
 	suite.meta.PutCollection(&Collection{
 		CollectionLoadInfo: &querypb.CollectionLoadInfo{
 			CollectionID:  collectionID,
-			ReplicaNumber: 1},
+			ReplicaNumber: 1,
+		},
 	})
 	suite.meta.PutPartition(&Partition{
 		PartitionLoadInfo: &querypb.PartitionLoadInfo{
@@ -236,7 +239,8 @@ func (suite *TargetManagerSuite) TestUpdateNextTarget() {
 
 	suite.broker.ExpectedCalls = nil
 	// test getRecoveryInfoV2 failed , then back to getRecoveryInfo succeed
-	suite.broker.EXPECT().GetRecoveryInfoV2(mock.Anything, collectionID).Return(nil, nil, status.Errorf(codes.Unimplemented, "fake not found"))
+	suite.broker.EXPECT().GetRecoveryInfoV2(mock.Anything, collectionID).Return(
+		nil, nil, merr.WrapErrServiceUnimplemented(status.Errorf(codes.Unimplemented, "fake not found")))
 	suite.broker.EXPECT().GetPartitions(mock.Anything, mock.Anything).Return([]int64{1}, nil)
 	suite.broker.EXPECT().GetRecoveryInfo(mock.Anything, collectionID, int64(1)).Return(nextTargetChannels, nextTargetBinlogs, nil)
 	err := suite.mgr.UpdateCollectionNextTarget(collectionID)
@@ -251,7 +255,6 @@ func (suite *TargetManagerSuite) TestUpdateNextTarget() {
 
 	err = suite.mgr.UpdateCollectionNextTarget(collectionID)
 	suite.NoError(err)
-
 }
 
 func (suite *TargetManagerSuite) TestRemovePartition() {
@@ -365,7 +368,8 @@ func (suite *TargetManagerSuite) TestGetSegmentByChannel() {
 	suite.meta.PutCollection(&Collection{
 		CollectionLoadInfo: &querypb.CollectionLoadInfo{
 			CollectionID:  collectionID,
-			ReplicaNumber: 1},
+			ReplicaNumber: 1,
+		},
 	})
 	suite.meta.PutPartition(&Partition{
 		PartitionLoadInfo: &querypb.PartitionLoadInfo{

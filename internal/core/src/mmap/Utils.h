@@ -27,7 +27,7 @@
 #include "common/FieldMeta.h"
 #include "mmap/Types.h"
 #include "storage/Util.h"
-#include "utils/File.h"
+#include "common/File.h"
 
 namespace milvus {
 
@@ -66,8 +66,8 @@ FillField(DataType data_type, const storage::FieldDataPtr data, void* dst) {
                 break;
             }
             default:
-                PanicInfo(fmt::format("not supported data type {}",
-                                      datatype_name(data_type)));
+                PanicInfo(DataTypeInvalid,
+                          fmt::format("not supported data type {}", data_type));
         }
     } else {
         memcpy(dst, data->Data(), data->Size());
@@ -80,7 +80,8 @@ FillField(DataType data_type, const storage::FieldDataPtr data, void* dst) {
 inline size_t
 WriteFieldData(File& file,
                DataType data_type,
-               const storage::FieldDataPtr& data) {
+               const storage::FieldDataPtr& data,
+               std::vector<std::vector<uint64_t>>& element_indices) {
     size_t total_written{0};
     if (datatype_is_variable(data_type)) {
         switch (data_type) {
@@ -110,8 +111,22 @@ WriteFieldData(File& file,
                 }
                 break;
             }
+            case DataType::ARRAY: {
+                for (size_t i = 0; i < data->get_num_rows(); ++i) {
+                    auto array = static_cast<const Array*>(data->RawValue(i));
+                    ssize_t written =
+                        file.Write(array->data(), array->byte_size());
+                    if (written < array->byte_size()) {
+                        break;
+                    }
+                    element_indices.emplace_back(array->get_offsets());
+                    total_written += written;
+                }
+                break;
+            }
             default:
-                PanicInfo(fmt::format("not supported data type {}",
+                PanicInfo(DataTypeInvalid,
+                          fmt::format("not supported data type {}",
                                       datatype_name(data_type)));
         }
     } else {

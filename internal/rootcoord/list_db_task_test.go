@@ -20,12 +20,13 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	mockrootcoord "github.com/milvus-io/milvus/internal/rootcoord/mocks"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 )
 
 func Test_ListDBTask(t *testing.T) {
@@ -46,7 +47,7 @@ func Test_ListDBTask(t *testing.T) {
 
 		err = task.Execute(context.Background())
 		assert.Error(t, err)
-		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, task.Resp.Status.ErrorCode)
+		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, task.Resp.GetStatus().GetErrorCode())
 	})
 
 	t.Run("ok", func(t *testing.T) {
@@ -75,6 +76,6 @@ func Test_ListDBTask(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, 1, len(task.Resp.GetDbNames()))
 		assert.Equal(t, ret[0].Name, task.Resp.GetDbNames()[0])
-		assert.Equal(t, commonpb.ErrorCode_Success, task.Resp.Status.ErrorCode)
+		assert.Equal(t, commonpb.ErrorCode_Success, task.Resp.GetStatus().GetErrorCode())
 	})
 }

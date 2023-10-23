@@ -18,15 +18,20 @@ package etcdkv_test
 
 import (
 	"fmt"
+	"path"
 	"sort"
 	"testing"
 
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
 	"golang.org/x/exp/maps"
 
+	"github.com/milvus-io/milvus/internal/kv"
 	embed_etcd_kv "github.com/milvus-io/milvus/internal/kv/etcd"
+	"github.com/milvus-io/milvus/internal/kv/predicates"
+	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
@@ -98,17 +103,20 @@ func TestEmbedEtcd(te *testing.T) {
 				metaKv.GetPath("test1"),
 				metaKv.GetPath("test2"),
 				metaKv.GetPath("test1/a"),
-				metaKv.GetPath("test1/b")}, []string{"value1", "value2", "value_a", "value_b"}, nil},
+				metaKv.GetPath("test1/b"),
+			}, []string{"value1", "value2", "value_a", "value_b"}, nil},
 			{"test1", []string{
 				metaKv.GetPath("test1"),
 				metaKv.GetPath("test1/a"),
-				metaKv.GetPath("test1/b")}, []string{"value1", "value_a", "value_b"}, nil},
+				metaKv.GetPath("test1/b"),
+			}, []string{"value1", "value_a", "value_b"}, nil},
 			{"test2", []string{metaKv.GetPath("test2")}, []string{"value2"}, nil},
 			{"", []string{
 				metaKv.GetPath("test1"),
 				metaKv.GetPath("test2"),
 				metaKv.GetPath("test1/a"),
-				metaKv.GetPath("test1/b")}, []string{"value1", "value2", "value_a", "value_b"}, nil},
+				metaKv.GetPath("test1/b"),
+			}, []string{"value1", "value2", "value_a", "value_b"}, nil},
 			{"test1/a", []string{metaKv.GetPath("test1/a")}, []string{"value_a"}, nil},
 			{"a", []string{}, []string{}, nil},
 			{"root", []string{}, []string{}, nil},
@@ -203,17 +211,20 @@ func TestEmbedEtcd(te *testing.T) {
 				metaKv.GetPath("test1"),
 				metaKv.GetPath("test2"),
 				metaKv.GetPath("test1/a"),
-				metaKv.GetPath("test1/b")}, [][]byte{[]byte("value1"), []byte("value2"), []byte("value_a"), []byte("value_b")}, nil},
+				metaKv.GetPath("test1/b"),
+			}, [][]byte{[]byte("value1"), []byte("value2"), []byte("value_a"), []byte("value_b")}, nil},
 			{"test1", []string{
 				metaKv.GetPath("test1"),
 				metaKv.GetPath("test1/a"),
-				metaKv.GetPath("test1/b")}, [][]byte{[]byte("value1"), []byte("value_a"), []byte("value_b")}, nil},
+				metaKv.GetPath("test1/b"),
+			}, [][]byte{[]byte("value1"), []byte("value_a"), []byte("value_b")}, nil},
 			{"test2", []string{metaKv.GetPath("test2")}, [][]byte{[]byte("value2")}, nil},
 			{"", []string{
 				metaKv.GetPath("test1"),
 				metaKv.GetPath("test2"),
 				metaKv.GetPath("test1/a"),
-				metaKv.GetPath("test1/b")}, [][]byte{[]byte("value1"), []byte("value2"), []byte("value_a"), []byte("value_b")}, nil},
+				metaKv.GetPath("test1/b"),
+			}, [][]byte{[]byte("value1"), []byte("value2"), []byte("value_a"), []byte("value_b")}, nil},
 			{"test1/a", []string{metaKv.GetPath("test1/a")}, [][]byte{[]byte("value_a")}, nil},
 			{"a", []string{}, [][]byte{}, nil},
 			{"root", []string{}, [][]byte{}, nil},
@@ -300,7 +311,6 @@ func TestEmbedEtcd(te *testing.T) {
 			assert.ElementsMatch(t, test.expectedValues, values)
 			assert.NotZero(t, revision)
 		}
-
 	})
 
 	te.Run("etcdKV MultiSaveAndMultiLoad", func(t *testing.T) {
@@ -522,7 +532,7 @@ func TestEmbedEtcd(te *testing.T) {
 		assert.Empty(t, vs)
 	})
 
-	te.Run("etcdKV MultiRemoveWithPrefix", func(t *testing.T) {
+	te.Run("etcdKV MultiSaveAndRemoveWithPrefix", func(t *testing.T) {
 		rootPath := "/etcd/test/root/multi_remove_with_prefix"
 		metaKv, err := embed_etcd_kv.NewMetaKvFactory(rootPath, &param.EtcdCfg)
 		require.NoError(t, err)
@@ -538,45 +548,6 @@ func TestEmbedEtcd(te *testing.T) {
 			"x/den/1": "100",
 			"x/den/2": "200",
 		}
-
-		err = metaKv.MultiSave(prepareTests)
-		require.NoError(t, err)
-
-		multiRemoveWithPrefixTests := []struct {
-			prefix []string
-
-			testKey       string
-			expectedValue string
-		}{
-			{[]string{"x/abc"}, "x/abc/1", ""},
-			{[]string{}, "x/abc/2", ""},
-			{[]string{}, "x/def/1", "10"},
-			{[]string{}, "x/def/2", "20"},
-			{[]string{}, "x/den/1", "100"},
-			{[]string{}, "x/den/2", "200"},
-			{[]string{}, "not-exist", ""},
-			{[]string{"x/def", "x/den"}, "x/def/1", ""},
-			{[]string{}, "x/def/1", ""},
-			{[]string{}, "x/def/2", ""},
-			{[]string{}, "x/den/1", ""},
-			{[]string{}, "x/den/2", ""},
-			{[]string{}, "not-exist", ""},
-		}
-
-		for _, test := range multiRemoveWithPrefixTests {
-			if len(test.prefix) > 0 {
-				err = metaKv.MultiRemoveWithPrefix(test.prefix)
-				assert.NoError(t, err)
-			}
-
-			v, _ := metaKv.Load(test.testKey)
-			assert.Equal(t, test.expectedValue, v)
-		}
-
-		k, v, err := metaKv.LoadWithPrefix("/")
-		assert.NoError(t, err)
-		assert.Zero(t, len(k))
-		assert.Zero(t, len(v))
 
 		// MultiSaveAndRemoveWithPrefix
 		err = metaKv.MultiSave(prepareTests)
@@ -597,7 +568,7 @@ func TestEmbedEtcd(te *testing.T) {
 		}
 
 		for _, test := range multiSaveAndRemoveWithPrefixTests {
-			k, _, err = metaKv.LoadWithPrefix(test.loadPrefix)
+			k, _, err := metaKv.LoadWithPrefix(test.loadPrefix)
 			assert.NoError(t, err)
 			assert.Equal(t, test.lengthBeforeRemove, len(k))
 
@@ -626,40 +597,6 @@ func TestEmbedEtcd(te *testing.T) {
 			"x/def/2": []byte("20"),
 			"x/den/1": []byte("100"),
 			"x/den/2": []byte("200"),
-		}
-
-		err = metaKv.MultiSaveBytes(prepareTests)
-		require.NoError(t, err)
-
-		multiRemoveWithPrefixTests := []struct {
-			prefix []string
-
-			testKey       string
-			expectedValue []byte
-		}{
-			{[]string{"x/abc"}, "x/abc/1", nil},
-			{[]string{}, "x/abc/2", nil},
-			{[]string{}, "x/def/1", []byte("10")},
-			{[]string{}, "x/def/2", []byte("20")},
-			{[]string{}, "x/den/1", []byte("100")},
-			{[]string{}, "x/den/2", []byte("200")},
-			{[]string{}, "not-exist", nil},
-			{[]string{"x/def", "x/den"}, "x/def/1", nil},
-			{[]string{}, "x/def/1", nil},
-			{[]string{}, "x/def/2", nil},
-			{[]string{}, "x/den/1", nil},
-			{[]string{}, "x/den/2", nil},
-			{[]string{}, "not-exist", nil},
-		}
-
-		for _, test := range multiRemoveWithPrefixTests {
-			if len(test.prefix) > 0 {
-				err = metaKv.MultiRemoveWithPrefix(test.prefix)
-				assert.NoError(t, err)
-			}
-
-			v, _ := metaKv.LoadBytes(test.testKey)
-			assert.Equal(t, test.expectedValue, v)
 		}
 
 		k, v, err := metaKv.LoadBytesWithPrefix("/")
@@ -892,4 +829,91 @@ func TestEmbedEtcd(te *testing.T) {
 		assert.NoError(t, err)
 		assert.False(t, has)
 	})
+}
+
+type EmbedEtcdKVSuite struct {
+	suite.Suite
+
+	param *paramtable.ComponentParam
+
+	rootPath string
+	kv       kv.MetaKv
+}
+
+func (s *EmbedEtcdKVSuite) SetupSuite() {
+	te := s.T()
+	te.Setenv(metricsinfo.DeployModeEnvKey, metricsinfo.StandaloneDeployMode)
+	param := new(paramtable.ComponentParam)
+	te.Setenv("etcd.use.embed", "true")
+	te.Setenv("etcd.config.path", "../../../configs/advanced/etcd.yaml")
+
+	dir := te.TempDir()
+	te.Setenv("etcd.data.dir", dir)
+
+	param.Init(paramtable.NewBaseTable())
+	s.param = param
+}
+
+func (s *EmbedEtcdKVSuite) SetupTest() {
+	s.rootPath = path.Join("unittest/etcdkv", funcutil.RandomString(8))
+
+	metaKv, err := embed_etcd_kv.NewMetaKvFactory(s.rootPath, &s.param.EtcdCfg)
+	s.Require().NoError(err)
+	s.kv = metaKv
+}
+
+func (s *EmbedEtcdKVSuite) TearDownTest() {
+	if s.kv != nil {
+		s.kv.RemoveWithPrefix("")
+		s.kv.Close()
+		s.kv = nil
+	}
+}
+
+func (s *EmbedEtcdKVSuite) TestTxnWithPredicates() {
+	etcdKV := s.kv
+
+	prepareKV := map[string]string{
+		"lease1": "1",
+		"lease2": "2",
+	}
+
+	err := etcdKV.MultiSave(prepareKV)
+	s.Require().NoError(err)
+
+	badPredicate := predicates.NewMockPredicate(s.T())
+	badPredicate.EXPECT().Type().Return(0)
+	badPredicate.EXPECT().Target().Return(predicates.PredTargetValue)
+
+	multiSaveAndRemovePredTests := []struct {
+		tag           string
+		multiSave     map[string]string
+		preds         []predicates.Predicate
+		expectSuccess bool
+	}{
+		{"predicate_ok", map[string]string{"a": "b"}, []predicates.Predicate{predicates.ValueEqual("lease1", "1")}, true},
+		{"predicate_fail", map[string]string{"a": "b"}, []predicates.Predicate{predicates.ValueEqual("lease1", "2")}, false},
+		{"bad_predicate", map[string]string{"a": "b"}, []predicates.Predicate{badPredicate}, false},
+	}
+
+	for _, test := range multiSaveAndRemovePredTests {
+		s.Run(test.tag, func() {
+			err := etcdKV.MultiSaveAndRemove(test.multiSave, nil, test.preds...)
+			if test.expectSuccess {
+				s.NoError(err)
+			} else {
+				s.Error(err)
+			}
+			err = etcdKV.MultiSaveAndRemoveWithPrefix(test.multiSave, nil, test.preds...)
+			if test.expectSuccess {
+				s.NoError(err)
+			} else {
+				s.Error(err)
+			}
+		})
+	}
+}
+
+func TestEmbedEtcdKV(t *testing.T) {
+	suite.Run(t, new(EmbedEtcdKVSuite))
 }

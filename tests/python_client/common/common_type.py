@@ -21,7 +21,9 @@ default_binary_index = {"index_type": "BIN_IVF_FLAT", "params": {"nlist": 128}, 
 default_diskann_index = {"index_type": "DISKANN", "metric_type": "COSINE", "params": {}}
 default_diskann_search_params = {"metric_type": "COSINE", "params": {"search_list": 30}}
 max_top_k = 16384
-max_partition_num = 4096  # 256
+max_partition_num = 4096
+max_role_num = 10
+default_partition_num = 64   # default num_partitions for partition key feature
 default_segment_row_limit = 1000
 default_server_segment_row_limit = 1024 * 512
 default_alias = "default"
@@ -226,11 +228,11 @@ get_wrong_format_dict = [
 ]
 
 """ Specially defined list """
-all_index_types = ["FLAT", "IVF_FLAT", "IVF_SQ8", "IVF_PQ", "HNSW", "DISKANN", "BIN_FLAT", "BIN_IVF_FLAT",
+all_index_types = ["FLAT", "IVF_FLAT", "IVF_SQ8", "IVF_PQ", "HNSW", "SCANN", "DISKANN", "BIN_FLAT", "BIN_IVF_FLAT",
                    "GPU_IVF_FLAT", "GPU_IVF_PQ"]
 
 default_index_params = [{"nlist": 128}, {"nlist": 128}, {"nlist": 128}, {"nlist": 128, "m": 16, "nbits": 8},
-                        {"M": 48, "efConstruction": 500}, {}, {"nlist": 128}, {"nlist": 128},
+                        {"M": 48, "efConstruction": 500}, {"nlist": 128}, {}, {"nlist": 128}, {"nlist": 128},
                         {"nlist": 64}, {"nlist": 64, "m": 16, "nbits": 8}]
 
 Handler_type = ["GRPC", "HTTP"]

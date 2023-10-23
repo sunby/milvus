@@ -418,9 +418,9 @@ func (_c *MockCluster_ReleaseSegments_Call) RunAndReturn(run func(context.Contex
 	return _c
 }
 
-// Start provides a mock function with given fields: ctx
-func (_m *MockCluster) Start(ctx context.Context) {
-	_m.Called(ctx)
+// Start provides a mock function with given fields:
+func (_m *MockCluster) Start() {
+	_m.Called()
 }
 
 // MockCluster_Start_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Start'
@@ -429,14 +429,13 @@ type MockCluster_Start_Call struct {
 }
 
 // Start is a helper method to define mock.On call
-//   - ctx context.Context
-func (_e *MockCluster_Expecter) Start(ctx interface{}) *MockCluster_Start_Call {
-	return &MockCluster_Start_Call{Call: _e.mock.On("Start", ctx)}
+func (_e *MockCluster_Expecter) Start() *MockCluster_Start_Call {
+	return &MockCluster_Start_Call{Call: _e.mock.On("Start")}
 }
 
-func (_c *MockCluster_Start_Call) Run(run func(ctx context.Context)) *MockCluster_Start_Call {
+func (_c *MockCluster_Start_Call) Run(run func()) *MockCluster_Start_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(context.Context))
+		run()
 	})
 	return _c
 }
@@ -446,7 +445,7 @@ func (_c *MockCluster_Start_Call) Return() *MockCluster_Start_Call {
 	return _c
 }
 
-func (_c *MockCluster_Start_Call) RunAndReturn(run func(context.Context)) *MockCluster_Start_Call {
+func (_c *MockCluster_Start_Call) RunAndReturn(run func()) *MockCluster_Start_Call {
 	_c.Call.Return(run)
 	return _c
 }

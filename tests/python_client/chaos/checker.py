@@ -102,6 +102,8 @@ class RequestRecords(metaclass=Singleton):
             self.buffer = []
 
     def sink(self):
+        if len(self.buffer) == 0:
+            return
         df = pd.DataFrame(self.buffer)
         if not self.created_file:
             with request_lock:
@@ -126,6 +128,9 @@ class ResultAnalyzer:
         df = df.sort_values(by='start_time')
         self.df = df
         self.chaos_info = get_chaos_info()
+        self.chaos_start_time = self.chaos_info['create_time'] if self.chaos_info is not None else None
+        self.chaos_end_time = self.chaos_info['delete_time'] if self.chaos_info is not None else None
+        self.recovery_time = self.chaos_info['recovery_time'] if self.chaos_info is not None else None
 
     def get_stage_success_rate(self):
         df = self.df
@@ -179,7 +184,9 @@ class ResultAnalyzer:
 
     def show_result_table(self):
         table = PrettyTable()
-        table.field_names = ['operation_name', 'before_chaos', 'during_chaos', 'after_chaos']
+        table.field_names = ['operation_name', 'before_chaos',
+                             f'during_chaos\n{self.chaos_start_time}~{self.recovery_time}',
+                             'after_chaos']
         data = self.get_stage_success_rate()
         for operation, values in data.items():
             row = [operation, values['before_chaos'], values['during_chaos'], values['after_chaos']]
@@ -335,7 +342,7 @@ class Checker:
         checker_name = self.__class__.__name__
         checkers_result = f"{checker_name}, succ_rate: {succ_rate:.2f}, total: {total:03d}, average_time: {average_time:.4f}, max_time: {max_time:.4f}, min_time: {min_time:.4f}"
         log.info(checkers_result)
-        log.info(f"{checker_name} rsp times: {self.rsp_times}")
+        log.debug(f"{checker_name} rsp times: {self.rsp_times}")
         if len(self.fail_records) > 0:
             log.info(f"{checker_name} failed at {self.fail_records}")
         return checkers_result
@@ -479,6 +486,7 @@ class InsertFlushChecker(Checker):
                     self.initial_entities += constants.DELTA_PER_INS
                 else:
                     self._fail += 1
+                sleep(constants.WAIT_PER_OP * 6)
 
 
 class FlushChecker(Checker):
@@ -513,7 +521,7 @@ class FlushChecker(Checker):
     def keep_running(self):
         while self._keep_running:
             self.run_task()
-            sleep(constants.WAIT_PER_OP / 10)
+            sleep(constants.WAIT_PER_OP * 6)
 
 
 class InsertChecker(Checker):
@@ -529,6 +537,7 @@ class InsertChecker(Checker):
         self.scale = 1 * 10 ** 6
         self.start_time_stamp = int(time.time() * self.scale)  # us
         self.term_expr = f'{self.int64_field_name} >= {self.start_time_stamp}'
+        self.file_name = f"/tmp/ci_logs/insert_data_{uuid.uuid4()}.parquet"
 
     @trace()
     def insert(self):
@@ -546,6 +555,7 @@ class InsertChecker(Checker):
                                          enable_traceback=enable_traceback,
                                          check_task=CheckTasks.check_nothing)
         if result:
+            # TODO: persist data to file
             self.inserted_data.extend(ts_data)
         return res, result
 
@@ -617,7 +627,7 @@ class CreateChecker(Checker):
     def keep_running(self):
         while self._keep_running:
             self.run_task()
-            sleep(constants.WAIT_PER_OP / 10)
+            sleep(constants.WAIT_PER_OP)
 
 
 class IndexChecker(Checker):
@@ -639,7 +649,6 @@ class IndexChecker(Checker):
         res, result = self.c_wrap.create_index(self.float_vector_field_name,
                                                constants.DEFAULT_INDEX_PARAM,
                                                index_name=self.index_name,
-                                               timeout=timeout,
                                                enable_traceback=enable_traceback,
                                                check_task=CheckTasks.check_nothing)
         return res, result
@@ -654,7 +663,7 @@ class IndexChecker(Checker):
     def keep_running(self):
         while self._keep_running:
             self.run_task()
-            sleep(constants.WAIT_PER_OP / 10)
+            sleep(constants.WAIT_PER_OP * 6)
 
 
 class QueryChecker(Checker):
@@ -810,12 +819,24 @@ class DropChecker(Checker):
         if collection_name is None:
             collection_name = cf.gen_unique_str("DropChecker_")
         super().__init__(collection_name=collection_name, schema=schema)
+        self.collection_pool = []
+        self.gen_collection_pool(schema=self.schema)
+
+    def gen_collection_pool(self, pool_size=50, schema=None):
+        for i in range(pool_size):
+            collection_name = cf.gen_unique_str("DropChecker_")
+            res, result = self.c_wrap.init_collection(name=collection_name, schema=schema)
+            if result:
+                self.collection_pool.append(collection_name)
 
     @trace()
     def drop(self):
         res, result = self.c_wrap.drop()
+        if result:
+            self.collection_pool.remove(self.c_wrap.name)
         return res, result
 
+    @exception_handler()
     def run_task(self):
         res, result = self.drop()
         return res, result
@@ -824,12 +845,17 @@ class DropChecker(Checker):
         while self._keep_running:
             res, result = self.run_task()
             if result:
-                self.c_wrap.init_collection(
-                    name=cf.gen_unique_str("DropChecker_"),
-                    schema=cf.gen_default_collection_schema(),
-                    timeout=timeout,
-                    check_task=CheckTasks.check_nothing)
-            sleep(constants.WAIT_PER_OP / 10)
+                try:
+                    if len(self.collection_pool) <= 10:
+                        self.gen_collection_pool(schema=self.schema)
+                except Exception as e:
+                    log.error(f"Failed to generate collection pool: {e}")
+                try:
+                    c_name = self.collection_pool[0]
+                    self.c_wrap.init_collection(name=c_name)
+                except Exception as e:
+                    log.error(f"Failed to init new collection: {e}")
+            sleep(constants.WAIT_PER_OP)
 
 
 class LoadBalanceChecker(Checker):

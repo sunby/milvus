@@ -43,7 +43,7 @@ type getStatisticsTask struct {
 	unloadedPartitionIDs []UniqueID
 
 	ctx context.Context
-	dc  types.DataCoord
+	dc  types.DataCoordClient
 	tr  *timerecord.TimeRecorder
 
 	fromDataCoord bool
@@ -51,7 +51,7 @@ type getStatisticsTask struct {
 
 	// if query from shard
 	*internalpb.GetStatisticsRequest
-	qc        types.QueryCoord
+	qc        types.QueryCoordClient
 	resultBuf *typeutil.ConcurrentSet[*internalpb.GetStatisticsResponse]
 
 	lb LBPolicy
@@ -216,7 +216,7 @@ func (g *getStatisticsTask) PostExecute(ctx context.Context) error {
 		return err
 	}
 	g.result = &milvuspb.GetStatisticsResponse{
-		Status: merr.Status(nil),
+		Status: merr.Success(),
 		Stats:  result,
 	}
 
@@ -241,14 +241,14 @@ func (g *getStatisticsTask) getStatisticsFromDataCoord(ctx context.Context) erro
 	if err != nil {
 		return err
 	}
-	if result.Status.ErrorCode != commonpb.ErrorCode_Success {
-		return errors.New(result.Status.Reason)
+	if result.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
+		return merr.Error(result.GetStatus())
 	}
 	if g.resultBuf == nil {
 		g.resultBuf = typeutil.NewConcurrentSet[*internalpb.GetStatisticsResponse]()
 	}
 	g.resultBuf.Insert(&internalpb.GetStatisticsResponse{
-		Status: merr.Status(nil),
+		Status: merr.Success(),
 		Stats:  result.Stats,
 	})
 	return nil
@@ -266,7 +266,6 @@ func (g *getStatisticsTask) getStatisticsFromQueryNode(ctx context.Context) erro
 		nq:             1,
 		exec:           g.getStatisticsShard,
 	})
-
 	if err != nil {
 		return errors.Wrap(err, "failed to statistic")
 	}
@@ -274,7 +273,7 @@ func (g *getStatisticsTask) getStatisticsFromQueryNode(ctx context.Context) erro
 	return nil
 }
 
-func (g *getStatisticsTask) getStatisticsShard(ctx context.Context, nodeID int64, qn types.QueryNode, channelIDs ...string) error {
+func (g *getStatisticsTask) getStatisticsShard(ctx context.Context, nodeID int64, qn types.QueryNodeClient, channelIDs ...string) error {
 	nodeReq := proto.Clone(g.GetStatisticsRequest).(*internalpb.GetStatisticsRequest)
 	nodeReq.Base.TargetID = nodeID
 	req := &querypb.GetStatisticsRequest{
@@ -312,7 +311,7 @@ func (g *getStatisticsTask) getStatisticsShard(ctx context.Context, nodeID int64
 
 // checkFullLoaded check if collection / partition was fully loaded into QueryNode
 // return loaded partitions, unloaded partitions and error
-func checkFullLoaded(ctx context.Context, qc types.QueryCoord, dbName string, collectionName string, collectionID int64, searchPartitionIDs []UniqueID) ([]UniqueID, []UniqueID, error) {
+func checkFullLoaded(ctx context.Context, qc types.QueryCoordClient, dbName string, collectionName string, collectionID int64, searchPartitionIDs []UniqueID) ([]UniqueID, []UniqueID, error) {
 	var loadedPartitionIDs []UniqueID
 	var unloadPartitionIDs []UniqueID
 
@@ -335,7 +334,7 @@ func checkFullLoaded(ctx context.Context, qc types.QueryCoord, dbName string, co
 		if err != nil {
 			return nil, nil, fmt.Errorf("showPartitions failed, collection = %d, partitionIDs = %v, err = %s", collectionID, searchPartitionIDs, err)
 		}
-		if resp.Status.ErrorCode != commonpb.ErrorCode_Success {
+		if resp.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
 			return nil, nil, fmt.Errorf("showPartitions failed, collection = %d, partitionIDs = %v, reason = %s", collectionID, searchPartitionIDs, resp.GetStatus().GetReason())
 		}
 
@@ -360,7 +359,7 @@ func checkFullLoaded(ctx context.Context, qc types.QueryCoord, dbName string, co
 	if err != nil {
 		return nil, nil, fmt.Errorf("showPartitions failed, collection = %d, partitionIDs = %v, err = %s", collectionID, searchPartitionIDs, err)
 	}
-	if resp.Status.ErrorCode != commonpb.ErrorCode_Success {
+	if resp.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
 		return nil, nil, fmt.Errorf("showPartitions failed, collection = %d, partitionIDs = %v, reason = %s", collectionID, searchPartitionIDs, resp.GetStatus().GetReason())
 	}
 
@@ -462,11 +461,11 @@ func reduceStatisticResponse(results []map[string]string) ([]*commonpb.KeyValueP
 //		if err != nil {
 //			return err
 //		}
-//		if result.Status.ErrorCode != commonpb.ErrorCode_Success {
-//			return errors.New(result.Status.Reason)
+//		if result.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
+//			return merr.Error(result.GetStatus())
 //		}
 //		g.toReduceResults = append(g.toReduceResults, &internalpb.GetStatisticsResponse{
-//			Status: merr.Status(nil),
+//			Status: merr.Success(),
 //			Stats:  result.Stats,
 //		})
 //		log.Debug("get partition statistics from DataCoord execute done", zap.Int64("msgID", g.ID()))
@@ -481,7 +480,7 @@ func reduceStatisticResponse(results []map[string]string) ([]*commonpb.KeyValueP
 //		return err
 //	}
 //	g.result = &milvuspb.GetPartitionStatisticsResponse{
-//		Status: merr.Status(nil),
+//		Status: merr.Success(),
 //		Stats:  g.innerResult,
 //	}
 //	return nil
@@ -534,11 +533,11 @@ func reduceStatisticResponse(results []map[string]string) ([]*commonpb.KeyValueP
 //			if err != nil {
 //				return err
 //			}
-//			if result.Status.ErrorCode != commonpb.ErrorCode_Success {
-//				return errors.New(result.Status.Reason)
+//			if result.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
+//				return merr.Error(result.GetStatus())
 //			}
 //			g.toReduceResults = append(g.toReduceResults, &internalpb.GetStatisticsResponse{
-//				Status: merr.Status(nil),
+//				Status: merr.Success(),
 //				Stats:  result.Stats,
 //			})
 //		} else { // some partitions have been loaded, get some partition statistics from datacoord
@@ -557,11 +556,11 @@ func reduceStatisticResponse(results []map[string]string) ([]*commonpb.KeyValueP
 //			if err != nil {
 //				return err
 //			}
-//			if result.Status.ErrorCode != commonpb.ErrorCode_Success {
-//				return errors.New(result.Status.Reason)
+//			if result.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
+//				return merr.Error(result.GetStatus())
 //			}
 //			g.toReduceResults = append(g.toReduceResults, &internalpb.GetStatisticsResponse{
-//				Status: merr.Status(nil),
+//				Status: merr.Success(),
 //				Stats:  result.Stats,
 //			})
 //		}
@@ -577,7 +576,7 @@ func reduceStatisticResponse(results []map[string]string) ([]*commonpb.KeyValueP
 //		return err
 //	}
 //	g.result = &milvuspb.GetCollectionStatisticsResponse{
-//		Status: merr.Status(nil),
+//		Status: merr.Success(),
 //		Stats:  g.innerResult,
 //	}
 //	return nil
@@ -589,7 +588,7 @@ type getCollectionStatisticsTask struct {
 	Condition
 	*milvuspb.GetCollectionStatisticsRequest
 	ctx       context.Context
-	dataCoord types.DataCoord
+	dataCoord types.DataCoordClient
 	result    *milvuspb.GetCollectionStatisticsResponse
 
 	collectionID UniqueID
@@ -656,11 +655,11 @@ func (g *getCollectionStatisticsTask) Execute(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if result.Status.ErrorCode != commonpb.ErrorCode_Success {
-		return errors.New(result.Status.Reason)
+	if result.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
+		return merr.Error(result.GetStatus())
 	}
 	g.result = &milvuspb.GetCollectionStatisticsResponse{
-		Status: merr.Status(nil),
+		Status: merr.Success(),
 		Stats:  result.Stats,
 	}
 	return nil
@@ -674,7 +673,7 @@ type getPartitionStatisticsTask struct {
 	Condition
 	*milvuspb.GetPartitionStatisticsRequest
 	ctx       context.Context
-	dataCoord types.DataCoord
+	dataCoord types.DataCoordClient
 	result    *milvuspb.GetPartitionStatisticsResponse
 
 	collectionID UniqueID
@@ -746,11 +745,11 @@ func (g *getPartitionStatisticsTask) Execute(ctx context.Context) error {
 	if result == nil {
 		return errors.New("get partition statistics resp is nil")
 	}
-	if result.Status.ErrorCode != commonpb.ErrorCode_Success {
-		return errors.New(result.Status.Reason)
+	if result.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
+		return merr.Error(result.GetStatus())
 	}
 	g.result = &milvuspb.GetPartitionStatisticsResponse{
-		Status: merr.Status(nil),
+		Status: merr.Success(),
 		Stats:  result.Stats,
 	}
 	return nil

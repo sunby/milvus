@@ -118,9 +118,9 @@ func (s *InsertSuite) TestInsert() {
 	log.Info("TestInsert succeed")
 	log.Info("==================")
 	log.Info("==================")
-
 }
 
 func TestInsert(t *testing.T) {
+	t.Skip("Skip integration test, need to refactor integration test framework")
 	suite.Run(t, new(InsertSuite))
 }

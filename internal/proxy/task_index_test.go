@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"google.golang.org/grpc"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
@@ -37,6 +38,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 func TestMain(m *testing.M) {
@@ -56,9 +58,7 @@ func TestGetIndexStateTask_Execute(t *testing.T) {
 	rootCoord := newMockRootCoord()
 	queryCoord := getMockQueryCoord()
 	queryCoord.EXPECT().ShowCollections(mock.Anything, mock.Anything).Return(&querypb.ShowCollectionsResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:        merr.Success(),
 		CollectionIDs: []int64{},
 	}, nil)
 	datacoord := NewDataCoordMock()
@@ -86,22 +86,18 @@ func TestGetIndexStateTask_Execute(t *testing.T) {
 	_ = InitMetaCache(ctx, rootCoord, queryCoord, shardMgr)
 	assert.Error(t, gist.Execute(ctx))
 
-	rootCoord.DescribeCollectionFunc = func(ctx context.Context, request *milvuspb.DescribeCollectionRequest) (*milvuspb.DescribeCollectionResponse, error) {
+	rootCoord.DescribeCollectionFunc = func(ctx context.Context, request *milvuspb.DescribeCollectionRequest, opts ...grpc.CallOption) (*milvuspb.DescribeCollectionResponse, error) {
 		return &milvuspb.DescribeCollectionResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status:         merr.Success(),
 			Schema:         newTestSchema(),
 			CollectionID:   collectionID,
 			CollectionName: request.CollectionName,
 		}, nil
 	}
 
-	datacoord.GetIndexStateFunc = func(ctx context.Context, request *indexpb.GetIndexStateRequest) (*indexpb.GetIndexStateResponse, error) {
+	datacoord.GetIndexStateFunc = func(ctx context.Context, request *indexpb.GetIndexStateRequest, opts ...grpc.CallOption) (*indexpb.GetIndexStateResponse, error) {
 		return &indexpb.GetIndexStateResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status:     merr.Success(),
 			State:      commonpb.IndexState_Finished,
 			FailReason: "",
 		}, nil
@@ -120,9 +116,7 @@ func TestDropIndexTask_PreExecute(t *testing.T) {
 	paramtable.Init()
 	qc := getMockQueryCoord()
 	qc.EXPECT().ShowCollections(mock.Anything, mock.Anything).Return(&querypb.ShowCollectionsResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:        merr.Success(),
 		CollectionIDs: []int64{},
 	}, nil)
 	dc := NewDataCoordMock()
@@ -183,9 +177,7 @@ func TestDropIndexTask_PreExecute(t *testing.T) {
 	t.Run("coll has been loaded", func(t *testing.T) {
 		qc := getMockQueryCoord()
 		qc.EXPECT().ShowCollections(mock.Anything, mock.Anything).Return(&querypb.ShowCollectionsResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status:        merr.Success(),
 			CollectionIDs: []int64{collectionID},
 		}, nil)
 		dit.queryCoord = qc
@@ -218,8 +210,8 @@ func TestDropIndexTask_PreExecute(t *testing.T) {
 	})
 }
 
-func getMockQueryCoord() *mocks.MockQueryCoord {
-	qc := &mocks.MockQueryCoord{}
+func getMockQueryCoord() *mocks.MockQueryCoordClient {
+	qc := &mocks.MockQueryCoordClient{}
 	successStatus := &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}
 	qc.EXPECT().LoadCollection(mock.Anything, mock.Anything).Return(successStatus, nil)
 	qc.EXPECT().GetShardLeaders(mock.Anything, mock.Anything).Return(&querypb.GetShardLeadersResponse{
@@ -327,7 +319,8 @@ func Test_parseIndexParams(t *testing.T) {
 					Key:   MetricTypeKey,
 					Value: "L2",
 				},
-			}},
+			},
+		},
 	}
 
 	t.Run("parse index params", func(t *testing.T) {
@@ -411,7 +404,8 @@ func Test_parseIndexParams(t *testing.T) {
 					Key:   MetricTypeKey,
 					Value: "L2",
 				},
-			}},
+			},
+		},
 	}
 	t.Run("parse index params 2", func(t *testing.T) {
 		Params.Save(Params.AutoIndexConfig.Enable.Key, "true")
@@ -498,6 +492,154 @@ func Test_parseIndexParams(t *testing.T) {
 				IsPrimaryKey: false,
 				Description:  "field no.1",
 				DataType:     schemapb.DataType_JSON,
+			},
+		}
+		err := cit3.parseIndexParams()
+		assert.Error(t, err)
+	})
+
+	t.Run("create index on VarChar field", func(t *testing.T) {
+		cit := &createIndexTask{
+			req: &milvuspb.CreateIndexRequest{
+				ExtraParams: []*commonpb.KeyValuePair{
+					{
+						Key:   common.IndexTypeKey,
+						Value: DefaultStringIndexType,
+					},
+				},
+				IndexName: "",
+			},
+			fieldSchema: &schemapb.FieldSchema{
+				FieldID:      101,
+				Name:         "FieldID",
+				IsPrimaryKey: false,
+				DataType:     schemapb.DataType_VarChar,
+			},
+		}
+		err := cit.parseIndexParams()
+		assert.NoError(t, err)
+	})
+
+	t.Run("create index on Arithmetic field", func(t *testing.T) {
+		cit := &createIndexTask{
+			req: &milvuspb.CreateIndexRequest{
+				ExtraParams: []*commonpb.KeyValuePair{
+					{
+						Key:   common.IndexTypeKey,
+						Value: DefaultArithmeticIndexType,
+					},
+				},
+				IndexName: "",
+			},
+			fieldSchema: &schemapb.FieldSchema{
+				FieldID:      101,
+				Name:         "FieldID",
+				IsPrimaryKey: false,
+				DataType:     schemapb.DataType_Int64,
+			},
+		}
+		err := cit.parseIndexParams()
+		assert.NoError(t, err)
+	})
+
+	// Compatible with the old version <= 2.3.0
+	t.Run("create marisa-trie index on VarChar field", func(t *testing.T) {
+		cit := &createIndexTask{
+			req: &milvuspb.CreateIndexRequest{
+				ExtraParams: []*commonpb.KeyValuePair{
+					{
+						Key:   common.IndexTypeKey,
+						Value: "marisa-trie",
+					},
+				},
+				IndexName: "",
+			},
+			fieldSchema: &schemapb.FieldSchema{
+				FieldID:      101,
+				Name:         "FieldID",
+				IsPrimaryKey: false,
+				DataType:     schemapb.DataType_VarChar,
+			},
+		}
+		err := cit.parseIndexParams()
+		assert.NoError(t, err)
+	})
+
+	// Compatible with the old version <= 2.3.0
+	t.Run("create Asceneding index on Arithmetic field", func(t *testing.T) {
+		cit := &createIndexTask{
+			req: &milvuspb.CreateIndexRequest{
+				ExtraParams: []*commonpb.KeyValuePair{
+					{
+						Key:   common.IndexTypeKey,
+						Value: "Asceneding",
+					},
+				},
+				IndexName: "",
+			},
+			fieldSchema: &schemapb.FieldSchema{
+				FieldID:      101,
+				Name:         "FieldID",
+				IsPrimaryKey: false,
+				DataType:     schemapb.DataType_Int64,
+			},
+		}
+		err := cit.parseIndexParams()
+		assert.NoError(t, err)
+	})
+
+	t.Run("create unsupported index on Arithmetic field", func(t *testing.T) {
+		cit := &createIndexTask{
+			req: &milvuspb.CreateIndexRequest{
+				ExtraParams: []*commonpb.KeyValuePair{
+					{
+						Key:   common.IndexTypeKey,
+						Value: "invalid_type",
+					},
+				},
+				IndexName: "",
+			},
+			fieldSchema: &schemapb.FieldSchema{
+				FieldID:      101,
+				Name:         "FieldID",
+				IsPrimaryKey: false,
+				DataType:     schemapb.DataType_Int64,
+			},
+		}
+		err := cit.parseIndexParams()
+		assert.Error(t, err)
+	})
+
+	t.Run("create index on array field", func(t *testing.T) {
+		cit3 := &createIndexTask{
+			Condition: nil,
+			req: &milvuspb.CreateIndexRequest{
+				Base:           nil,
+				DbName:         "",
+				CollectionName: "",
+				FieldName:      "",
+				ExtraParams: []*commonpb.KeyValuePair{
+					{
+						Key:   common.IndexTypeKey,
+						Value: "STL_SORT",
+					},
+				},
+				IndexName: "",
+			},
+			ctx:            nil,
+			rootCoord:      nil,
+			result:         nil,
+			isAutoIndex:    false,
+			newIndexParams: nil,
+			newTypeParams:  nil,
+			collectionID:   0,
+			fieldSchema: &schemapb.FieldSchema{
+				FieldID:      101,
+				Name:         "FieldID",
+				IsPrimaryKey: false,
+				Description:  "field no.1",
+				DataType:     schemapb.DataType_Array,
+				ElementType:  schemapb.DataType_Int64,
 			},
 		}
 		err := cit3.parseIndexParams()
@@ -712,4 +854,29 @@ func Test_parseIndexParams_AutoIndex(t *testing.T) {
 		err := task.parseIndexParams()
 		assert.Error(t, err)
 	})
+}
+
+func newTestSchema() *schemapb.CollectionSchema {
+	fields := []*schemapb.FieldSchema{
+		{FieldID: 0, Name: "FieldID", IsPrimaryKey: false, Description: "field no.1", DataType: schemapb.DataType_Int64},
+	}
+
+	for name, value := range schemapb.DataType_value {
+		dataType := schemapb.DataType(value)
+		if !typeutil.IsIntegerType(dataType) && !typeutil.IsFloatingType(dataType) && !typeutil.IsVectorType(dataType) && !typeutil.IsStringType(dataType) {
+			continue
+		}
+		newField := &schemapb.FieldSchema{
+			FieldID: int64(100 + value), Name: name + "Field", IsPrimaryKey: false, Description: "", DataType: dataType,
+		}
+		fields = append(fields, newField)
+	}
+
+	return &schemapb.CollectionSchema{
+		Name:               "test",
+		Description:        "schema for test used",
+		AutoID:             true,
+		Fields:             fields,
+		EnableDynamicField: true,
+	}
 }

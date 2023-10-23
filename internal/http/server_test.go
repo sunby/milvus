@@ -20,17 +20,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
-	"github.com/milvus-io/milvus/internal/http/healthz"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
+	"github.com/milvus-io/milvus/internal/http/healthz"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
@@ -54,7 +54,6 @@ type HTTPServerTestSuite struct {
 func (suite *HTTPServerTestSuite) SetupSuite() {
 	suite.server = httptest.NewServer(nil)
 	registerDefaults()
-
 }
 
 func (suite *HTTPServerTestSuite) TearDownSuite() {
@@ -85,7 +84,7 @@ func (suite *HTTPServerTestSuite) TestDefaultLogHandler() {
 	suite.Require().NoError(err)
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	suite.Require().NoError(err)
 	suite.Equal("{\"level\":\"error\"}\n", string(body))
 	suite.Equal(zap.ErrorLevel, log.GetLevel())
@@ -101,7 +100,7 @@ func (suite *HTTPServerTestSuite) TestHealthzHandler() {
 	resp, err := client.Do(req)
 	suite.Nil(err)
 	defer resp.Body.Close()
-	body, _ := ioutil.ReadAll(resp.Body)
+	body, _ := io.ReadAll(resp.Body)
 	suite.Equal("OK", string(body))
 
 	req, _ = http.NewRequest(http.MethodGet, url, nil)
@@ -109,7 +108,7 @@ func (suite *HTTPServerTestSuite) TestHealthzHandler() {
 	resp, err = client.Do(req)
 	suite.Nil(err)
 	defer resp.Body.Close()
-	body, _ = ioutil.ReadAll(resp.Body)
+	body, _ = io.ReadAll(resp.Body)
 	suite.Equal("{\"state\":\"OK\",\"detail\":[{\"name\":\"m1\",\"code\":1}]}", string(body))
 
 	healthz.Register(&MockIndicator{"m2", commonpb.StateCode_Abnormal})
@@ -118,7 +117,7 @@ func (suite *HTTPServerTestSuite) TestHealthzHandler() {
 	resp, err = client.Do(req)
 	suite.Nil(err)
 	defer resp.Body.Close()
-	body, _ = ioutil.ReadAll(resp.Body)
+	body, _ = io.ReadAll(resp.Body)
 	suite.Equal("{\"state\":\"component m2 state is Abnormal\",\"detail\":[{\"name\":\"m1\",\"code\":1},{\"name\":\"m2\",\"code\":2}]}", string(body))
 }
 

@@ -30,7 +30,7 @@
 #include "common/Span.h"
 #include "common/Types.h"
 #include "common/Utils.h"
-#include "exceptions/EasyAssert.h"
+#include "common/EasyAssert.h"
 #include "storage/FieldData.h"
 
 namespace milvus::segcore {
@@ -148,12 +148,14 @@ class ConcurrentVectorImpl : public VectorBase {
     ConcurrentVectorImpl&
     operator=(const ConcurrentVectorImpl&) = delete;
 
-    using TraitType =
-        std::conditional_t<is_scalar,
-                           Type,
-                           std::conditional_t<std::is_same_v<Type, float>,
-                                              FloatVector,
-                                              BinaryVector>>;
+    using TraitType = std::conditional_t<
+        is_scalar,
+        Type,
+        std::conditional_t<std::is_same_v<Type, float>,
+                           FloatVector,
+                           std::conditional_t<std::is_same_v<Type, float16>,
+                                              Float16Vector,
+                                              BinaryVector>>>;
 
  public:
     explicit ConcurrentVectorImpl(ssize_t dim, int64_t size_per_chunk)
@@ -180,9 +182,8 @@ class ConcurrentVectorImpl : public VectorBase {
             return Span<TraitType>(chunk.data(), chunk.size());
         } else if constexpr (std::is_same_v<Type, int64_t> ||  // NOLINT
                              std::is_same_v<Type, int>) {
-            // TODO: where should the braces be placed?
             // only for testing
-            PanicInfo("unimplemented");
+            PanicInfo(NotImplemented, "unimplemented");
         } else {
             static_assert(
                 std::is_same_v<typename TraitType::embedded_type, Type>);
@@ -380,13 +381,20 @@ class ConcurrentVector<BinaryVector>
     : public ConcurrentVectorImpl<uint8_t, false> {
  public:
     explicit ConcurrentVector(int64_t dim, int64_t size_per_chunk)
-        : binary_dim_(dim), ConcurrentVectorImpl(dim / 8, size_per_chunk) {
+        : ConcurrentVectorImpl(dim / 8, size_per_chunk) {
         AssertInfo(dim % 8 == 0,
                    fmt::format("dim is not a multiple of 8, dim={}", dim));
     }
+};
 
- private:
-    int64_t binary_dim_;
+template <>
+class ConcurrentVector<Float16Vector>
+    : public ConcurrentVectorImpl<float16, false> {
+ public:
+    ConcurrentVector(int64_t dim, int64_t size_per_chunk)
+        : ConcurrentVectorImpl<float16, false>::ConcurrentVectorImpl(
+              dim, size_per_chunk) {
+    }
 };
 
 }  // namespace milvus::segcore

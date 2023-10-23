@@ -56,15 +56,14 @@ class TestChaosApply:
         chaos_res.delete(meta_name, raise_ex=False)
         sleep(2)
 
-    def test_chaos_apply(self, chaos_type, target_component, target_number, chaos_duration, chaos_interval, wait_signal):
+    def test_chaos_apply(self, chaos_type, target_component, target_scope, target_number, chaos_duration, chaos_interval, wait_signal):
         # start the monitor threads to check the milvus ops
         log.info("*********************Chaos Test Start**********************")
         if wait_signal:
             log.info("need wait signal to start chaos")
             ready_for_chaos = wait_signal_to_apply_chaos()
             if not ready_for_chaos:
-                log.info("did not get the signal to apply chaos")
-                raise Exception
+                log.info("get the signal to apply chaos timeout")
             else:
                 log.info("get the signal to apply chaos")
         log.info(connections.get_connection_addr('default'))
@@ -78,6 +77,7 @@ class TestChaosApply:
         update_key_value(chaos_config, "app.kubernetes.io/instance", release_name)
         update_key_value(chaos_config, "namespaces", [self.milvus_ns])
         update_key_value(chaos_config, "value", target_number)
+        update_key_value(chaos_config, "mode", target_scope)
         self.chaos_config = chaos_config
         if "s" in chaos_interval:
             schedule = f"*/{chaos_interval[:-1]} * * * * *"

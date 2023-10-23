@@ -33,12 +33,9 @@ namespace milvus::storage {
 
 class DiskFileManagerImpl : public FileManagerImpl {
  public:
-    explicit DiskFileManagerImpl(const FieldDataMeta& field_mata,
-                                 IndexMeta index_meta,
-                                 ChunkManagerPtr remote_chunk_manager);
+    explicit DiskFileManagerImpl(const FileManagerContext& fileManagerContext);
 
-    explicit DiskFileManagerImpl(const FieldDataMeta& field_mata,
-                                 IndexMeta index_meta,
+    explicit DiskFileManagerImpl(const FileManagerContext& fileManagerContext,
                                  std::shared_ptr<milvus_storage::Space> space);
 
     virtual ~DiskFileManagerImpl();

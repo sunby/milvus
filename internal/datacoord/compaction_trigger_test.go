@@ -22,8 +22,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
-	"github.com/milvus-io/milvus/pkg/util/paramtable"
-	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
@@ -33,6 +31,7 @@ import (
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/common"
+	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 )
 
 type spyCompactionHandler struct {
@@ -466,9 +465,7 @@ func Test_compactionTrigger_force(t *testing.T) {
 		})
 
 		t.Run(tt.name+" with DiskANN index", func(t *testing.T) {
-			segmentIDs := make([]int64, 0)
 			for _, segment := range tt.fields.meta.segments.GetSegments() {
-				segmentIDs = append(segmentIDs, segment.GetID())
 				// Collection 1000 means it has DiskANN index
 				segment.CollectionID = 1000
 			}
@@ -493,7 +490,7 @@ func Test_compactionTrigger_force(t *testing.T) {
 		})
 
 		t.Run(tt.name+" with allocate ts error", func(t *testing.T) {
-			//indexCood := newMockIndexCoord()
+			// indexCood := newMockIndexCoord()
 			tr := &compactionTrigger{
 				meta:                         tt.fields.meta,
 				handler:                      newMockHandlerWithMeta(tt.fields.meta),
@@ -623,7 +620,6 @@ func Test_compactionTrigger_force_maxSegmentLimit(t *testing.T) {
 		collectionID int64
 		compactTime  *compactTime
 	}
-	paramtable.Init()
 	vecFieldID := int64(201)
 	segmentInfos := &SegmentsInfo{
 		segments: make(map[UniqueID]*SegmentInfo),
@@ -830,7 +826,6 @@ func Test_compactionTrigger_noplan(t *testing.T) {
 		collectionID int64
 		compactTime  *compactTime
 	}
-	paramtable.Init()
 	Params.DataCoordCfg.MinSegmentToMerge.DefaultValue = "4"
 	vecFieldID := int64(201)
 	tests := []struct {
@@ -931,7 +926,6 @@ func Test_compactionTrigger_noplan(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-
 			tr := &compactionTrigger{
 				meta:                         tt.fields.meta,
 				handler:                      newMockHandlerWithMeta(tt.fields.meta),
@@ -972,7 +966,6 @@ func Test_compactionTrigger_PrioritizedCandi(t *testing.T) {
 		collectionID int64
 		compactTime  *compactTime
 	}
-	paramtable.Init()
 	vecFieldID := int64(201)
 
 	genSeg := func(segID, numRows int64) *datapb.SegmentInfo {
@@ -1155,7 +1148,6 @@ func Test_compactionTrigger_SmallCandi(t *testing.T) {
 		collectionID int64
 		compactTime  *compactTime
 	}
-	paramtable.Init()
 	vecFieldID := int64(201)
 
 	genSeg := func(segID, numRows int64) *datapb.SegmentInfo {
@@ -1338,7 +1330,6 @@ func Test_compactionTrigger_SqueezeNonPlannedSegs(t *testing.T) {
 		collectionID int64
 		compactTime  *compactTime
 	}
-	paramtable.Init()
 	vecFieldID := int64(201)
 
 	genSeg := func(segID, numRows int64) *datapb.SegmentInfo {
@@ -1517,7 +1508,6 @@ func Test_compactionTrigger_noplan_random_size(t *testing.T) {
 		collectionID int64
 		compactTime  *compactTime
 	}
-	paramtable.Init()
 
 	segmentInfos := &SegmentsInfo{
 		segments: make(map[UniqueID]*SegmentInfo),
@@ -1668,7 +1658,6 @@ func Test_compactionTrigger_noplan_random_size(t *testing.T) {
 			}
 
 			for _, plan := range plans {
-
 				size := int64(0)
 				for _, log := range plan.SegmentBinlogs {
 					size += log.FieldBinlogs[0].GetBinlogs()[0].LogSize
@@ -1689,8 +1678,6 @@ func Test_compactionTrigger_noplan_random_size(t *testing.T) {
 
 // Test shouldDoSingleCompaction
 func Test_compactionTrigger_shouldDoSingleCompaction(t *testing.T) {
-	paramtable.Init()
-
 	trigger := newCompactionTrigger(&meta{}, &compactionPlanHandler{}, newMockAllocator(), newMockHandler())
 
 	// Test too many deltalogs.
@@ -1719,7 +1706,7 @@ func Test_compactionTrigger_shouldDoSingleCompaction(t *testing.T) {
 	couldDo := trigger.ShouldDoSingleCompaction(info, false, &compactTime{})
 	assert.True(t, couldDo)
 
-	//Test too many stats log
+	// Test too many stats log
 	info = &SegmentInfo{
 		SegmentInfo: &datapb.SegmentInfo{
 			ID:             1,
@@ -1747,12 +1734,12 @@ func Test_compactionTrigger_shouldDoSingleCompaction(t *testing.T) {
 
 	couldDo = trigger.ShouldDoSingleCompaction(info, true, &compactTime{})
 	assert.False(t, couldDo)
-	//Test too many stats log but compacted
+	// Test too many stats log but compacted
 	info.CompactionFrom = []int64{0, 1}
 	couldDo = trigger.ShouldDoSingleCompaction(info, false, &compactTime{})
 	assert.False(t, couldDo)
 
-	//Test expire triggered  compaction
+	// Test expire triggered  compaction
 	var binlogs2 []*datapb.FieldBinlog
 	for i := UniqueID(0); i < 100; i++ {
 		binlogs2 = append(binlogs2, &datapb.FieldBinlog{
@@ -1985,40 +1972,41 @@ func (s *CompactionTriggerSuite) SetupTest() {
 	s.indexID = 300
 	s.vecFieldID = 400
 	s.channel = "dml_0_100v0"
-	s.meta = &meta{segments: &SegmentsInfo{
-		map[int64]*SegmentInfo{
-			1: {
-				SegmentInfo:    s.genSeg(1, 60),
-				lastFlushTime:  time.Now().Add(-100 * time.Minute),
-				segmentIndexes: s.genSegIndex(1, indexID, 60),
-			},
-			2: {
-				SegmentInfo:    s.genSeg(2, 60),
-				lastFlushTime:  time.Now(),
-				segmentIndexes: s.genSegIndex(2, indexID, 60),
-			},
-			3: {
-				SegmentInfo:    s.genSeg(3, 60),
-				lastFlushTime:  time.Now(),
-				segmentIndexes: s.genSegIndex(3, indexID, 60),
-			},
-			4: {
-				SegmentInfo:    s.genSeg(4, 60),
-				lastFlushTime:  time.Now(),
-				segmentIndexes: s.genSegIndex(4, indexID, 60),
-			},
-			5: {
-				SegmentInfo:    s.genSeg(5, 26),
-				lastFlushTime:  time.Now(),
-				segmentIndexes: s.genSegIndex(5, indexID, 26),
-			},
-			6: {
-				SegmentInfo:    s.genSeg(6, 26),
-				lastFlushTime:  time.Now(),
-				segmentIndexes: s.genSegIndex(6, indexID, 26),
+	s.meta = &meta{
+		segments: &SegmentsInfo{
+			map[int64]*SegmentInfo{
+				1: {
+					SegmentInfo:    s.genSeg(1, 60),
+					lastFlushTime:  time.Now().Add(-100 * time.Minute),
+					segmentIndexes: s.genSegIndex(1, indexID, 60),
+				},
+				2: {
+					SegmentInfo:    s.genSeg(2, 60),
+					lastFlushTime:  time.Now(),
+					segmentIndexes: s.genSegIndex(2, indexID, 60),
+				},
+				3: {
+					SegmentInfo:    s.genSeg(3, 60),
+					lastFlushTime:  time.Now(),
+					segmentIndexes: s.genSegIndex(3, indexID, 60),
+				},
+				4: {
+					SegmentInfo:    s.genSeg(4, 60),
+					lastFlushTime:  time.Now(),
+					segmentIndexes: s.genSegIndex(4, indexID, 60),
+				},
+				5: {
+					SegmentInfo:    s.genSeg(5, 26),
+					lastFlushTime:  time.Now(),
+					segmentIndexes: s.genSegIndex(5, indexID, 26),
+				},
+				6: {
+					SegmentInfo:    s.genSeg(6, 26),
+					lastFlushTime:  time.Now(),
+					segmentIndexes: s.genSegIndex(6, indexID, 26),
+				},
 			},
 		},
-	},
 		collections: map[int64]*collectionInfo{
 			s.collectionID: {
 				ID: s.collectionID,
@@ -2072,7 +2060,7 @@ func (s *CompactionTriggerSuite) TestHandleSignal() {
 		defer s.SetupTest()
 		tr := s.tr
 		s.compactionHandler.EXPECT().isFull().Return(false)
-		//s.allocator.EXPECT().allocTimestamp(mock.Anything).Return(10000, nil)
+		// s.allocator.EXPECT().allocTimestamp(mock.Anything).Return(10000, nil)
 		s.handler.EXPECT().GetCollection(mock.Anything, int64(100)).Return(nil, errors.New("mocked"))
 		tr.handleSignal(&compactionSignal{
 			segmentID:    1,
@@ -2089,7 +2077,7 @@ func (s *CompactionTriggerSuite) TestHandleSignal() {
 		defer s.SetupTest()
 		tr := s.tr
 		s.compactionHandler.EXPECT().isFull().Return(false)
-		//s.allocator.EXPECT().allocTimestamp(mock.Anything).Return(10000, nil)
+		// s.allocator.EXPECT().allocTimestamp(mock.Anything).Return(10000, nil)
 		s.handler.EXPECT().GetCollection(mock.Anything, int64(100)).Return(&collectionInfo{
 			Properties: map[string]string{
 				common.CollectionAutoCompactionKey: "bad_value",

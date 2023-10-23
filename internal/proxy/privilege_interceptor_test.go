@@ -5,13 +5,15 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus/internal/mocks"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
-	"github.com/stretchr/testify/assert"
 )
 
 func TestUnaryServerInterceptor(t *testing.T) {
@@ -45,14 +47,12 @@ func TestPrivilegeInterceptor(t *testing.T) {
 
 		ctx = GetContext(context.Background(), "alice:123456")
 		client := &MockRootCoordClientInterface{}
-		queryCoord := &mocks.MockQueryCoord{}
+		queryCoord := &mocks.MockQueryCoordClient{}
 		mgr := newShardClientMgr()
 
 		client.listPolicy = func(ctx context.Context, in *internalpb.ListPolicyRequest) (*internalpb.ListPolicyResponse, error) {
 			return &internalpb.ListPolicyResponse{
-				Status: &commonpb.Status{
-					ErrorCode: commonpb.ErrorCode_Success,
-				},
+				Status: merr.Success(),
 				PolicyInfos: []string{
 					funcutil.PolicyForPrivilege("role1", commonpb.ObjectType_Collection.String(), "col1", commonpb.ObjectPrivilege_PrivilegeLoad.String(), "default"),
 					funcutil.PolicyForPrivilege("role1", commonpb.ObjectType_Collection.String(), "col1", commonpb.ObjectPrivilege_PrivilegeGetLoadState.String(), "default"),
@@ -162,7 +162,6 @@ func TestPrivilegeInterceptor(t *testing.T) {
 			getPolicyModel("foo")
 		})
 	})
-
 }
 
 func TestResourceGroupPrivilege(t *testing.T) {
@@ -176,14 +175,12 @@ func TestResourceGroupPrivilege(t *testing.T) {
 
 		ctx = GetContext(context.Background(), "fooo:123456")
 		client := &MockRootCoordClientInterface{}
-		queryCoord := &mocks.MockQueryCoord{}
+		queryCoord := &mocks.MockQueryCoordClient{}
 		mgr := newShardClientMgr()
 
 		client.listPolicy = func(ctx context.Context, in *internalpb.ListPolicyRequest) (*internalpb.ListPolicyResponse, error) {
 			return &internalpb.ListPolicyResponse{
-				Status: &commonpb.Status{
-					ErrorCode: commonpb.ErrorCode_Success,
-				},
+				Status: merr.Success(),
 				PolicyInfos: []string{
 					funcutil.PolicyForPrivilege("role1", commonpb.ObjectType_Global.String(), "*", commonpb.ObjectPrivilege_PrivilegeCreateResourceGroup.String(), "default"),
 					funcutil.PolicyForPrivilege("role1", commonpb.ObjectType_Global.String(), "*", commonpb.ObjectPrivilege_PrivilegeDropResourceGroup.String(), "default"),
@@ -223,5 +220,4 @@ func TestResourceGroupPrivilege(t *testing.T) {
 		_, err = PrivilegeInterceptor(GetContext(context.Background(), "fooo:123456"), &milvuspb.TransferReplicaRequest{})
 		assert.NoError(t, err)
 	})
-
 }

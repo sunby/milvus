@@ -19,31 +19,36 @@
 package cluster
 
 import (
-	context "context"
+	"context"
+	"io"
 	"testing"
 
 	"github.com/cockroachdb/errors"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
-	commonpb "github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
-	"github.com/milvus-io/milvus/internal/mocks"
-	internalpb "github.com/milvus-io/milvus/internal/proto/internalpb"
-	querypb "github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
+	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	"github.com/milvus-io/milvus/internal/mocks"
+	"github.com/milvus-io/milvus/internal/proto/internalpb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/util/streamrpc"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
 type RemoteWorkerSuite struct {
 	suite.Suite
 
-	mockClient *mocks.MockQueryNode
+	mockClient *mocks.MockQueryNodeClient
 	worker     *remoteWorker
 }
 
 func (s *RemoteWorkerSuite) SetupTest() {
-	s.mockClient = &mocks.MockQueryNode{}
+	s.mockClient = &mocks.MockQueryNodeClient{}
 	s.worker = &remoteWorker{client: s.mockClient}
 }
 
@@ -173,6 +178,19 @@ func (s *RemoteWorkerSuite) TestDelete() {
 
 		s.Error(err)
 	})
+
+	s.Run("legacy_querynode_unimplemented", func() {
+		defer func() { s.mockClient.ExpectedCalls = nil }()
+
+		s.mockClient.EXPECT().Delete(mock.Anything, mock.AnythingOfType("*querypb.DeleteRequest")).
+			Return(nil, merr.WrapErrServiceUnimplemented(status.Errorf(codes.Unimplemented, "mocked grpc unimplemented")))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		err := s.worker.Delete(ctx, &querypb.DeleteRequest{})
+
+		s.NoError(err)
+	})
 }
 
 func (s *RemoteWorkerSuite) TestSearch() {
@@ -240,7 +258,7 @@ func (s *RemoteWorkerSuite) TestSearch() {
 
 		grpcErr := status.Error(codes.Unimplemented, "method not implemented")
 		s.mockClient.EXPECT().SearchSegments(mock.Anything, mock.AnythingOfType("*querypb.SearchRequest")).
-			Return(result, grpcErr)
+			Return(result, merr.WrapErrServiceUnimplemented(grpcErr))
 		s.mockClient.EXPECT().Search(mock.Anything, mock.AnythingOfType("*querypb.SearchRequest")).
 			Return(result, err)
 
@@ -319,7 +337,7 @@ func (s *RemoteWorkerSuite) TestQuery() {
 
 		grpcErr := status.Error(codes.Unimplemented, "method not implemented")
 		s.mockClient.EXPECT().QuerySegments(mock.Anything, mock.AnythingOfType("*querypb.QueryRequest")).
-			Return(result, grpcErr)
+			Return(result, merr.WrapErrServiceUnimplemented(grpcErr))
 		s.mockClient.EXPECT().Query(mock.Anything, mock.AnythingOfType("*querypb.QueryRequest")).
 			Return(result, err)
 
@@ -329,6 +347,174 @@ func (s *RemoteWorkerSuite) TestQuery() {
 
 		s.Equal(err, serr)
 		s.Equal(result, sr)
+	})
+}
+
+func (s *RemoteWorkerSuite) TestQueryStream() {
+	s.Run("normal_run", func() {
+		defer func() { s.mockClient.ExpectedCalls = nil }()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		client := streamrpc.NewLocalQueryClient(ctx)
+		server := client.CreateServer()
+
+		ids := []int64{10, 11, 12}
+		s.mockClient.EXPECT().QueryStreamSegments(
+			mock.Anything,
+			mock.AnythingOfType("*querypb.QueryRequest"),
+		).RunAndReturn(func(ctx context.Context, request *querypb.QueryRequest, option ...grpc.CallOption) (querypb.QueryNode_QueryStreamSegmentsClient, error) {
+			client := streamrpc.NewLocalQueryClient(ctx)
+			server := client.CreateServer()
+
+			for _, id := range ids {
+				err := server.Send(&internalpb.RetrieveResults{
+					Status: merr.Success(),
+					Ids: &schemapb.IDs{
+						IdField: &schemapb.IDs_IntId{
+							IntId: &schemapb.LongArray{Data: []int64{id}},
+						},
+					},
+				})
+				s.NoError(err)
+			}
+			err := server.FinishSend(nil)
+			s.NoError(err)
+			return client, nil
+		})
+
+		go func() {
+			err := s.worker.QueryStreamSegments(ctx, &querypb.QueryRequest{}, server)
+			if err != nil {
+				server.Send(&internalpb.RetrieveResults{
+					Status: merr.Status(err),
+				})
+			}
+			server.FinishSend(err)
+		}()
+
+		recNum := 0
+		for {
+			result, err := client.Recv()
+			if err == io.EOF {
+				break
+			}
+			s.NoError(err)
+
+			err = merr.Error(result.GetStatus())
+			s.NoError(err)
+
+			s.Less(recNum, len(ids))
+			s.Equal(result.Ids.GetIntId().Data[0], ids[recNum])
+			recNum++
+		}
+	})
+
+	s.Run("send msg failed", func() {
+		defer func() { s.mockClient.ExpectedCalls = nil }()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		clientCtx, clientClose := context.WithCancel(ctx)
+		client := streamrpc.NewLocalQueryClient(clientCtx)
+		server := client.CreateServer()
+		clientClose()
+
+		ids := []int64{10, 11, 12}
+
+		s.mockClient.EXPECT().QueryStreamSegments(
+			mock.Anything,
+			mock.AnythingOfType("*querypb.QueryRequest"),
+		).RunAndReturn(func(ctx context.Context, request *querypb.QueryRequest, option ...grpc.CallOption) (querypb.QueryNode_QueryStreamSegmentsClient, error) {
+			for _, id := range ids {
+				client := streamrpc.NewLocalQueryClient(ctx)
+				server := client.CreateServer()
+
+				err := server.Send(&internalpb.RetrieveResults{
+					Status: merr.Success(),
+					Ids: &schemapb.IDs{
+						IdField: &schemapb.IDs_IntId{
+							IntId: &schemapb.LongArray{Data: []int64{id}},
+						},
+					},
+				})
+				s.NoError(err)
+			}
+			err := server.FinishSend(nil)
+			s.NoError(err)
+			return client, nil
+		})
+
+		err := s.worker.QueryStreamSegments(ctx, &querypb.QueryRequest{}, server)
+		s.Error(err)
+	})
+
+	s.Run("client_return_error", func() {
+		defer func() { s.mockClient.ExpectedCalls = nil }()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		client := streamrpc.NewLocalQueryClient(ctx)
+		server := streamrpc.NewConcurrentQueryStreamServer(client.CreateServer())
+
+		s.mockClient.EXPECT().QueryStreamSegments(
+			mock.Anything,
+			mock.AnythingOfType("*querypb.QueryRequest"),
+		).Return(nil, errors.New("mocked error"))
+
+		go func() {
+			err := s.worker.QueryStreamSegments(ctx, &querypb.QueryRequest{}, server)
+			server.Send(&internalpb.RetrieveResults{
+				Status: merr.Status(err),
+			})
+		}()
+
+		result, err := client.Recv()
+		s.NoError(err)
+
+		err = merr.Error(result.GetStatus())
+		// Check result
+		s.Error(err)
+	})
+
+	s.Run("client_return_fail_status", func() {
+		defer func() { s.mockClient.ExpectedCalls = nil }()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		client := streamrpc.NewLocalQueryClient(ctx)
+		server := client.CreateServer()
+
+		s.mockClient.EXPECT().QueryStreamSegments(
+			mock.Anything,
+			mock.AnythingOfType("*querypb.QueryRequest"),
+		).RunAndReturn(func(ctx context.Context, request *querypb.QueryRequest, option ...grpc.CallOption) (querypb.QueryNode_QueryStreamSegmentsClient, error) {
+			client := streamrpc.NewLocalQueryClient(ctx)
+			server := client.CreateServer()
+
+			err := server.Send(&internalpb.RetrieveResults{
+				Status: &commonpb.Status{ErrorCode: commonpb.ErrorCode_UnexpectedError},
+			})
+			s.NoError(err)
+
+			err = server.FinishSend(nil)
+			s.NoError(err)
+			return client, nil
+		})
+
+		go func() {
+			err := s.worker.QueryStreamSegments(ctx, &querypb.QueryRequest{}, server)
+			server.Send(&internalpb.RetrieveResults{
+				Status: merr.Status(err),
+			})
+		}()
+
+		result, err := client.Recv()
+		s.NoError(err)
+
+		err = merr.Error(result.GetStatus())
+		// Check result
+		s.Error(err)
 	})
 }
 
@@ -394,9 +580,9 @@ func (s *RemoteWorkerSuite) TestGetStatistics() {
 func (s *RemoteWorkerSuite) TestBasic() {
 	s.True(s.worker.IsHealthy())
 
-	s.mockClient.EXPECT().Stop().Return(nil)
+	s.mockClient.EXPECT().Close().Return(nil)
 	s.worker.Stop()
-	s.mockClient.AssertCalled(s.T(), "Stop")
+	s.mockClient.AssertCalled(s.T(), "Close")
 }
 
 func TestRemoteWorker(t *testing.T) {
@@ -404,8 +590,7 @@ func TestRemoteWorker(t *testing.T) {
 }
 
 func TestNewRemoteWorker(t *testing.T) {
-	client := &mocks.MockQueryNode{}
-
+	client := mocks.NewMockQueryNodeClient(t)
 	w := NewRemoteWorker(client)
 
 	rw, ok := w.(*remoteWorker)

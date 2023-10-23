@@ -23,7 +23,6 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/errors"
-
 	"github.com/stretchr/testify/assert"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
@@ -132,8 +131,10 @@ func buildVectorChunkManager(ctx context.Context, localPath string, localCacheEn
 	return vcm, nil
 }
 
-var Params = paramtable.Get()
-var localPath = "/tmp/milvus_test/chunkmanager/"
+var (
+	Params    = paramtable.Get()
+	localPath = "/tmp/milvus_test/chunkmanager/"
+)
 
 func TestMain(m *testing.M) {
 	paramtable.Init()
@@ -322,6 +323,7 @@ func (m *mockFailedChunkManager) RemoveWithPrefix(ctx context.Context, prefix st
 	}
 	return nil
 }
+
 func (m *mockFailedChunkManager) MultiRemove(ctx context.Context, key []string) error {
 	if m.fail {
 		return errors.New("multi remove error")
@@ -465,7 +467,7 @@ func TestVectorChunkManager_Read(t *testing.T) {
 
 			r, err = vcm.Mmap(ctx, "not exist")
 			assert.Error(t, err)
-			assert.Nil(t, nil)
+			assert.Nil(t, r)
 		}
 
 		content, err = vcm.ReadAt(ctx, "109", 9999, 8*4)

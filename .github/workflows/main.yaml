@@ -67,7 +67,7 @@ jobs:
       - name: 'Setup Use USE_ASAN'
         if: steps.changed-files-cpp.outputs.any_changed == 'true'
         run: |
-          echo "useasan=true" >> $GITHUB_ENV
+          echo "useasan=ON" >> $GITHUB_ENV
           echo "Setup USE_ASAN to true since cpp file(s) changed"
       - name: 'Generate CCache Hash'
         env:
@@ -123,6 +123,12 @@ jobs:
           path: .docker/amd64-ubuntu${{ matrix.ubuntu }}-conan
           key: ubuntu${{ matrix.ubuntu }}-conan-${{ hashFiles('internal/core/conanfile.*') }}
           restore-keys: ubuntu${{ matrix.ubuntu }}-conan-
+      - name: Start Service
+        shell: bash
+        run: |
+          docker-compose up -d azurite
+#      - name: 'Setup upterm session'
+#        uses: lhotari/action-upterm@v1
       - name: UT
         run: |
           chmod +x build/builder.sh
@@ -166,7 +172,9 @@ jobs:
       - name: Start Service
         shell: bash
         run: |
-          docker-compose up -d pulsar etcd minio
+          docker-compose up -d pulsar etcd minio azurite
+#      - name: 'Setup upterm session'
+#        uses: lhotari/action-upterm@v1
       - name: UT
         run: |
           chmod +x build/builder.sh

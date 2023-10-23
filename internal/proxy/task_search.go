@@ -63,7 +63,7 @@ type searchTask struct {
 	offset    int64
 	resultBuf *typeutil.ConcurrentSet[*internalpb.SearchResults]
 
-	qc   types.QueryCoord
+	qc   types.QueryCoordClient
 	node types.ProxyComponent
 	lb   LBPolicy
 }
@@ -507,7 +507,7 @@ func (t *searchTask) PostExecute(ctx context.Context) error {
 	return nil
 }
 
-func (t *searchTask) searchShard(ctx context.Context, nodeID int64, qn types.QueryNode, channelIDs ...string) error {
+func (t *searchTask) searchShard(ctx context.Context, nodeID int64, qn types.QueryNodeClient, channelIDs ...string) error {
 	searchReq := typeutil.Clone(t.SearchRequest)
 	searchReq.GetBase().TargetID = nodeID
 	req := &querypb.SearchRequest{
@@ -639,10 +639,7 @@ func (t *searchTask) Requery() error {
 
 func (t *searchTask) fillInEmptyResult(numQueries int64) {
 	t.result = &milvuspb.SearchResults{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-			Reason:    "search result is empty",
-		},
+		Status:         merr.Success("search result is empty"),
 		CollectionName: t.collectionName,
 		Results: &schemapb.SearchResultData{
 			NumQueries: numQueries,
@@ -770,7 +767,7 @@ func reduceSearchResultData(ctx context.Context, subSearchResultData []*schemapb
 		zap.String("metricType", metricType))
 
 	ret := &milvuspb.SearchResults{
-		Status: merr.Status(nil),
+		Status: merr.Success(),
 		Results: &schemapb.SearchResultData{
 			NumQueries: nq,
 			TopK:       topk,
@@ -799,10 +796,12 @@ func reduceSearchResultData(ctx context.Context, subSearchResultData []*schemapb
 	}
 
 	for i, sData := range subSearchResultData {
+		pkLength := typeutil.GetSizeOfIDs(sData.GetIds())
 		log.Ctx(ctx).Debug("subSearchResultData",
 			zap.Int("result No.", i),
 			zap.Int64("nq", sData.NumQueries),
 			zap.Int64("topk", sData.TopK),
+			zap.Int("length of pks", pkLength),
 			zap.Any("length of FieldsData", len(sData.FieldsData)))
 		if err := checkSearchResultData(sData, nq, topk); err != nil {
 			log.Ctx(ctx).Warn("invalid search results", zap.Error(err))
@@ -828,9 +827,10 @@ func reduceSearchResultData(ctx context.Context, subSearchResultData []*schemapb
 		realTopK   int64 = -1
 	)
 
+	var retSize int64
+	maxOutputSize := paramtable.Get().QuotaConfig.MaxOutputSize.GetAsInt64()
 	// reducing nq * topk results
 	for i := int64(0); i < nq; i++ {
-
 		var (
 			// cursor of current data of each subSearch for merging the j-th data of TopK.
 			// sum(cursors) == j
@@ -865,7 +865,7 @@ func reduceSearchResultData(ctx context.Context, subSearchResultData []*schemapb
 
 			// remove duplicates
 			if _, ok := idSet[id]; !ok {
-				typeutil.AppendFieldData(ret.Results.FieldsData, subSearchResultData[subSearchIdx].FieldsData, resultDataIdx)
+				retSize += typeutil.AppendFieldData(ret.Results.FieldsData, subSearchResultData[subSearchIdx].FieldsData, resultDataIdx)
 				typeutil.AppendPKs(ret.Results.Ids, id)
 				ret.Results.Scores = append(ret.Results.Scores, score)
 				idSet[id] = struct{}{}
@@ -884,8 +884,8 @@ func reduceSearchResultData(ctx context.Context, subSearchResultData []*schemapb
 		ret.Results.Topks = append(ret.Results.Topks, realTopK)
 
 		// limit search result to avoid oom
-		if int64(proto.Size(ret)) > paramtable.Get().QuotaConfig.MaxOutputSize.GetAsInt64() {
-			return nil, fmt.Errorf("search results exceed the maxOutputSize Limit %d", paramtable.Get().QuotaConfig.MaxOutputSize.GetAsInt64())
+		if retSize > maxOutputSize {
+			return nil, fmt.Errorf("search results exceed the maxOutputSize Limit %d", maxOutputSize)
 		}
 	}
 	log.Ctx(ctx).Debug("skip duplicated search result", zap.Int64("count", skipDupCnt))

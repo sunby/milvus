@@ -8,11 +8,12 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper/nmq"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
-	"github.com/stretchr/testify/assert"
 )
 
 func BenchmarkProduceAndConsumeNatsMQ(b *testing.B) {
@@ -25,7 +26,7 @@ func BenchmarkProduceAndConsumeNatsMQ(b *testing.B) {
 	cfg.Opts.StoreDir = storeDir
 	nmq.MustInitNatsMQ(cfg)
 
-	client, err := nmq.NewClientWithDefaultOptions()
+	client, err := nmq.NewClientWithDefaultOptions(context.Background())
 	if err != nil {
 		panic(err)
 	}

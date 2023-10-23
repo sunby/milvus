@@ -28,6 +28,7 @@ import (
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/retry"
 	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
@@ -99,6 +100,7 @@ func (dn *deleteNode) Operate(in []Msg) []Msg {
 		log.Debug("Buffer delete request in DataNode", zap.String("traceID", traceID))
 		tmpSegIDs, err := dn.bufferDeleteMsg(msg, fgMsg.timeRange, fgMsg.startPositions[0], fgMsg.endPositions[0])
 		if err != nil {
+			// should not happen
 			// error occurs only when deleteMsg is misaligned, should not happen
 			log.Fatal("failed to buffer delete msg", zap.String("traceID", traceID), zap.Error(err))
 		}
@@ -127,6 +129,10 @@ func (dn *deleteNode) Operate(in []Msg) []Msg {
 					return dn.flushManager.flushDelData(buf, segmentToFlush, fgMsg.endPositions[0])
 				}, getFlowGraphRetryOpt())
 				if err != nil {
+					if merr.IsCanceledOrTimeout(err) {
+						log.Warn("skip syncing delete data for context done", zap.Int64("segmentID", segmentToFlush))
+						continue
+					}
 					log.Fatal("failed to flush delete data", zap.Int64("segmentID", segmentToFlush), zap.Error(err))
 				}
 				// remove delete buf
@@ -172,7 +178,8 @@ func (dn *deleteNode) bufferDeleteMsg(msg *msgstream.DeleteMsg, tr TimeRange, st
 // If the key may exist in the segment, returns it in map.
 // If the key not exist in the segment, the segment is filter out.
 func (dn *deleteNode) filterSegmentByPK(partID UniqueID, pks []primaryKey, tss []Timestamp) (
-	map[UniqueID][]primaryKey, map[UniqueID][]uint64) {
+	map[UniqueID][]primaryKey, map[UniqueID][]uint64,
+) {
 	segID2Pks := make(map[UniqueID][]primaryKey)
 	segID2Tss := make(map[UniqueID][]uint64)
 	segments := dn.channel.filterSegments(partID)
@@ -191,8 +198,8 @@ func (dn *deleteNode) filterSegmentByPK(partID UniqueID, pks []primaryKey, tss [
 
 func newDeleteNode(ctx context.Context, fm flushManager, manager *DeltaBufferManager, sig chan<- string, config *nodeConfig) (*deleteNode, error) {
 	baseNode := BaseNode{}
-	baseNode.SetMaxQueueLength(config.maxQueueLength)
-	baseNode.SetMaxParallelism(config.maxParallelism)
+	baseNode.SetMaxQueueLength(Params.DataNodeCfg.FlowGraphMaxQueueLength.GetAsInt32())
+	baseNode.SetMaxParallelism(Params.DataNodeCfg.FlowGraphMaxParallelism.GetAsInt32())
 
 	return &deleteNode{
 		ctx:              ctx,

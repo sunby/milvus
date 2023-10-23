@@ -25,28 +25,31 @@
 #include "Meta.h"
 #include "common/Utils.h"
 #include "common/Slice.h"
+#include "common/Types.h"
 #include "index/Utils.h"
 
 namespace milvus::index {
 
 template <typename T>
 inline ScalarIndexSort<T>::ScalarIndexSort(
-    storage::FileManagerImplPtr file_manager)
+    const storage::FileManagerContext& file_manager_context)
     : is_built_(false), data_() {
-    if (file_manager != nullptr) {
-        file_manager_ = std::dynamic_pointer_cast<storage::MemFileManagerImpl>(
-            file_manager);
+    if (file_manager_context.Valid()) {
+        file_manager_ =
+            std::make_shared<storage::MemFileManagerImpl>(file_manager_context);
+        AssertInfo(file_manager_ != nullptr, "create file manager failed!");
     }
 }
 
 template <typename T>
 inline ScalarIndexSort<T>::ScalarIndexSort(
-    storage::FileManagerImplPtr file_manager,
+    const storage::FileManagerContext& file_manager_context,
     std::shared_ptr<milvus_storage::Space> space)
     : is_built_(false), data_(), space_(space) {
-    if (file_manager != nullptr) {
-        file_manager_ = std::dynamic_pointer_cast<storage::MemFileManagerImpl>(
-            file_manager);
+    if (file_manager_context.Valid()) {
+        file_manager_ =
+            std::make_shared<storage::MemFileManagerImpl>(file_manager_context, space_);
+        AssertInfo(file_manager_ != nullptr, "create file manager failed!");
     }
 }
 template <typename T>
@@ -71,9 +74,8 @@ ScalarIndexSort<T>::Build(const Config& config) {
         total_num_rows += data->get_num_rows();
     }
     if (total_num_rows == 0) {
-        // todo: throw an exception
-        throw std::invalid_argument(
-            "ScalarIndexSort cannot build null values!");
+        throw SegcoreError(DataIsEmpty,
+                           "ScalarIndexSort cannot build null values!");
     }
 
     data_.reserve(total_num_rows);
@@ -101,9 +103,8 @@ ScalarIndexSort<T>::Build(size_t n, const T* values) {
     if (is_built_)
         return;
     if (n == 0) {
-        // todo: throw an exception
-        throw std::invalid_argument(
-            "ScalarIndexSort cannot build null values!");
+        throw SegcoreError(DataIsEmpty,
+                           "ScalarIndexSort cannot build null values!");
     }
     data_.reserve(n);
     idx_to_offsets_.resize(n);
@@ -226,14 +227,14 @@ ScalarIndexSort<T>::LoadV2(const Config& config) {
     for (auto& file_name : index_files.value()) {
         auto res = space_->GetBlobByteSize(file_name);
         if (!res.ok()) {
-            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+            PanicInfo(S3Error,
                           "unable to read index blob");
         }
         auto index_blob_data =
             std::shared_ptr<uint8_t[]>(new uint8_t[res.value()]);
         auto status = space_->ReadBlob(file_name, index_blob_data.get());
         if (!status.ok()) {
-            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
+            PanicInfo(S3Error,
                           "unable to read index blob");
         }
         auto raw_index_blob =
@@ -322,8 +323,8 @@ ScalarIndexSort<T>::Range(const T value, const OpType op) {
                 data_.begin(), data_.end(), IndexStructure<T>(value));
             break;
         default:
-            throw std::invalid_argument(std::string("Invalid OperatorType: ") +
-                                        std::to_string((int)op) + "!");
+            throw SegcoreError(OpTypeInvalid,
+                               fmt::format("Invalid OperatorType: {}", op));
     }
     for (; lb < ub; ++lb) {
         bitset[lb->idx_] = true;

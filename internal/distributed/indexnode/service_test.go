@@ -20,7 +20,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
@@ -28,12 +27,10 @@ import (
 	"github.com/milvus-io/milvus/internal/indexnode"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
-	"github.com/milvus-io/milvus/pkg/util/etcd"
+	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
-
-var ParamsGlobal paramtable.ComponentParam
 
 func TestIndexNodeServer(t *testing.T) {
 	paramtable.Init()
@@ -44,18 +41,7 @@ func TestIndexNodeServer(t *testing.T) {
 	assert.NotNil(t, server)
 
 	inm := indexnode.NewIndexNodeMock()
-	ParamsGlobal.Init(paramtable.NewBaseTable(paramtable.SkipRemote(true)))
-	etcdCli, err := etcd.GetEtcdClient(
-		ParamsGlobal.EtcdCfg.UseEmbedEtcd.GetAsBool(),
-		ParamsGlobal.EtcdCfg.EtcdUseSSL.GetAsBool(),
-		ParamsGlobal.EtcdCfg.Endpoints.GetAsStrings(),
-		ParamsGlobal.EtcdCfg.EtcdTLSCert.GetValue(),
-		ParamsGlobal.EtcdCfg.EtcdTLSKey.GetValue(),
-		ParamsGlobal.EtcdCfg.EtcdTLSCACert.GetValue(),
-		ParamsGlobal.EtcdCfg.EtcdTLSMinVersion.GetValue())
-	assert.NoError(t, err)
-	inm.SetEtcdClient(etcdCli)
-	err = server.SetClient(inm)
+	err = server.setServer(inm)
 	assert.NoError(t, err)
 
 	err = server.Run()
@@ -72,7 +58,7 @@ func TestIndexNodeServer(t *testing.T) {
 		req := &internalpb.GetStatisticsChannelRequest{}
 		resp, err := server.GetStatisticsChannel(ctx, req)
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	})
 
 	t.Run("CreateJob", func(t *testing.T) {
@@ -91,7 +77,7 @@ func TestIndexNodeServer(t *testing.T) {
 		req := &indexpb.QueryJobsRequest{}
 		resp, err := server.QueryJobs(ctx, req)
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	})
 
 	t.Run("DropJobs", func(t *testing.T) {
@@ -107,7 +93,7 @@ func TestIndexNodeServer(t *testing.T) {
 		}
 		resp, err := server.ShowConfigurations(ctx, req)
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	})
 
 	t.Run("GetMetrics", func(t *testing.T) {
@@ -115,14 +101,14 @@ func TestIndexNodeServer(t *testing.T) {
 		assert.NoError(t, err)
 		resp, err := server.GetMetrics(ctx, req)
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	})
 
 	t.Run("GetTaskSlots", func(t *testing.T) {
 		req := &indexpb.GetJobStatsRequest{}
 		resp, err := server.GetJobStats(ctx, req)
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
 	})
 
 	err = server.Stop()

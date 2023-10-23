@@ -16,8 +16,6 @@
 
 #pragma once
 
-#if defined(__linux__) || defined(__APPLE__)
-
 #include <marisa.h>
 #include "index/StringIndex.h"
 #include <string>
@@ -32,10 +30,12 @@ namespace milvus::index {
 class StringIndexMarisa : public StringIndex {
  public:
     explicit StringIndexMarisa(
-        storage::FileManagerImplPtr file_manager = nullptr);
+        const storage::FileManagerContext& file_manager_context =
+            storage::FileManagerContext());
 
-    explicit StringIndexMarisa(storage::FileManagerImplPtr file_manager,
-                               std::shared_ptr<milvus_storage::Space> space);
+    explicit StringIndexMarisa(
+        const storage::FileManagerContext& file_manager_context,
+        std::shared_ptr<milvus_storage::Space> space);
 
     int64_t
     Size() override;
@@ -123,15 +123,15 @@ class StringIndexMarisa : public StringIndex {
 using StringIndexMarisaPtr = std::unique_ptr<StringIndexMarisa>;
 
 inline StringIndexPtr
-CreateStringIndexMarisa(storage::FileManagerImplPtr file_manager = nullptr) {
-    return std::make_unique<StringIndexMarisa>(file_manager);
+CreateStringIndexMarisa(
+    const storage::FileManagerContext& file_manager_context =
+        storage::FileManagerContext()) {
+    return std::make_unique<StringIndexMarisa>(file_manager_context);
 }
 
 inline StringIndexPtr
-CreateStringIndexMarisa(storage::FileManagerImplPtr file_manager,
+CreateStringIndexMarisa(const storage::FileManagerContext& file_manager_context,
                         std::shared_ptr<milvus_storage::Space> space) {
-    return std::make_unique<StringIndexMarisa>(file_manager, space);
+    return std::make_unique<StringIndexMarisa>(file_manager_context, space);
 }
 }  // namespace milvus::index
-
-#endif

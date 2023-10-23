@@ -40,6 +40,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/indexparamcheck"
 	"github.com/milvus-io/milvus/pkg/util/indexparams"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/timerecord"
 )
@@ -52,11 +53,12 @@ var (
 type Blob = storage.Blob
 
 type taskInfo struct {
-	cancel         context.CancelFunc
-	state          commonpb.IndexState
-	fileKeys       []string
-	serializedSize uint64
-	failReason     string
+	cancel              context.CancelFunc
+	state               commonpb.IndexState
+	fileKeys            []string
+	serializedSize      uint64
+	failReason          string
+	currentIndexVersion int32
 
 	// task statistics
 	statistic *indexpb.JobInfo
@@ -206,28 +208,29 @@ type indexBuildTask struct {
 	cancel context.CancelFunc
 	ctx    context.Context
 
-	cm             storage.ChunkManager
-	index          indexcgowrapper.CodecIndex
-	savePaths      []string
-	req            *indexpb.CreateJobRequest
-	BuildID        UniqueID
-	nodeID         UniqueID
-	ClusterID      string
-	collectionID   UniqueID
-	partitionID    UniqueID
-	segmentID      UniqueID
-	fieldID        UniqueID
-	fieldName      string
-	fieldType      schemapb.DataType
-	fieldData      storage.FieldData
-	indexBlobs     []*storage.Blob
-	newTypeParams  map[string]string
-	newIndexParams map[string]string
-	serializedSize uint64
-	tr             *timerecord.TimeRecorder
-	queueDur       time.Duration
-	statistic      indexpb.JobInfo
-	node           *IndexNode
+	cm                  storage.ChunkManager
+	index               indexcgowrapper.CodecIndex
+	savePaths           []string
+	req                 *indexpb.CreateJobRequest
+	currentIndexVersion int32
+	BuildID             UniqueID
+	nodeID              UniqueID
+	ClusterID           string
+	collectionID        UniqueID
+	partitionID         UniqueID
+	segmentID           UniqueID
+	fieldID             UniqueID
+	fieldName           string
+	fieldType           schemapb.DataType
+	fieldData           storage.FieldData
+	indexBlobs          []*storage.Blob
+	newTypeParams       map[string]string
+	newIndexParams      map[string]string
+	serializedSize      uint64
+	tr                  *timerecord.TimeRecorder
+	queueDur            time.Duration
+	statistic           indexpb.JobInfo
+	node                *IndexNode
 }
 
 func (it *indexBuildTask) Reset() {
@@ -313,8 +316,8 @@ func (it *indexBuildTask) LoadData(ctx context.Context) error {
 	getValueByPath := func(path string) ([]byte, error) {
 		data, err := it.cm.Read(ctx, path)
 		if err != nil {
-			if errors.Is(err, ErrNoSuchKey) {
-				return nil, ErrNoSuchKey
+			if errors.Is(err, merr.ErrIoKeyNotFound) {
+				return nil, err
 			}
 			return nil, err
 		}
@@ -354,7 +357,7 @@ func (it *indexBuildTask) LoadData(ctx context.Context) error {
 	}
 
 	loadFieldDataLatency := it.tr.CtxRecord(ctx, "load field data done")
-	metrics.IndexNodeLoadFieldLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10)).Observe(float64(loadFieldDataLatency.Milliseconds()))
+	metrics.IndexNodeLoadFieldLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10)).Observe(loadFieldDataLatency.Seconds())
 
 	err = it.decodeBlobs(ctx, blobs)
 	if err != nil {
@@ -463,6 +466,12 @@ func (it *indexBuildTask) BuildIndex(ctx context.Context) error {
 		}
 	}
 
+	it.currentIndexVersion = getCurrentIndexVersion(it.req.GetCurrentIndexVersion())
+	if err := buildIndexInfo.AppendIndexEngineVersion(it.currentIndexVersion); err != nil {
+		log.Ctx(ctx).Warn("append index engine version failed", zap.Error(err))
+		return err
+	}
+
 	it.index, err = indexcgowrapper.CreateIndex(ctx, buildIndexInfo)
 	if err != nil {
 		if it.index != nil && it.index.CleanLocalData() != nil {
@@ -475,14 +484,13 @@ func (it *indexBuildTask) BuildIndex(ctx context.Context) error {
 	}
 
 	buildIndexLatency := it.tr.RecordSpan()
-	metrics.IndexNodeKnowhereBuildIndexLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10)).Observe(float64(buildIndexLatency.Milliseconds()))
+	metrics.IndexNodeKnowhereBuildIndexLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10)).Observe(buildIndexLatency.Seconds())
 
 	log.Ctx(ctx).Info("Successfully build index", zap.Int64("buildID", it.BuildID), zap.Int64("Collection", it.collectionID), zap.Int64("SegmentID", it.segmentID))
 	return nil
 }
 
 func (it *indexBuildTask) SaveIndexFiles(ctx context.Context) error {
-
 	gcIndex := func() {
 		if err := it.index.Delete(); err != nil {
 			log.Ctx(ctx).Error("IndexNode indexBuildTask Execute CIndexDelete failed", zap.Error(err))
@@ -495,7 +503,7 @@ func (it *indexBuildTask) SaveIndexFiles(ctx context.Context) error {
 		return err
 	}
 	encodeIndexFileDur := it.tr.Record("index serialize and upload done")
-	metrics.IndexNodeEncodeIndexFileLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10)).Observe(float64(encodeIndexFileDur.Milliseconds()))
+	metrics.IndexNodeEncodeIndexFileLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10)).Observe(encodeIndexFileDur.Seconds())
 
 	// early release index for gc, and we can ensure that Delete is idempotent.
 	gcIndex()
@@ -511,10 +519,10 @@ func (it *indexBuildTask) SaveIndexFiles(ctx context.Context) error {
 	}
 
 	it.statistic.EndTime = time.Now().UnixMicro()
-	it.node.storeIndexFilesAndStatistic(it.ClusterID, it.BuildID, saveFileKeys, it.serializedSize, &it.statistic)
+	it.node.storeIndexFilesAndStatistic(it.ClusterID, it.BuildID, saveFileKeys, it.serializedSize, &it.statistic, it.currentIndexVersion)
 	log.Ctx(ctx).Debug("save index files done", zap.Strings("IndexFiles", saveFileKeys))
 	saveIndexFileDur := it.tr.RecordSpan()
-	metrics.IndexNodeSaveIndexFileLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10)).Observe(float64(saveIndexFileDur.Milliseconds()))
+	metrics.IndexNodeSaveIndexFileLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10)).Observe(saveIndexFileDur.Seconds())
 	it.tr.Elapse("index building all done")
 	log.Ctx(ctx).Info("Successfully save index files", zap.Int64("buildID", it.BuildID), zap.Int64("Collection", it.collectionID),
 		zap.Int64("partition", it.partitionID), zap.Int64("SegmentId", it.segmentID))
@@ -524,12 +532,12 @@ func (it *indexBuildTask) SaveIndexFiles(ctx context.Context) error {
 func (it *indexBuildTask) parseFieldMetaFromBinlog(ctx context.Context) error {
 	toLoadDataPaths := it.req.GetDataPaths()
 	if len(toLoadDataPaths) == 0 {
-		return ErrEmptyInsertPaths
+		return merr.WrapErrParameterInvalidMsg("data insert path must be not empty")
 	}
 	data, err := it.cm.Read(ctx, toLoadDataPaths[0])
 	if err != nil {
-		if errors.Is(err, ErrNoSuchKey) {
-			return ErrNoSuchKey
+		if errors.Is(err, merr.ErrIoKeyNotFound) {
+			return err
 		}
 		return err
 	}
@@ -540,7 +548,7 @@ func (it *indexBuildTask) parseFieldMetaFromBinlog(ctx context.Context) error {
 		return err
 	}
 	if len(insertData.Data) != 1 {
-		return errors.New("we expect only one field in deserialized insert data")
+		return merr.WrapErrParameterInvalidMsg("we expect only one field in deserialized insert data")
 	}
 
 	it.collectionID = collectionID
@@ -561,11 +569,10 @@ func (it *indexBuildTask) decodeBlobs(ctx context.Context, blobs []*storage.Blob
 	if err2 != nil {
 		return err2
 	}
-	decodeDuration := it.tr.RecordSpan().Milliseconds()
-	metrics.IndexNodeDecodeFieldLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10)).Observe(float64(decodeDuration))
+	metrics.IndexNodeDecodeFieldLatency.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10)).Observe(it.tr.RecordSpan().Seconds())
 
 	if len(insertData.Data) != 1 {
-		return errors.New("we expect only one field in deserialized insert data")
+		return merr.WrapErrParameterInvalidMsg("we expect only one field in deserialized insert data")
 	}
 	it.collectionID = collectionID
 	it.partitionID = partitionID

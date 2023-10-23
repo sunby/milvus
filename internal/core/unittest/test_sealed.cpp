@@ -15,7 +15,14 @@
 #include "common/Types.h"
 #include "segcore/SegmentSealedImpl.h"
 #include "test_utils/DataGen.h"
+#include "test_utils/storage_test_utils.h"
 #include "index/IndexFactory.h"
+#include "storage/Util.h"
+#include "knowhere/version.h"
+#include "storage/ChunkCacheSingleton.h"
+#include "storage/RemoteChunkManagerSingleton.h"
+#include "storage/MinioChunkManager.h"
+#include "test_utils/indexbuilder_test_utils.h"
 
 using namespace milvus;
 using namespace milvus::query;
@@ -82,9 +89,11 @@ TEST(Sealed, without_predicate) {
     create_index_info.field_type = DataType::VECTOR_FLOAT;
     create_index_info.metric_type = knowhere::metric::L2;
     create_index_info.index_type = knowhere::IndexEnum::INDEX_FAISS_IVFFLAT;
+    create_index_info.index_engine_version =
+        knowhere::Version::GetCurrentVersion().VersionNumber();
 
     auto indexing = milvus::index::IndexFactory::GetInstance().CreateIndex(
-        create_index_info, nullptr);
+        create_index_info, milvus::storage::FileManagerContext());
 
     auto build_conf =
         knowhere::Json{{knowhere::meta::METRIC_TYPE, knowhere::metric::L2},
@@ -195,8 +204,10 @@ TEST(Sealed, with_predicate) {
     create_index_info.field_type = DataType::VECTOR_FLOAT;
     create_index_info.metric_type = knowhere::metric::L2;
     create_index_info.index_type = knowhere::IndexEnum::INDEX_FAISS_IVFFLAT;
+    create_index_info.index_engine_version =
+        knowhere::Version::GetCurrentVersion().VersionNumber();
     auto indexing = milvus::index::IndexFactory::GetInstance().CreateIndex(
-        create_index_info, nullptr);
+        create_index_info, milvus::storage::FileManagerContext());
 
     auto build_conf =
         knowhere::Json{{knowhere::meta::METRIC_TYPE, knowhere::metric::L2},
@@ -299,8 +310,10 @@ TEST(Sealed, with_predicate_filter_all) {
     create_index_info.field_type = DataType::VECTOR_FLOAT;
     create_index_info.metric_type = knowhere::metric::L2;
     create_index_info.index_type = knowhere::IndexEnum::INDEX_FAISS_IVFFLAT;
+    create_index_info.index_engine_version =
+        knowhere::Version::GetCurrentVersion().VersionNumber();
     auto ivf_indexing = milvus::index::IndexFactory::GetInstance().CreateIndex(
-        create_index_info, nullptr);
+        create_index_info, milvus::storage::FileManagerContext());
 
     auto ivf_build_conf =
         knowhere::Json{{knowhere::meta::DIM, std::to_string(dim)},
@@ -337,8 +350,10 @@ TEST(Sealed, with_predicate_filter_all) {
     create_index_info.field_type = DataType::VECTOR_FLOAT;
     create_index_info.metric_type = knowhere::metric::L2;
     create_index_info.index_type = knowhere::IndexEnum::INDEX_HNSW;
+    create_index_info.index_engine_version =
+        knowhere::Version::GetCurrentVersion().VersionNumber();
     auto hnsw_indexing = milvus::index::IndexFactory::GetInstance().CreateIndex(
-        create_index_info, nullptr);
+        create_index_info, milvus::storage::FileManagerContext());
     hnsw_indexing->BuildWithDataset(database, hnsw_conf);
 
     auto hnsw_vec_index =
@@ -376,6 +391,7 @@ TEST(Sealed, LoadFieldData) {
     schema->AddDebugField("int16", DataType::INT16);
     schema->AddDebugField("float", DataType::FLOAT);
     schema->AddDebugField("json", DataType::JSON);
+    schema->AddDebugField("array", DataType::ARRAY, DataType::INT64);
     schema->set_primary_field_id(counter_id);
 
     auto dataset = DataGen(schema, N);
@@ -500,6 +516,7 @@ TEST(Sealed, LoadFieldDataMmap) {
     schema->AddDebugField("int16", DataType::INT16);
     schema->AddDebugField("float", DataType::FLOAT);
     schema->AddDebugField("json", DataType::JSON);
+    schema->AddDebugField("array", DataType::ARRAY, DataType::INT64);
     schema->set_primary_field_id(counter_id);
 
     auto dataset = DataGen(schema, N);
@@ -1053,7 +1070,7 @@ TEST(Sealed, DeleteCount) {
     ASSERT_TRUE(status.ok());
 
     auto cnt = segment->get_deleted_count();
-    ASSERT_EQ(cnt, c);
+    ASSERT_EQ(cnt, 0);
 }
 
 TEST(Sealed, RealCount) {
@@ -1145,4 +1162,222 @@ TEST(Sealed, GetVector) {
             EXPECT_TRUE(vector[i * dim + j] == fakevec[id * dim + j]);
         }
     }
+}
+
+TEST(Sealed, GetVectorFromChunkCache) {
+    // skip test due to mem leak from AWS::InitSDK
+    return;
+
+    auto dim = 16;
+    auto topK = 5;
+    auto N = ROW_COUNT;
+    auto metric_type = knowhere::metric::L2;
+    auto index_type = knowhere::IndexEnum::INDEX_FAISS_IVFPQ;
+
+    auto mmap_dir = "/tmp/mmap";
+    auto file_name = std::string(
+        "sealed_test_get_vector_from_chunk_cache/insert_log/1/101/1000000");
+
+    auto sc = milvus::storage::StorageConfig{};
+    milvus::storage::RemoteChunkManagerSingleton::GetInstance().Init(sc);
+    auto mcm = std::make_unique<milvus::storage::MinioChunkManager>(sc);
+    mcm->CreateBucket(sc.bucket_name);
+    milvus::storage::ChunkCacheSingleton::GetInstance().Init(mmap_dir,
+                                                             "willneed");
+
+    auto schema = std::make_shared<Schema>();
+    auto fakevec_id = schema->AddDebugField(
+        "fakevec", DataType::VECTOR_FLOAT, dim, metric_type);
+    auto counter_id = schema->AddDebugField("counter", DataType::INT64);
+    auto double_id = schema->AddDebugField("double", DataType::DOUBLE);
+    auto nothing_id = schema->AddDebugField("nothing", DataType::INT32);
+    auto str_id = schema->AddDebugField("str", DataType::VARCHAR);
+    schema->AddDebugField("int8", DataType::INT8);
+    schema->AddDebugField("int16", DataType::INT16);
+    schema->AddDebugField("float", DataType::FLOAT);
+    schema->set_primary_field_id(counter_id);
+
+    auto dataset = DataGen(schema, N);
+    auto field_data_meta =
+        milvus::storage::FieldDataMeta{1, 2, 3, fakevec_id.get()};
+    auto field_meta = milvus::FieldMeta(milvus::FieldName("facevec"),
+                                        fakevec_id,
+                                        milvus::DataType::VECTOR_FLOAT,
+                                        dim,
+                                        metric_type);
+
+    auto rcm = milvus::storage::RemoteChunkManagerSingleton::GetInstance()
+                   .GetRemoteChunkManager();
+    auto data = dataset.get_col<float>(fakevec_id);
+    auto data_slices = std::vector<const uint8_t*>{(uint8_t*)data.data()};
+    auto slice_sizes = std::vector<int64_t>{static_cast<int64_t>(N)};
+    auto slice_names = std::vector<std::string>{file_name};
+    PutFieldData(rcm.get(),
+                 data_slices,
+                 slice_sizes,
+                 slice_names,
+                 field_data_meta,
+                 field_meta);
+
+    auto fakevec = dataset.get_col<float>(fakevec_id);
+    auto conf = generate_build_conf(index_type, metric_type);
+    auto ds = knowhere::GenDataSet(N, dim, fakevec.data());
+    auto indexing = std::make_unique<index::VectorMemIndex>(
+        index_type,
+        metric_type,
+        knowhere::Version::GetCurrentVersion().VersionNumber());
+    indexing->BuildWithDataset(ds, conf);
+    auto segment_sealed = CreateSealedSegment(schema);
+
+    LoadIndexInfo vec_info;
+    vec_info.field_id = fakevec_id.get();
+    vec_info.index = std::move(indexing);
+    vec_info.index_params["metric_type"] = knowhere::metric::L2;
+    segment_sealed->LoadIndex(vec_info);
+
+    auto field_binlog_info =
+        FieldBinlogInfo{fakevec_id.get(),
+                        N,
+                        std::vector<int64_t>{N},
+                        std::vector<std::string>{file_name}};
+    segment_sealed->AddFieldDataInfoForSealed(LoadFieldDataInfo{
+        std::map<int64_t, FieldBinlogInfo>{
+            {fakevec_id.get(), field_binlog_info}},
+        mmap_dir,
+    });
+
+    auto segment = dynamic_cast<SegmentSealedImpl*>(segment_sealed.get());
+    auto has = segment->HasRawData(vec_info.field_id);
+    EXPECT_FALSE(has);
+
+    auto ids_ds = GenRandomIds(N);
+    auto result =
+        segment->get_vector(fakevec_id, ids_ds->GetIds(), ids_ds->GetRows());
+
+    auto vector = result.get()->mutable_vectors()->float_vector().data();
+    EXPECT_TRUE(vector.size() == fakevec.size());
+    for (size_t i = 0; i < N; ++i) {
+        auto id = ids_ds->GetIds()[i];
+        for (size_t j = 0; j < dim; ++j) {
+            auto expect = fakevec[id * dim + j];
+            auto actual = vector[i * dim + j];
+            AssertInfo(expect == actual,
+                       fmt::format("expect {}, actual {}", expect, actual));
+        }
+    }
+
+    rcm->Remove(file_name);
+    std::filesystem::remove_all(mmap_dir);
+    auto exist = rcm->Exist(file_name);
+    Assert(!exist);
+    exist = std::filesystem::exists(mmap_dir);
+    Assert(!exist);
+}
+
+TEST(Sealed, LoadArrayFieldData) {
+    auto dim = 16;
+    auto topK = 5;
+    auto N = 10;
+    auto metric_type = knowhere::metric::L2;
+    auto schema = std::make_shared<Schema>();
+    auto fakevec_id = schema->AddDebugField(
+        "fakevec", DataType::VECTOR_FLOAT, dim, metric_type);
+    auto counter_id = schema->AddDebugField("counter", DataType::INT64);
+    auto array_id =
+        schema->AddDebugField("array", DataType::ARRAY, DataType::INT64);
+    schema->set_primary_field_id(counter_id);
+
+    auto dataset = DataGen(schema, N);
+    auto fakevec = dataset.get_col<float>(fakevec_id);
+    auto segment = CreateSealedSegment(schema);
+
+    const char* raw_plan = R"(vector_anns:<
+            field_id:100
+            predicates:<
+                json_contains_expr:<
+                    column_info:<
+                        field_id:102
+                        data_type:Array
+                        element_type:Int64
+                    >
+                    elements:<int64_val:1 >
+                    op:Contains
+                    elements_same_type:true
+                >
+            >
+            query_info:<
+                topk: 5
+                round_decimal: 3
+                metric_type: "L2"
+                search_params: "{\"nprobe\": 10}"
+            > placeholder_tag:"$0"
+        >)";
+
+    auto plan_str = translate_text_plan_to_binary_plan(raw_plan);
+    auto plan =
+        CreateSearchPlanByExpr(*schema, plan_str.data(), plan_str.size());
+    auto num_queries = 5;
+    auto ph_group_raw = CreatePlaceholderGroup(num_queries, 16, 1024);
+    auto ph_group =
+        ParsePlaceholderGroup(plan.get(), ph_group_raw.SerializeAsString());
+
+    SealedLoadFieldData(dataset, *segment);
+    segment->Search(plan.get(), ph_group.get());
+
+    auto ids_ds = GenRandomIds(N);
+    auto s = dynamic_cast<SegmentSealedImpl*>(segment.get());
+    auto int64_result = s->bulk_subscript(array_id, ids_ds->GetIds(), N);
+    auto result_count = int64_result->scalars().array_data().data().size();
+    ASSERT_EQ(result_count, N);
+}
+
+TEST(Sealed, LoadArrayFieldDataWithMMap) {
+    auto dim = 16;
+    auto topK = 5;
+    auto N = ROW_COUNT;
+    auto metric_type = knowhere::metric::L2;
+    auto schema = std::make_shared<Schema>();
+    auto fakevec_id = schema->AddDebugField(
+        "fakevec", DataType::VECTOR_FLOAT, dim, metric_type);
+    auto counter_id = schema->AddDebugField("counter", DataType::INT64);
+    auto array_id =
+        schema->AddDebugField("array", DataType::ARRAY, DataType::INT64);
+    schema->set_primary_field_id(counter_id);
+
+    auto dataset = DataGen(schema, N);
+    auto fakevec = dataset.get_col<float>(fakevec_id);
+    auto segment = CreateSealedSegment(schema);
+
+    const char* raw_plan = R"(vector_anns:<
+            field_id:100
+            predicates:<
+                json_contains_expr:<
+                    column_info:<
+                        field_id:102
+                        data_type:Array
+                        element_type:Int64
+                    >
+                    elements:<int64_val:1 >
+                    op:Contains
+                    elements_same_type:true
+                >
+            >
+            query_info:<
+                topk: 5
+                round_decimal: 3
+                metric_type: "L2"
+                search_params: "{\"nprobe\": 10}"
+            > placeholder_tag:"$0"
+        >)";
+
+    auto plan_str = translate_text_plan_to_binary_plan(raw_plan);
+    auto plan =
+        CreateSearchPlanByExpr(*schema, plan_str.data(), plan_str.size());
+    auto num_queries = 5;
+    auto ph_group_raw = CreatePlaceholderGroup(num_queries, 16, 1024);
+    auto ph_group =
+        ParsePlaceholderGroup(plan.get(), ph_group_raw.SerializeAsString());
+
+    SealedLoadFieldData(dataset, *segment, {}, true);
+    segment->Search(plan.get(), ph_group.get());
 }

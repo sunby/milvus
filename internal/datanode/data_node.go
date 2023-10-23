@@ -25,25 +25,20 @@ import (
 	"io"
 	"math/rand"
 	"os"
-	"path"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/cockroachdb/errors"
-	"github.com/golang/protobuf/proto"
-	v3rpc "go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus/internal/datanode/allocator"
+	"github.com/milvus-io/milvus/internal/datanode/broker"
 	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
-	"github.com/milvus-io/milvus/internal/proto/datapb"
-	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/dependency"
@@ -51,7 +46,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/mq/msgdispatcher"
-	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
 	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
@@ -60,15 +54,8 @@ import (
 )
 
 const (
-	// RPCConnectionTimeout is used to set the timeout for rpc request
-	RPCConnectionTimeout = 30 * time.Second
-
 	// ConnectEtcdMaxRetryTime is used to limit the max retry time for connection etcd
 	ConnectEtcdMaxRetryTime = 100
-
-	// ImportCallTimeout is the timeout used in Import() method calls
-	// This value is equal to RootCoord's task expire time
-	ImportCallTimeout = 15 * 60 * time.Second
 )
 
 var getFlowGraphServiceAttempts = uint(50)
@@ -87,8 +74,7 @@ var Params *paramtable.ComponentParam = paramtable.Get()
 //	`etcdCli`   is a connection of etcd
 //	`rootCoord` is a grpc client of root coordinator.
 //	`dataCoord` is a grpc client of data service.
-//	`NodeID` is unique to each datanode.
-//	`State` is current statement of this data node, indicating whether it's healthy.
+//	`stateCode` is current statement of this data node, indicating whether it's healthy.
 //
 //	`clearSignal` is a signal channel for releasing the flowgraph resources.
 //	`segmentCache` stores all flushing and flushed segments.
@@ -107,14 +93,15 @@ type DataNode struct {
 
 	etcdCli   *clientv3.Client
 	address   string
-	rootCoord types.RootCoord
-	dataCoord types.DataCoord
+	rootCoord types.RootCoordClient
+	dataCoord types.DataCoordClient
+	broker    broker.Broker
 
-	//call once
+	// call once
 	initOnce     sync.Once
 	startOnce    sync.Once
 	stopOnce     sync.Once
-	wg           sync.WaitGroup
+	stopWaiter   sync.WaitGroup
 	sessionMu    sync.Mutex // to fix data race
 	session      *sessionutil.Session
 	watchKv      kv.WatchKV
@@ -167,8 +154,8 @@ func (node *DataNode) SetEtcdClient(etcdCli *clientv3.Client) {
 	node.etcdCli = etcdCli
 }
 
-// SetRootCoord sets RootCoord's grpc client, error is returned if repeatedly set.
-func (node *DataNode) SetRootCoord(rc types.RootCoord) error {
+// SetRootCoordClient sets RootCoord's grpc client, error is returned if repeatedly set.
+func (node *DataNode) SetRootCoordClient(rc types.RootCoordClient) error {
 	switch {
 	case rc == nil, node.rootCoord != nil:
 		return errors.New("nil parameter or repeatedly set")
@@ -178,8 +165,8 @@ func (node *DataNode) SetRootCoord(rc types.RootCoord) error {
 	}
 }
 
-// SetDataCoord sets data service's grpc client, error is returned if repeatedly set.
-func (node *DataNode) SetDataCoord(ds types.DataCoord) error {
+// SetDataCoordClient sets data service's grpc client, error is returned if repeatedly set.
+func (node *DataNode) SetDataCoordClient(ds types.DataCoordClient) error {
 	switch {
 	case ds == nil, node.dataCoord != nil:
 		return errors.New("nil parameter or repeatedly set")
@@ -219,6 +206,7 @@ func (node *DataNode) initSession() error {
 		return errors.New("failed to initialize session")
 	}
 	node.session.Init(typeutil.DataNodeRole, node.address, false, true)
+	sessionutil.SaveServerInfo(typeutil.DataNodeRole, node.session.ServerID)
 	return nil
 }
 
@@ -245,6 +233,8 @@ func (node *DataNode) Init() error {
 			return
 		}
 
+		node.broker = broker.NewCoordBroker(node.rootCoord, node.dataCoord)
+
 		err := node.initRateCollector()
 		if err != nil {
 			log.Error("DataNode server init rateCollector failed", zap.Int64("node ID", paramtable.GetNodeID()), zap.Error(err))
@@ -269,70 +259,8 @@ func (node *DataNode) Init() error {
 		node.factory.Init(Params)
 		log.Info("DataNode server init succeeded",
 			zap.String("MsgChannelSubName", Params.CommonCfg.DataNodeSubName.GetValue()))
-
 	})
 	return initError
-}
-
-// StartWatchChannels start loop to watch channel allocation status via kv(etcd for now)
-func (node *DataNode) StartWatchChannels(ctx context.Context) {
-	defer node.wg.Done()
-	defer logutil.LogPanic()
-	// REF MEP#7 watch path should be [prefix]/channel/{node_id}/{channel_name}
-	// TODO, this is risky, we'd better watch etcd with revision rather simply a path
-	watchPrefix := path.Join(Params.CommonCfg.DataCoordWatchSubPath.GetValue(), fmt.Sprintf("%d", node.GetSession().ServerID))
-	log.Info("Start watch channel", zap.String("prefix", watchPrefix))
-	evtChan := node.watchKv.WatchWithPrefix(watchPrefix)
-	// after watch, first check all exists nodes first
-	err := node.checkWatchedList()
-	if err != nil {
-		log.Warn("StartWatchChannels failed", zap.Error(err))
-		return
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			log.Info("watch etcd loop quit")
-			return
-		case event, ok := <-evtChan:
-			if !ok {
-				log.Warn("datanode failed to watch channel, return")
-				go node.StartWatchChannels(ctx)
-				return
-			}
-
-			if err := event.Err(); err != nil {
-				log.Warn("datanode watch channel canceled", zap.Error(event.Err()))
-				// https://github.com/etcd-io/etcd/issues/8980
-				if event.Err() == v3rpc.ErrCompacted {
-					go node.StartWatchChannels(ctx)
-					return
-				}
-				// if watch loop return due to event canceled, the datanode is not functional anymore
-				log.Panic("datanode is not functional for event canceled", zap.Error(err))
-				return
-			}
-			for _, evt := range event.Events {
-				// We need to stay in order until events enqueued
-				node.handleChannelEvt(evt)
-			}
-		}
-	}
-}
-
-// checkWatchedList list all nodes under [prefix]/channel/{node_id} and make sure all nodeds are watched
-// serves the corner case for etcd connection lost and missing some events
-func (node *DataNode) checkWatchedList() error {
-	// REF MEP#7 watch path should be [prefix]/channel/{node_id}/{channel_name}
-	prefix := path.Join(Params.CommonCfg.DataCoordWatchSubPath.GetValue(), fmt.Sprintf("%d", paramtable.GetNodeID()))
-	keys, values, err := node.watchKv.LoadWithPrefix(prefix)
-	if err != nil {
-		return err
-	}
-	for i, val := range values {
-		node.handleWatchInfo(&event{eventType: putEventType}, keys[i], []byte(val))
-	}
-	return nil
 }
 
 // handleChannelEvt handles event from kv watch event
@@ -354,123 +282,6 @@ func (node *DataNode) handleChannelEvt(evt *clientv3.Event) {
 	node.handleWatchInfo(e, string(evt.Kv.Key), evt.Kv.Value)
 }
 
-func (node *DataNode) handleWatchInfo(e *event, key string, data []byte) {
-	switch e.eventType {
-	case putEventType:
-		watchInfo, err := parsePutEventData(data)
-		if err != nil {
-			log.Warn("fail to handle watchInfo", zap.Int("event type", e.eventType), zap.String("key", key), zap.Error(err))
-			return
-		}
-
-		if isEndWatchState(watchInfo.State) {
-			log.Info("DataNode received a PUT event with an end State", zap.String("state", watchInfo.State.String()))
-			return
-		}
-
-		if watchInfo.Progress != 0 {
-			log.Info("DataNode received a PUT event with tickler update progress", zap.String("channel", watchInfo.Vchan.ChannelName), zap.Int64("version", e.version))
-			return
-		}
-
-		e.info = watchInfo
-		e.vChanName = watchInfo.GetVchan().GetChannelName()
-		log.Info("DataNode is handling watchInfo PUT event", zap.String("key", key), zap.Any("watch state", watchInfo.GetState().String()))
-	case deleteEventType:
-		e.vChanName = parseDeleteEventKey(key)
-		log.Info("DataNode is handling watchInfo DELETE event", zap.String("key", key))
-	}
-
-	actualManager, loaded := node.eventManagerMap.GetOrInsert(e.vChanName, newChannelEventManager(
-		node.handlePutEvent, node.handleDeleteEvent, retryWatchInterval,
-	))
-
-	if !loaded {
-		actualManager.Run()
-	}
-
-	actualManager.handleEvent(*e)
-
-	// Whenever a delete event comes, this eventManager will be removed from map
-	if e.eventType == deleteEventType {
-		if m, loaded := node.eventManagerMap.GetAndRemove(e.vChanName); loaded {
-			m.Close()
-		}
-	}
-}
-
-func parsePutEventData(data []byte) (*datapb.ChannelWatchInfo, error) {
-	watchInfo := datapb.ChannelWatchInfo{}
-	err := proto.Unmarshal(data, &watchInfo)
-	if err != nil {
-		return nil, fmt.Errorf("invalid event data: fail to parse ChannelWatchInfo, err: %v", err)
-	}
-
-	if watchInfo.Vchan == nil {
-		return nil, fmt.Errorf("invalid event: ChannelWatchInfo with nil VChannelInfo")
-	}
-	reviseVChannelInfo(watchInfo.GetVchan())
-	return &watchInfo, nil
-}
-
-func parseDeleteEventKey(key string) string {
-	parts := strings.Split(key, "/")
-	vChanName := parts[len(parts)-1]
-	return vChanName
-}
-
-func (node *DataNode) handlePutEvent(watchInfo *datapb.ChannelWatchInfo, version int64) (err error) {
-	vChanName := watchInfo.GetVchan().GetChannelName()
-	key := path.Join(Params.CommonCfg.DataCoordWatchSubPath.GetValue(), fmt.Sprintf("%d", node.GetSession().ServerID), vChanName)
-	tickler := newTickler(version, key, watchInfo, node.watchKv, Params.DataNodeCfg.WatchEventTicklerInterval.GetAsDuration(time.Second))
-
-	switch watchInfo.State {
-	case datapb.ChannelWatchState_Uncomplete, datapb.ChannelWatchState_ToWatch:
-		if err := node.flowgraphManager.addAndStart(node, watchInfo.GetVchan(), watchInfo.GetSchema(), tickler); err != nil {
-			log.Warn("handle put event: new data sync service failed", zap.String("vChanName", vChanName), zap.Error(err))
-			watchInfo.State = datapb.ChannelWatchState_WatchFailure
-		} else {
-			log.Info("handle put event: new data sync service success", zap.String("vChanName", vChanName))
-			watchInfo.State = datapb.ChannelWatchState_WatchSuccess
-		}
-	case datapb.ChannelWatchState_ToRelease:
-		// there is no reason why we release fail
-		node.tryToReleaseFlowgraph(vChanName)
-		watchInfo.State = datapb.ChannelWatchState_ReleaseSuccess
-	}
-
-	v, err := proto.Marshal(watchInfo)
-	if err != nil {
-		return fmt.Errorf("fail to marshal watchInfo with state, vChanName: %s, state: %s ,err: %w", vChanName, watchInfo.State.String(), err)
-	}
-
-	success, err := node.watchKv.CompareVersionAndSwap(key, tickler.version, string(v))
-	// etcd error
-	if err != nil {
-		// flow graph will leak if not release, causing new datanode failed to subscribe
-		node.tryToReleaseFlowgraph(vChanName)
-		log.Warn("fail to update watch state to etcd", zap.String("vChanName", vChanName),
-			zap.String("state", watchInfo.State.String()), zap.Error(err))
-		return err
-	}
-	// etcd valid but the states updated.
-	if !success {
-		log.Info("handle put event: failed to compare version and swap, release flowgraph",
-			zap.String("key", key), zap.String("state", watchInfo.State.String()),
-			zap.String("vChanName", vChanName))
-		// flow graph will leak if not release, causing new datanode failed to subscribe
-		node.tryToReleaseFlowgraph(vChanName)
-		return nil
-	}
-	log.Info("handle put event success", zap.String("key", key),
-		zap.String("state", watchInfo.State.String()), zap.String("vChanName", vChanName))
-	return nil
-}
-
-func (node *DataNode) handleDeleteEvent(vChanName string) {
-	node.tryToReleaseFlowgraph(vChanName)
-}
-
 // tryToReleaseFlowgraph tries to release a flowgraph
 func (node *DataNode) tryToReleaseFlowgraph(vChanName string) {
 	log.Info("try to release flowgraph", zap.String("vChanName", vChanName))
@@ -480,7 +291,7 @@ func (node *DataNode) tryToReleaseFlowgraph(vChanName string) {
 // BackGroundGC runs in background to release datanode resources
 // GOOSE TODO: remove background GC, using ToRelease for drop-collection after #15846
 func (node *DataNode) BackGroundGC(vChannelCh <-chan string) {
-	defer node.wg.Done()
+	defer node.stopWaiter.Done()
 	log.Info("DataNode Background GC Start")
 	for {
 		select {
@@ -504,33 +315,33 @@ func (node *DataNode) Start() error {
 		}
 		log.Info("start id allocator done", zap.String("role", typeutil.DataNodeRole))
 
-		rep, err := node.rootCoord.AllocTimestamp(node.ctx, &rootcoordpb.AllocTimestampRequest{
-			Base: commonpbutil.NewMsgBase(
-				commonpbutil.WithMsgType(commonpb.MsgType_RequestTSO),
-				commonpbutil.WithMsgID(0),
-				commonpbutil.WithSourceID(paramtable.GetNodeID()),
-			),
-			Count: 1,
-		})
-		if err != nil || rep.Status.ErrorCode != commonpb.ErrorCode_Success {
-			log.Warn("fail to alloc timestamp", zap.Any("rep", rep), zap.Error(err))
-			startErr = errors.New("DataNode fail to alloc timestamp")
-			return
-		}
+		/*
+			rep, err := node.rootCoord.AllocTimestamp(node.ctx, &rootcoordpb.AllocTimestampRequest{
+				Base: commonpbutil.NewMsgBase(
+					commonpbutil.WithMsgType(commonpb.MsgType_RequestTSO),
+					commonpbutil.WithMsgID(0),
+					commonpbutil.WithSourceID(paramtable.GetNodeID()),
+				),
+				Count: 1,
+			})
+			if err != nil || rep.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
+				log.Warn("fail to alloc timestamp", zap.Any("rep", rep), zap.Error(err))
+				startErr = errors.New("DataNode fail to alloc timestamp")
+				return
+			}*/
 
 		connectEtcdFn := func() error {
 			etcdKV := etcdkv.NewEtcdKV(node.etcdCli, Params.EtcdCfg.MetaRootPath.GetValue())
 			node.watchKv = etcdKV
 			return nil
 		}
-		err = retry.Do(node.ctx, connectEtcdFn, retry.Attempts(ConnectEtcdMaxRetryTime))
+		err := retry.Do(node.ctx, connectEtcdFn, retry.Attempts(ConnectEtcdMaxRetryTime))
 		if err != nil {
 			startErr = errors.New("DataNode fail to connect etcd")
 			return
 		}
 
 		chunkManager, err := node.factory.NewPersistentStorageChunkManager(node.ctx)
-
 		if err != nil {
 			startErr = err
 			return
@@ -538,24 +349,24 @@ func (node *DataNode) Start() error {
 
 		node.chunkManager = chunkManager
 
-		node.wg.Add(1)
+		node.stopWaiter.Add(1)
 		go node.BackGroundGC(node.clearSignal)
 
 		go node.compactionExecutor.start(node.ctx)
 
 		if Params.DataNodeCfg.DataNodeTimeTickByRPC.GetAsBool() {
-			node.timeTickSender = newTimeTickSender(node.dataCoord, node.session.ServerID)
+			node.timeTickSender = newTimeTickSender(node.broker, node.session.ServerID)
 			go node.timeTickSender.start(node.ctx)
 		}
 
-		node.wg.Add(1)
+		node.stopWaiter.Add(1)
 		// Start node watch node
 		go node.StartWatchChannels(node.ctx)
 
-		go node.flowgraphManager.start()
+		node.stopWaiter.Add(1)
+		go node.flowgraphManager.start(&node.stopWaiter)
 
 		node.UpdateStateCode(commonpb.StateCode_Healthy)
-
 	})
 	return startErr
 }
@@ -608,7 +419,7 @@ func (node *DataNode) Stop() error {
 			node.session.Stop()
 		}
 
-		node.wg.Wait()
+		node.stopWaiter.Wait()
 	})
 	return nil
 }

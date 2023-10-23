@@ -17,7 +17,7 @@
 #include "query/SubSearchResult.h"
 #include "query/generated/ExecExprVisitor.h"
 #include "segcore/SegmentGrowing.h"
-#include "utils/Json.h"
+#include "common/Json.h"
 #include "log/Log.h"
 
 namespace milvus::query {
@@ -210,6 +210,11 @@ ExecPlanNodeVisitor::visit(FloatVectorANNS& node) {
 void
 ExecPlanNodeVisitor::visit(BinaryVectorANNS& node) {
     VectorVisitorImpl<BinaryVector>(node);
+}
+
+void
+ExecPlanNodeVisitor::visit(Float16VectorANNS& node) {
+    VectorVisitorImpl<Float16Vector>(node);
 }
 
 }  // namespace milvus::query

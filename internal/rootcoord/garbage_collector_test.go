@@ -24,6 +24,7 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"google.golang.org/grpc"
 
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	"github.com/milvus-io/milvus/internal/mocks"
@@ -460,8 +461,8 @@ func TestGarbageCollector_RemoveCreatingPartition(t *testing.T) {
 				signal <- struct{}{}
 			})
 
-		qc := mocks.NewMockQueryCoord(t)
-		qc.EXPECT().ReleasePartitions(mock.Anything, mock.Anything).Return(merr.Status(nil), nil)
+		qc := mocks.NewMockQueryCoordClient(t)
+		qc.EXPECT().ReleasePartitions(mock.Anything, mock.Anything).Return(merr.Success(), nil)
 
 		core := newTestCore(withTtSynchronizer(ticker),
 			withMeta(meta),
@@ -485,10 +486,10 @@ func TestGarbageCollector_RemoveCreatingPartition(t *testing.T) {
 		signal := make(chan struct{}, 1)
 		meta := mockrootcoord.NewIMetaTable(t)
 
-		qc := mocks.NewMockQueryCoord(t)
-		qc.EXPECT().ReleasePartitions(mock.Anything, mock.Anything).
-			Return(merr.Status(nil), fmt.Errorf("mock err")).
-			Run(func(ctx context.Context, req *querypb.ReleasePartitionsRequest) {
+		qc := mocks.NewMockQueryCoordClient(t)
+		qc.EXPECT().ReleasePartitions(mock.Anything, mock.Anything, mock.Anything).
+			Return(merr.Success(), fmt.Errorf("mock err")).
+			Run(func(ctx context.Context, req *querypb.ReleasePartitionsRequest, opts ...grpc.CallOption) {
 				signal <- struct{}{}
 			})
 
@@ -519,8 +520,8 @@ func TestGarbageCollector_RemoveCreatingPartition(t *testing.T) {
 				signal <- struct{}{}
 			})
 
-		qc := mocks.NewMockQueryCoord(t)
-		qc.EXPECT().ReleasePartitions(mock.Anything, mock.Anything).Return(merr.Status(nil), nil)
+		qc := mocks.NewMockQueryCoordClient(t)
+		qc.EXPECT().ReleasePartitions(mock.Anything, mock.Anything, mock.Anything).Return(merr.Success(), nil)
 
 		core := newTestCore(withTtSynchronizer(ticker),
 			withMeta(meta),

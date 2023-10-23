@@ -22,12 +22,16 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	"github.com/milvus-io/milvus/internal/datanode/broker"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
 func TestFlowGraphManager(t *testing.T) {
@@ -51,10 +55,28 @@ func TestFlowGraphManager(t *testing.T) {
 	err = node.Init()
 	require.Nil(t, err)
 
+	meta := NewMetaFactory().GetCollectionMeta(1, "test_collection", schemapb.DataType_Int64)
+	broker := broker.NewMockBroker(t)
+	broker.EXPECT().ReportTimeTick(mock.Anything, mock.Anything).Return(nil).Maybe()
+	broker.EXPECT().SaveBinlogPaths(mock.Anything, mock.Anything).Return(nil).Maybe()
+	broker.EXPECT().GetSegmentInfo(mock.Anything, mock.Anything).Return([]*datapb.SegmentInfo{}, nil).Maybe()
+	broker.EXPECT().DropVirtualChannel(mock.Anything, mock.Anything).Return(nil).Maybe()
+	broker.EXPECT().UpdateChannelCheckpoint(mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+		Return(&milvuspb.DescribeCollectionResponse{
+			Status:         merr.Status(nil),
+			CollectionID:   1,
+			CollectionName: "test_collection",
+			Schema:         meta.GetSchema(),
+		}, nil)
+
+	node.broker = broker
+
 	fm := newFlowgraphManager()
 	defer func() {
 		fm.dropAll()
 	}()
+
 	t.Run("Test addAndStart", func(t *testing.T) {
 		vchanName := "by-dev-rootcoord-dml-test-flowgraphmanager-addAndStart"
 		vchan := &datapb.VchannelInfo{
@@ -63,7 +85,7 @@ func TestFlowGraphManager(t *testing.T) {
 		}
 		require.False(t, fm.exist(vchanName))
 
-		err := fm.addAndStart(node, vchan, nil, genTestTickler())
+		err := fm.addAndStartWithEtcdTickler(node, vchan, nil, genTestTickler())
 		assert.NoError(t, err)
 		assert.True(t, fm.exist(vchanName))
 
@@ -78,7 +100,7 @@ func TestFlowGraphManager(t *testing.T) {
 		}
 		require.False(t, fm.exist(vchanName))
 
-		err := fm.addAndStart(node, vchan, nil, genTestTickler())
+		err := fm.addAndStartWithEtcdTickler(node, vchan, nil, genTestTickler())
 		assert.NoError(t, err)
 		assert.True(t, fm.exist(vchanName))
 
@@ -96,19 +118,21 @@ func TestFlowGraphManager(t *testing.T) {
 		}
 		require.False(t, fm.exist(vchanName))
 
-		err := fm.addAndStart(node, vchan, nil, genTestTickler())
+		err := fm.addAndStartWithEtcdTickler(node, vchan, nil, genTestTickler())
 		assert.NoError(t, err)
 		assert.True(t, fm.exist(vchanName))
 		fg, ok := fm.getFlowgraphService(vchanName)
 		require.True(t, ok)
-		err = fg.channel.addSegment(addSegmentReq{
-			segType:     datapb.SegmentType_New,
-			segID:       100,
-			collID:      1,
-			partitionID: 10,
-			startPos:    &msgpb.MsgPosition{},
-			endPos:      &msgpb.MsgPosition{},
-		})
+		err = fg.channel.addSegment(
+			context.TODO(),
+			addSegmentReq{
+				segType:     datapb.SegmentType_New,
+				segID:       100,
+				collID:      1,
+				partitionID: 10,
+				startPos:    &msgpb.MsgPosition{},
+				endPos:      &msgpb.MsgPosition{},
+			})
 		require.NoError(t, err)
 
 		tests := []struct {
@@ -144,20 +168,22 @@ func TestFlowGraphManager(t *testing.T) {
 		}
 		require.False(t, fm.exist(vchanName))
 
-		err := fm.addAndStart(node, vchan, nil, genTestTickler())
+		err := fm.addAndStartWithEtcdTickler(node, vchan, nil, genTestTickler())
 		assert.NoError(t, err)
 		assert.True(t, fm.exist(vchanName))
 
 		fg, ok := fm.getFlowgraphService(vchanName)
 		require.True(t, ok)
-		err = fg.channel.addSegment(addSegmentReq{
-			segType:     datapb.SegmentType_New,
-			segID:       100,
-			collID:      1,
-			partitionID: 10,
-			startPos:    &msgpb.MsgPosition{},
-			endPos:      &msgpb.MsgPosition{},
-		})
+		err = fg.channel.addSegment(
+			context.TODO(),
+			addSegmentReq{
+				segType:     datapb.SegmentType_New,
+				segID:       100,
+				collID:      1,
+				partitionID: 10,
+				startPos:    &msgpb.MsgPosition{},
+				endPos:      &msgpb.MsgPosition{},
+			})
 		require.NoError(t, err)
 
 		tests := []struct {
@@ -199,10 +225,16 @@ func TestFlowGraphManager(t *testing.T) {
 			memorySizes      []int64
 			expectNeedToSync []bool
 		}{
-			{"test over the watermark", 100, 0.5,
-				[]int64{15, 16, 17, 18}, []bool{false, false, false, true}},
-			{"test below the watermark", 100, 0.5,
-				[]int64{1, 2, 3, 4}, []bool{false, false, false, false}},
+			{
+				"test over the watermark", 100, 0.5,
+				[]int64{15, 16, 17, 18},
+				[]bool{false, false, false, true},
+			},
+			{
+				"test below the watermark", 100, 0.5,
+				[]int64{1, 2, 3, 4},
+				[]bool{false, false, false, false},
+			},
 		}
 
 		fm.dropAll()
@@ -215,21 +247,21 @@ func TestFlowGraphManager(t *testing.T) {
 				vchan := &datapb.VchannelInfo{
 					ChannelName: vchannel,
 				}
-				err = fm.addAndStart(node, vchan, nil, genTestTickler())
+				err = fm.addAndStartWithEtcdTickler(node, vchan, nil, genTestTickler())
 				assert.NoError(t, err)
 				fg, ok := fm.flowgraphs.Get(vchannel)
 				assert.True(t, ok)
-				err = fg.channel.addSegment(addSegmentReq{segID: 0})
+				err = fg.channel.addSegment(context.TODO(), addSegmentReq{segID: 0})
 				assert.NoError(t, err)
 				fg.channel.getSegment(0).memorySize = memorySize
-				fg.channel.(*ChannelMeta).needToSync.Store(false)
+				fg.channel.setIsHighMemory(false)
 			}
 			fm.execute(test.totalMemory)
 			for i, needToSync := range test.expectNeedToSync {
 				vchannel := fmt.Sprintf("%s%d", channelPrefix, i)
 				fg, ok := fm.flowgraphs.Get(vchannel)
 				assert.True(t, ok)
-				assert.Equal(t, needToSync, fg.channel.(*ChannelMeta).needToSync.Load())
+				assert.Equal(t, needToSync, fg.channel.getIsHighMemory())
 			}
 		}
 	})

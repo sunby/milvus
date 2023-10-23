@@ -24,7 +24,6 @@ import (
 	"github.com/cockroachdb/errors"
 	milvus_storage "github.com/milvus-io/milvus-storage/go/storage"
 	"github.com/milvus-io/milvus-storage/go/storage/options"
-	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 
@@ -34,6 +33,7 @@ import (
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/retry"
+	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 )
 
 // errStart used for retry start
@@ -68,7 +68,7 @@ type flushTaskRunner struct {
 	segmentID  UniqueID
 	insertLogs map[UniqueID]*datapb.Binlog
 	statsLogs  map[UniqueID]*datapb.Binlog
-	deltaLogs  []*datapb.Binlog //[]*DelDataBuf
+	deltaLogs  []*datapb.Binlog // []*DelDataBuf
 	pos        *msgpb.MsgPosition
 	flushed    bool
 	dropped    bool
@@ -104,7 +104,7 @@ func newTaskInjection(segmentCnt int, pf func(pack *segmentFlushPack)) *taskInje
 
 // Injected returns a chan, which will be closed after pre set segments counts an injected
 func (ti *taskInjection) Injected() <-chan struct{} {
-	
+
 	return ti.injected
 }
 
@@ -143,7 +143,8 @@ func (t *flushTaskRunner) init(f notifyMetaFunc, postFunc taskPostFunc, signal <
 
 // runFlushInsert executes flush insert task with once and retry
 func (t *flushTaskRunner) runFlushInsert(task flushInsertTask,
-	binlogs, statslogs map[UniqueID]*datapb.Binlog, flushed bool, dropped bool, pos *msgpb.MsgPosition, opts ...retry.Option) {
+	binlogs, statslogs map[UniqueID]*datapb.Binlog, flushed bool, dropped bool, pos *msgpb.MsgPosition, opts ...retry.Option,
+) {
 	t.insertOnce.Do(func() {
 		t.insertLogs = binlogs
 		t.statsLogs = statslogs
@@ -173,7 +174,7 @@ func (t *flushTaskRunner) runFlushInsert(task flushInsertTask,
 func (t *flushTaskRunner) runFlushDel(task flushDeleteTask, deltaLogs *DelDataBuf, opts ...retry.Option) {
 	t.deleteOnce.Do(func() {
 		if deltaLogs == nil {
-			t.deltaLogs = nil //[]*DelDataBuf{}
+			t.deltaLogs = nil // []*DelDataBuf{}
 		} else {
 			t.deltaLogs = []*datapb.Binlog{
 				{

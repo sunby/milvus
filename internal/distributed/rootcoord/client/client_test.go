@@ -25,17 +25,16 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
-	"github.com/milvus-io/milvus/internal/util/mock"
+	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
-
-	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
-	"github.com/milvus-io/milvus/pkg/log"
-	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"google.golang.org/grpc"
 
+	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
 	"github.com/milvus-io/milvus/internal/proxy"
+	"github.com/milvus-io/milvus/internal/util/mock"
+	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
-	"github.com/stretchr/testify/assert"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
 
 func TestMain(m *testing.M) {
@@ -71,15 +70,6 @@ func Test_NewClient(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, client)
 
-	err = client.Init()
-	assert.NoError(t, err)
-
-	err = client.Start()
-	assert.NoError(t, err)
-
-	err = client.Register()
-	assert.NoError(t, err)
-
 	checkFunc := func(retNotNil bool) {
 		retCheck := func(notNil bool, ret interface{}, err error) {
 			if notNil {
@@ -92,15 +82,15 @@ func Test_NewClient(t *testing.T) {
 		}
 
 		{
-			r, err := client.GetComponentStates(ctx)
+			r, err := client.GetComponentStates(ctx, nil)
 			retCheck(retNotNil, r, err)
 		}
 		{
-			r, err := client.GetTimeTickChannel(ctx)
+			r, err := client.GetTimeTickChannel(ctx, nil)
 			retCheck(retNotNil, r, err)
 		}
 		{
-			r, err := client.GetStatisticsChannel(ctx)
+			r, err := client.GetStatisticsChannel(ctx, nil)
 			retCheck(retNotNil, r, err)
 		}
 		{
@@ -306,15 +296,15 @@ func Test_NewClient(t *testing.T) {
 		assert.Error(t, err)
 	}
 	{
-		rTimeout, err := client.GetComponentStates(shortCtx)
+		rTimeout, err := client.GetComponentStates(shortCtx, nil)
 		retCheck(rTimeout, err)
 	}
 	{
-		rTimeout, err := client.GetTimeTickChannel(shortCtx)
+		rTimeout, err := client.GetTimeTickChannel(shortCtx, nil)
 		retCheck(rTimeout, err)
 	}
 	{
-		rTimeout, err := client.GetStatisticsChannel(shortCtx)
+		rTimeout, err := client.GetStatisticsChannel(shortCtx, nil)
 		retCheck(rTimeout, err)
 	}
 	{
@@ -474,6 +464,6 @@ func Test_NewClient(t *testing.T) {
 		retCheck(rTimeout, err)
 	}
 	// clean up
-	err = client.Stop()
+	err = client.Close()
 	assert.NoError(t, err)
 }

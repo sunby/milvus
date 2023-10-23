@@ -16,7 +16,6 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querynodev2/collector"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
-	"github.com/milvus-io/milvus/internal/util"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
@@ -167,7 +166,7 @@ func (t *SearchTask) Execute() error {
 				Base: &commonpb.MsgBase{
 					SourceID: paramtable.GetNodeID(),
 				},
-				Status:         merr.Status(nil),
+				Status:         merr.Success(),
 				MetricType:     req.GetReq().GetMetricType(),
 				NumQueries:     t.originNqs[i],
 				TopK:           t.originTopks[i],
@@ -194,8 +193,11 @@ func (t *SearchTask) Execute() error {
 		return err
 	}
 	defer segments.DeleteSearchResultDataBlobs(blobs)
-	reduceLatency := tr.RecordSpan()
-
+	metrics.QueryNodeReduceLatency.WithLabelValues(
+		fmt.Sprint(paramtable.GetNodeID()),
+		metrics.SearchLabel,
+		metrics.ReduceSegments).
+		Observe(float64(tr.RecordSpan().Milliseconds()))
 	for i := range t.originNqs {
 		blob, err := segments.GetSearchResultDataBlob(blobs, i)
 		if err != nil {
@@ -213,17 +215,11 @@ func (t *SearchTask) Execute() error {
 		bs := make([]byte, len(blob))
 		copy(bs, blob)
 
-		metrics.QueryNodeReduceLatency.WithLabelValues(
-			fmt.Sprint(paramtable.GetNodeID()),
-			metrics.SearchLabel,
-			metrics.ReduceSegments).
-			Observe(float64(reduceLatency.Milliseconds()))
-
 		task.result = &internalpb.SearchResults{
 			Base: &commonpb.MsgBase{
 				SourceID: paramtable.GetNodeID(),
 			},
-			Status:         util.WrapStatus(commonpb.ErrorCode_Success, ""),
+			Status:         merr.Success(),
 			MetricType:     req.GetReq().GetMetricType(),
 			NumQueries:     t.originNqs[i],
 			TopK:           t.originTopks[i],
@@ -235,6 +231,7 @@ func (t *SearchTask) Execute() error {
 			},
 		}
 	}
+
 	return nil
 }
 

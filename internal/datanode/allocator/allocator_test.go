@@ -22,10 +22,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 
-	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
 func TestGetGenerator(t *testing.T) {
@@ -77,16 +78,15 @@ func TestGetGenerator(t *testing.T) {
 }
 
 type RootCoordFactory struct {
-	types.RootCoord
+	types.RootCoordClient
 	ID UniqueID
 }
 
-func (m *RootCoordFactory) AllocID(ctx context.Context, in *rootcoordpb.AllocIDRequest) (*rootcoordpb.AllocIDResponse, error) {
+func (m *RootCoordFactory) AllocID(ctx context.Context, in *rootcoordpb.AllocIDRequest, opts ...grpc.CallOption) (*rootcoordpb.AllocIDResponse, error) {
 	resp := &rootcoordpb.AllocIDResponse{
-		ID:    m.ID,
-		Count: in.GetCount(),
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		}}
+		ID:     m.ID,
+		Count:  in.GetCount(),
+		Status: merr.Success(),
+	}
 	return resp, nil
 }

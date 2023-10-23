@@ -28,7 +28,6 @@ import (
 	"github.com/stretchr/testify/mock"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
-	"github.com/milvus-io/milvus/internal/kv/mocks"
 	mockkv "github.com/milvus-io/milvus/internal/kv/mocks"
 	"github.com/milvus-io/milvus/internal/metastore/kv/datacoord"
 	catalogmocks "github.com/milvus-io/milvus/internal/metastore/mocks"
@@ -41,7 +40,7 @@ import (
 func TestMeta_CanCreateIndex(t *testing.T) {
 	var (
 		collID = UniqueID(1)
-		//partID     = UniqueID(2)
+		// partID     = UniqueID(2)
 		indexID    = UniqueID(10)
 		fieldID    = UniqueID(100)
 		indexName  = "_default_idx"
@@ -85,7 +84,7 @@ func TestMeta_CanCreateIndex(t *testing.T) {
 		IndexParams:     indexParams,
 		Timestamp:       0,
 		IsAutoIndex:     false,
-		UserIndexParams: nil,
+		UserIndexParams: indexParams,
 	}
 
 	t.Run("can create index", func(t *testing.T) {
@@ -103,7 +102,7 @@ func TestMeta_CanCreateIndex(t *testing.T) {
 			TypeParams:      typeParams,
 			IndexParams:     indexParams,
 			IsAutoIndex:     false,
-			UserIndexParams: nil,
+			UserIndexParams: indexParams,
 		}
 
 		err = m.CreateIndex(index)
@@ -126,17 +125,19 @@ func TestMeta_CanCreateIndex(t *testing.T) {
 		assert.Equal(t, int64(0), tmpIndexID)
 
 		req.TypeParams = typeParams
-		req.IndexParams = append(req.IndexParams, &commonpb.KeyValuePair{Key: "metrics_type", Value: "L2"})
+		req.UserIndexParams = append(indexParams, &commonpb.KeyValuePair{Key: "metrics_type", Value: "L2"})
 		tmpIndexID, err = m.CanCreateIndex(req)
 		assert.Error(t, err)
 		assert.Equal(t, int64(0), tmpIndexID)
 
 		req.IndexParams = []*commonpb.KeyValuePair{{Key: common.IndexTypeKey, Value: "HNSW"}}
+		req.UserIndexParams = req.IndexParams
 		tmpIndexID, err = m.CanCreateIndex(req)
 		assert.Error(t, err)
 		assert.Equal(t, int64(0), tmpIndexID)
 
 		req.IndexParams = indexParams
+		req.UserIndexParams = indexParams
 		req.FieldID++
 		tmpIndexID, err = m.CanCreateIndex(req)
 		assert.Error(t, err)
@@ -162,7 +163,7 @@ func TestMeta_CanCreateIndex(t *testing.T) {
 func TestMeta_HasSameReq(t *testing.T) {
 	var (
 		collID = UniqueID(1)
-		//partID     = UniqueID(2)
+		// partID     = UniqueID(2)
 		indexID    = UniqueID(10)
 		fieldID    = UniqueID(100)
 		indexName  = "_default_idx"
@@ -199,7 +200,7 @@ func TestMeta_HasSameReq(t *testing.T) {
 		IndexParams:     indexParams,
 		Timestamp:       0,
 		IsAutoIndex:     false,
-		UserIndexParams: nil,
+		UserIndexParams: indexParams,
 	}
 
 	t.Run("no indexes", func(t *testing.T) {
@@ -220,7 +221,7 @@ func TestMeta_HasSameReq(t *testing.T) {
 				TypeParams:      typeParams,
 				IndexParams:     indexParams,
 				IsAutoIndex:     false,
-				UserIndexParams: nil,
+				UserIndexParams: indexParams,
 			},
 		}
 		has, _ := m.HasSameReq(req)
@@ -241,6 +242,12 @@ func TestMeta_HasSameReq(t *testing.T) {
 }
 
 func TestMeta_CreateIndex(t *testing.T) {
+	indexParams := []*commonpb.KeyValuePair{
+		{
+			Key:   common.IndexTypeKey,
+			Value: "FLAT",
+		},
+	}
 	index := &model.Index{
 		TenantID:     "",
 		CollectionID: 1,
@@ -255,14 +262,9 @@ func TestMeta_CreateIndex(t *testing.T) {
 				Value: "128",
 			},
 		},
-		IndexParams: []*commonpb.KeyValuePair{
-			{
-				Key:   common.IndexTypeKey,
-				Value: "FLAT",
-			},
-		},
+		IndexParams:     indexParams,
 		IsAutoIndex:     false,
-		UserIndexParams: nil,
+		UserIndexParams: indexParams,
 	}
 
 	t.Run("success", func(t *testing.T) {
@@ -353,7 +355,6 @@ func TestMeta_AddSegmentIndex(t *testing.T) {
 		CreateTime:    12,
 		IndexFileKeys: nil,
 		IndexSize:     0,
-		WriteHandoff:  false,
 	}
 
 	t.Run("save meta fail", func(t *testing.T) {
@@ -371,7 +372,7 @@ func TestMeta_AddSegmentIndex(t *testing.T) {
 func TestMeta_GetIndexIDByName(t *testing.T) {
 	var (
 		collID = UniqueID(1)
-		//partID     = UniqueID(2)
+		// partID     = UniqueID(2)
 		indexID    = UniqueID(10)
 		fieldID    = UniqueID(100)
 		indexName  = "_default_idx"
@@ -418,14 +419,13 @@ func TestMeta_GetIndexIDByName(t *testing.T) {
 				TypeParams:      typeParams,
 				IndexParams:     indexParams,
 				IsAutoIndex:     false,
-				UserIndexParams: nil,
+				UserIndexParams: indexParams,
 			},
 		}
 
 		indexID2CreateTS := m.GetIndexIDByName(collID, indexName)
 		assert.Contains(t, indexID2CreateTS, indexID)
 	})
-
 }
 
 func TestMeta_GetSegmentIndexState(t *testing.T) {
@@ -493,7 +493,7 @@ func TestMeta_GetSegmentIndexState(t *testing.T) {
 				TypeParams:      typeParams,
 				IndexParams:     indexParams,
 				IsAutoIndex:     false,
-				UserIndexParams: nil,
+				UserIndexParams: indexParams,
 			},
 		}
 		state := m.GetSegmentIndexState(collID, segID)
@@ -521,7 +521,6 @@ func TestMeta_GetSegmentIndexState(t *testing.T) {
 			CreateTime:    12,
 			IndexFileKeys: nil,
 			IndexSize:     0,
-			WriteHandoff:  false,
 		})
 
 		state := m.GetSegmentIndexState(collID, segID)
@@ -544,7 +543,6 @@ func TestMeta_GetSegmentIndexState(t *testing.T) {
 			CreateTime:    12,
 			IndexFileKeys: nil,
 			IndexSize:     0,
-			WriteHandoff:  false,
 		})
 
 		state := m.GetSegmentIndexState(collID, segID)
@@ -599,7 +597,6 @@ func TestMeta_GetSegmentIndexStateOnField(t *testing.T) {
 							CreateTime:    10,
 							IndexFileKeys: nil,
 							IndexSize:     0,
-							WriteHandoff:  false,
 						},
 					},
 				},
@@ -620,7 +617,7 @@ func TestMeta_GetSegmentIndexStateOnField(t *testing.T) {
 					TypeParams:      typeParams,
 					IndexParams:     indexParams,
 					IsAutoIndex:     false,
-					UserIndexParams: nil,
+					UserIndexParams: indexParams,
 				},
 			},
 		},
@@ -640,7 +637,6 @@ func TestMeta_GetSegmentIndexStateOnField(t *testing.T) {
 				CreateTime:    10,
 				IndexFileKeys: nil,
 				IndexSize:     0,
-				WriteHandoff:  false,
 			},
 		},
 	}
@@ -732,7 +728,7 @@ func TestMeta_MarkIndexAsDeleted(t *testing.T) {
 }
 
 func TestMeta_GetSegmentIndexes(t *testing.T) {
-	m := createMetaTable(&datacoord.Catalog{MetaKv: mocks.NewMetaKv(t)})
+	m := createMetaTable(&datacoord.Catalog{MetaKv: mockkv.NewMetaKv(t)})
 
 	t.Run("success", func(t *testing.T) {
 		segIndexes := m.GetSegmentIndexes(segID)
@@ -834,6 +830,12 @@ func TestMeta_GetIndexNameByID(t *testing.T) {
 }
 
 func TestMeta_GetTypeParams(t *testing.T) {
+	indexParams := []*commonpb.KeyValuePair{
+		{
+			Key:   common.IndexTypeKey,
+			Value: "HNSW",
+		},
+	}
 	m := &meta{
 		indexes: map[UniqueID]map[UniqueID]*model.Index{
 			collID: {
@@ -851,14 +853,9 @@ func TestMeta_GetTypeParams(t *testing.T) {
 							Value: "128",
 						},
 					},
-					IndexParams: []*commonpb.KeyValuePair{
-						{
-							Key:   common.IndexTypeKey,
-							Value: "HNSW",
-						},
-					},
+					IndexParams:     indexParams,
 					IsAutoIndex:     false,
-					UserIndexParams: nil,
+					UserIndexParams: indexParams,
 				},
 			},
 		},
@@ -879,6 +876,12 @@ func TestMeta_GetTypeParams(t *testing.T) {
 }
 
 func TestMeta_GetIndexParams(t *testing.T) {
+	indexParams := []*commonpb.KeyValuePair{
+		{
+			Key:   common.IndexTypeKey,
+			Value: "HNSW",
+		},
+	}
 	m := &meta{
 		indexes: map[UniqueID]map[UniqueID]*model.Index{
 			collID: {
@@ -896,14 +899,9 @@ func TestMeta_GetIndexParams(t *testing.T) {
 							Value: "128",
 						},
 					},
-					IndexParams: []*commonpb.KeyValuePair{
-						{
-							Key:   common.IndexTypeKey,
-							Value: "HNSW",
-						},
-					},
+					IndexParams:     indexParams,
 					IsAutoIndex:     false,
-					UserIndexParams: nil,
+					UserIndexParams: indexParams,
 				},
 			},
 		},
@@ -941,7 +939,6 @@ func TestMeta_GetIndexJob(t *testing.T) {
 				CreateTime:    0,
 				IndexFileKeys: nil,
 				IndexSize:     0,
-				WriteHandoff:  false,
 			},
 		},
 	}
@@ -1046,7 +1043,6 @@ func updateSegmentIndexMeta(t *testing.T) *meta {
 							CreateTime:    0,
 							IndexFileKeys: nil,
 							IndexSize:     0,
-							WriteHandoff:  false,
 						},
 					},
 				},
@@ -1085,7 +1081,6 @@ func updateSegmentIndexMeta(t *testing.T) *meta {
 				CreateTime:    0,
 				IndexFileKeys: nil,
 				IndexSize:     0,
-				WriteHandoff:  false,
 			},
 		},
 	}

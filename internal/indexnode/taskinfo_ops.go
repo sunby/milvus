@@ -5,11 +5,12 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	"go.uber.org/zap"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
-	"go.uber.org/zap"
 )
 
 func (i *IndexNode) loadOrStoreTask(ClusterID string, buildID UniqueID, info *taskInfo) *taskInfo {
@@ -55,7 +56,14 @@ func (i *IndexNode) foreachTaskInfo(fn func(ClusterID string, buildID UniqueID, 
 	}
 }
 
-func (i *IndexNode) storeIndexFilesAndStatistic(ClusterID string, buildID UniqueID, fileKeys []string, serializedSize uint64, statistic *indexpb.JobInfo) {
+func (i *IndexNode) storeIndexFilesAndStatistic(
+	ClusterID string,
+	buildID UniqueID,
+	fileKeys []string,
+	serializedSize uint64,
+	statistic *indexpb.JobInfo,
+	currentIndexVersion int32,
+) {
 	key := taskKey{ClusterID: ClusterID, BuildID: buildID}
 	i.stateLock.Lock()
 	defer i.stateLock.Unlock()
@@ -63,11 +71,12 @@ func (i *IndexNode) storeIndexFilesAndStatistic(ClusterID string, buildID Unique
 		info.fileKeys = common.CloneStringList(fileKeys)
 		info.serializedSize = serializedSize
 		info.statistic = proto.Clone(statistic).(*indexpb.JobInfo)
+		info.currentIndexVersion = currentIndexVersion
 		return
 	}
 }
 
-func (i *IndexNode) deleteTaskInfos(keys []taskKey) []*taskInfo {
+func (i *IndexNode) deleteTaskInfos(ctx context.Context, keys []taskKey) []*taskInfo {
 	i.stateLock.Lock()
 	defer i.stateLock.Unlock()
 	deleted := make([]*taskInfo, 0, len(keys))
@@ -76,6 +85,8 @@ func (i *IndexNode) deleteTaskInfos(keys []taskKey) []*taskInfo {
 		if ok {
 			deleted = append(deleted, info)
 			delete(i.tasks, key)
+			log.Ctx(ctx).Info("delete task infos",
+				zap.String("cluster_id", key.ClusterID), zap.Int64("build_id", key.BuildID))
 		}
 	}
 	return deleted

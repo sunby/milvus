@@ -8,11 +8,8 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
-	"github.com/milvus-io/milvus/internal/proto/segcorepb"
 	storage "github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/util/initcore"
-	"github.com/milvus-io/milvus/pkg/util/funcutil"
-	"github.com/milvus-io/milvus/pkg/util/metric"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
 
@@ -114,8 +111,8 @@ func (suite *SegmentSuite) SetupTest() {
 
 func (suite *SegmentSuite) TearDownTest() {
 	ctx := context.Background()
-	DeleteSegment(suite.sealed)
-	DeleteSegment(suite.growing)
+	suite.sealed.Release()
+	suite.growing.Release()
 	DeleteCollection(suite.collection)
 	suite.chunkManager.RemoveWithPrefix(ctx, suite.rootPath)
 }
@@ -148,56 +145,6 @@ func (suite *SegmentSuite) TestHasRawData() {
 	suite.True(has)
 }
 
-func (suite *SegmentSuite) TestValidateIndexedFieldsData() {
-	result := &segcorepb.RetrieveResults{
-		Ids: &schemapb.IDs{
-			IdField: &schemapb.IDs_IntId{
-				IntId: &schemapb.LongArray{
-					Data: []int64{5, 4, 3, 2, 9, 8, 7, 6},
-				}},
-		},
-		Offset: []int64{5, 4, 3, 2, 9, 8, 7, 6},
-		FieldsData: []*schemapb.FieldData{
-			genFieldData("int64 field", 100, schemapb.DataType_Int64,
-				[]int64{5, 4, 3, 2, 9, 8, 7, 6}, 1),
-			genFieldData("float vector field", 101, schemapb.DataType_FloatVector,
-				[]float32{5, 4, 3, 2, 9, 8, 7, 6}, 1),
-		},
-	}
-
-	// no index
-	err := suite.growing.ValidateIndexedFieldsData(context.Background(), result)
-	suite.NoError(err)
-	err = suite.sealed.ValidateIndexedFieldsData(context.Background(), result)
-	suite.NoError(err)
-
-	// with index and has raw data
-	suite.sealed.AddIndex(101, &IndexedFieldInfo{
-		IndexInfo: &querypb.FieldIndexInfo{
-			FieldID:     101,
-			EnableIndex: true,
-		},
-	})
-	suite.True(suite.sealed.ExistIndex(101))
-	err = suite.sealed.ValidateIndexedFieldsData(context.Background(), result)
-	suite.NoError(err)
-
-	// index doesn't have index type
-	DeleteSegment(suite.sealed)
-	suite.True(suite.sealed.ExistIndex(101))
-	err = suite.sealed.ValidateIndexedFieldsData(context.Background(), result)
-	suite.Error(err)
-
-	// with index but doesn't have raw data
-	index := suite.sealed.GetIndex(101)
-	_, indexParams := genIndexParams(IndexHNSW, metric.L2)
-	index.IndexInfo.IndexParams = funcutil.Map2KeyValuePair(indexParams)
-	DeleteSegment(suite.sealed)
-	suite.True(suite.sealed.ExistIndex(101))
-	err = suite.sealed.ValidateIndexedFieldsData(context.Background(), result)
-	suite.Error(err)
-}
-
 func (suite *SegmentSuite) TestCASVersion() {
 	segment := suite.sealed
 
@@ -210,7 +157,7 @@ func (suite *SegmentSuite) TestCASVersion() {
 }
 
 func (suite *SegmentSuite) TestSegmentReleased() {
-	DeleteSegment(suite.sealed)
+	suite.sealed.Release()
 
 	suite.sealed.ptrLock.RLock()
 	suite.False(suite.sealed.isValid())

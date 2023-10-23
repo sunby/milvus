@@ -72,7 +72,6 @@ func FillMsgBaseFromClient(sourceID int64, options ...MsgBaseOptions) MsgBaseOpt
 			op(msgBase)
 		}
 	}
-
 }
 
 func newMsgBaseDefault() *commonpb.MsgBase {
@@ -99,12 +98,4 @@ func UpdateMsgBase(msgBase *commonpb.MsgBase, options ...MsgBaseOptions) *common
 		op(msgBaseRt)
 	}
 	return msgBaseRt
-}
-
-func IsHealthy(stateCode commonpb.StateCode) bool {
-	return stateCode == commonpb.StateCode_Healthy
-}
-
-func IsHealthyOrStopping(stateCode commonpb.StateCode) bool {
-	return stateCode == commonpb.StateCode_Healthy || stateCode == commonpb.StateCode_Stopping
 }

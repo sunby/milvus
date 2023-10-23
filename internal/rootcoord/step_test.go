@@ -25,8 +25,8 @@ import (
 )
 
 func Test_waitForTsSyncedStep_Execute(t *testing.T) {
-	//Params.InitOnce()
-	//Params.ProxyCfg.TimeTickInterval = time.Millisecond
+	// Params.InitOnce()
+	// Params.ProxyCfg.TimeTickInterval = time.Millisecond
 
 	ticker := newRocksMqTtSynchronizer()
 	core := newTestCore(withTtSynchronizer(ticker))
@@ -94,4 +94,24 @@ func Test_confirmGCStep_Execute(t *testing.T) {
 		_, err := s.Execute(context.TODO())
 		assert.NoError(t, err)
 	})
+}
+
+func TestSkip(t *testing.T) {
+	{
+		s := &unwatchChannelsStep{isSkip: true}
+		_, err := s.Execute(context.Background())
+		assert.NoError(t, err)
+	}
+
+	{
+		s := &deleteCollectionDataStep{isSkip: true}
+		_, err := s.Execute(context.Background())
+		assert.NoError(t, err)
+	}
+
+	{
+		s := &deletePartitionDataStep{isSkip: true}
+		_, err := s.Execute(context.Background())
+		assert.NoError(t, err)
+	}
 }

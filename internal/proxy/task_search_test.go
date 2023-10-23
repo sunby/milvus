@@ -38,6 +38,7 @@ import (
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/metric"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/timerecord"
@@ -69,11 +70,11 @@ func TestSearchTask_PostExecute(t *testing.T) {
 
 		err := qt.PostExecute(context.TODO())
 		assert.NoError(t, err)
-		assert.Equal(t, qt.result.Status.ErrorCode, commonpb.ErrorCode_Success)
+		assert.Equal(t, qt.result.GetStatus().GetErrorCode(), commonpb.ErrorCode_Success)
 	})
 }
 
-func createColl(t *testing.T, name string, rc types.RootCoord) {
+func createColl(t *testing.T, name string, rc types.RootCoordClient) {
 	schema := constructCollectionSchema(testInt64Field, testFloatVecField, testVecDim, name)
 	marshaledSchema, err := proto.Marshal(schema)
 	require.NoError(t, err)
@@ -134,7 +135,8 @@ func getValidSearchParams() []*commonpb.KeyValuePair {
 		{
 			Key:   IgnoreGrowingKey,
 			Value: "false",
-		}}
+		},
+	}
 }
 
 func getInvalidSearchParams(invalidName string) []*commonpb.KeyValuePair {
@@ -152,12 +154,11 @@ func TestSearchTask_PreExecute(t *testing.T) {
 
 	var (
 		rc  = NewRootCoordMock()
-		qc  = mocks.NewMockQueryCoord(t)
+		qc  = mocks.NewMockQueryCoordClient(t)
 		ctx = context.TODO()
 	)
 
-	err = rc.Start()
-	defer rc.Stop()
+	defer rc.Close()
 	require.NoError(t, err)
 	mgr := newShardClientMgr()
 	err = InitMetaCache(ctx, rc, qc, mgr)
@@ -265,34 +266,41 @@ func getQueryCoord() *mocks.MockQueryCoord {
 	return qc
 }
 
+func getQueryCoordClient() *mocks.MockQueryCoordClient {
+	qc := &mocks.MockQueryCoordClient{}
+	qc.EXPECT().Close().Return(nil)
+	return qc
+}
+
 func getQueryNode() *mocks.MockQueryNode {
 	qn := &mocks.MockQueryNode{}
 
 	return qn
 }
 
-func TestSearchTaskV2_Execute(t *testing.T) {
+func getQueryNodeClient() *mocks.MockQueryNodeClient {
+	qn := &mocks.MockQueryNodeClient{}
 
+	return qn
+}
+
+func TestSearchTaskV2_Execute(t *testing.T) {
 	var (
 		err error
 
 		rc  = NewRootCoordMock()
-		qc  = getQueryCoord()
+		qc  = getQueryCoordClient()
 		ctx = context.TODO()
 
 		collectionName = t.Name() + funcutil.GenRandomStr()
 	)
 
-	err = rc.Start()
-	require.NoError(t, err)
-	defer rc.Stop()
+	defer rc.Close()
 	mgr := newShardClientMgr()
 	err = InitMetaCache(ctx, rc, qc, mgr)
 	require.NoError(t, err)
 
-	err = qc.Start()
-	require.NoError(t, err)
-	defer qc.Stop()
+	defer qc.Close()
 
 	task := &searchTask{
 		ctx: ctx,
@@ -1119,62 +1127,79 @@ func Test_checkSearchResultData(t *testing.T) {
 
 		args args
 	}{
-		{"data.NumQueries != nq", true,
+		{
+			"data.NumQueries != nq", true,
 			args{
 				data: &schemapb.SearchResultData{NumQueries: 100},
 				nq:   10,
-			}},
-		{"data.TopK != topk", true,
+			},
+		},
+		{
+			"data.TopK != topk", true,
 			args{
 				data: &schemapb.SearchResultData{NumQueries: 1, TopK: 1},
 				nq:   1,
 				topk: 10,
-			}},
-		{"size of IntId != NumQueries * TopK", true,
+			},
+		},
+		{
+			"size of IntId != NumQueries * TopK", true,
 			args{
 				data: &schemapb.SearchResultData{
 					NumQueries: 1,
 					TopK:       1,
 					Ids: &schemapb.IDs{
-						IdField: &schemapb.IDs_IntId{IntId: &schemapb.LongArray{Data: []int64{1, 2}}}},
+						IdField: &schemapb.IDs_IntId{IntId: &schemapb.LongArray{Data: []int64{1, 2}}},
+					},
 				},
 				nq:   1,
 				topk: 1,
-			}},
-		{"size of StrID != NumQueries * TopK", true,
+			},
+		},
+		{
+			"size of StrID != NumQueries * TopK", true,
 			args{
 				data: &schemapb.SearchResultData{
 					NumQueries: 1,
 					TopK:       1,
 					Ids: &schemapb.IDs{
-						IdField: &schemapb.IDs_StrId{StrId: &schemapb.StringArray{Data: []string{"1", "2"}}}},
+						IdField: &schemapb.IDs_StrId{StrId: &schemapb.StringArray{Data: []string{"1", "2"}}},
+					},
 				},
 				nq:   1,
 				topk: 1,
-			}},
-		{"size of score != nq * topK", true,
+			},
+		},
+		{
+			"size of score != nq * topK", true,
 			args{
 				data: &schemapb.SearchResultData{
 					NumQueries: 1,
 					TopK:       1,
 					Ids: &schemapb.IDs{
-						IdField: &schemapb.IDs_IntId{IntId: &schemapb.LongArray{Data: []int64{1}}}},
+						IdField: &schemapb.IDs_IntId{IntId: &schemapb.LongArray{Data: []int64{1}}},
+					},
 					Scores: []float32{0.99, 0.98},
 				},
 				nq:   1,
 				topk: 1,
-			}},
-		{"correct params", false,
+			},
+		},
+		{
+			"correct params", false,
 			args{
 				data: &schemapb.SearchResultData{
 					NumQueries: 1,
 					TopK:       1,
 					Ids: &schemapb.IDs{
-						IdField: &schemapb.IDs_IntId{IntId: &schemapb.LongArray{Data: []int64{1}}}},
-					Scores: []float32{0.99}},
+						IdField: &schemapb.IDs_IntId{IntId: &schemapb.LongArray{Data: []int64{1}}},
+					},
+					Scores: []float32{0.99},
+				},
 				nq:   1,
 				topk: 1,
-			}},
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -1411,21 +1436,31 @@ func TestTaskSearch_reduceSearchResultData(t *testing.T) {
 			outScore []float32
 			outData  []int64
 		}{
-			{"offset 0, limit 5", 0, 5,
+			{
+				"offset 0, limit 5", 0, 5,
 				[]float32{-50, -49, -48, -47, -46, -45, -44, -43, -42, -41},
-				[]int64{50, 49, 48, 47, 46, 45, 44, 43, 42, 41}},
-			{"offset 1, limit 4", 1, 4,
+				[]int64{50, 49, 48, 47, 46, 45, 44, 43, 42, 41},
+			},
+			{
+				"offset 1, limit 4", 1, 4,
 				[]float32{-49, -48, -47, -46, -44, -43, -42, -41},
-				[]int64{49, 48, 47, 46, 44, 43, 42, 41}},
-			{"offset 2, limit 3", 2, 3,
+				[]int64{49, 48, 47, 46, 44, 43, 42, 41},
+			},
+			{
+				"offset 2, limit 3", 2, 3,
 				[]float32{-48, -47, -46, -43, -42, -41},
-				[]int64{48, 47, 46, 43, 42, 41}},
-			{"offset 3, limit 2", 3, 2,
+				[]int64{48, 47, 46, 43, 42, 41},
+			},
+			{
+				"offset 3, limit 2", 3, 2,
 				[]float32{-47, -46, -42, -41},
-				[]int64{47, 46, 42, 41}},
-			{"offset 4, limit 1", 4, 1,
+				[]int64{47, 46, 42, 41},
+			},
+			{
+				"offset 4, limit 1", 4, 1,
 				[]float32{-46, -41},
-				[]int64{46, 41}},
+				[]int64{46, 41},
+			},
 		}
 
 		var results []*schemapb.SearchResultData
@@ -1459,24 +1494,36 @@ func TestTaskSearch_reduceSearchResultData(t *testing.T) {
 			outScore []float32
 			outData  []int64
 		}{
-			{"offset 0, limit 6", 0, 6, 5,
+			{
+				"offset 0, limit 6", 0, 6, 5,
 				[]float32{-50, -49, -48, -47, -46, -45, -44, -43, -42, -41},
-				[]int64{50, 49, 48, 47, 46, 45, 44, 43, 42, 41}},
-			{"offset 1, limit 5", 1, 5, 4,
+				[]int64{50, 49, 48, 47, 46, 45, 44, 43, 42, 41},
+			},
+			{
+				"offset 1, limit 5", 1, 5, 4,
 				[]float32{-49, -48, -47, -46, -44, -43, -42, -41},
-				[]int64{49, 48, 47, 46, 44, 43, 42, 41}},
-			{"offset 2, limit 4", 2, 4, 3,
+				[]int64{49, 48, 47, 46, 44, 43, 42, 41},
+			},
+			{
+				"offset 2, limit 4", 2, 4, 3,
 				[]float32{-48, -47, -46, -43, -42, -41},
-				[]int64{48, 47, 46, 43, 42, 41}},
-			{"offset 3, limit 3", 3, 3, 2,
+				[]int64{48, 47, 46, 43, 42, 41},
+			},
+			{
+				"offset 3, limit 3", 3, 3, 2,
 				[]float32{-47, -46, -42, -41},
-				[]int64{47, 46, 42, 41}},
-			{"offset 4, limit 2", 4, 2, 1,
+				[]int64{47, 46, 42, 41},
+			},
+			{
+				"offset 4, limit 2", 4, 2, 1,
 				[]float32{-46, -41},
-				[]int64{46, 41}},
-			{"offset 5, limit 1", 5, 1, 0,
+				[]int64{46, 41},
+			},
+			{
+				"offset 5, limit 1", 5, 1, 0,
 				[]float32{},
-				[]int64{}},
+				[]int64{},
+			},
 		}
 
 		for _, test := range lessThanLimitTests {
@@ -1543,30 +1590,26 @@ func TestTaskSearch_reduceSearchResultData(t *testing.T) {
 }
 
 func TestSearchTask_ErrExecute(t *testing.T) {
-
 	var (
 		err error
 		ctx = context.TODO()
 
 		rc = NewRootCoordMock()
-		qc = getQueryCoord()
-		qn = getQueryNode()
+		qc = getQueryCoordClient()
+		qn = getQueryNodeClient()
 
 		shardsNum      = int32(2)
 		collectionName = t.Name() + funcutil.GenRandomStr()
 	)
 
-	qn.EXPECT().GetComponentStates(mock.Anything).Return(nil, nil).Maybe()
+	qn.EXPECT().GetComponentStates(mock.Anything, mock.Anything).Return(nil, nil).Maybe()
 
 	mgr := NewMockShardClientManager(t)
 	mgr.EXPECT().GetClient(mock.Anything, mock.Anything).Return(qn, nil).Maybe()
 	mgr.EXPECT().UpdateShardLeaders(mock.Anything, mock.Anything).Return(nil).Maybe()
 	lb := NewLBPolicyImpl(mgr)
 
-	rc.Start()
-	defer rc.Stop()
-	qc.Start()
-	defer qc.Stop()
+	defer qc.Close()
 
 	err = InitMetaCache(ctx, rc, qc, mgr)
 	assert.NoError(t, err)
@@ -1646,9 +1689,7 @@ func TestSearchTask_ErrExecute(t *testing.T) {
 		},
 		ctx: ctx,
 		result: &milvuspb.SearchResults{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status: merr.Success(),
 		},
 		request: &milvuspb.SearchRequest{
 			Base: &commonpb.MsgBase{
@@ -1674,7 +1715,7 @@ func TestSearchTask_ErrExecute(t *testing.T) {
 	assert.Error(t, task.Execute(ctx))
 
 	qn.ExpectedCalls = nil
-	qn.EXPECT().GetComponentStates(mock.Anything).Return(nil, nil).Maybe()
+	qn.EXPECT().GetComponentStates(mock.Anything, mock.Anything).Return(nil, nil).Maybe()
 	qn.EXPECT().Search(mock.Anything, mock.Anything).Return(&internalpb.SearchResults{
 		Status: &commonpb.Status{
 			ErrorCode: commonpb.ErrorCode_NotShardLeader,
@@ -1684,7 +1725,7 @@ func TestSearchTask_ErrExecute(t *testing.T) {
 	assert.True(t, strings.Contains(err.Error(), errInvalidShardLeaders.Error()))
 
 	qn.ExpectedCalls = nil
-	qn.EXPECT().GetComponentStates(mock.Anything).Return(nil, nil).Maybe()
+	qn.EXPECT().GetComponentStates(mock.Anything, mock.Anything).Return(nil, nil).Maybe()
 	qn.EXPECT().Search(mock.Anything, mock.Anything).Return(&internalpb.SearchResults{
 		Status: &commonpb.Status{
 			ErrorCode: commonpb.ErrorCode_UnexpectedError,
@@ -1693,11 +1734,9 @@ func TestSearchTask_ErrExecute(t *testing.T) {
 	assert.Error(t, task.Execute(ctx))
 
 	qn.ExpectedCalls = nil
-	qn.EXPECT().GetComponentStates(mock.Anything).Return(nil, nil).Maybe()
+	qn.EXPECT().GetComponentStates(mock.Anything, mock.Anything).Return(nil, nil).Maybe()
 	qn.EXPECT().Search(mock.Anything, mock.Anything).Return(&internalpb.SearchResults{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status: merr.Success(),
 	}, nil)
 	assert.NoError(t, task.Execute(ctx))
 }
@@ -1751,7 +1790,8 @@ func TestTaskSearch_parseQueryInfo(t *testing.T) {
 	t.Run("parseSearchInfo error", func(t *testing.T) {
 		spNoTopk := []*commonpb.KeyValuePair{{
 			Key:   AnnsFieldKey,
-			Value: testFloatVecField}}
+			Value: testFloatVecField,
+		}}
 
 		spInvalidTopk := append(spNoTopk, &commonpb.KeyValuePair{
 			Key:   TopKKey,
@@ -1871,19 +1911,20 @@ func TestSearchTask_Requery(t *testing.T) {
 		node := mocks.NewMockProxy(t)
 		node.EXPECT().Query(mock.Anything, mock.Anything).
 			Return(&milvuspb.QueryResults{
-				FieldsData: []*schemapb.FieldData{{
-					Type:      schemapb.DataType_Int64,
-					FieldName: pkField,
-					Field: &schemapb.FieldData_Scalars{
-						Scalars: &schemapb.ScalarField{
-							Data: &schemapb.ScalarField_LongData{
-								LongData: &schemapb.LongArray{
-									Data: ids,
+				FieldsData: []*schemapb.FieldData{
+					{
+						Type:      schemapb.DataType_Int64,
+						FieldName: pkField,
+						Field: &schemapb.FieldData_Scalars{
+							Scalars: &schemapb.ScalarField{
+								Data: &schemapb.ScalarField_LongData{
+									LongData: &schemapb.LongArray{
+										Data: ids,
+									},
 								},
 							},
 						},
 					},
-				},
 					newFloatVectorFieldData(vecField, rows, dim),
 				},
 			}, nil)
@@ -2034,19 +2075,20 @@ func TestSearchTask_Requery(t *testing.T) {
 		node := mocks.NewMockProxy(t)
 		node.EXPECT().Query(mock.Anything, mock.Anything).
 			Return(&milvuspb.QueryResults{
-				FieldsData: []*schemapb.FieldData{{
-					Type:      schemapb.DataType_Int64,
-					FieldName: pkField,
-					Field: &schemapb.FieldData_Scalars{
-						Scalars: &schemapb.ScalarField{
-							Data: &schemapb.ScalarField_LongData{
-								LongData: &schemapb.LongArray{
-									Data: ids[:len(ids)-1],
+				FieldsData: []*schemapb.FieldData{
+					{
+						Type:      schemapb.DataType_Int64,
+						FieldName: pkField,
+						Field: &schemapb.FieldData_Scalars{
+							Scalars: &schemapb.ScalarField{
+								Data: &schemapb.ScalarField_LongData{
+									LongData: &schemapb.LongArray{
+										Data: ids[:len(ids)-1],
+									},
 								},
 							},
 						},
 					},
-				},
 					newFloatVectorFieldData(vecField, rows, dim),
 				},
 			}, nil)

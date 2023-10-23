@@ -26,6 +26,7 @@ import (
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
+	"github.com/tikv/client-go/v2/txnkv"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
@@ -47,6 +48,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/tikv"
 )
 
 func TestMain(m *testing.M) {
@@ -81,9 +83,12 @@ type ServerSuite struct {
 	// Mocks
 	broker *meta.MockBroker
 
-	server *Server
-	nodes  []*mocks.MockQueryNode
+	tikvCli *txnkv.Client
+	server  *Server
+	nodes   []*mocks.MockQueryNode
 }
+
+var testMeta string
 
 func (suite *ServerSuite) SetupSuite() {
 	paramtable.Init()
@@ -121,7 +126,10 @@ func (suite *ServerSuite) SetupSuite() {
 
 func (suite *ServerSuite) SetupTest() {
 	var err error
+	paramtable.Get().Save(paramtable.Get().MetaStoreCfg.MetaStoreType.Key, testMeta)
+	suite.tikvCli = tikv.SetupLocalTxn()
 	suite.server, err = suite.newQueryCoord()
+
 	suite.Require().NoError(err)
 	suite.hackServer()
 	err = suite.server.Start()
@@ -152,6 +160,7 @@ func (suite *ServerSuite) TearDownTest() {
 			node.Stop()
 		}
 	}
+	paramtable.Get().Reset(paramtable.Get().MetaStoreCfg.MetaStoreType.Key)
 }
 
 func (suite *ServerSuite) TestRecover() {
@@ -171,7 +180,7 @@ func (suite *ServerSuite) TestRecover() {
 
 func (suite *ServerSuite) TestNodeUp() {
 	node1 := mocks.NewMockQueryNode(suite.T(), suite.server.etcdCli, 100)
-	node1.EXPECT().GetDataDistribution(mock.Anything, mock.Anything).Return(&querypb.GetDataDistributionResponse{Status: merr.Status(nil)}, nil)
+	node1.EXPECT().GetDataDistribution(mock.Anything, mock.Anything).Return(&querypb.GetDataDistributionResponse{Status: merr.Success()}, nil)
 	err := node1.Start()
 	suite.NoError(err)
 	defer node1.Stop()
@@ -195,7 +204,7 @@ func (suite *ServerSuite) TestNodeUp() {
 	suite.server.nodeMgr.Add(session.NewNodeInfo(1001, "localhost"))
 
 	node2 := mocks.NewMockQueryNode(suite.T(), suite.server.etcdCli, 101)
-	node2.EXPECT().GetDataDistribution(mock.Anything, mock.Anything).Return(&querypb.GetDataDistributionResponse{Status: merr.Status(nil)}, nil).Maybe()
+	node2.EXPECT().GetDataDistribution(mock.Anything, mock.Anything).Return(&querypb.GetDataDistributionResponse{Status: merr.Success()}, nil).Maybe()
 	err = node2.Start()
 	suite.NoError(err)
 	defer node2.Stop()
@@ -282,7 +291,7 @@ func (suite *ServerSuite) TestDisableActiveStandby() {
 	suite.NoError(err)
 	suite.Equal(commonpb.StateCode_Healthy, suite.server.State())
 
-	states, err := suite.server.GetComponentStates(context.Background())
+	states, err := suite.server.GetComponentStates(context.Background(), nil)
 	suite.NoError(err)
 	suite.Equal(commonpb.StateCode_Healthy, states.GetState().GetStateCode())
 }
@@ -295,11 +304,11 @@ func (suite *ServerSuite) TestEnableActiveStandby() {
 
 	suite.server, err = suite.newQueryCoord()
 	suite.NoError(err)
-	mockRootCoord := coordMocks.NewRootCoord(suite.T())
-	mockDataCoord := coordMocks.NewMockDataCoord(suite.T())
+	mockRootCoord := coordMocks.NewMockRootCoordClient(suite.T())
+	mockDataCoord := coordMocks.NewMockDataCoordClient(suite.T())
 
 	mockRootCoord.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
-		Status: merr.Status(nil),
+		Status: merr.Success(),
 		Schema: &schemapb.CollectionSchema{},
 	}, nil).Maybe()
 	for _, collection := range suite.collections {
@@ -310,17 +319,17 @@ func (suite *ServerSuite) TestEnableActiveStandby() {
 			CollectionID: collection,
 		}
 		mockRootCoord.EXPECT().ShowPartitions(mock.Anything, req).Return(&milvuspb.ShowPartitionsResponse{
-			Status:       merr.Status(nil),
+			Status:       merr.Success(),
 			PartitionIDs: suite.partitions[collection],
 		}, nil).Maybe()
 		suite.expectGetRecoverInfoByMockDataCoord(collection, mockDataCoord)
 	}
-	err = suite.server.SetRootCoord(mockRootCoord)
+	err = suite.server.SetRootCoordClient(mockRootCoord)
 	suite.NoError(err)
-	err = suite.server.SetDataCoord(mockDataCoord)
+	err = suite.server.SetDataCoordClient(mockDataCoord)
 	suite.NoError(err)
-	//suite.hackServer()
-	states1, err := suite.server.GetComponentStates(context.Background())
+	// suite.hackServer()
+	states1, err := suite.server.GetComponentStates(context.Background(), nil)
 	suite.NoError(err)
 	suite.Equal(commonpb.StateCode_StandBy, states1.GetState().GetStateCode())
 	err = suite.server.Register()
@@ -328,7 +337,7 @@ func (suite *ServerSuite) TestEnableActiveStandby() {
 	err = suite.server.Start()
 	suite.NoError(err)
 
-	states2, err := suite.server.GetComponentStates(context.Background())
+	states2, err := suite.server.GetComponentStates(context.Background(), nil)
 	suite.NoError(err)
 	suite.Equal(commonpb.StateCode_Healthy, states2.GetState().GetStateCode())
 
@@ -399,11 +408,11 @@ func (suite *ServerSuite) expectGetRecoverInfo(collection int64) {
 }
 
 func (suite *ServerSuite) expectLoadAndReleasePartitions(querynode *mocks.MockQueryNode) {
-	querynode.EXPECT().LoadPartitions(mock.Anything, mock.Anything).Return(merr.Status(nil), nil).Maybe()
-	querynode.EXPECT().ReleasePartitions(mock.Anything, mock.Anything).Return(merr.Status(nil), nil).Maybe()
+	querynode.EXPECT().LoadPartitions(mock.Anything, mock.Anything).Return(merr.Success(), nil).Maybe()
+	querynode.EXPECT().ReleasePartitions(mock.Anything, mock.Anything).Return(merr.Success(), nil).Maybe()
 }
 
-func (suite *ServerSuite) expectGetRecoverInfoByMockDataCoord(collection int64, dataCoord *coordMocks.MockDataCoord) {
+func (suite *ServerSuite) expectGetRecoverInfoByMockDataCoord(collection int64, dataCoord *coordMocks.MockDataCoordClient) {
 	var (
 		vChannels    []*datapb.VchannelInfo
 		segmentInfos []*datapb.SegmentInfo
@@ -434,9 +443,7 @@ func (suite *ServerSuite) expectGetRecoverInfoByMockDataCoord(collection int64, 
 		}
 	}
 	dataCoord.EXPECT().GetRecoveryInfoV2(mock.Anything, getRecoveryInfoRequest).Return(&datapb.GetRecoveryInfoResponseV2{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:   merr.Success(),
 		Channels: vChannels,
 		Segments: segmentInfos,
 	}, nil).Maybe()
@@ -520,12 +527,12 @@ func (suite *ServerSuite) hackServer() {
 }
 
 func (suite *ServerSuite) hackBroker(server *Server) {
-	mockRootCoord := coordMocks.NewRootCoord(suite.T())
-	mockDataCoord := coordMocks.NewMockDataCoord(suite.T())
+	mockRootCoord := coordMocks.NewMockRootCoordClient(suite.T())
+	mockDataCoord := coordMocks.NewMockDataCoordClient(suite.T())
 
 	for _, collection := range suite.collections {
 		mockRootCoord.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
-			Status: merr.Status(nil),
+			Status: merr.Success(),
 			Schema: &schemapb.CollectionSchema{},
 		}, nil).Maybe()
 		req := &milvuspb.ShowPartitionsRequest{
@@ -535,13 +542,13 @@ func (suite *ServerSuite) hackBroker(server *Server) {
 			CollectionID: collection,
 		}
 		mockRootCoord.EXPECT().ShowPartitions(mock.Anything, req).Return(&milvuspb.ShowPartitionsResponse{
-			Status:       merr.Status(nil),
+			Status:       merr.Success(),
 			PartitionIDs: suite.partitions[collection],
 		}, nil).Maybe()
 	}
-	err := server.SetRootCoord(mockRootCoord)
+	err := server.SetRootCoordClient(mockRootCoord)
 	suite.NoError(err)
-	err = server.SetDataCoord(mockDataCoord)
+	err = server.SetDataCoordClient(mockDataCoord)
 	suite.NoError(err)
 }
 
@@ -563,6 +570,8 @@ func (suite *ServerSuite) newQueryCoord() (*Server, error) {
 		return nil, err
 	}
 	server.SetEtcdClient(etcdCli)
+	server.SetTiKVClient(suite.tikvCli)
+
 	server.SetQueryNodeCreator(session.DefaultQueryNodeCreator)
 	suite.hackBroker(server)
 	err = server.Init()
@@ -570,5 +579,9 @@ func (suite *ServerSuite) newQueryCoord() (*Server, error) {
 }
 
 func TestServer(t *testing.T) {
-	suite.Run(t, new(ServerSuite))
+	parameters := []string{"tikv", "etcd"}
+	for _, v := range parameters {
+		testMeta = v
+		suite.Run(t, new(ServerSuite))
+	}
 }

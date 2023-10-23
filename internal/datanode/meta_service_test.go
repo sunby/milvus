@@ -21,11 +21,15 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/errors"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"google.golang.org/grpc"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
-	"github.com/stretchr/testify/assert"
+	"github.com/milvus-io/milvus/internal/datanode/broker"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
 const (
@@ -39,15 +43,17 @@ func TestMetaService_All(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	mFactory := &RootCoordFactory{
-		pkType: schemapb.DataType_Int64,
-	}
-	mFactory.setCollectionID(collectionID0)
-	mFactory.setCollectionName(collectionName0)
-	ms := newMetaService(mFactory, collectionID0)
+	meta := NewMetaFactory().GetCollectionMeta(collectionID0, collectionName0, schemapb.DataType_Int64)
+	broker := broker.NewMockBroker(t)
+	broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+		Return(&milvuspb.DescribeCollectionResponse{
+			Status: merr.Status(nil),
+			Schema: meta.GetSchema(),
+		}, nil).Maybe()
+
+	ms := newMetaService(broker, collectionID0)
 
 	t.Run("Test getCollectionSchema", func(t *testing.T) {
-
 		sch, err := ms.getCollectionSchema(ctx, collectionID0, 0)
 		assert.NoError(t, err)
 		assert.NotNil(t, sch)
@@ -67,7 +73,7 @@ type RootCoordFails1 struct {
 }
 
 // DescribeCollectionInternal override method that will fails
-func (rc *RootCoordFails1) DescribeCollectionInternal(ctx context.Context, req *milvuspb.DescribeCollectionRequest) (*milvuspb.DescribeCollectionResponse, error) {
+func (rc *RootCoordFails1) DescribeCollectionInternal(ctx context.Context, req *milvuspb.DescribeCollectionRequest, opts ...grpc.CallOption) (*milvuspb.DescribeCollectionResponse, error) {
 	return nil, errors.New("always fail")
 }
 
@@ -77,30 +83,23 @@ type RootCoordFails2 struct {
 }
 
 // DescribeCollectionInternal override method that will fails
-func (rc *RootCoordFails2) DescribeCollectionInternal(ctx context.Context, req *milvuspb.DescribeCollectionRequest) (*milvuspb.DescribeCollectionResponse, error) {
+func (rc *RootCoordFails2) DescribeCollectionInternal(ctx context.Context, req *milvuspb.DescribeCollectionRequest, opts ...grpc.CallOption) (*milvuspb.DescribeCollectionResponse, error) {
 	return &milvuspb.DescribeCollectionResponse{
 		Status: &commonpb.Status{ErrorCode: commonpb.ErrorCode_UnexpectedError},
 	}, nil
 }
 
 func TestMetaServiceRootCoodFails(t *testing.T) {
-
 	t.Run("Test Describe with error", func(t *testing.T) {
 		rc := &RootCoordFails1{}
 		rc.setCollectionID(collectionID0)
 		rc.setCollectionName(collectionName0)
 
-		ms := newMetaService(rc, collectionID0)
-		_, err := ms.getCollectionSchema(context.Background(), collectionID1, 0)
-		assert.Error(t, err)
-	})
+		broker := broker.NewMockBroker(t)
+		broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+			Return(nil, errors.New("mock"))
 
-	t.Run("Test Describe wit nil response", func(t *testing.T) {
-		rc := &RootCoordFails2{}
-		rc.setCollectionID(collectionID0)
-		rc.setCollectionName(collectionName0)
-
-		ms := newMetaService(rc, collectionID0)
+		ms := newMetaService(broker, collectionID0)
 		_, err := ms.getCollectionSchema(context.Background(), collectionID1, 0)
 		assert.Error(t, err)
 	})

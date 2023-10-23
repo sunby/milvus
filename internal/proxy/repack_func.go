@@ -27,7 +27,6 @@ func insertRepackFunc(
 	tsMsgs []msgstream.TsMsg,
 	hashKeys [][]int32,
 ) (map[int32]*msgstream.MsgPack, error) {
-
 	if len(hashKeys) < len(tsMsgs) {
 		return nil, fmt.Errorf(
 			"the length of hash keys (%d) is less than the length of messages (%d)",
@@ -59,7 +58,6 @@ func defaultInsertRepackFunc(
 	tsMsgs []msgstream.TsMsg,
 	hashKeys [][]int32,
 ) (map[int32]*msgstream.MsgPack, error) {
-
 	if len(hashKeys) < len(tsMsgs) {
 		return nil, fmt.Errorf(
 			"the length of hash keys (%d) is less than the length of messages (%d)",
@@ -82,4 +80,15 @@ func defaultInsertRepackFunc(
 		pack[key].Msgs = append(pack[key].Msgs, msg)
 	}
 	return pack, nil
+}
+
+func replicatePackFunc(
+	tsMsgs []msgstream.TsMsg,
+	hashKeys [][]int32,
+) (map[int32]*msgstream.MsgPack, error) {
+	return map[int32]*msgstream.MsgPack{
+		0: {
+			Msgs: tsMsgs,
+		},
+	}, nil
 }

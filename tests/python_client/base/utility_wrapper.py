@@ -188,6 +188,24 @@ class ApiUtilityWrapper:
             if task.task_id in pending_task_ids:
                 log.info(f"task {task.task_id} state transfer from pending to {task.state_name}")
 
+    def wait_index_build_completed(self, collection_name, timeout=None):
+        start = time.time()
+        if timeout is not None:
+            task_timeout = timeout
+        else:
+            task_timeout = TIMEOUT
+        end = time.time()
+        while end - start <= task_timeout:
+            time.sleep(0.5)
+            index_states, _ = self.index_building_progress(collection_name)
+            log.debug(f"index states: {index_states}")
+            if index_states["total_rows"] == index_states["indexed_rows"]:
+                log.info(f"index build completed")
+                return True
+            end = time.time()
+        log.info(f"index build timeout")
+        return False
+
     def get_query_segment_info(self, collection_name, timeout=None, using="default", check_task=None, check_items=None):
         timeout = TIMEOUT if timeout is None else timeout
         func_name = sys._getframe().f_code.co_name
@@ -496,14 +514,14 @@ class ApiUtilityWrapper:
         check_result = ResponseChecker(res, func_name, check_task, check_items, check, **kwargs).run()
         return res, check_result
 
-    def rename_collection(self, old_collection_name, new_collection_name, timeout=None, check_task=None,
-                          check_items=None, **kwargs):
+    def rename_collection(self, old_collection_name, new_collection_name, new_db_name="", timeout=None,
+                          check_task=None, check_items=None, **kwargs):
         func_name = sys._getframe().f_code.co_name
-        res, check = api_request([self.ut.rename_collection, old_collection_name, new_collection_name, timeout],
-                                 **kwargs)
+        res, check = api_request([self.ut.rename_collection, old_collection_name, new_collection_name, new_db_name,
+                                  timeout], **kwargs)
         check_result = ResponseChecker(res, func_name, check_task, check_items, check,
                                        old_collection_name=old_collection_name, new_collection_name=new_collection_name,
-                                       timeout=timeout, **kwargs).run()
+                                       new_db_name=new_db_name, timeout=timeout, **kwargs).run()
         return res, check_result
 
     def flush_all(self, using="default", timeout=None, check_task=None, check_items=None, **kwargs):

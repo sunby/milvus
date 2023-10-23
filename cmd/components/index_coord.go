@@ -26,8 +26,7 @@ import (
 )
 
 // IndexCoord implements IndexCoord grpc server
-type IndexCoord struct {
-}
+type IndexCoord struct{}
 
 // NewIndexCoord creates a new IndexCoord
 func NewIndexCoord(ctx context.Context, factory dependency.Factory) (*IndexCoord, error) {
@@ -48,7 +47,6 @@ func (s *IndexCoord) Stop() error {
 
 // GetComponentStates returns indexnode's states
 func (s *IndexCoord) Health(ctx context.Context) commonpb.StateCode {
-	log.Info("IndexCoord is healthy")
 	return commonpb.StateCode_Healthy
 }
 

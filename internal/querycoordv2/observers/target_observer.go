@@ -41,14 +41,17 @@ type targetUpdateRequest struct {
 	ReadyNotifier chan struct{}
 }
 
+type initRequest struct{}
+
 type TargetObserver struct {
-	c         chan struct{}
+	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	meta      *meta.Meta
 	targetMgr *meta.TargetManager
 	distMgr   *meta.DistributionManager
 	broker    meta.Broker
 
+	initChan             chan initRequest
 	manualCheck          chan checkRequest
 	nextTargetLastUpdate map[int64]time.Time
 	updateChan           chan targetUpdateRequest
@@ -60,7 +63,6 @@ type TargetObserver struct {
 
 func NewTargetObserver(meta *meta.Meta, targetMgr *meta.TargetManager, distMgr *meta.DistributionManager, broker meta.Broker) *TargetObserver {
 	return &TargetObserver{
-		c:                    make(chan struct{}),
 		meta:                 meta,
 		targetMgr:            targetMgr,
 		distMgr:              distMgr,
@@ -69,17 +71,26 @@ func NewTargetObserver(meta *meta.Meta, targetMgr *meta.TargetManager, distMgr *
 		nextTargetLastUpdate: make(map[int64]time.Time),
 		updateChan:           make(chan targetUpdateRequest),
 		readyNotifiers:       make(map[int64][]chan struct{}),
+		initChan:             make(chan initRequest),
 	}
 }
 
-func (ob *TargetObserver) Start(ctx context.Context) {
+func (ob *TargetObserver) Start() {
+	ctx, cancel := context.WithCancel(context.Background())
+	ob.cancel = cancel
+
 	ob.wg.Add(1)
 	go ob.schedule(ctx)
+
+	// after target observer start, update target for all collection
+	ob.initChan <- initRequest{}
 }
 
 func (ob *TargetObserver) Stop() {
 	ob.stopOnce.Do(func() {
-		close(ob.c)
+		if ob.cancel != nil {
+			ob.cancel()
+		}
 		ob.wg.Wait()
 	})
 }
@@ -93,15 +104,19 @@ func (ob *TargetObserver) schedule(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Info("Close target observer due to context canceled")
-			return
-		case <-ob.c:
 			log.Info("Close target observer")
 			return
 
+		case <-ob.initChan:
+			for _, collectionID := range ob.meta.GetAll() {
+				ob.init(collectionID)
+			}
+
 		case <-ticker.C:
 			ob.clean()
-			ob.tryUpdateTarget()
+			for _, collectionID := range ob.meta.GetAll() {
+				ob.check(collectionID)
+			}
 
 		case req := <-ob.manualCheck:
 			ob.check(req.CollectionID)
@@ -118,11 +133,6 @@ func (ob *TargetObserver) schedule(ctx context.Context) {
 			}
 
 			req.Notifier <- err
-
-			// Manually trigger the observer,
-			// to avoid waiting for a long time (10s)
-			ob.clean()
-			ob.tryUpdateTarget()
 		}
 	}
 }
@@ -130,13 +140,20 @@ func (ob *TargetObserver) schedule(ctx context.Context) {
 // Check checks whether the next target is ready,
 // and updates the current target if it is,
 // returns true if current target is not nil
-func (ob *TargetObserver) Check(collectionID int64) bool {
+func (ob *TargetObserver) Check(ctx context.Context, collectionID int64) bool {
 	notifier := make(chan bool)
-	ob.manualCheck <- checkRequest{
-		CollectionID: collectionID,
-		Notifier:     notifier,
+	select {
+	case ob.manualCheck <- checkRequest{CollectionID: collectionID, Notifier: notifier}:
+	case <-ctx.Done():
+		return false
 	}
-	return <-notifier
+
+	select {
+	case result := <-notifier:
+		return result
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (ob *TargetObserver) check(collectionID int64) {
@@ -155,6 +172,18 @@ func (ob *TargetObserver) check(collectionID int64) {
 	if ob.shouldUpdateNextTarget(collectionID) {
 		// update next target in collection level
 		ob.updateNextTarget(collectionID)
+	}
+}
+
+func (ob *TargetObserver) init(collectionID int64) {
+	// pull next target first if not exist
+	if !ob.targetMgr.IsNextTargetExist(collectionID) {
+		ob.updateNextTarget(collectionID)
+	}
+
+	// try to update current target if all segment/channel are ready
+	if ob.shouldUpdateCurrentTarget(collectionID) {
+		ob.updateCurrentTarget(collectionID)
 	}
 }
 
@@ -183,28 +212,19 @@ func (ob *TargetObserver) ReleaseCollection(collectionID int64) {
 	delete(ob.readyNotifiers, collectionID)
 }
 
-func (ob *TargetObserver) tryUpdateTarget() {
-	collections := ob.meta.GetAll()
-	for _, collectionID := range collections {
-		ob.check(collectionID)
-	}
-
-	collectionSet := typeutil.NewUniqueSet(collections...)
+func (ob *TargetObserver) clean() {
+	collectionSet := typeutil.NewUniqueSet(ob.meta.GetAll()...)
 	// for collection which has been removed from target, try to clear nextTargetLastUpdate
 	for collection := range ob.nextTargetLastUpdate {
 		if !collectionSet.Contain(collection) {
 			delete(ob.nextTargetLastUpdate, collection)
 		}
 	}
-}
-
-func (ob *TargetObserver) clean() {
-	collections := typeutil.NewSet(ob.meta.GetAll()...)
 
 	ob.mut.Lock()
 	defer ob.mut.Unlock()
 	for collectionID, notifiers := range ob.readyNotifiers {
-		if !collections.Contain(collectionID) {
+		if !collectionSet.Contain(collectionID) {
 			for i := range notifiers {
 				close(notifiers[i])
 			}

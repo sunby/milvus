@@ -20,13 +20,16 @@ import (
 	"container/list"
 	"context"
 	"sync"
+	"time"
 
-	"github.com/cockroachdb/errors"
 	"go.opentelemetry.io/otel"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
+	"github.com/milvus-io/milvus/pkg/util/conc"
+	"github.com/milvus-io/milvus/pkg/util/merr"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -83,7 +86,7 @@ func (queue *baseTaskQueue) addUnissuedTask(t task) error {
 	defer queue.utLock.Unlock()
 
 	if queue.utFull() {
-		return errors.New("task queue is full")
+		return merr.WrapErrServiceRequestLimitExceeded(int32(queue.getMaxTaskNum()))
 	}
 	queue.unissuedTasks.PushBack(t)
 	queue.utBufChan <- 1
@@ -227,7 +230,7 @@ func (queue *dmTaskQueue) Enqueue(t task) error {
 	//	1) Protect member pChanStatisticsInfos
 	//	2) Serialize the timestamp allocation for dml tasks
 
-	//1. set the current pChannels for this dmTask
+	// 1. set the current pChannels for this dmTask
 	dmt := t.(dmlTask)
 	err := dmt.setChannels()
 	if err != nil {
@@ -235,19 +238,19 @@ func (queue *dmTaskQueue) Enqueue(t task) error {
 		return err
 	}
 
-	//2. enqueue dml task
+	// 2. enqueue dml task
 	queue.statsLock.Lock()
 	defer queue.statsLock.Unlock()
 	err = queue.baseTaskQueue.Enqueue(t)
 	if err != nil {
 		return err
 	}
-	//3. commit will use pChannels got previously when preAdding and will definitely succeed
+	// 3. commit will use pChannels got previously when preAdding and will definitely succeed
 	pChannels := dmt.getChannels()
 	queue.commitPChanStats(dmt, pChannels)
-	//there's indeed a possibility that the collection info cache was expired after preAddPChanStats
-	//but considering root coord knows everything about meta modification, invalid stats appended after the meta changed
-	//will be discarded by root coord and will not lead to inconsistent state
+	// there's indeed a possibility that the collection info cache was expired after preAddPChanStats
+	// but considering root coord knows everything about meta modification, invalid stats appended after the meta changed
+	// will be discarded by root coord and will not lead to inconsistent state
 	return nil
 }
 
@@ -269,7 +272,7 @@ func (queue *dmTaskQueue) PopActiveTask(taskID UniqueID) task {
 }
 
 func (queue *dmTaskQueue) commitPChanStats(dmt dmlTask, pChannels []pChan) {
-	//1. prepare new stat for all pChannels
+	// 1. prepare new stat for all pChannels
 	newStats := make(map[pChan]pChanStatistics)
 	beginTs := dmt.BeginTs()
 	endTs := dmt.EndTs()
@@ -279,7 +282,7 @@ func (queue *dmTaskQueue) commitPChanStats(dmt dmlTask, pChannels []pChan) {
 			maxTs: endTs,
 		}
 	}
-	//2. update stats for all pChannels
+	// 2. update stats for all pChannels
 	for cName, newStat := range newStats {
 		currentStat, ok := queue.pChanStatisticsInfos[cName]
 		if !ok {
@@ -325,7 +328,6 @@ func (queue *dmTaskQueue) popPChanStats(t task) {
 }
 
 func (queue *dmTaskQueue) getPChanStatsInfo() (map[pChan]*pChanStatistics, error) {
-
 	ret := make(map[pChan]*pChanStatistics)
 	queue.statsLock.RLock()
 	defer queue.statsLock.RUnlock()
@@ -373,6 +375,9 @@ type taskScheduler struct {
 	dmQueue *dmTaskQueue
 	dqQueue *dqTaskQueue
 
+	// data control queue, use for such as flush operation, which control the data status
+	dcQueue *ddTaskQueue
+
 	wg     sync.WaitGroup
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -397,6 +402,8 @@ func newTaskScheduler(ctx context.Context,
 	s.dmQueue = newDmTaskQueue(tsoAllocatorIns)
 	s.dqQueue = newDqTaskQueue(tsoAllocatorIns)
 
+	s.dcQueue = newDdTaskQueue(tsoAllocatorIns)
+
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -408,25 +415,16 @@ func (sched *taskScheduler) scheduleDdTask() task {
 	return sched.ddQueue.PopUnissuedTask()
 }
 
+func (sched *taskScheduler) scheduleDcTask() task {
+	return sched.dcQueue.PopUnissuedTask()
+}
+
 func (sched *taskScheduler) scheduleDmTask() task {
 	return sched.dmQueue.PopUnissuedTask()
 }
 
 func (sched *taskScheduler) scheduleDqTask() task {
 	return sched.dqQueue.PopUnissuedTask()
-}
-
-func (sched *taskScheduler) getTaskByReqID(reqID UniqueID) task {
-	if t := sched.ddQueue.getTaskByReqID(reqID); t != nil {
-		return t
-	}
-	if t := sched.dmQueue.getTaskByReqID(reqID); t != nil {
-		return t
-	}
-	if t := sched.dqQueue.getTaskByReqID(reqID); t != nil {
-		return t
-	}
-	return nil
 }
 
 func (sched *taskScheduler) processTask(t task, q taskQueue) {
@@ -487,8 +485,25 @@ func (sched *taskScheduler) definitionLoop() {
 	}
 }
 
+// controlLoop schedule the data control operation, such as flush
+func (sched *taskScheduler) controlLoop() {
+	defer sched.wg.Done()
+	for {
+		select {
+		case <-sched.ctx.Done():
+			return
+		case <-sched.dcQueue.utChan():
+			if !sched.dcQueue.utEmpty() {
+				t := sched.scheduleDcTask()
+				sched.processTask(t, sched.dcQueue)
+			}
+		}
+	}
+}
+
 func (sched *taskScheduler) manipulationLoop() {
 	defer sched.wg.Done()
+
 	for {
 		select {
 		case <-sched.ctx.Done():
@@ -505,6 +520,7 @@ func (sched *taskScheduler) manipulationLoop() {
 func (sched *taskScheduler) queryLoop() {
 	defer sched.wg.Done()
 
+	pool := conc.NewPool[struct{}](paramtable.Get().ProxyCfg.MaxTaskNum.GetAsInt(), conc.WithExpiryDuration(time.Minute))
 	for {
 		select {
 		case <-sched.ctx.Done():
@@ -512,7 +528,10 @@ func (sched *taskScheduler) queryLoop() {
 		case <-sched.dqQueue.utChan():
 			if !sched.dqQueue.utEmpty() {
 				t := sched.scheduleDqTask()
-				go sched.processTask(t, sched.dqQueue)
+				pool.Submit(func() (struct{}, error) {
+					sched.processTask(t, sched.dqQueue)
+					return struct{}{}, nil
+				})
 			} else {
 				log.Debug("query queue is empty ...")
 			}
@@ -523,6 +542,9 @@ func (sched *taskScheduler) queryLoop() {
 func (sched *taskScheduler) Start() error {
 	sched.wg.Add(1)
 	go sched.definitionLoop()
+
+	sched.wg.Add(1)
+	go sched.controlLoop()
 
 	sched.wg.Add(1)
 	go sched.manipulationLoop()

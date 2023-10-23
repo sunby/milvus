@@ -25,19 +25,21 @@
 
 namespace milvus::index {
 
-#define BUILD_DISK_ANN
-#ifdef BUILD_DISK_ANN
-
 template <typename T>
 class VectorDiskAnnIndex : public VectorIndex {
  public:
-    explicit VectorDiskAnnIndex(const IndexType& index_type,
-                                const MetricType& metric_type,
-                                storage::FileManagerImplPtr file_manager);
+    explicit VectorDiskAnnIndex(
+        const IndexType& index_type,
+        const MetricType& metric_type,
+        const IndexVersion& version,
+        const storage::FileManagerContext& file_manager_context =
+            storage::FileManagerContext());
+
     BinarySet
     Serialize(const Config& config) override {  // deprecated
-        auto remote_paths_to_size = file_manager_->GetRemotePathsToFileSize();
         BinarySet binary_set;
+        index_.Serialize(binary_set);
+        auto remote_paths_to_size = file_manager_->GetRemotePathsToFileSize();
         for (auto& file : remote_paths_to_size) {
             binary_set.Append(file.first, nullptr, file.second);
         }
@@ -96,6 +98,5 @@ class VectorDiskAnnIndex : public VectorIndex {
 
 template <typename T>
 using VectorDiskAnnIndexPtr = std::unique_ptr<VectorDiskAnnIndex<T>>;
-#endif
 
 }  // namespace milvus::index

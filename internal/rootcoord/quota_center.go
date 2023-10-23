@@ -87,8 +87,8 @@ type collectionStates = map[milvuspb.QuotaState]commonpb.ErrorCode
 type QuotaCenter struct {
 	// clients
 	proxies    *proxyClientManager
-	queryCoord types.QueryCoord
-	dataCoord  types.DataCoord
+	queryCoord types.QueryCoordClient
+	dataCoord  types.DataCoordClient
 	meta       IMetaTable
 
 	// metrics
@@ -113,7 +113,7 @@ type QuotaCenter struct {
 }
 
 // NewQuotaCenter returns a new QuotaCenter.
-func NewQuotaCenter(proxies *proxyClientManager, queryCoord types.QueryCoord, dataCoord types.DataCoord, tsoAllocator tso.Allocator, meta IMetaTable) *QuotaCenter {
+func NewQuotaCenter(proxies *proxyClientManager, queryCoord types.QueryCoordClient, dataCoord types.DataCoordClient, tsoAllocator tso.Allocator, meta IMetaTable) *QuotaCenter {
 	return &QuotaCenter{
 		proxies:             proxies,
 		queryCoord:          queryCoord,
@@ -264,7 +264,7 @@ func (q *QuotaCenter) syncMetrics() error {
 	if err != nil {
 		return err
 	}
-	//log.Debug("QuotaCenter sync metrics done",
+	// log.Debug("QuotaCenter sync metrics done",
 	//	zap.Any("dataNodeMetrics", q.dataNodeMetrics),
 	//	zap.Any("queryNodeMetrics", q.queryNodeMetrics),
 	//	zap.Any("proxyMetrics", q.proxyMetrics),
@@ -857,7 +857,7 @@ func (q *QuotaCenter) recordMetrics() {
 
 func (q *QuotaCenter) diskAllowance(collection UniqueID) float64 {
 	q.diskMu.Lock()
-	q.diskMu.Unlock()
+	defer q.diskMu.Unlock()
 	if !Params.QuotaConfig.DiskProtectionEnabled.GetAsBool() {
 		return math.MaxInt64
 	}

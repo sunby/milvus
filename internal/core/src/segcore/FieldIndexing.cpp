@@ -11,27 +11,32 @@
 
 #include <string>
 #include <thread>
+#include "common/EasyAssert.h"
+#include "fmt/format.h"
 #include "index/ScalarIndexSort.h"
 #include "index/StringIndexSort.h"
 
 #include "common/SystemProperty.h"
 #include "segcore/FieldIndexing.h"
-#include "index/VectorMemNMIndex.h"
+#include "index/VectorMemIndex.h"
 #include "IndexConfigGenerator.h"
 
 namespace milvus::segcore {
+using std::unique_ptr;
 
 VectorFieldIndexing::VectorFieldIndexing(const FieldMeta& field_meta,
                                          const FieldIndexMeta& field_index_meta,
                                          int64_t segment_max_row_count,
                                          const SegcoreConfig& segcore_config)
     : FieldIndexing(field_meta, segcore_config),
-      config_(std::make_unique<VecIndexConfig>(
-          segment_max_row_count, field_index_meta, segcore_config)),
       build(false),
-      sync_with_index(false) {
-    index_ = std::make_unique<index::VectorMemIndex>(config_->GetIndexType(),
-                                                     config_->GetMetricType());
+      sync_with_index(false),
+      config_(std::make_unique<VecIndexConfig>(
+          segment_max_row_count, field_index_meta, segcore_config)) {
+    index_ = std::make_unique<index::VectorMemIndex>(
+        config_->GetIndexType(),
+        config_->GetMetricType(),
+        knowhere::Version::GetCurrentVersion().VersionNumber());
 }
 
 void
@@ -50,8 +55,10 @@ VectorFieldIndexing::BuildIndexRange(int64_t ack_beg,
     data_.grow_to_at_least(ack_end);
     for (int chunk_id = ack_beg; chunk_id < ack_end; chunk_id++) {
         const auto& chunk = source->get_chunk(chunk_id);
-        auto indexing = std::make_unique<index::VectorMemNMIndex>(
-            knowhere::IndexEnum::INDEX_FAISS_IVFFLAT, knowhere::metric::L2);
+        auto indexing = std::make_unique<index::VectorMemIndex>(
+            knowhere::IndexEnum::INDEX_FAISS_IVFFLAT,
+            knowhere::metric::L2,
+            knowhere::Version::GetCurrentVersion().VersionNumber());
         auto dataset = knowhere::GenDataSet(
             source->get_size_per_chunk(), dim, chunk.data());
         indexing->BuildWithDataset(dataset, conf);
@@ -99,7 +106,7 @@ VectorFieldIndexing::AppendSegmentIndex(int64_t reserved_offset,
         int64_t vec_num = vector_id_end - vector_id_beg + 1;
         // for train index
         const void* data_addr;
-        std::unique_ptr<float[]> vec_data;
+        unique_ptr<float[]> vec_data;
         //all train data in one chunk
         if (chunk_id_beg == chunk_id_end) {
             data_addr = vec_base->get_chunk_data(chunk_id_beg);
@@ -237,9 +244,15 @@ CreateIndex(const FieldMeta& field_meta,
                                                          field_index_meta,
                                                          segment_max_row_count,
                                                          segcore_config);
+        } else if (field_meta.get_data_type() == DataType::VECTOR_FLOAT16) {
+            return std::make_unique<VectorFieldIndexing>(field_meta,
+                                                         field_index_meta,
+                                                         segment_max_row_count,
+                                                         segcore_config);
         } else {
-            // TODO
-            PanicInfo("unsupported");
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported vector type in index: {}",
+                                  field_meta.get_data_type()));
         }
     }
     switch (field_meta.get_data_type()) {
@@ -268,7 +281,9 @@ CreateIndex(const FieldMeta& field_meta,
             return std::make_unique<ScalarFieldIndexing<std::string>>(
                 field_meta, segcore_config);
         default:
-            PanicInfo("unsupported");
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported scalar type in index: {}",
+                                  field_meta.get_data_type()));
     }
 }
 

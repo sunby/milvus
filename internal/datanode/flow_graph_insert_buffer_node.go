@@ -22,6 +22,7 @@ import (
 	"math"
 	"reflect"
 
+	"github.com/cockroachdb/errors"
 	"github.com/golang/protobuf/proto"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/atomic"
@@ -38,6 +39,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/retry"
 	"github.com/milvus-io/milvus/pkg/util/tsoutil"
@@ -308,7 +310,7 @@ type syncTask struct {
 }
 
 func (ibNode *insertBufferNode) FillInSyncTasks(fgMsg *flowGraphMsg, seg2Upload []UniqueID) map[UniqueID]*syncTask {
-	var syncTasks = make(map[UniqueID]*syncTask)
+	syncTasks := make(map[UniqueID]*syncTask)
 
 	if fgMsg.dropCollection {
 		// All segments in the collection will be synced, not matter empty buffer or not
@@ -376,10 +378,10 @@ func (ibNode *insertBufferNode) FillInSyncTasks(fgMsg *flowGraphMsg, seg2Upload 
 	}
 
 	// sync delete
-	//here we adopt a quite radical strategy:
-	//every time we make sure that the N biggest delDataBuf can be flushed
-	//when memsize usage reaches a certain level
-	//the aim for taking all these actions is to guarantee that the memory consumed by delBuf will not exceed a limit
+	// here we adopt a quite radical strategy:
+	// every time we make sure that the N biggest delDataBuf can be flushed
+	// when memsize usage reaches a certain level
+	// the aim for taking all these actions is to guarantee that the memory consumed by delBuf will not exceed a limit
 	segmentsToFlush := ibNode.delBufferManager.ShouldFlushSegments()
 	for _, segID := range segmentsToFlush {
 		syncTasks[segID] = &syncTask{
@@ -450,7 +452,7 @@ func (ibNode *insertBufferNode) FillInSyncTasks(fgMsg *flowGraphMsg, seg2Upload 
 func (ibNode *insertBufferNode) Sync(fgMsg *flowGraphMsg, seg2Upload []UniqueID, endPosition *msgpb.MsgPosition) []UniqueID {
 	syncTasks := ibNode.FillInSyncTasks(fgMsg, seg2Upload)
 	segmentsToSync := make([]UniqueID, 0, len(syncTasks))
-	ibNode.channel.(*ChannelMeta).needToSync.Store(false)
+	ibNode.channel.setIsHighMemory(false)
 
 	for _, task := range syncTasks {
 		log := log.With(zap.Int64("segmentID", task.segmentID),
@@ -462,6 +464,7 @@ func (ibNode *insertBufferNode) Sync(fgMsg *flowGraphMsg, seg2Upload []UniqueID,
 		).WithRateGroup("ibNode.sync", 1, 60)
 		// check if segment is syncing
 		segment := ibNode.channel.getSegment(task.segmentID)
+
 		if !task.dropped && !task.flushed && segment.isSyncing() {
 			log.RatedInfo(10, "segment is syncing, skip it")
 			continue
@@ -484,6 +487,9 @@ func (ibNode *insertBufferNode) Sync(fgMsg *flowGraphMsg, seg2Upload []UniqueID,
 				task.dropped,
 				endPosition)
 			if err != nil {
+				if errors.Is(err, merr.ErrSegmentNotFound) {
+					return retry.Unrecoverable(err)
+				}
 				return err
 			}
 			return nil
@@ -495,6 +501,24 @@ func (ibNode *insertBufferNode) Sync(fgMsg *flowGraphMsg, seg2Upload []UniqueID,
 				metrics.DataNodeAutoFlushBufferCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.FailLabel).Inc()
 				metrics.DataNodeAutoFlushBufferCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.TotalLabel).Inc()
 			}
+
+			if errors.Is(err, merr.ErrSegmentNotFound) {
+				if !segment.isValid() {
+					log.Info("try to flush a compacted segment, ignore..",
+						zap.Int64("segmentID", task.segmentID),
+						zap.Error(err))
+				}
+				continue
+			}
+
+			if merr.IsCanceledOrTimeout(err) {
+				log.Warn("skip syncing buffer data for context done",
+					zap.Int64("segmentID", task.segmentID),
+					zap.Error(err),
+				)
+				continue
+			}
+
 			log.Fatal("insertBufferNode failed to flushBufferData",
 				zap.Int64("segmentID", task.segmentID),
 				zap.Error(err),
@@ -521,13 +545,13 @@ func (ibNode *insertBufferNode) Sync(fgMsg *flowGraphMsg, seg2Upload []UniqueID,
 func (ibNode *insertBufferNode) addSegmentAndUpdateRowNum(insertMsgs []*msgstream.InsertMsg, startPos, endPos *msgpb.MsgPosition) (seg2Upload []UniqueID, err error) {
 	uniqueSeg := make(map[UniqueID]int64)
 	for _, msg := range insertMsgs {
-
 		currentSegID := msg.GetSegmentID()
 		collID := msg.GetCollectionID()
 		partitionID := msg.GetPartitionID()
 
 		if !ibNode.channel.hasSegment(currentSegID, true) {
 			err = ibNode.channel.addSegment(
+				context.TODO(),
 				addSegmentReq{
 					segType:     datapb.SegmentType_New,
 					segID:       currentSegID,
@@ -645,7 +669,6 @@ func (ibNode *insertBufferNode) getTimestampRange(tsData *storage.Int64FieldData
 
 // WriteTimeTick writes timetick once insertBufferNode operates.
 func (ibNode *insertBufferNode) WriteTimeTick(ts Timestamp, segmentIDs []int64) {
-
 	select {
 	case resendTTMsg := <-ibNode.resendTTChan:
 		log.Info("resend TT msg received in insertBufferNode",
@@ -677,12 +700,19 @@ func (ibNode *insertBufferNode) getCollectionandPartitionIDbySegID(segmentID Uni
 	return ibNode.channel.getCollectionAndPartitionID(segmentID)
 }
 
-func newInsertBufferNode(ctx context.Context, collID UniqueID, delBufManager *DeltaBufferManager, flushCh <-chan flushMsg, resendTTCh <-chan resendTTMsg,
-	fm flushManager, flushingSegCache *Cache, config *nodeConfig, timeTickManager *timeTickSender) (*insertBufferNode, error) {
-
+func newInsertBufferNode(
+	ctx context.Context,
+	flushCh <-chan flushMsg,
+	resendTTCh <-chan resendTTMsg,
+	delBufManager *DeltaBufferManager,
+	fm flushManager,
+	flushingSegCache *Cache,
+	timeTickManager *timeTickSender,
+	config *nodeConfig,
+) (*insertBufferNode, error) {
 	baseNode := BaseNode{}
-	baseNode.SetMaxQueueLength(config.maxQueueLength)
-	baseNode.SetMaxParallelism(config.maxParallelism)
+	baseNode.SetMaxQueueLength(Params.DataNodeCfg.FlowGraphMaxQueueLength.GetAsInt32())
+	baseNode.SetMaxParallelism(Params.DataNodeCfg.FlowGraphMaxParallelism.GetAsInt32())
 
 	if Params.DataNodeCfg.DataNodeTimeTickByRPC.GetAsBool() {
 		return &insertBufferNode{
@@ -702,7 +732,7 @@ func newInsertBufferNode(ctx context.Context, collID UniqueID, delBufManager *De
 		}, nil
 	}
 
-	//input stream, data node time tick
+	// input stream, data node time tick
 	wTt, err := config.msFactory.NewMsgStream(ctx)
 	if err != nil {
 		return nil, err
@@ -710,7 +740,8 @@ func newInsertBufferNode(ctx context.Context, collID UniqueID, delBufManager *De
 	wTt.AsProducer([]string{Params.CommonCfg.DataCoordTimeTick.GetValue()})
 	metrics.DataNodeNumProducers.WithLabelValues(fmt.Sprint(paramtable.GetNodeID())).Inc()
 	log.Info("datanode AsProducer", zap.String("TimeTickChannelName", Params.CommonCfg.DataCoordTimeTick.GetValue()))
-	var wTtMsgStream msgstream.MsgStream = wTt
+	wTtMsgStream := wTt
+	wTtMsgStream.EnableProduce(true)
 
 	mt := newMergedTimeTickerSender(func(ts Timestamp, segmentIDs []int64) error {
 		stats := make([]*commonpb.SegmentStats, 0, len(segmentIDs))
@@ -734,7 +765,7 @@ func newInsertBufferNode(ctx context.Context, collID UniqueID, delBufManager *De
 					commonpbutil.WithMsgType(commonpb.MsgType_DataNodeTt),
 					commonpbutil.WithMsgID(0),
 					commonpbutil.WithTimeStamp(ts),
-					commonpbutil.WithSourceID(config.serverID),
+					commonpbutil.WithSourceID(paramtable.GetNodeID()),
 				),
 				ChannelName:   config.vChannelName,
 				Timestamp:     ts,
@@ -745,7 +776,7 @@ func newInsertBufferNode(ctx context.Context, collID UniqueID, delBufManager *De
 		sub := tsoutil.SubByNow(ts)
 		pChan := funcutil.ToPhysicalChannel(config.vChannelName)
 		metrics.DataNodeProduceTimeTickLag.
-			WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), fmt.Sprint(collID), pChan).
+			WithLabelValues(fmt.Sprint(config.serverID), fmt.Sprint(config.collectionID), pChan).
 			Set(float64(sub))
 		return wTtMsgStream.Produce(&msgPack)
 	})

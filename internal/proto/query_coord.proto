@@ -67,7 +67,9 @@ service QueryNode {
   rpc Search(SearchRequest) returns (internal.SearchResults) {}
   rpc SearchSegments(SearchRequest) returns (internal.SearchResults) {}
   rpc Query(QueryRequest) returns (internal.RetrieveResults) {}
+  rpc QueryStream(QueryRequest) returns (stream internal.RetrieveResults){}
   rpc QuerySegments(QueryRequest) returns (internal.RetrieveResults) {}
+  rpc QueryStreamSegments(QueryRequest) returns (stream internal.RetrieveResults){}
 
   rpc ShowConfigurations(internal.ShowConfigurationsRequest) returns (internal.ShowConfigurationsResponse){}
   // https://wiki.lfaidata.foundation/display/MIL/MEP+8+--+Add+metrics+for+proxy
@@ -78,7 +80,8 @@ service QueryNode {
   rpc Delete(DeleteRequest) returns (common.Status) {}
 }
 
-//--------------------QueryCoord grpc request and response proto------------------
+// --------------------QueryCoord grpc request and response proto------------------
+
 message ShowCollectionsRequest {
   common.MsgBase base = 1;
   // Not useful for now
@@ -204,7 +207,8 @@ message SyncNewCreatedPartitionRequest {
   int64 partitionID = 3;
 }
 
-//-----------------query node grpc request and response proto----------------
+// -----------------query node grpc request and response proto----------------
+
 message LoadMetaInfo {
   LoadType load_type = 1;
   int64 collectionID = 2;
@@ -269,6 +273,7 @@ message FieldIndexInfo {
   int64 index_size = 8;
   int64 index_version = 9;
   int64 num_rows = 10;
+  int32 current_index_version = 11;
 }
 
 enum LoadScope {
@@ -348,7 +353,8 @@ message GetLoadInfoResponse {
   repeated int64 partitions = 4;
 }
 
-//----------------request auto triggered by QueryCoord-----------------
+// ----------------request auto triggered by QueryCoord-----------------
+
 message HandoffSegmentsRequest {
   common.MsgBase base = 1;
   repeated SegmentInfo segmentInfos = 2;
@@ -364,7 +370,7 @@ message LoadBalanceRequest {
   int64 collectionID = 6;
 }
 
-//-------------------- internal meta proto------------------
+// -------------------- internal meta proto------------------
 
 enum DataScope {
   UnKnown = 0;
@@ -462,7 +468,8 @@ message UnsubscribeChannelInfo {
   repeated UnsubscribeChannels collection_channels = 2;
 }
 
-//---- synchronize messages proto between QueryCoord and QueryNode -----
+// ---- synchronize messages proto between QueryCoord and QueryNode -----
+
 message SegmentChangeInfo {
   int64 online_nodeID = 1;
   repeated SegmentInfo online_segments = 2;
@@ -532,6 +539,7 @@ message CollectionLoadInfo {
   LoadStatus status = 4;
   map<int64, int64> field_indexID = 5;
   LoadType load_type = 6;
+  int32 recover_times = 7;
 }
 
 message PartitionLoadInfo {
@@ -540,6 +548,7 @@ message PartitionLoadInfo {
   int32 replica_number = 3; // Deprecated: No longer used; kept for compatibility.
   LoadStatus status = 4;
   map<int64, int64> field_indexID = 5; // Deprecated: No longer used; kept for compatibility.
+  int32 recover_times = 7;
 }
 
 message Replica {

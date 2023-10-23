@@ -32,15 +32,16 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/pkg/common"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 type StatisticTaskSuite struct {
 	suite.Suite
-	rc types.RootCoord
-	qc types.QueryCoord
-	qn *mocks.MockQueryNode
+	rc types.RootCoordClient
+	qc types.QueryCoordClient
+	qn *mocks.MockQueryNodeClient
 
 	lb LBPolicy
 
@@ -54,7 +55,7 @@ func (s *StatisticTaskSuite) SetupSuite() {
 
 func (s *StatisticTaskSuite) SetupTest() {
 	successStatus := commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}
-	qc := mocks.NewMockQueryCoord(s.T())
+	qc := mocks.NewMockQueryCoordClient(s.T())
 	qc.EXPECT().LoadCollection(mock.Anything, mock.Anything).Return(&successStatus, nil)
 
 	qc.EXPECT().GetShardLeaders(mock.Anything, mock.Anything).Return(&querypb.GetShardLeadersResponse{
@@ -68,18 +69,15 @@ func (s *StatisticTaskSuite) SetupTest() {
 		},
 	}, nil).Maybe()
 	qc.EXPECT().ShowPartitions(mock.Anything, mock.Anything).Return(&querypb.ShowPartitionsResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:       merr.Success(),
 		PartitionIDs: []int64{1, 2, 3},
 	}, nil).Maybe()
 
 	s.qc = qc
 	s.rc = NewRootCoordMock()
-	s.rc.Start()
-	s.qn = mocks.NewMockQueryNode(s.T())
+	s.qn = mocks.NewMockQueryNodeClient(s.T())
 
-	s.qn.EXPECT().GetComponentStates(mock.Anything).Return(nil, nil).Maybe()
+	s.qn.EXPECT().GetComponentStates(mock.Anything, mock.Anything).Return(nil, nil).Maybe()
 	mgr := NewMockShardClientManager(s.T())
 	mgr.EXPECT().GetClient(mock.Anything, mock.Anything).Return(s.qn, nil).Maybe()
 	mgr.EXPECT().UpdateShardLeaders(mock.Anything, mock.Anything).Return(nil).Maybe()
@@ -142,7 +140,7 @@ func (s *StatisticTaskSuite) loadCollection() {
 }
 
 func (s *StatisticTaskSuite) TearDownSuite() {
-	s.rc.Stop()
+	s.rc.Close()
 }
 
 func (s *StatisticTaskSuite) TestStatisticTask_Timeout() {
@@ -168,9 +166,7 @@ func (s *StatisticTaskSuite) getStatisticsTask(ctx context.Context) *getStatisti
 		ctx:            ctx,
 		collectionName: s.collectionName,
 		result: &milvuspb.GetStatisticsResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status: merr.Success(),
 		},
 		request: &milvuspb.GetStatisticsRequest{
 			Base: &commonpb.MsgBase{

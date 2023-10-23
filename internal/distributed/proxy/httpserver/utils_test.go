@@ -5,12 +5,13 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"github.com/tidwall/gjson"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/pkg/common"
-	"github.com/stretchr/testify/assert"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -115,7 +116,8 @@ func generateIndexes() []*milvuspb.IndexDescription {
 				{
 					Key:   "index_type",
 					Value: "IVF_FLAT",
-				}, {
+				},
+				{
 					Key:   Params,
 					Value: "{\"nlist\":1024}",
 				},
@@ -252,25 +254,29 @@ func TestPrintCollectionDetails(t *testing.T) {
 			HTTPReturnFieldType:       "Int64",
 			HTTPReturnFieldPrimaryKey: true,
 			HTTPReturnFieldAutoID:     false,
-			HTTPReturnDescription:     ""},
+			HTTPReturnDescription:     "",
+		},
 		{
 			HTTPReturnFieldName:       FieldWordCount,
 			HTTPReturnFieldType:       "Int64",
 			HTTPReturnFieldPrimaryKey: false,
 			HTTPReturnFieldAutoID:     false,
-			HTTPReturnDescription:     ""},
+			HTTPReturnDescription:     "",
+		},
 		{
 			HTTPReturnFieldName:       FieldBookIntro,
 			HTTPReturnFieldType:       "FloatVector(2)",
 			HTTPReturnFieldPrimaryKey: false,
 			HTTPReturnFieldAutoID:     false,
-			HTTPReturnDescription:     ""},
+			HTTPReturnDescription:     "",
+		},
 	})
 	assert.Equal(t, printIndexes(indexes), []gin.H{
 		{
 			HTTPReturnIndexName:        DefaultIndexName,
 			HTTPReturnIndexField:       FieldBookIntro,
-			HTTPReturnIndexMetricsType: DefaultMetricType},
+			HTTPReturnIndexMetricsType: DefaultMetricType,
+		},
 	})
 	assert.Equal(t, getMetricType(indexes[0].Params), DefaultMetricType)
 	assert.Equal(t, getMetricType(nil), DefaultMetricType)
@@ -286,7 +292,8 @@ func TestPrintCollectionDetails(t *testing.T) {
 			HTTPReturnFieldType:       "VarChar(10)",
 			HTTPReturnFieldPrimaryKey: false,
 			HTTPReturnFieldAutoID:     false,
-			HTTPReturnDescription:     ""},
+			HTTPReturnDescription:     "",
+		},
 	})
 }
 
@@ -321,13 +328,14 @@ func TestPrimaryField(t *testing.T) {
 }
 
 func TestInsertWithDynamicFields(t *testing.T) {
-	body := "{\"data\": {\"id\": 0, \"book_id\": 1, \"book_intro\": [0.1, 0.2], \"word_count\": 2}}"
+	body := "{\"data\": {\"id\": 0, \"book_id\": 1, \"book_intro\": [0.1, 0.2], \"word_count\": 2, \"classified\": false, \"databaseID\": null}}"
 	req := InsertReq{}
 	coll := generateCollectionSchema(false)
-	err := checkAndSetData(body, &milvuspb.DescribeCollectionResponse{
+	var err error
+	err, req.Data = checkAndSetData(body, &milvuspb.DescribeCollectionResponse{
 		Status: &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success},
 		Schema: coll,
-	}, &req)
+	})
 	assert.Equal(t, err, nil)
 	assert.Equal(t, req.Data[0]["id"], int64(0))
 	assert.Equal(t, req.Data[0]["book_id"], int64(1))
@@ -336,13 +344,13 @@ func TestInsertWithDynamicFields(t *testing.T) {
 	assert.Equal(t, err, nil)
 	assert.Equal(t, fieldsData[len(fieldsData)-1].IsDynamic, true)
 	assert.Equal(t, fieldsData[len(fieldsData)-1].Type, schemapb.DataType_JSON)
-	assert.Equal(t, string(fieldsData[len(fieldsData)-1].GetScalars().GetJsonData().GetData()[0]), "{\"id\":0}")
+	assert.Equal(t, string(fieldsData[len(fieldsData)-1].GetScalars().GetJsonData().GetData()[0]), "{\"classified\":false,\"id\":0}")
 }
 
 func TestSerialize(t *testing.T) {
 	parameters := []float32{0.11111, 0.22222}
-	//assert.Equal(t, string(serialize(parameters)), "\ufffd\ufffd\ufffd=\ufffd\ufffdc\u003e")
-	//assert.Equal(t, string(vector2PlaceholderGroupBytes(parameters)), "vector2PlaceholderGroupBytes") // todo
+	// assert.Equal(t, string(serialize(parameters)), "\ufffd\ufffd\ufffd=\ufffd\ufffdc\u003e")
+	// assert.Equal(t, string(vector2PlaceholderGroupBytes(parameters)), "vector2PlaceholderGroupBytes") // todo
 	assert.Equal(t, string(serialize(parameters)), "\xa4\x8d\xe3=\xa4\x8dc>")
 	assert.Equal(t, string(vector2PlaceholderGroupBytes(parameters)), "\n\x10\n\x02$0\x10e\x1a\b\xa4\x8d\xe3=\xa4\x8dc>") // todo
 }
@@ -373,7 +381,6 @@ func compareRow64(m1 map[string]interface{}, m2 map[string]interface{}) bool {
 		}
 	}
 	return true
-
 }
 
 func compareRow(m1 map[string]interface{}, m2 map[string]interface{}) bool {
@@ -413,7 +420,6 @@ func compareRow(m1 map[string]interface{}, m2 map[string]interface{}) bool {
 		}
 	}
 	return true
-
 }
 
 type CompareFunc func(map[string]interface{}, map[string]interface{}) bool
@@ -785,11 +791,13 @@ func TestBuildQueryResps(t *testing.T) {
 		assert.Equal(t, compareRows(rows, exceptRows, compareRow), true)
 	}
 
-	dataTypes := []schemapb.DataType{schemapb.DataType_FloatVector, schemapb.DataType_BinaryVector,
+	dataTypes := []schemapb.DataType{
+		schemapb.DataType_FloatVector, schemapb.DataType_BinaryVector,
 		schemapb.DataType_Bool, schemapb.DataType_Int8, schemapb.DataType_Int16, schemapb.DataType_Int32,
 		schemapb.DataType_Float, schemapb.DataType_Double,
 		schemapb.DataType_String, schemapb.DataType_VarChar,
-		schemapb.DataType_JSON, schemapb.DataType_Array}
+		schemapb.DataType_JSON, schemapb.DataType_Array,
+	}
 	for _, dateType := range dataTypes {
 		_, err := buildQueryResp(int64(0), outputFields, newFieldData([]*schemapb.FieldData{}, dateType), generateIds(3), []float32{0.01, 0.04, 0.09})
 		assert.Equal(t, err, nil)

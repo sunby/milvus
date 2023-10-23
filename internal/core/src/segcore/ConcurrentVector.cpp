@@ -30,8 +30,11 @@ VectorBase::set_data_raw(ssize_t element_offset,
         } else if (field_meta.get_data_type() == DataType::VECTOR_BINARY) {
             return set_data_raw(
                 element_offset, VEC_FIELD_DATA(data, binary), element_count);
+        } else if (field_meta.get_data_type() == DataType::VECTOR_FLOAT16) {
+            return set_data_raw(
+                element_offset, VEC_FIELD_DATA(data, float16), element_count);
         } else {
-            PanicInfo("unsupported");
+            PanicInfo(DataTypeInvalid, "unsupported");
         }
     }
 
@@ -84,8 +87,19 @@ VectorBase::set_data_raw(ssize_t element_offset,
 
             return set_data_raw(element_offset, data_raw.data(), element_count);
         }
+        case DataType::ARRAY: {
+            auto& array_data = FIELD_DATA(data, array);
+            std::vector<Array> data_raw{};
+            data_raw.reserve(array_data.size());
+            for (auto& array_bytes : array_data) {
+                data_raw.emplace_back(Array(array_bytes));
+            }
+
+            return set_data_raw(element_offset, data_raw.data(), element_count);
+        }
         default: {
-            PanicInfo(fmt::format("unsupported datatype {}",
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported datatype {}",
                                   field_meta.get_data_type()));
         }
     }

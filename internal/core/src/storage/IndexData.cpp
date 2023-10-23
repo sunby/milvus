@@ -15,7 +15,7 @@
 // limitations under the License.
 
 #include "storage/IndexData.h"
-#include "exceptions/EasyAssert.h"
+#include "common/EasyAssert.h"
 #include "common/Consts.h"
 #include "storage/Event.h"
 
@@ -41,7 +41,8 @@ IndexData::Serialize(StorageType medium) {
         case StorageType::LocalDisk:
             return serialize_to_local_file();
         default:
-            PanicInfo("unsupported medium type");
+            PanicInfo(DataFormatBroken,
+                      fmt::format("unsupported medium type {}", medium));
     }
 }
 

@@ -23,10 +23,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cockroachdb/errors"
+	"github.com/samber/lo"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 
-	"github.com/cockroachdb/errors"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
@@ -37,7 +38,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	. "github.com/milvus-io/milvus/pkg/util/typeutil"
-	"github.com/samber/lo"
 )
 
 const (
@@ -126,7 +126,7 @@ func (queue *taskQueue) Range(fn func(task Task) bool) {
 }
 
 type Scheduler interface {
-	Start(ctx context.Context)
+	Start()
 	Stop()
 	AddExecutor(nodeID int64)
 	RemoveExecutor(nodeID int64)
@@ -165,7 +165,8 @@ func NewScheduler(ctx context.Context,
 	targetMgr *meta.TargetManager,
 	broker meta.Broker,
 	cluster session.Cluster,
-	nodeMgr *session.NodeManager) *taskScheduler {
+	nodeMgr *session.NodeManager,
+) *taskScheduler {
 	id := time.Now().UnixMilli()
 	return &taskScheduler{
 		ctx:       ctx,
@@ -190,7 +191,7 @@ func NewScheduler(ctx context.Context,
 	}
 }
 
-func (scheduler *taskScheduler) Start(ctx context.Context) {}
+func (scheduler *taskScheduler) Start() {}
 
 func (scheduler *taskScheduler) Stop() {
 	scheduler.rwmutex.Lock()
@@ -199,6 +200,13 @@ func (scheduler *taskScheduler) Stop() {
 	for nodeID, executor := range scheduler.executors {
 		executor.Stop()
 		delete(scheduler.executors, nodeID)
+	}
+
+	for _, task := range scheduler.segmentTasks {
+		scheduler.remove(task)
+	}
+	for _, task := range scheduler.channelTasks {
+		scheduler.remove(task)
 	}
 }
 
@@ -258,7 +266,7 @@ func (scheduler *taskScheduler) Add(task Task) error {
 	}
 
 	scheduler.updateTaskMetrics()
-	log.Info("task added", zap.String("task", task.String()))
+	log.Ctx(task.Context()).Info("task added", zap.String("task", task.String()))
 	return nil
 }
 
@@ -688,7 +696,7 @@ func (scheduler *taskScheduler) recordSegmentTaskError(task *SegmentTask) {
 }
 
 func (scheduler *taskScheduler) remove(task Task) {
-	log := log.With(
+	log := log.Ctx(task.Context()).With(
 		zap.Int64("taskID", task.ID()),
 		zap.Int64("collectionID", task.CollectionID()),
 		zap.Int64("replicaID", task.ReplicaID()),

@@ -23,30 +23,31 @@ import (
 	"os"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/cockroachdb/errors"
-	"github.com/milvus-io/milvus/internal/allocator"
-	"github.com/milvus-io/milvus/internal/util/dependency"
-	"github.com/milvus-io/milvus/internal/util/sessionutil"
-	"github.com/milvus-io/milvus/pkg/util/tsoutil"
-
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.uber.org/atomic"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
+	"github.com/milvus-io/milvus/internal/allocator"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proxy/accesslog"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util/dependency"
+	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
+	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
 	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/ratelimitutil"
+	"github.com/milvus-io/milvus/pkg/util/resource"
+	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -77,17 +78,19 @@ type Proxy struct {
 	ip         string
 	port       int
 
-	stateCode atomic.Value
+	stateCode atomic.Int32
 
 	etcdCli    *clientv3.Client
 	address    string
-	rootCoord  types.RootCoord
-	dataCoord  types.DataCoord
-	queryCoord types.QueryCoord
+	rootCoord  types.RootCoordClient
+	dataCoord  types.DataCoordClient
+	queryCoord types.QueryCoordClient
 
 	multiRateLimiter *MultiRateLimiter
 
 	chMgr channelsMgr
+
+	replicateMsgStream msgstream.MsgStream
 
 	sched *taskScheduler
 
@@ -112,6 +115,10 @@ type Proxy struct {
 
 	// for load balance in replicas
 	lbPolicy LBPolicy
+
+	// resource manager
+	resourceManager        resource.Manager
+	replicateStreamManager *ReplicateStreamManager
 }
 
 // NewProxy returns a Proxy struct.
@@ -122,18 +129,31 @@ func NewProxy(ctx context.Context, factory dependency.Factory) (*Proxy, error) {
 	mgr := newShardClientMgr()
 	lbPolicy := NewLBPolicyImpl(mgr)
 	lbPolicy.Start(ctx)
+	resourceManager := resource.NewManager(10*time.Second, 20*time.Second, make(map[string]time.Duration))
+	replicateStreamManager := NewReplicateStreamManager(ctx, factory, resourceManager)
 	node := &Proxy{
-		ctx:              ctx1,
-		cancel:           cancel,
-		factory:          factory,
-		searchResultCh:   make(chan *internalpb.SearchResults, n),
-		shardMgr:         mgr,
-		multiRateLimiter: NewMultiRateLimiter(),
-		lbPolicy:         lbPolicy,
+		ctx:                    ctx1,
+		cancel:                 cancel,
+		factory:                factory,
+		searchResultCh:         make(chan *internalpb.SearchResults, n),
+		shardMgr:               mgr,
+		multiRateLimiter:       NewMultiRateLimiter(),
+		lbPolicy:               lbPolicy,
+		resourceManager:        resourceManager,
+		replicateStreamManager: replicateStreamManager,
 	}
 	node.UpdateStateCode(commonpb.StateCode_Abnormal)
 	logutil.Logger(ctx).Debug("create a new Proxy instance", zap.Any("state", node.stateCode.Load()))
 	return node, nil
+}
+
+// UpdateStateCode updates the state code of Proxy.
+func (node *Proxy) UpdateStateCode(code commonpb.StateCode) {
+	node.stateCode.Store(int32(code))
+}
+
+func (node *Proxy) GetStateCode() commonpb.StateCode {
+	return commonpb.StateCode(node.stateCode.Load())
 }
 
 // Register registers proxy at etcd
@@ -154,7 +174,7 @@ func (node *Proxy) Register() error {
 		}
 	})
 	// TODO Reset the logger
-	//Params.initLogCfg()
+	// Params.initLogCfg()
 	return nil
 }
 
@@ -165,6 +185,7 @@ func (node *Proxy) initSession() error {
 		return errors.New("new session failed, maybe etcd cannot be connected")
 	}
 	node.session.Init(typeutil.ProxyRole, node.address, false, true)
+	sessionutil.SaveServerInfo(typeutil.ProxyRole, node.session.ServerID)
 	return nil
 }
 
@@ -241,6 +262,17 @@ func (node *Proxy) Init() error {
 	node.chMgr = chMgr
 	log.Debug("create channels manager done", zap.String("role", typeutil.ProxyRole))
 
+	replicateMsgChannel := Params.CommonCfg.ReplicateMsgChannel.GetValue()
+	node.replicateMsgStream, err = node.factory.NewMsgStream(node.ctx)
+	if err != nil {
+		log.Warn("failed to create replicate msg stream",
+			zap.String("role", typeutil.ProxyRole), zap.Int64("ProxyID", paramtable.GetNodeID()),
+			zap.Error(err))
+		return err
+	}
+	node.replicateMsgStream.EnableProduce(true)
+	node.replicateMsgStream.AsProducer([]string{replicateMsgChannel})
+
 	node.sched, err = newTaskScheduler(node.ctx, node.tsoAllocator, node.factory)
 	if err != nil {
 		log.Warn("failed to create task scheduler", zap.String("role", typeutil.ProxyRole), zap.Error(err))
@@ -278,6 +310,9 @@ func (node *Proxy) sendChannelsTimeTickLoop() {
 				log.Info("send channels time tick loop exit")
 				return
 			case <-ticker.C:
+				if !Params.CommonCfg.TTMsgEnabled.GetAsBool() {
+					continue
+				}
 				stats, ts, err := node.chTicker.getMinTsStatistics()
 				if err != nil {
 					log.Warn("sendChannelsTimeTickLoop.getMinTsStatistics", zap.Error(err))
@@ -334,7 +369,7 @@ func (node *Proxy) sendChannelsTimeTickLoop() {
 					log.Warn("sendChannelsTimeTickLoop.UpdateChannelTimeTick", zap.Error(err))
 					continue
 				}
-				if status.ErrorCode != 0 {
+				if status.GetErrorCode() != 0 {
 					log.Warn("sendChannelsTimeTickLoop.UpdateChannelTimeTick",
 						zap.Any("ErrorCode", status.ErrorCode),
 						zap.Any("Reason", status.Reason))
@@ -433,6 +468,10 @@ func (node *Proxy) Stop() error {
 		node.lbPolicy.Close()
 	}
 
+	if node.resourceManager != nil {
+		node.resourceManager.Close()
+	}
+
 	// https://github.com/milvus-io/milvus/issues/12282
 	node.UpdateStateCode(commonpb.StateCode_Abnormal)
 
@@ -470,21 +509,21 @@ func (node *Proxy) SetEtcdClient(client *clientv3.Client) {
 }
 
 // SetRootCoordClient sets RootCoord client for proxy.
-func (node *Proxy) SetRootCoordClient(cli types.RootCoord) {
+func (node *Proxy) SetRootCoordClient(cli types.RootCoordClient) {
 	node.rootCoord = cli
 }
 
 // SetDataCoordClient sets DataCoord client for proxy.
-func (node *Proxy) SetDataCoordClient(cli types.DataCoord) {
+func (node *Proxy) SetDataCoordClient(cli types.DataCoordClient) {
 	node.dataCoord = cli
 }
 
 // SetQueryCoordClient sets QueryCoord client for proxy.
-func (node *Proxy) SetQueryCoordClient(cli types.QueryCoord) {
+func (node *Proxy) SetQueryCoordClient(cli types.QueryCoordClient) {
 	node.queryCoord = cli
 }
 
-func (node *Proxy) SetQueryNodeCreator(f func(ctx context.Context, addr string, nodeID int64) (types.QueryNode, error)) {
+func (node *Proxy) SetQueryNodeCreator(f func(ctx context.Context, addr string, nodeID int64) (types.QueryNodeClient, error)) {
 	node.shardMgr.SetClientCreatorFunc(f)
 }
 

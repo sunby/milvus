@@ -19,18 +19,21 @@ package session
 import (
 	"context"
 	"net"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/suite"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/mocks"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
-	"github.com/stretchr/testify/mock"
-	"github.com/stretchr/testify/suite"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 const bufSize = 1024 * 1024
@@ -45,10 +48,12 @@ type ClusterTestSuite struct {
 
 func (suite *ClusterTestSuite) SetupSuite() {
 	paramtable.Init()
+	paramtable.Get().Save("grpc.client.maxMaxAttempts", "1")
 	suite.setupServers()
 }
 
 func (suite *ClusterTestSuite) TearDownSuite() {
+	paramtable.Get().Save("grpc.client.maxMaxAttempts", strconv.FormatInt(paramtable.DefaultMaxAttempts, 10))
 	for _, svr := range suite.svrs {
 		svr.GracefulStop()
 	}
@@ -61,6 +66,7 @@ func (suite *ClusterTestSuite) SetupTest() {
 func (suite *ClusterTestSuite) TearDownTest() {
 	suite.cluster.Stop()
 }
+
 func (suite *ClusterTestSuite) setupServers() {
 	svrs := suite.createTestServers()
 	for _, svr := range svrs {
@@ -103,10 +109,7 @@ func (suite *ClusterTestSuite) createTestServers() []querypb.QueryNodeServer {
 }
 
 func (suite *ClusterTestSuite) createDefaultMockServer() querypb.QueryNodeServer {
-	succStatus := &commonpb.Status{
-		ErrorCode: commonpb.ErrorCode_Success,
-		Reason:    "",
-	}
+	succStatus := merr.Success()
 	svr := mocks.NewMockQueryNodeServer(suite.T())
 	// TODO: register more mock methods
 	svr.EXPECT().LoadSegments(
@@ -215,10 +218,7 @@ func (suite *ClusterTestSuite) TestLoadSegments() {
 		Infos: []*querypb.SegmentLoadInfo{{}},
 	})
 	suite.NoError(err)
-	suite.Equal(&commonpb.Status{
-		ErrorCode: commonpb.ErrorCode_Success,
-		Reason:    "",
-	}, status)
+	suite.Equal(merr.Success(), status)
 
 	status, err = suite.cluster.LoadSegments(ctx, 1, &querypb.LoadSegmentsRequest{
 		Base:  &commonpb.MsgBase{},
@@ -244,10 +244,7 @@ func (suite *ClusterTestSuite) TestWatchDmChannels() {
 		Base: &commonpb.MsgBase{},
 	})
 	suite.NoError(err)
-	suite.Equal(&commonpb.Status{
-		ErrorCode: commonpb.ErrorCode_Success,
-		Reason:    "",
-	}, status)
+	suite.Equal(merr.Success(), status)
 
 	status, err = suite.cluster.WatchDmChannels(ctx, 1, &querypb.WatchDmChannelsRequest{
 		Base: &commonpb.MsgBase{},
@@ -265,10 +262,7 @@ func (suite *ClusterTestSuite) TestUnsubDmChannel() {
 		Base: &commonpb.MsgBase{},
 	})
 	suite.NoError(err)
-	suite.Equal(&commonpb.Status{
-		ErrorCode: commonpb.ErrorCode_Success,
-		Reason:    "",
-	}, status)
+	suite.Equal(merr.Success(), status)
 
 	status, err = suite.cluster.UnsubDmChannel(ctx, 1, &querypb.UnsubDmChannelRequest{
 		Base: &commonpb.MsgBase{},
@@ -286,10 +280,7 @@ func (suite *ClusterTestSuite) TestReleaseSegments() {
 		Base: &commonpb.MsgBase{},
 	})
 	suite.NoError(err)
-	suite.Equal(&commonpb.Status{
-		ErrorCode: commonpb.ErrorCode_Success,
-		Reason:    "",
-	}, status)
+	suite.Equal(merr.Success(), status)
 
 	status, err = suite.cluster.ReleaseSegments(ctx, 1, &querypb.ReleaseSegmentsRequest{
 		Base: &commonpb.MsgBase{},
@@ -307,10 +298,7 @@ func (suite *ClusterTestSuite) TestLoadAndReleasePartitions() {
 		Base: &commonpb.MsgBase{},
 	})
 	suite.NoError(err)
-	suite.Equal(&commonpb.Status{
-		ErrorCode: commonpb.ErrorCode_Success,
-		Reason:    "",
-	}, status)
+	suite.Equal(merr.Success(), status)
 
 	status, err = suite.cluster.LoadPartitions(ctx, 1, &querypb.LoadPartitionsRequest{
 		Base: &commonpb.MsgBase{},
@@ -325,10 +313,7 @@ func (suite *ClusterTestSuite) TestLoadAndReleasePartitions() {
 		Base: &commonpb.MsgBase{},
 	})
 	suite.NoError(err)
-	suite.Equal(&commonpb.Status{
-		ErrorCode: commonpb.ErrorCode_Success,
-		Reason:    "",
-	}, status)
+	suite.Equal(merr.Success(), status)
 
 	status, err = suite.cluster.ReleasePartitions(ctx, 1, &querypb.ReleasePartitionsRequest{
 		Base: &commonpb.MsgBase{},
@@ -346,10 +331,7 @@ func (suite *ClusterTestSuite) TestGetDataDistribution() {
 		Base: &commonpb.MsgBase{},
 	})
 	suite.NoError(err)
-	suite.Equal(&commonpb.Status{
-		ErrorCode: commonpb.ErrorCode_Success,
-		Reason:    "",
-	}, resp.GetStatus())
+	suite.Equal(merr.Success(), resp.GetStatus())
 
 	resp, err = suite.cluster.GetDataDistribution(ctx, 1, &querypb.GetDataDistributionRequest{
 		Base: &commonpb.MsgBase{},
@@ -366,10 +348,7 @@ func (suite *ClusterTestSuite) TestGetMetrics() {
 	ctx := context.TODO()
 	resp, err := suite.cluster.GetMetrics(ctx, 0, &milvuspb.GetMetricsRequest{})
 	suite.NoError(err)
-	suite.Equal(&commonpb.Status{
-		ErrorCode: commonpb.ErrorCode_Success,
-		Reason:    "",
-	}, resp.GetStatus())
+	suite.Equal(merr.Success(), resp.GetStatus())
 
 	resp, err = suite.cluster.GetMetrics(ctx, 1, &milvuspb.GetMetricsRequest{})
 	suite.NoError(err)
@@ -385,10 +364,7 @@ func (suite *ClusterTestSuite) TestSyncDistribution() {
 		Base: &commonpb.MsgBase{},
 	})
 	suite.NoError(err)
-	suite.Equal(&commonpb.Status{
-		ErrorCode: commonpb.ErrorCode_Success,
-		Reason:    "",
-	}, status)
+	suite.Equal(merr.Success(), status)
 
 	status, err = suite.cluster.SyncDistribution(ctx, 1, &querypb.SyncDistributionRequest{
 		Base: &commonpb.MsgBase{},

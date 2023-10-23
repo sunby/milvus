@@ -38,6 +38,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
@@ -48,8 +49,8 @@ func TestQueryTask_all(t *testing.T) {
 		ctx = context.TODO()
 
 		rc = NewRootCoordMock()
-		qc = mocks.NewMockQueryCoord(t)
-		qn = getQueryNode()
+		qc = mocks.NewMockQueryCoordClient(t)
+		qn = getQueryNodeClient()
 
 		shardsNum      = common.DefaultShardsNum
 		collectionName = t.Name() + funcutil.GenRandomStr()
@@ -58,11 +59,9 @@ func TestQueryTask_all(t *testing.T) {
 		hitNum = 10
 	)
 
-	qn.EXPECT().GetComponentStates(mock.Anything).Return(nil, nil).Maybe()
+	qn.EXPECT().GetComponentStates(mock.Anything, mock.Anything, mock.Anything).Return(nil, nil).Maybe()
 
 	successStatus := commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}
-	qc.EXPECT().Start().Return(nil)
-	qc.EXPECT().Stop().Return(nil)
 	qc.EXPECT().LoadCollection(mock.Anything, mock.Anything).Return(&successStatus, nil)
 	qc.EXPECT().GetShardLeaders(mock.Anything, mock.Anything).Return(&querypb.GetShardLeadersResponse{
 		Status: &successStatus,
@@ -80,11 +79,7 @@ func TestQueryTask_all(t *testing.T) {
 	mgr.EXPECT().UpdateShardLeaders(mock.Anything, mock.Anything).Return(nil).Maybe()
 	lb := NewLBPolicyImpl(mgr)
 
-	rc.Start()
-	defer rc.Stop()
-	qc.Start()
-	defer qc.Stop()
-
+	defer rc.Close()
 	err = InitMetaCache(ctx, rc, qc, mgr)
 	assert.NoError(t, err)
 
@@ -146,9 +141,7 @@ func TestQueryTask_all(t *testing.T) {
 		},
 		ctx: ctx,
 		result: &milvuspb.QueryResults{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status:     merr.Success(),
 			FieldsData: []*schemapb.FieldData{},
 		},
 		request: &milvuspb.QueryRequest{
@@ -162,10 +155,6 @@ func TestQueryTask_all(t *testing.T) {
 				{
 					Key:   IgnoreGrowingKey,
 					Value: "false",
-				},
-				{
-					Key:   IterationExtensionReduceRateKey,
-					Value: "10",
 				},
 			},
 		},
@@ -185,19 +174,17 @@ func TestQueryTask_all(t *testing.T) {
 	// after preExecute
 	assert.Greater(t, task.TimeoutTimestamp, typeutil.ZeroTimestamp)
 
-	// check iteration extension reduce
-	assert.Equal(t, int64(10), task.RetrieveRequest.IterationExtensionReduceRate)
+	// check reduce_stop_for_best
+	assert.Equal(t, false, task.RetrieveRequest.GetReduceStopForBest())
 	task.request.QueryParams = append(task.request.QueryParams, &commonpb.KeyValuePair{
-		Key:   IterationExtensionReduceRateKey,
-		Value: "10XXX",
+		Key:   ReduceStopForBestKey,
+		Value: "trxxxx",
 	})
 	assert.Error(t, task.PreExecute(ctx))
 
 	result1 := &internalpb.RetrieveResults{
-		Base: &commonpb.MsgBase{MsgType: commonpb.MsgType_RetrieveResult},
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Base:   &commonpb.MsgBase{MsgType: commonpb.MsgType_RetrieveResult},
+		Status: merr.Success(),
 		Ids: &schemapb.IDs{
 			IdField: &schemapb.IDs_IntId{
 				IntId: &schemapb.LongArray{Data: generateInt64Array(hitNum)},
@@ -217,12 +204,12 @@ func TestQueryTask_all(t *testing.T) {
 	task.RetrieveRequest.OutputFieldsId = append(task.RetrieveRequest.OutputFieldsId, common.TimeStampField)
 	task.ctx = ctx
 	qn.ExpectedCalls = nil
-	qn.EXPECT().GetComponentStates(mock.Anything).Return(nil, nil).Maybe()
+	qn.EXPECT().GetComponentStates(mock.Anything, mock.Anything).Return(nil, nil).Maybe()
 	qn.EXPECT().Query(mock.Anything, mock.Anything).Return(nil, errors.New("mock error"))
 	assert.Error(t, task.Execute(ctx))
 
 	qn.ExpectedCalls = nil
-	qn.EXPECT().GetComponentStates(mock.Anything).Return(nil, nil).Maybe()
+	qn.EXPECT().GetComponentStates(mock.Anything, mock.Anything).Return(nil, nil).Maybe()
 	qn.EXPECT().Query(mock.Anything, mock.Anything).Return(&internalpb.RetrieveResults{
 		Status: &commonpb.Status{
 			ErrorCode: commonpb.ErrorCode_NotShardLeader,
@@ -232,7 +219,7 @@ func TestQueryTask_all(t *testing.T) {
 	assert.True(t, strings.Contains(err.Error(), errInvalidShardLeaders.Error()))
 
 	qn.ExpectedCalls = nil
-	qn.EXPECT().GetComponentStates(mock.Anything).Return(nil, nil).Maybe()
+	qn.EXPECT().GetComponentStates(mock.Anything, mock.Anything).Return(nil, nil).Maybe()
 	qn.EXPECT().Query(mock.Anything, mock.Anything).Return(&internalpb.RetrieveResults{
 		Status: &commonpb.Status{
 			ErrorCode: commonpb.ErrorCode_UnexpectedError,
@@ -241,7 +228,7 @@ func TestQueryTask_all(t *testing.T) {
 	assert.Error(t, task.Execute(ctx))
 
 	qn.ExpectedCalls = nil
-	qn.EXPECT().GetComponentStates(mock.Anything).Return(nil, nil).Maybe()
+	qn.EXPECT().GetComponentStates(mock.Anything, mock.Anything).Return(nil, nil).Maybe()
 	qn.EXPECT().Query(mock.Anything, mock.Anything).Return(result1, nil)
 	assert.NoError(t, task.Execute(ctx))
 
@@ -431,7 +418,6 @@ func TestTaskQuery_functions(t *testing.T) {
 						Key:   test.inKey[i],
 						Value: test.inValue[i],
 					})
-
 				}
 				ret, err := parseQueryParams(inParams)
 				if test.expectErr {
@@ -526,7 +512,8 @@ func TestTaskQuery_functions(t *testing.T) {
 				1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
 				1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
 				11.0, 22.0, 33.0, 44.0, 55.0, 66.0, 77.0, 88.0,
-				11.0, 22.0, 33.0, 44.0, 55.0, 66.0, 77.0, 88.0}
+				11.0, 22.0, 33.0, 44.0, 55.0, 66.0, 77.0, 88.0,
+			}
 
 			t.Run("test limited", func(t *testing.T) {
 				tests := []struct {
@@ -548,7 +535,6 @@ func TestTaskQuery_functions(t *testing.T) {
 						assert.NoError(t, err)
 					})
 				}
-
 			})
 
 			t.Run("test unLimited and maxOutputSize", func(t *testing.T) {
@@ -598,6 +584,28 @@ func TestTaskQuery_functions(t *testing.T) {
 						assert.InDeltaSlice(t, resultFloat[test.offset*Dim:(test.offset+1)*Dim], result.FieldsData[1].GetVectors().GetFloatVector().Data, 10e-10)
 					})
 				}
+			})
+
+			t.Run("test stop reduce for best for limit", func(t *testing.T) {
+				result, err := reduceRetrieveResults(context.Background(),
+					[]*internalpb.RetrieveResults{r1, r2},
+					&queryParams{limit: 2, reduceStopForBest: true})
+				assert.NoError(t, err)
+				assert.Equal(t, 2, len(result.GetFieldsData()))
+				assert.Equal(t, []int64{11, 11, 22}, result.GetFieldsData()[0].GetScalars().GetLongData().Data)
+				len := len(result.GetFieldsData()[0].GetScalars().GetLongData().Data)
+				assert.InDeltaSlice(t, resultFloat[0:(len)*Dim], result.FieldsData[1].GetVectors().GetFloatVector().Data, 10e-10)
+			})
+
+			t.Run("test stop reduce for best for unlimited set", func(t *testing.T) {
+				result, err := reduceRetrieveResults(context.Background(),
+					[]*internalpb.RetrieveResults{r1, r2},
+					&queryParams{limit: typeutil.Unlimited, reduceStopForBest: true})
+				assert.NoError(t, err)
+				assert.Equal(t, 2, len(result.GetFieldsData()))
+				assert.Equal(t, []int64{11, 11, 22, 22}, result.GetFieldsData()[0].GetScalars().GetLongData().Data)
+				len := len(result.GetFieldsData()[0].GetScalars().GetLongData().Data)
+				assert.InDeltaSlice(t, resultFloat[0:(len)*Dim], result.FieldsData[1].GetVectors().GetFloatVector().Data, 10e-10)
 			})
 		})
 	})
@@ -857,7 +865,6 @@ func Test_queryTask_createPlan(t *testing.T) {
 	})
 
 	t.Run("query without expression", func(t *testing.T) {
-
 		tsk := &queryTask{
 			request: &milvuspb.QueryRequest{
 				OutputFields: []string{"a"},
@@ -868,7 +875,6 @@ func Test_queryTask_createPlan(t *testing.T) {
 	})
 
 	t.Run("invalid expression", func(t *testing.T) {
-
 		schema := &schemapb.CollectionSchema{
 			Fields: []*schemapb.FieldSchema{
 				{
@@ -892,7 +898,6 @@ func Test_queryTask_createPlan(t *testing.T) {
 	})
 
 	t.Run("invalid output fields", func(t *testing.T) {
-
 		schema := &schemapb.CollectionSchema{
 			Fields: []*schemapb.FieldSchema{
 				{

@@ -19,7 +19,7 @@
 
 #include "SegmentInterface.h"
 #include "Utils.h"
-#include "exceptions/EasyAssert.h"
+#include "common/EasyAssert.h"
 #include "pkVisitor.h"
 
 namespace milvus::segcore {
@@ -124,6 +124,8 @@ ReduceHelper::FillPrimaryKey() {
     uint32_t valid_index = 0;
     for (auto& search_result : search_results_) {
         FilterInvalidSearchResult(search_result);
+        LOG_SEGCORE_DEBUG_ << "the size of search result"
+                           << search_result->seg_offsets_.size();
         if (search_result->get_total_result_count() > 0) {
             auto segment =
                 static_cast<SegmentInterface*>(search_result->segment_);
@@ -318,7 +320,8 @@ ReduceHelper::GetSearchResultDataSlice(int slice_index) {
             break;
         }
         default: {
-            PanicInfo("unsupported primary key type");
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported primary key type {}", pk_type));
         }
     }
 
@@ -365,7 +368,9 @@ ReduceHelper::GetSearchResultDataSlice(int slice_index) {
                         break;
                     }
                     default: {
-                        PanicInfo("unsupported primary key type");
+                        PanicInfo(DataTypeInvalid,
+                                  fmt::format("unsupported primary key type {}",
+                                              pk_type));
                     }
                 }
 
@@ -391,6 +396,12 @@ ReduceHelper::GetSearchResultDataSlice(int slice_index) {
         auto& field_meta = plan_->schema_[field_id];
         auto field_data =
             milvus::segcore::MergeDataArray(result_pairs, field_meta);
+        if (field_meta.get_data_type() == DataType::ARRAY) {
+            field_data->mutable_scalars()
+                ->mutable_array_data()
+                ->set_element_type(
+                    proto::schema::DataType(field_meta.get_element_type()));
+        }
         search_result_data->mutable_fields_data()->AddAllocated(
             field_data.release());
     }

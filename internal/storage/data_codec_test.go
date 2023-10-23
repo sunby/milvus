@@ -21,36 +21,39 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/proto/etcdpb"
+	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
-	"github.com/stretchr/testify/assert"
 )
 
 const (
-	CollectionID      = 1
-	PartitionID       = 1
-	SegmentID         = 1
-	RowIDField        = 0
-	TimestampField    = 1
-	BoolField         = 100
-	Int8Field         = 101
-	Int16Field        = 102
-	Int32Field        = 103
-	Int64Field        = 104
-	FloatField        = 105
-	DoubleField       = 106
-	StringField       = 107
-	BinaryVectorField = 108
-	FloatVectorField  = 109
-	ArrayField        = 110
-	JSONField         = 111
+	CollectionID       = 1
+	PartitionID        = 1
+	SegmentID          = 1
+	RowIDField         = 0
+	TimestampField     = 1
+	BoolField          = 100
+	Int8Field          = 101
+	Int16Field         = 102
+	Int32Field         = 103
+	Int64Field         = 104
+	FloatField         = 105
+	DoubleField        = 106
+	StringField        = 107
+	BinaryVectorField  = 108
+	FloatVectorField   = 109
+	ArrayField         = 110
+	JSONField          = 111
+	Float16VectorField = 112
 )
 
-func TestInsertCodec(t *testing.T) {
-	schema := &etcdpb.CollectionMeta{
+func genTestCollectionMeta() *etcdpb.CollectionMeta {
+	return &etcdpb.CollectionMeta{
 		ID:            CollectionID,
 		CreateTime:    1,
 		SegmentIDs:    []int64{SegmentID},
@@ -61,46 +64,40 @@ func TestInsertCodec(t *testing.T) {
 			AutoID:      true,
 			Fields: []*schemapb.FieldSchema{
 				{
-					FieldID:      RowIDField,
-					Name:         "row_id",
-					IsPrimaryKey: false,
-					Description:  "row_id",
-					DataType:     schemapb.DataType_Int64,
+					FieldID:     RowIDField,
+					Name:        "row_id",
+					Description: "row_id",
+					DataType:    schemapb.DataType_Int64,
 				},
 				{
-					FieldID:      TimestampField,
-					Name:         "Timestamp",
-					IsPrimaryKey: false,
-					Description:  "Timestamp",
-					DataType:     schemapb.DataType_Int64,
+					FieldID:     TimestampField,
+					Name:        "Timestamp",
+					Description: "Timestamp",
+					DataType:    schemapb.DataType_Int64,
 				},
 				{
-					FieldID:      BoolField,
-					Name:         "field_bool",
-					IsPrimaryKey: false,
-					Description:  "bool",
-					DataType:     schemapb.DataType_Bool,
+					FieldID:     BoolField,
+					Name:        "field_bool",
+					Description: "bool",
+					DataType:    schemapb.DataType_Bool,
 				},
 				{
-					FieldID:      Int8Field,
-					Name:         "field_int8",
-					IsPrimaryKey: false,
-					Description:  "int8",
-					DataType:     schemapb.DataType_Int8,
+					FieldID:     Int8Field,
+					Name:        "field_int8",
+					Description: "int8",
+					DataType:    schemapb.DataType_Int8,
 				},
 				{
-					FieldID:      Int16Field,
-					Name:         "field_int16",
-					IsPrimaryKey: false,
-					Description:  "int16",
-					DataType:     schemapb.DataType_Int16,
+					FieldID:     Int16Field,
+					Name:        "field_int16",
+					Description: "int16",
+					DataType:    schemapb.DataType_Int16,
 				},
 				{
-					FieldID:      Int32Field,
-					Name:         "field_int32",
-					IsPrimaryKey: false,
-					Description:  "int32",
-					DataType:     schemapb.DataType_Int32,
+					FieldID:     Int32Field,
+					Name:        "field_int32",
+					Description: "int32",
+					DataType:    schemapb.DataType_Int32,
 				},
 				{
 					FieldID:      Int64Field,
@@ -110,25 +107,22 @@ func TestInsertCodec(t *testing.T) {
 					DataType:     schemapb.DataType_Int64,
 				},
 				{
-					FieldID:      FloatField,
-					Name:         "field_float",
-					IsPrimaryKey: false,
-					Description:  "float",
-					DataType:     schemapb.DataType_Float,
+					FieldID:     FloatField,
+					Name:        "field_float",
+					Description: "float",
+					DataType:    schemapb.DataType_Float,
 				},
 				{
-					FieldID:      DoubleField,
-					Name:         "field_double",
-					IsPrimaryKey: false,
-					Description:  "double",
-					DataType:     schemapb.DataType_Double,
+					FieldID:     DoubleField,
+					Name:        "field_double",
+					Description: "double",
+					DataType:    schemapb.DataType_Double,
 				},
 				{
-					FieldID:      StringField,
-					Name:         "field_string",
-					IsPrimaryKey: false,
-					Description:  "string",
-					DataType:     schemapb.DataType_String,
+					FieldID:     StringField,
+					Name:        "field_string",
+					Description: "string",
+					DataType:    schemapb.DataType_String,
 				},
 				{
 					FieldID:     ArrayField,
@@ -144,22 +138,48 @@ func TestInsertCodec(t *testing.T) {
 					DataType:    schemapb.DataType_JSON,
 				},
 				{
-					FieldID:      BinaryVectorField,
-					Name:         "field_binary_vector",
-					IsPrimaryKey: false,
-					Description:  "binary_vector",
-					DataType:     schemapb.DataType_BinaryVector,
+					FieldID:     BinaryVectorField,
+					Name:        "field_binary_vector",
+					Description: "binary_vector",
+					DataType:    schemapb.DataType_BinaryVector,
+					TypeParams: []*commonpb.KeyValuePair{
+						{
+							Key:   common.DimKey,
+							Value: "8",
+						},
+					},
 				},
 				{
-					FieldID:      FloatVectorField,
-					Name:         "field_float_vector",
-					IsPrimaryKey: false,
-					Description:  "float_vector",
-					DataType:     schemapb.DataType_FloatVector,
+					FieldID:     FloatVectorField,
+					Name:        "field_float_vector",
+					Description: "float_vector",
+					DataType:    schemapb.DataType_FloatVector,
+					TypeParams: []*commonpb.KeyValuePair{
+						{
+							Key:   common.DimKey,
+							Value: "4",
+						},
+					},
+				},
+				{
+					FieldID:     Float16VectorField,
+					Name:        "field_float16_vector",
+					Description: "float16_vector",
+					DataType:    schemapb.DataType_Float16Vector,
+					TypeParams: []*commonpb.KeyValuePair{
+						{
+							Key:   common.DimKey,
+							Value: "4",
+						},
+					},
 				},
 			},
 		},
 	}
+}
+
+func TestInsertCodec(t *testing.T) {
+	schema := genTestCollectionMeta()
 	insertCodec := NewInsertCodecWithSchema(schema)
 	insertData1 := &InsertData{
 		Data: map[int64]FieldData{
@@ -222,6 +242,11 @@ func TestInsertCodec(t *testing.T) {
 					[]byte(`{"key":"world"}`),
 				},
 			},
+			Float16VectorField: &Float16VectorFieldData{
+				// length = 2 * Dim * numRows(2) = 16
+				Data: []byte{0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255},
+				Dim:  4,
+			},
 		},
 	}
 
@@ -265,6 +290,11 @@ func TestInsertCodec(t *testing.T) {
 				Data: []float32{0, 1, 2, 3, 0, 1, 2, 3},
 				Dim:  4,
 			},
+			Float16VectorField: &Float16VectorFieldData{
+				// length = 2 * Dim * numRows(2) = 16
+				Data: []byte{0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255},
+				Dim:  4,
+			},
 			ArrayField: &ArrayFieldData{
 				ElementType: schemapb.DataType_Int32,
 				Data: []*schemapb.ScalarField{
@@ -291,20 +321,21 @@ func TestInsertCodec(t *testing.T) {
 
 	insertDataEmpty := &InsertData{
 		Data: map[int64]FieldData{
-			RowIDField:        &Int64FieldData{[]int64{}},
-			TimestampField:    &Int64FieldData{[]int64{}},
-			BoolField:         &BoolFieldData{[]bool{}},
-			Int8Field:         &Int8FieldData{[]int8{}},
-			Int16Field:        &Int16FieldData{[]int16{}},
-			Int32Field:        &Int32FieldData{[]int32{}},
-			Int64Field:        &Int64FieldData{[]int64{}},
-			FloatField:        &FloatFieldData{[]float32{}},
-			DoubleField:       &DoubleFieldData{[]float64{}},
-			StringField:       &StringFieldData{[]string{}},
-			BinaryVectorField: &BinaryVectorFieldData{[]byte{}, 8},
-			FloatVectorField:  &FloatVectorFieldData{[]float32{}, 4},
-			ArrayField:        &ArrayFieldData{schemapb.DataType_Int32, []*schemapb.ScalarField{}},
-			JSONField:         &JSONFieldData{[][]byte{}},
+			RowIDField:         &Int64FieldData{[]int64{}},
+			TimestampField:     &Int64FieldData{[]int64{}},
+			BoolField:          &BoolFieldData{[]bool{}},
+			Int8Field:          &Int8FieldData{[]int8{}},
+			Int16Field:         &Int16FieldData{[]int16{}},
+			Int32Field:         &Int32FieldData{[]int32{}},
+			Int64Field:         &Int64FieldData{[]int64{}},
+			FloatField:         &FloatFieldData{[]float32{}},
+			DoubleField:        &DoubleFieldData{[]float64{}},
+			StringField:        &StringFieldData{[]string{}},
+			BinaryVectorField:  &BinaryVectorFieldData{[]byte{}, 8},
+			FloatVectorField:   &FloatVectorFieldData{[]float32{}, 4},
+			Float16VectorField: &Float16VectorFieldData{[]byte{}, 4},
+			ArrayField:         &ArrayFieldData{schemapb.DataType_Int32, []*schemapb.ScalarField{}},
+			JSONField:          &JSONFieldData{[][]byte{}},
 		},
 	}
 	b, err := insertCodec.Serialize(PartitionID, SegmentID, insertDataEmpty)
@@ -345,6 +376,12 @@ func TestInsertCodec(t *testing.T) {
 	assert.Equal(t, []string{"1", "2", "3", "4"}, resultData.Data[StringField].(*StringFieldData).Data)
 	assert.Equal(t, []byte{0, 255, 0, 255}, resultData.Data[BinaryVectorField].(*BinaryVectorFieldData).Data)
 	assert.Equal(t, []float32{0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 6, 7, 4, 5, 6, 7}, resultData.Data[FloatVectorField].(*FloatVectorFieldData).Data)
+	assert.Equal(t, []byte{
+		0, 255, 0, 255, 0, 255, 0, 255,
+		0, 255, 0, 255, 0, 255, 0, 255,
+		0, 255, 0, 255, 0, 255, 0, 255,
+		0, 255, 0, 255, 0, 255, 0, 255,
+	}, resultData.Data[Float16VectorField].(*Float16VectorFieldData).Data)
 
 	int32ArrayList := [][]int32{{1, 2, 3}, {4, 5, 6}, {3, 2, 1}, {6, 5, 4}}
 	resultArrayList := [][]int32{}
@@ -665,5 +702,4 @@ func TestMemorySize(t *testing.T) {
 	assert.Equal(t, insertDataEmpty.Data[StringField].GetMemorySize(), 0)
 	assert.Equal(t, insertDataEmpty.Data[BinaryVectorField].GetMemorySize(), 4)
 	assert.Equal(t, insertDataEmpty.Data[FloatVectorField].GetMemorySize(), 4)
-
 }

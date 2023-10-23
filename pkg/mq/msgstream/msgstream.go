@@ -20,7 +20,6 @@ import (
 	"context"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
-
 	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
@@ -62,12 +61,14 @@ type MsgStream interface {
 	GetProduceChannels() []string
 	Broadcast(*MsgPack) (map[string][]MessageID, error)
 
-	AsConsumer(channels []string, subName string, position mqwrapper.SubscriptionInitialPosition)
+	AsConsumer(ctx context.Context, channels []string, subName string, position mqwrapper.SubscriptionInitialPosition) error
 	Chan() <-chan *MsgPack
-	Seek(offset []*MsgPosition) error
+	Seek(ctx context.Context, offset []*MsgPosition) error
 
 	GetLatestMsgID(channel string) (MessageID, error)
 	CheckTopicValid(channel string) error
+
+	EnableProduce(can bool)
 }
 
 type Factory interface {

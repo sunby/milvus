@@ -27,7 +27,6 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
-	"github.com/milvus-io/milvus/internal/kv/mocks"
 	mockkv "github.com/milvus-io/milvus/internal/kv/mocks"
 	"github.com/milvus-io/milvus/internal/metastore/kv/datacoord"
 	catalogmocks "github.com/milvus-io/milvus/internal/metastore/mocks"
@@ -37,10 +36,11 @@ import (
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/pkg/common"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
 func TestServerId(t *testing.T) {
-	s := &Server{session: &sessionutil.Session{ServerID: 0}}
+	s := &Server{session: &sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 0}}}
 	assert.Equal(t, int64(0), s.serverID())
 }
 
@@ -48,7 +48,7 @@ func TestServer_CreateIndex(t *testing.T) {
 	var (
 		collID  = UniqueID(1)
 		fieldID = UniqueID(10)
-		//indexID    = UniqueID(100)
+		// indexID    = UniqueID(100)
 		indexName  = "default_idx"
 		typeParams = []*commonpb.KeyValuePair{
 			{
@@ -100,7 +100,7 @@ func TestServer_CreateIndex(t *testing.T) {
 		s.stateCode.Store(commonpb.StateCode_Abnormal)
 		resp, err := s.CreateIndex(ctx, req)
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_DataCoordNA, resp.GetErrorCode())
+		assert.ErrorIs(t, merr.Error(resp), merr.ErrServiceNotReady)
 	})
 
 	t.Run("index not consistent", func(t *testing.T) {
@@ -182,7 +182,7 @@ func TestServer_GetIndexState(t *testing.T) {
 	)
 	s := &Server{
 		meta: &meta{
-			catalog: &datacoord.Catalog{MetaKv: mocks.NewMetaKv(t)},
+			catalog: &datacoord.Catalog{MetaKv: mockkv.NewMetaKv(t)},
 		},
 		allocator:       newMockAllocator(),
 		notifyIndexChan: make(chan UniqueID, 1),
@@ -192,18 +192,18 @@ func TestServer_GetIndexState(t *testing.T) {
 		s.stateCode.Store(commonpb.StateCode_Initializing)
 		resp, err := s.GetIndexState(ctx, req)
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_DataCoordNA, resp.GetStatus().GetErrorCode())
+		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrServiceNotReady)
 	})
 
 	s.stateCode.Store(commonpb.StateCode_Healthy)
-	t.Run("index not exist", func(t *testing.T) {
+	t.Run("index not found", func(t *testing.T) {
 		resp, err := s.GetIndexState(ctx, req)
 		assert.NoError(t, err)
 		assert.Equal(t, commonpb.ErrorCode_IndexNotExist, resp.GetStatus().GetErrorCode())
 	})
 
 	s.meta = &meta{
-		catalog: &datacoord.Catalog{MetaKv: mocks.NewMetaKv(t)},
+		catalog: &datacoord.Catalog{MetaKv: mockkv.NewMetaKv(t)},
 		indexes: map[UniqueID]map[UniqueID]*model.Index{
 			collID: {
 				indexID: {
@@ -254,7 +254,7 @@ func TestServer_GetIndexState(t *testing.T) {
 	})
 
 	s.meta = &meta{
-		catalog: &datacoord.Catalog{MetaKv: mocks.NewMetaKv(t)},
+		catalog: &datacoord.Catalog{MetaKv: mockkv.NewMetaKv(t)},
 		indexes: map[UniqueID]map[UniqueID]*model.Index{
 			collID: {
 				indexID: {
@@ -372,7 +372,7 @@ func TestServer_GetSegmentIndexState(t *testing.T) {
 	)
 	s := &Server{
 		meta: &meta{
-			catalog:  &datacoord.Catalog{MetaKv: mocks.NewMetaKv(t)},
+			catalog:  &datacoord.Catalog{MetaKv: mockkv.NewMetaKv(t)},
 			indexes:  map[UniqueID]map[UniqueID]*model.Index{},
 			segments: &SegmentsInfo{map[UniqueID]*SegmentInfo{}},
 		},
@@ -384,7 +384,7 @@ func TestServer_GetSegmentIndexState(t *testing.T) {
 		s.stateCode.Store(commonpb.StateCode_Abnormal)
 		resp, err := s.GetSegmentIndexState(ctx, req)
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_DataCoordNA, resp.GetStatus().GetErrorCode())
+		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrServiceNotReady)
 	})
 
 	t.Run("no indexes", func(t *testing.T) {
@@ -507,7 +507,7 @@ func TestServer_GetIndexBuildProgress(t *testing.T) {
 
 	s := &Server{
 		meta: &meta{
-			catalog:  &datacoord.Catalog{MetaKv: mocks.NewMetaKv(t)},
+			catalog:  &datacoord.Catalog{MetaKv: mockkv.NewMetaKv(t)},
 			indexes:  map[UniqueID]map[UniqueID]*model.Index{},
 			segments: &SegmentsInfo{map[UniqueID]*SegmentInfo{}},
 		},
@@ -518,7 +518,7 @@ func TestServer_GetIndexBuildProgress(t *testing.T) {
 		s.stateCode.Store(commonpb.StateCode_Initializing)
 		resp, err := s.GetIndexBuildProgress(ctx, req)
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_DataCoordNA, resp.GetStatus().GetErrorCode())
+		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrServiceNotReady)
 	})
 
 	t.Run("no indexes", func(t *testing.T) {
@@ -706,7 +706,7 @@ func TestServer_DescribeIndex(t *testing.T) {
 			catalog: catalog,
 			indexes: map[UniqueID]map[UniqueID]*model.Index{
 				collID: {
-					//finished
+					// finished
 					indexID: {
 						TenantID:        "",
 						CollectionID:    collID,
@@ -998,7 +998,7 @@ func TestServer_DescribeIndex(t *testing.T) {
 		s.stateCode.Store(commonpb.StateCode_Initializing)
 		resp, err := s.DescribeIndex(ctx, req)
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_DataCoordNA, resp.GetStatus().GetErrorCode())
+		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrServiceNotReady)
 	})
 
 	s.stateCode.Store(commonpb.StateCode_Healthy)
@@ -1067,7 +1067,7 @@ func TestServer_GetIndexStatistics(t *testing.T) {
 			catalog: catalog,
 			indexes: map[UniqueID]map[UniqueID]*model.Index{
 				collID: {
-					//finished
+					// finished
 					indexID: {
 						TenantID:        "",
 						CollectionID:    collID,
@@ -1347,7 +1347,7 @@ func TestServer_DropIndex(t *testing.T) {
 			catalog: catalog,
 			indexes: map[UniqueID]map[UniqueID]*model.Index{
 				collID: {
-					//finished
+					// finished
 					indexID: {
 						TenantID:        "",
 						CollectionID:    collID,
@@ -1442,7 +1442,7 @@ func TestServer_DropIndex(t *testing.T) {
 		s.stateCode.Store(commonpb.StateCode_Initializing)
 		resp, err := s.DropIndex(ctx, req)
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_DataCoordNA, resp.GetErrorCode())
+		assert.ErrorIs(t, merr.Error(resp), merr.ErrServiceNotReady)
 	})
 
 	s.stateCode.Store(commonpb.StateCode_Healthy)
@@ -1539,10 +1539,10 @@ func TestServer_GetIndexInfos(t *testing.T) {
 
 	s := &Server{
 		meta: &meta{
-			catalog: &datacoord.Catalog{MetaKv: mocks.NewMetaKv(t)},
+			catalog: &datacoord.Catalog{MetaKv: mockkv.NewMetaKv(t)},
 			indexes: map[UniqueID]map[UniqueID]*model.Index{
 				collID: {
-					//finished
+					// finished
 					indexID: {
 						TenantID:        "",
 						CollectionID:    collID,
@@ -1602,7 +1602,7 @@ func TestServer_GetIndexInfos(t *testing.T) {
 		s.stateCode.Store(commonpb.StateCode_Initializing)
 		resp, err := s.GetIndexInfos(ctx, req)
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_DataCoordNA, resp.GetStatus().GetErrorCode())
+		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrServiceNotReady)
 	})
 
 	s.stateCode.Store(commonpb.StateCode_Healthy)

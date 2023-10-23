@@ -42,7 +42,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
 	"github.com/milvus-io/milvus/internal/querynodev2/tasks"
 	"github.com/milvus-io/milvus/internal/storage"
-	"github.com/milvus-io/milvus/internal/util"
+	"github.com/milvus-io/milvus/internal/util/streamrpc"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
@@ -56,9 +56,9 @@ import (
 )
 
 // GetComponentStates returns information about whether the node is healthy
-func (node *QueryNode) GetComponentStates(ctx context.Context) (*milvuspb.ComponentStates, error) {
+func (node *QueryNode) GetComponentStates(ctx context.Context, req *milvuspb.GetComponentStatesRequest) (*milvuspb.ComponentStates, error) {
 	stats := &milvuspb.ComponentStates{
-		Status: merr.Status(nil),
+		Status: merr.Success(),
 	}
 
 	code := node.lifetime.GetState()
@@ -78,18 +78,18 @@ func (node *QueryNode) GetComponentStates(ctx context.Context) (*milvuspb.Compon
 
 // GetTimeTickChannel returns the time tick channel
 // TimeTickChannel contains many time tick messages, which will be sent by query nodes
-func (node *QueryNode) GetTimeTickChannel(ctx context.Context) (*milvuspb.StringResponse, error) {
+func (node *QueryNode) GetTimeTickChannel(ctx context.Context, req *internalpb.GetTimeTickChannelRequest) (*milvuspb.StringResponse, error) {
 	return &milvuspb.StringResponse{
-		Status: merr.Status(nil),
+		Status: merr.Success(),
 		Value:  paramtable.Get().CommonCfg.QueryCoordTimeTick.GetValue(),
 	}, nil
 }
 
 // GetStatisticsChannel returns the statistics channel
 // Statistics channel contains statistics infos of query nodes, such as segment infos, memory infos
-func (node *QueryNode) GetStatisticsChannel(ctx context.Context) (*milvuspb.StringResponse, error) {
+func (node *QueryNode) GetStatisticsChannel(ctx context.Context, req *internalpb.GetStatisticsChannelRequest) (*milvuspb.StringResponse, error) {
 	return &milvuspb.StringResponse{
-		Status: merr.Status(nil),
+		Status: merr.Success(),
 	}, nil
 }
 
@@ -102,29 +102,22 @@ func (node *QueryNode) GetStatistics(ctx context.Context, req *querypb.GetStatis
 		zap.Uint64("guaranteeTimestamp", req.GetReq().GetGuaranteeTimestamp()),
 		zap.Uint64("timeTravel", req.GetReq().GetTravelTimestamp()))
 
-	if !node.lifetime.Add(commonpbutil.IsHealthy) {
-		msg := fmt.Sprintf("query node %d is not ready", paramtable.GetNodeID())
-		err := merr.WrapErrServiceNotReady(msg)
+	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
 		return &internalpb.GetStatisticsResponse{
 			Status: merr.Status(err),
 		}, nil
 	}
 	defer node.lifetime.Done()
 
-	if !CheckTargetID(req.GetReq()) {
-		targetID := req.GetReq().GetBase().GetTargetID()
-		log.Warn("target ID not match",
-			zap.Int64("targetID", targetID),
-			zap.Int64("nodeID", paramtable.GetNodeID()),
-		)
+	err := merr.CheckTargetID(req.GetReq().GetBase())
+	if err != nil {
+		log.Warn("target ID check failed", zap.Error(err))
 		return &internalpb.GetStatisticsResponse{
-			Status: util.WrapStatus(commonpb.ErrorCode_NodeIDNotMatch,
-				common.WrapNodeIDNotMatchMsg(targetID, paramtable.GetNodeID()),
-			),
+			Status: merr.Status(err),
 		}, nil
 	}
 	failRet := &internalpb.GetStatisticsResponse{
-		Status: merr.Status(nil),
+		Status: merr.Success(),
 	}
 
 	var toReduceResults []*internalpb.GetStatisticsResponse
@@ -141,17 +134,15 @@ func (node *QueryNode) GetStatistics(ctx context.Context, req *querypb.GetStatis
 		}
 		runningGp.Go(func() error {
 			ret, err := node.getChannelStatistics(runningCtx, req, ch)
+			if err == nil {
+				err = merr.Error(ret.GetStatus())
+			}
+
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				failRet.Status.Reason = err.Error()
-				failRet.Status.ErrorCode = commonpb.ErrorCode_UnexpectedError
+				failRet.Status = merr.Status(err)
 				return err
-			}
-			if ret.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
-				failRet.Status.Reason = ret.Status.Reason
-				failRet.Status.ErrorCode = ret.Status.ErrorCode
-				return fmt.Errorf("%s", ret.Status.Reason)
 			}
 			toReduceResults = append(toReduceResults, ret)
 			return nil
@@ -163,7 +154,7 @@ func (node *QueryNode) GetStatistics(ctx context.Context, req *querypb.GetStatis
 
 	ret, err := reduceStatisticResponse(toReduceResults)
 	if err != nil {
-		failRet.Status.Reason = err.Error()
+		failRet.Status = merr.Status(err)
 		return failRet, nil
 	}
 	log.Debug("reduce statistic result done")
@@ -215,20 +206,14 @@ func (node *QueryNode) WatchDmChannels(ctx context.Context, req *querypb.WatchDm
 	)
 
 	// check node healthy
-	if !node.lifetime.Add(commonpbutil.IsHealthy) {
-		msg := fmt.Sprintf("query node %d is not ready", paramtable.GetNodeID())
-		err := merr.WrapErrServiceNotReady(msg)
+	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
 		return merr.Status(err), nil
 	}
 	defer node.lifetime.Done()
 
 	// check target matches
-	if req.GetBase().GetTargetID() != paramtable.GetNodeID() {
-		status := &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_NodeIDNotMatch,
-			Reason:    common.WrapNodeIDNotMatchMsg(req.GetBase().GetTargetID(), paramtable.GetNodeID()),
-		}
-		return status, nil
+	if err := merr.CheckTargetID(req.GetBase()); err != nil {
+		return merr.Status(err), nil
 	}
 
 	// check metric type
@@ -240,7 +225,7 @@ func (node *QueryNode) WatchDmChannels(ctx context.Context, req *querypb.WatchDm
 	if !node.subscribingChannels.Insert(channel.GetChannelName()) {
 		msg := "channel subscribing..."
 		log.Warn(msg)
-		return util.SuccessStatus(msg), nil
+		return merr.Success(), nil
 	}
 	defer node.subscribingChannels.Remove(channel.GetChannelName())
 
@@ -254,7 +239,7 @@ func (node *QueryNode) WatchDmChannels(ctx context.Context, req *querypb.WatchDm
 	_, exist := node.delegators.Get(channel.GetChannelName())
 	if exist {
 		log.Info("channel already subscribed")
-		return util.SuccessStatus(), nil
+		return merr.Success(), nil
 	}
 
 	node.manager.Collection.PutOrRef(req.GetCollectionID(), req.GetSchema(),
@@ -265,7 +250,7 @@ func (node *QueryNode) WatchDmChannels(ctx context.Context, req *querypb.WatchDm
 		node.clusterManager, node.manager, node.tSafeManager, node.loader, node.factory, channel.GetSeekPosition().GetTimestamp())
 	if err != nil {
 		log.Warn("failed to create shard delegator", zap.Error(err))
-		return util.WrapStatus(commonpb.ErrorCode_UnexpectedError, "failed to create shard delegator", err), nil
+		return merr.Status(err), nil
 	}
 	node.delegators.Insert(channel.GetChannelName(), delegator)
 	defer func() {
@@ -286,7 +271,7 @@ func (node *QueryNode) WatchDmChannels(ctx context.Context, req *querypb.WatchDm
 	if err != nil {
 		msg := "failed to create pipeline"
 		log.Warn(msg, zap.Error(err))
-		return util.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg, err), nil
+		return merr.Status(err), nil
 	}
 	defer func() {
 		if err != nil {
@@ -322,7 +307,7 @@ func (node *QueryNode) WatchDmChannels(ctx context.Context, req *querypb.WatchDm
 	if err != nil {
 		msg := "failed to load growing segments"
 		log.Warn(msg, zap.Error(err))
-		return util.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg, err), nil
+		return merr.Status(err), nil
 	}
 	position := &msgpb.MsgPosition{
 		ChannelName: channel.SeekPosition.ChannelName,
@@ -344,7 +329,7 @@ func (node *QueryNode) WatchDmChannels(ctx context.Context, req *querypb.WatchDm
 	// delegator after all steps done
 	delegator.Start()
 	log.Info("watch dml channel success")
-	return util.SuccessStatus(), nil
+	return merr.Success(), nil
 }
 
 func (node *QueryNode) UnsubDmChannel(ctx context.Context, req *querypb.UnsubDmChannelRequest) (*commonpb.Status, error) {
@@ -357,21 +342,14 @@ func (node *QueryNode) UnsubDmChannel(ctx context.Context, req *querypb.UnsubDmC
 	log.Info("received unsubscribe channel request")
 
 	// check node healthy
-	if !node.lifetime.Add(commonpbutil.IsHealthy) {
-
-		msg := fmt.Sprintf("query node %d is not ready", paramtable.GetNodeID())
-		err := merr.WrapErrServiceNotReady(msg)
+	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
 		return merr.Status(err), nil
 	}
 	defer node.lifetime.Done()
 
 	// check target matches
-	if req.GetBase().GetTargetID() != paramtable.GetNodeID() {
-		status := &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_NodeIDNotMatch,
-			Reason:    common.WrapNodeIDNotMatchMsg(req.GetBase().GetTargetID(), paramtable.GetNodeID()),
-		}
-		return status, nil
+	if err := merr.CheckTargetID(req.GetBase()); err != nil {
+		return merr.Status(err), nil
 	}
 
 	node.unsubscribingChannels.Insert(req.GetChannelName())
@@ -389,7 +367,7 @@ func (node *QueryNode) UnsubDmChannel(ctx context.Context, req *querypb.UnsubDmC
 	}
 	log.Info("unsubscribed channel")
 
-	return util.SuccessStatus(), nil
+	return merr.Success(), nil
 }
 
 func (node *QueryNode) LoadPartitions(ctx context.Context, req *querypb.LoadPartitionsRequest) (*commonpb.Status, error) {
@@ -400,9 +378,7 @@ func (node *QueryNode) LoadPartitions(ctx context.Context, req *querypb.LoadPart
 
 	log.Info("received load partitions request")
 	// check node healthy
-	if !node.lifetime.Add(commonpbutil.IsHealthyOrStopping) {
-		msg := fmt.Sprintf("query node %d is not ready", paramtable.GetNodeID())
-		err := merr.WrapErrServiceNotReady(msg)
+	if err := node.lifetime.Add(merr.IsHealthyOrStopping); err != nil {
 		return merr.Status(err), nil
 	}
 	defer node.lifetime.Done()
@@ -413,7 +389,7 @@ func (node *QueryNode) LoadPartitions(ctx context.Context, req *querypb.LoadPart
 	}
 
 	log.Info("load partitions done")
-	return merr.Status(nil), nil
+	return merr.Success(), nil
 }
 
 // LoadSegments load historical data into query node, historical data can be vector data or index
@@ -433,17 +409,14 @@ func (node *QueryNode) LoadSegments(ctx context.Context, req *querypb.LoadSegmen
 		zap.Bool("needTransfer", req.GetNeedTransfer()),
 	)
 	// check node healthy
-	if !node.lifetime.Add(commonpbutil.IsHealthy) {
-		msg := fmt.Sprintf("query node %d is not ready", paramtable.GetNodeID())
-		err := merr.WrapErrServiceNotReady(msg)
+	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
 		return merr.Status(err), nil
 	}
 	node.lifetime.Done()
 
 	// check target matches
-	if req.GetBase().GetTargetID() != paramtable.GetNodeID() {
-		return util.WrapStatus(commonpb.ErrorCode_NodeIDNotMatch,
-			common.WrapNodeIDNotMatchMsg(req.GetBase().GetTargetID(), paramtable.GetNodeID())), nil
+	if err := merr.CheckTargetID(req.GetBase()); err != nil {
+		return merr.Status(err), nil
 	}
 
 	// Delegates request to workers
@@ -452,17 +425,18 @@ func (node *QueryNode) LoadSegments(ctx context.Context, req *querypb.LoadSegmen
 		if !ok {
 			msg := "failed to load segments, delegator not found"
 			log.Warn(msg)
-			return util.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg), nil
+			err := merr.WrapErrChannelNotFound(segment.GetInsertChannel())
+			return merr.Status(err), nil
 		}
 
 		req.NeedTransfer = false
 		err := delegator.LoadSegments(ctx, req)
 		if err != nil {
 			log.Warn("delegator failed to load segments", zap.Error(err))
-			return util.WrapStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
+			return merr.Status(err), nil
 		}
 
-		return util.SuccessStatus(), nil
+		return merr.Success(), nil
 	}
 
 	if req.GetLoadScope() == querypb.LoadScope_Delta {
@@ -485,10 +459,7 @@ func (node *QueryNode) LoadSegments(ctx context.Context, req *querypb.LoadSegmen
 		req.GetInfos()...,
 	)
 	if err != nil {
-		return &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_UnexpectedError,
-			Reason:    err.Error(),
-		}, nil
+		return merr.Status(err), nil
 	}
 
 	node.manager.Collection.Ref(req.GetCollectionID(), uint32(len(loaded)))
@@ -496,19 +467,17 @@ func (node *QueryNode) LoadSegments(ctx context.Context, req *querypb.LoadSegmen
 	log.Info("load segments done...",
 		zap.Int64s("segments", lo.Map(loaded, func(s segments.Segment, _ int) int64 { return s.ID() })))
 
-	return util.SuccessStatus(), nil
+	return merr.Success(), nil
 }
 
 // ReleaseCollection clears all data related to this collection on the querynode
 func (node *QueryNode) ReleaseCollection(ctx context.Context, in *querypb.ReleaseCollectionRequest) (*commonpb.Status, error) {
-	if !node.lifetime.Add(commonpbutil.IsHealthyOrStopping) {
-		msg := fmt.Sprintf("query node %d is not ready", paramtable.GetNodeID())
-		err := merr.WrapErrServiceNotReady(msg)
+	if err := node.lifetime.Add(merr.IsHealthyOrStopping); err != nil {
 		return merr.Status(err), nil
 	}
 	defer node.lifetime.Done()
 
-	return util.SuccessStatus(), nil
+	return merr.Success(), nil
 }
 
 // ReleasePartitions clears all data related to this partition on the querynode
@@ -521,9 +490,7 @@ func (node *QueryNode) ReleasePartitions(ctx context.Context, req *querypb.Relea
 	log.Info("received release partitions request")
 
 	// check node healthy
-	if !node.lifetime.Add(commonpbutil.IsHealthy) {
-		msg := fmt.Sprintf("query node %d is not ready", paramtable.GetNodeID())
-		err := merr.WrapErrServiceNotReady(msg)
+	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
 		return merr.Status(err), nil
 	}
 	defer node.lifetime.Done()
@@ -536,7 +503,7 @@ func (node *QueryNode) ReleasePartitions(ctx context.Context, req *querypb.Relea
 	}
 
 	log.Info("release partitions done")
-	return util.SuccessStatus(), nil
+	return merr.Success(), nil
 }
 
 // ReleaseSegments remove the specified segments from query node according segmentIDs, partitionIDs, and collectionID
@@ -554,20 +521,14 @@ func (node *QueryNode) ReleaseSegments(ctx context.Context, req *querypb.Release
 	)
 
 	// check node healthy
-	if !node.lifetime.Add(commonpbutil.IsHealthyOrStopping) {
-		msg := fmt.Sprintf("query node %d is not ready", paramtable.GetNodeID())
-		err := merr.WrapErrServiceNotReady(msg)
+	if err := node.lifetime.Add(merr.IsHealthyOrStopping); err != nil {
 		return merr.Status(err), nil
 	}
 	defer node.lifetime.Done()
 
 	// check target matches
-	if req.GetBase().GetTargetID() != paramtable.GetNodeID() {
-		status := &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_NodeIDNotMatch,
-			Reason:    common.WrapNodeIDNotMatchMsg(req.GetBase().GetTargetID(), paramtable.GetNodeID()),
-		}
-		return status, nil
+	if err := merr.CheckTargetID(req.GetBase()); err != nil {
+		return merr.Status(err), nil
 	}
 
 	if req.GetNeedTransfer() {
@@ -575,7 +536,8 @@ func (node *QueryNode) ReleaseSegments(ctx context.Context, req *querypb.Release
 		if !ok {
 			msg := "failed to release segment, delegator not found"
 			log.Warn(msg)
-			return util.WrapStatus(commonpb.ErrorCode_UnexpectedError, msg), nil
+			err := merr.WrapErrChannelNotFound(req.GetShard())
+			return merr.Status(err), nil
 		}
 
 		// when we try to release a segment, add it to pipeline's exclude list first
@@ -597,10 +559,10 @@ func (node *QueryNode) ReleaseSegments(ctx context.Context, req *querypb.Release
 		err := delegator.ReleaseSegments(ctx, req, false)
 		if err != nil {
 			log.Warn("delegator failed to release segment", zap.Error(err))
-			return util.WrapStatus(commonpb.ErrorCode_UnexpectedError, err.Error()), nil
+			return merr.Status(err), nil
 		}
 
-		return util.SuccessStatus(), nil
+		return merr.Success(), nil
 	}
 
 	log.Info("start to release segments")
@@ -611,14 +573,12 @@ func (node *QueryNode) ReleaseSegments(ctx context.Context, req *querypb.Release
 	}
 	node.manager.Collection.Unref(req.GetCollectionID(), uint32(sealedCount))
 
-	return util.SuccessStatus(), nil
+	return merr.Success(), nil
 }
 
 // GetSegmentInfo returns segment information of the collection on the queryNode, and the information includes memSize, numRow, indexName, indexID ...
 func (node *QueryNode) GetSegmentInfo(ctx context.Context, in *querypb.GetSegmentInfoRequest) (*querypb.GetSegmentInfoResponse, error) {
-	if !node.lifetime.Add(commonpbutil.IsHealthy) {
-		msg := fmt.Sprintf("query node %d is not ready", paramtable.GetNodeID())
-		err := merr.WrapErrServiceNotReady(msg)
+	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
 		return &querypb.GetSegmentInfoResponse{
 			Status: merr.Status(err),
 		}, nil
@@ -670,7 +630,7 @@ func (node *QueryNode) GetSegmentInfo(ctx context.Context, in *querypb.GetSegmen
 	}
 
 	return &querypb.GetSegmentInfoResponse{
-		Status: merr.Status(nil),
+		Status: merr.Success(),
 		Infos:  segmentInfos,
 	}, nil
 }
@@ -685,16 +645,16 @@ func (node *QueryNode) SearchSegments(ctx context.Context, req *querypb.SearchRe
 		zap.String("scope", req.GetScope().String()),
 	)
 
-	failRet := WrapSearchResult(commonpb.ErrorCode_UnexpectedError, "")
-	if !node.lifetime.Add(commonpbutil.IsHealthy) {
-		failRet.Status = merr.Status(merr.WrapErrServiceNotReady(fmt.Sprintf("node id: %d is unhealthy", paramtable.GetNodeID())))
-		return failRet, nil
+	resp := &internalpb.SearchResults{}
+	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
+		resp.Status = merr.Status(err)
+		return resp, nil
 	}
 	defer node.lifetime.Done()
 
 	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.SearchLabel, metrics.TotalLabel, metrics.FromLeader).Inc()
 	defer func() {
-		if failRet.Status.ErrorCode != commonpb.ErrorCode_Success {
+		if resp.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
 			metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.SearchLabel, metrics.FailLabel, metrics.FromLeader).Inc()
 		}
 	}()
@@ -712,22 +672,22 @@ func (node *QueryNode) SearchSegments(ctx context.Context, req *querypb.SearchRe
 	if collection == nil {
 		err := merr.WrapErrCollectionNotLoaded(req.GetReq().GetCollectionID())
 		log.Warn("failed to search segments", zap.Error(err))
-		failRet.Status = merr.Status(err)
-		return failRet, nil
+		resp.Status = merr.Status(err)
+		return resp, nil
 	}
 
 	task := tasks.NewSearchTask(searchCtx, collection, node.manager, req)
 	if err := node.scheduler.Add(task); err != nil {
 		log.Warn("failed to search channel", zap.Error(err))
-		failRet.Status.Reason = err.Error()
-		return failRet, nil
+		resp.Status = merr.Status(err)
+		return resp, nil
 	}
 
 	err := task.Wait()
 	if err != nil {
 		log.Warn("failed to search segments", zap.Error(err))
-		failRet.Status.Reason = err.Error()
-		return failRet, nil
+		resp.Status = merr.Status(err)
+		return resp, nil
 	}
 
 	tr.CtxElapse(ctx, fmt.Sprintf("search segments done, channel = %s, segmentIDs = %v",
@@ -735,16 +695,14 @@ func (node *QueryNode) SearchSegments(ctx context.Context, req *querypb.SearchRe
 		req.GetSegmentIDs(),
 	))
 
-	// TODO QueryNodeSQLatencyInQueue QueryNodeReduceLatency
-	failRet.Status.ErrorCode = commonpb.ErrorCode_Success
 	latency := tr.ElapseSpan()
 	metrics.QueryNodeSQReqLatency.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.SearchLabel, metrics.FromLeader).Observe(float64(latency.Milliseconds()))
 	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.SearchLabel, metrics.SuccessLabel, metrics.FromLeader).Inc()
 
-	result := task.Result()
-	result.GetCostAggregation().ResponseTime = tr.ElapseSpan().Milliseconds()
-	result.GetCostAggregation().TotalNQ = node.scheduler.GetWaitingTaskTotalNQ()
-	return result, nil
+	resp = task.Result()
+	resp.GetCostAggregation().ResponseTime = tr.ElapseSpan().Milliseconds()
+	resp.GetCostAggregation().TotalNQ = node.scheduler.GetWaitingTaskTotalNQ()
+	return resp, nil
 }
 
 // Search performs replica search tasks.
@@ -766,27 +724,23 @@ func (node *QueryNode) Search(ctx context.Context, req *querypb.SearchRequest) (
 
 	tr := timerecord.NewTimeRecorderWithTrace(ctx, "SearchRequest")
 
-	if !node.lifetime.Add(commonpbutil.IsHealthy) {
-		msg := fmt.Sprintf("query node %d is not ready", paramtable.GetNodeID())
-		err := merr.WrapErrServiceNotReady(msg)
+	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
 		return &internalpb.SearchResults{
 			Status: merr.Status(err),
 		}, nil
 	}
 	defer node.lifetime.Done()
 
-	if !CheckTargetID(req.GetReq()) {
-		targetID := req.GetReq().GetBase().GetTargetID()
-		log.Warn("target ID not match",
-			zap.Int64("targetID", targetID),
-			zap.Int64("nodeID", paramtable.GetNodeID()),
-		)
-		return WrapSearchResult(commonpb.ErrorCode_NodeIDNotMatch,
-			common.WrapNodeIDNotMatchMsg(targetID, paramtable.GetNodeID())), nil
+	err := merr.CheckTargetID(req.GetReq().GetBase())
+	if err != nil {
+		log.Warn("target ID check failed", zap.Error(err))
+		return &internalpb.SearchResults{
+			Status: merr.Status(err),
+		}, nil
 	}
 
 	failRet := &internalpb.SearchResults{
-		Status: merr.Status(nil),
+		Status: merr.Success(),
 	}
 	collection := node.manager.Collection.Get(req.GetReq().GetCollectionID())
 	if collection == nil {
@@ -827,8 +781,7 @@ func (node *QueryNode) Search(ctx context.Context, req *querypb.SearchRequest) (
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				failRet.Status.Reason = err.Error()
-				failRet.Status.ErrorCode = commonpb.ErrorCode_UnexpectedError
+				failRet.Status = merr.Status(err)
 				return err
 			}
 			if ret.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
@@ -846,8 +799,7 @@ func (node *QueryNode) Search(ctx context.Context, req *querypb.SearchRequest) (
 	result, err := segments.ReduceSearchResults(ctx, toReduceResults, req.Req.GetNq(), req.Req.GetTopk(), req.Req.GetMetricType())
 	if err != nil {
 		log.Warn("failed to reduce search results", zap.Error(err))
-		failRet.Status.ErrorCode = commonpb.ErrorCode_UnexpectedError
-		failRet.Status.Reason = err.Error()
+		failRet.Status = merr.Status(err)
 		return failRet, nil
 	}
 	reduceLatency := tr.RecordSpan()
@@ -867,7 +819,9 @@ func (node *QueryNode) Search(ctx context.Context, req *querypb.SearchRequest) (
 
 // only used for delegator query segments from worker
 func (node *QueryNode) QuerySegments(ctx context.Context, req *querypb.QueryRequest) (*internalpb.RetrieveResults, error) {
-	failRet := WrapRetrieveResult(commonpb.ErrorCode_UnexpectedError, "")
+	resp := &internalpb.RetrieveResults{
+		Status: merr.Success(),
+	}
 	msgID := req.Req.Base.GetMsgID()
 	traceID := trace.SpanFromContext(ctx).SpanContext().TraceID()
 	channel := req.GetDmlChannels()[0]
@@ -878,16 +832,15 @@ func (node *QueryNode) QuerySegments(ctx context.Context, req *querypb.QueryRequ
 		zap.String("scope", req.GetScope().String()),
 	)
 
-	if !node.lifetime.Add(commonpbutil.IsHealthy) {
-		err := merr.WrapErrServiceUnavailable(fmt.Sprintf("node id: %d is unhealthy", paramtable.GetNodeID()))
-		failRet.Status = merr.Status(err)
-		return failRet, nil
+	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
+		resp.Status = merr.Status(err)
+		return resp, nil
 	}
 	defer node.lifetime.Done()
 
 	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.TotalLabel, metrics.FromLeader).Inc()
 	defer func() {
-		if failRet.Status.ErrorCode != commonpb.ErrorCode_Success {
+		if resp.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
 			metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.FailLabel, metrics.FromLeader).Inc()
 		}
 	}()
@@ -903,22 +856,22 @@ func (node *QueryNode) QuerySegments(ctx context.Context, req *querypb.QueryRequ
 	tr := timerecord.NewTimeRecorder("querySegments")
 	collection := node.manager.Collection.Get(req.Req.GetCollectionID())
 	if collection == nil {
-		failRet.Status = merr.Status(merr.WrapErrCollectionNotLoaded(req.Req.GetCollectionID()))
-		return failRet, nil
+		resp.Status = merr.Status(merr.WrapErrCollectionNotLoaded(req.Req.GetCollectionID()))
+		return resp, nil
 	}
 
 	// Send task to scheduler and wait until it finished.
 	task := tasks.NewQueryTask(queryCtx, collection, node.manager, req)
 	if err := node.scheduler.Add(task); err != nil {
 		log.Warn("failed to add query task into scheduler", zap.Error(err))
-		failRet.Status = merr.Status(err)
-		return failRet, nil
+		resp.Status = merr.Status(err)
+		return resp, nil
 	}
 	err := task.Wait()
 	if err != nil {
 		log.Warn("failed to query channel", zap.Error(err))
-		failRet.Status = merr.Status(err)
-		return failRet, nil
+		resp.Status = merr.Status(err)
+		return resp, nil
 	}
 
 	tr.CtxElapse(ctx, fmt.Sprintf("do query done, traceID = %s, fromSharedLeader = %t, vChannel = %s, segmentIDs = %v",
@@ -928,7 +881,6 @@ func (node *QueryNode) QuerySegments(ctx context.Context, req *querypb.QueryRequ
 		req.GetSegmentIDs(),
 	))
 
-	failRet.Status.ErrorCode = commonpb.ErrorCode_Success
 	// TODO QueryNodeSQLatencyInQueue QueryNodeReduceLatency
 	latency := tr.ElapseSpan()
 	metrics.QueryNodeSQReqLatency.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.FromLeader).Observe(float64(latency.Milliseconds()))
@@ -960,23 +912,19 @@ func (node *QueryNode) Query(ctx context.Context, req *querypb.QueryRequest) (*i
 	)
 	tr := timerecord.NewTimeRecorderWithTrace(ctx, "QueryRequest")
 
-	if !node.lifetime.Add(commonpbutil.IsHealthy) {
-		msg := fmt.Sprintf("query node %d is not ready", paramtable.GetNodeID())
-		err := merr.WrapErrServiceNotReady(msg)
+	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
 		return &internalpb.RetrieveResults{
 			Status: merr.Status(err),
 		}, nil
 	}
 	defer node.lifetime.Done()
 
-	if !CheckTargetID(req.GetReq()) {
-		targetID := req.GetReq().GetBase().GetTargetID()
-		log.Warn("target ID not match",
-			zap.Int64("targetID", targetID),
-			zap.Int64("nodeID", paramtable.GetNodeID()),
-		)
-		return WrapRetrieveResult(commonpb.ErrorCode_NodeIDNotMatch,
-			common.WrapNodeIDNotMatchMsg(targetID, paramtable.GetNodeID())), nil
+	err := merr.CheckTargetID(req.GetReq().GetBase())
+	if err != nil {
+		log.Warn("target ID check failed", zap.Error(err))
+		return &internalpb.RetrieveResults{
+			Status: merr.Status(err),
+		}, nil
 	}
 
 	toMergeResults := make([]*internalpb.RetrieveResults, len(req.GetDmlChannels()))
@@ -995,25 +943,29 @@ func (node *QueryNode) Query(ctx context.Context, req *querypb.QueryRequest) (*i
 		idx := i
 		runningGp.Go(func() error {
 			ret, err := node.queryChannel(runningCtx, req, ch)
+			if err == nil {
+				err = merr.Error(ret.GetStatus())
+			}
 			if err != nil {
 				return err
-			}
-			if ret.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
-				return fmt.Errorf("%s", ret.Status.Reason)
 			}
 			toMergeResults[idx] = ret
 			return nil
 		})
 	}
 	if err := runningGp.Wait(); err != nil {
-		return WrapRetrieveResult(commonpb.ErrorCode_UnexpectedError, "failed to query channel", err), nil
+		return &internalpb.RetrieveResults{
+			Status: merr.Status(err),
+		}, nil
 	}
 
 	tr.RecordSpan()
 	reducer := segments.CreateInternalReducer(req, node.manager.Collection.Get(req.GetReq().GetCollectionID()).Schema())
 	ret, err := reducer.Reduce(ctx, toMergeResults)
 	if err != nil {
-		return WrapRetrieveResult(commonpb.ErrorCode_UnexpectedError, "failed to query channel", err), nil
+		return &internalpb.RetrieveResults{
+			Status: merr.Status(err),
+		}, nil
 	}
 	reduceLatency := tr.RecordSpan()
 	metrics.QueryNodeReduceLatency.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.ReduceShards).
@@ -1030,15 +982,132 @@ func (node *QueryNode) Query(ctx context.Context, req *querypb.QueryRequest) (*i
 	return ret, nil
 }
 
+func (node *QueryNode) QueryStream(req *querypb.QueryRequest, srv querypb.QueryNode_QueryStreamServer) error {
+	ctx := srv.Context()
+	log := log.Ctx(ctx).With(
+		zap.Int64("collectionID", req.GetReq().GetCollectionID()),
+		zap.Strings("shards", req.GetDmlChannels()),
+	)
+	concurrentSrv := streamrpc.NewConcurrentQueryStreamServer(srv)
+
+	log.Debug("received query stream request",
+		zap.Int64s("outputFields", req.GetReq().GetOutputFieldsId()),
+		zap.Int64s("segmentIDs", req.GetSegmentIDs()),
+		zap.Uint64("guaranteeTimestamp", req.GetReq().GetGuaranteeTimestamp()),
+		zap.Uint64("mvccTimestamp", req.GetReq().GetMvccTimestamp()),
+		zap.Bool("isCount", req.GetReq().GetIsCount()),
+	)
+
+	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
+		concurrentSrv.Send(&internalpb.RetrieveResults{Status: merr.Status(err)})
+		return nil
+	}
+	defer node.lifetime.Done()
+
+	err := merr.CheckTargetID(req.GetReq().GetBase())
+	if err != nil {
+		log.Warn("target ID check failed", zap.Error(err))
+		return err
+	}
+
+	runningGp, runningCtx := errgroup.WithContext(ctx)
+
+	for _, ch := range req.GetDmlChannels() {
+		ch := ch
+		req := &querypb.QueryRequest{
+			Req:             req.Req,
+			DmlChannels:     []string{ch},
+			SegmentIDs:      req.SegmentIDs,
+			FromShardLeader: req.FromShardLeader,
+			Scope:           req.Scope,
+		}
+
+		runningGp.Go(func() error {
+			err := node.queryChannelStream(runningCtx, req, ch, concurrentSrv)
+			if err != nil {
+				return err
+			}
+			return nil
+		})
+	}
+
+	if err := runningGp.Wait(); err != nil {
+		concurrentSrv.Send(&internalpb.RetrieveResults{
+			Status: merr.Status(err),
+		})
+		return nil
+	}
+
+	collector.Rate.Add(metricsinfo.NQPerSecond, 1)
+	metrics.QueryNodeExecuteCounter.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), metrics.QueryLabel).Add(float64(proto.Size(req)))
+	return nil
+}
+
+func (node *QueryNode) QueryStreamSegments(req *querypb.QueryRequest, srv querypb.QueryNode_QueryStreamSegmentsServer) error {
+	ctx := srv.Context()
+	msgID := req.Req.Base.GetMsgID()
+	traceID := trace.SpanFromContext(ctx).SpanContext().TraceID()
+	channel := req.GetDmlChannels()[0]
+	concurrentSrv := streamrpc.NewConcurrentQueryStreamServer(srv)
+
+	log := log.Ctx(ctx).With(
+		zap.Int64("msgID", msgID),
+		zap.Int64("collectionID", req.GetReq().GetCollectionID()),
+		zap.String("channel", channel),
+		zap.String("scope", req.GetScope().String()),
+	)
+
+	resp := &internalpb.RetrieveResults{}
+	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.TotalLabel, metrics.FromLeader).Inc()
+	defer func() {
+		if resp.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
+			metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.FailLabel, metrics.FromLeader).Inc()
+		}
+	}()
+
+	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
+		resp.Status = merr.Status(err)
+		concurrentSrv.Send(resp)
+		return nil
+	}
+	defer node.lifetime.Done()
+
+	log.Debug("start do query with channel",
+		zap.Bool("fromShardLeader", req.GetFromShardLeader()),
+		zap.Int64s("segmentIDs", req.GetSegmentIDs()),
+	)
+
+	tr := timerecord.NewTimeRecorder("queryChannel")
+
+	err := node.queryStreamSegments(ctx, req, concurrentSrv)
+	if err != nil {
+		resp.Status = merr.Status(err)
+		concurrentSrv.Send(resp)
+		return nil
+	}
+
+	tr.CtxElapse(ctx, fmt.Sprintf("do query done, traceID = %s, fromSharedLeader = %t, vChannel = %s, segmentIDs = %v",
+		traceID,
+		req.GetFromShardLeader(),
+		channel,
+		req.GetSegmentIDs(),
+	))
+
+	// TODO QueryNodeSQLatencyInQueue QueryNodeReduceLatency
+	latency := tr.ElapseSpan()
+	metrics.QueryNodeSQReqLatency.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.FromLeader).Observe(float64(latency.Milliseconds()))
+	metrics.QueryNodeSQCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.QueryLabel, metrics.SuccessLabel, metrics.FromLeader).Inc()
+	return nil
+}
+
 // SyncReplicaSegments syncs replica node & segments states
 func (node *QueryNode) SyncReplicaSegments(ctx context.Context, req *querypb.SyncReplicaSegmentsRequest) (*commonpb.Status, error) {
-	return util.SuccessStatus(), nil
+	return merr.Success(), nil
 }
 
 // ShowConfigurations returns the configurations of queryNode matching req.Pattern
 func (node *QueryNode) ShowConfigurations(ctx context.Context, req *internalpb.ShowConfigurationsRequest) (*internalpb.ShowConfigurationsResponse, error) {
-	if !node.lifetime.Add(commonpbutil.IsHealthy) {
-		err := merr.WrapErrServiceNotReady(fmt.Sprintf("node id: %d is unhealthy", paramtable.GetNodeID()))
+	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
 		log.Warn("QueryNode.ShowConfigurations failed",
 			zap.Int64("nodeId", paramtable.GetNodeID()),
 			zap.String("req", req.Pattern),
@@ -1061,15 +1130,14 @@ func (node *QueryNode) ShowConfigurations(ctx context.Context, req *internalpb.S
 	}
 
 	return &internalpb.ShowConfigurationsResponse{
-		Status:        merr.Status(nil),
+		Status:        merr.Success(),
 		Configuations: configList,
 	}, nil
 }
 
 // GetMetrics return system infos of the query node, such as total memory, memory usage, cpu usage ...
 func (node *QueryNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
-	if !node.lifetime.Add(commonpbutil.IsHealthy) {
-		err := merr.WrapErrServiceNotReady(fmt.Sprintf("node id: %d is unhealthy", paramtable.GetNodeID()))
+	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
 		log.Warn("QueryNode.GetMetrics failed",
 			zap.Int64("nodeId", paramtable.GetNodeID()),
 			zap.String("req", req.Request),
@@ -1090,10 +1158,7 @@ func (node *QueryNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsR
 			zap.Error(err))
 
 		return &milvuspb.GetMetricsResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_UnexpectedError,
-				Reason:    err.Error(),
-			},
+			Status: merr.Status(err),
 		}, nil
 	}
 
@@ -1106,10 +1171,7 @@ func (node *QueryNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsR
 				zap.String("metricType", metricType),
 				zap.Error(err))
 			return &milvuspb.GetMetricsResponse{
-				Status: &commonpb.Status{
-					ErrorCode: commonpb.ErrorCode_UnexpectedError,
-					Reason:    err.Error(),
-				},
+				Status: merr.Status(err),
 			}, nil
 		}
 		log.RatedDebug(50, "QueryNode.GetMetrics",
@@ -1127,11 +1189,7 @@ func (node *QueryNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsR
 		zap.String("metricType", metricType))
 
 	return &milvuspb.GetMetricsResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_UnexpectedError,
-			Reason:    metricsinfo.MsgUnimplementedMetric,
-		},
-		Response: "",
+		Status: merr.Status(merr.WrapErrMetricNotFound(metricType)),
 	}, nil
 }
 
@@ -1140,9 +1198,8 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 		zap.Int64("msgID", req.GetBase().GetMsgID()),
 		zap.Int64("nodeID", paramtable.GetNodeID()),
 	)
-	if !node.lifetime.Add(commonpbutil.IsHealthy) {
-		err := merr.WrapErrServiceNotReady(fmt.Sprintf("node id: %d is unhealthy", paramtable.GetNodeID()))
-		log.Warn("QueryNode.GetMetrics failed",
+	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
+		log.Warn("QueryNode.GetDataDistribution failed",
 			zap.Error(err))
 
 		return &querypb.GetDataDistributionResponse{
@@ -1152,12 +1209,10 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 	defer node.lifetime.Done()
 
 	// check target matches
-	if req.GetBase().GetTargetID() != paramtable.GetNodeID() {
-		status := &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_NodeIDNotMatch,
-			Reason:    common.WrapNodeIDNotMatchMsg(req.GetBase().GetTargetID(), paramtable.GetNodeID()),
-		}
-		return &querypb.GetDataDistributionResponse{Status: status}, nil
+	if err := merr.CheckTargetID(req.GetBase()); err != nil {
+		return &querypb.GetDataDistributionResponse{
+			Status: merr.Status(err),
+		}, nil
 	}
 
 	sealedSegments := node.manager.Segment.GetBy(segments.WithType(commonpb.SegmentState_Sealed))
@@ -1179,17 +1234,17 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 	channelVersionInfos := make([]*querypb.ChannelVersionInfo, 0)
 	leaderViews := make([]*querypb.LeaderView, 0)
 
-	node.delegators.Range(func(key string, value delegator.ShardDelegator) bool {
-		if !value.Serviceable() {
+	node.delegators.Range(func(key string, delegator delegator.ShardDelegator) bool {
+		if !delegator.Serviceable() {
 			return true
 		}
 		channelVersionInfos = append(channelVersionInfos, &querypb.ChannelVersionInfo{
 			Channel:    key,
-			Collection: value.Collection(),
-			Version:    value.Version(),
+			Collection: delegator.Collection(),
+			Version:    delegator.Version(),
 		})
 
-		sealed, growing := value.GetSegmentInfo(false)
+		sealed, growing := delegator.GetSegmentInfo(false)
 		sealedSegments := make(map[int64]*querypb.SegmentDist)
 		for _, item := range sealed {
 			for _, segment := range item.Segments {
@@ -1212,17 +1267,17 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 		}
 
 		leaderViews = append(leaderViews, &querypb.LeaderView{
-			Collection:      value.Collection(),
+			Collection:      delegator.Collection(),
 			Channel:         key,
 			SegmentDist:     sealedSegments,
 			GrowingSegments: growingSegments,
-			TargetVersion:   value.GetTargetVersion(),
+			TargetVersion:   delegator.GetTargetVersion(),
 		})
 		return true
 	})
 
 	return &querypb.GetDataDistributionResponse{
-		Status:      merr.Status(nil),
+		Status:      merr.Success(),
 		NodeID:      paramtable.GetNodeID(),
 		Segments:    segmentVersionInfos,
 		Channels:    channelVersionInfos,
@@ -1234,31 +1289,22 @@ func (node *QueryNode) SyncDistribution(ctx context.Context, req *querypb.SyncDi
 	log := log.Ctx(ctx).With(zap.Int64("collectionID", req.GetCollectionID()),
 		zap.String("channel", req.GetChannel()), zap.Int64("currentNodeID", paramtable.GetNodeID()))
 	// check node healthy
-	if !node.lifetime.Add(commonpbutil.IsHealthy) {
-		msg := fmt.Sprintf("query node %d is not ready", paramtable.GetNodeID())
-		err := merr.WrapErrServiceNotReady(msg)
+	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
 		return merr.Status(err), nil
 	}
 	defer node.lifetime.Done()
 
 	// check target matches
-	if req.GetBase().GetTargetID() != paramtable.GetNodeID() {
-		log.Warn("failed to do match target id when sync ", zap.Int64("expect", req.GetBase().GetTargetID()), zap.Int64("actual", node.session.ServerID))
-		status := &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_NodeIDNotMatch,
-			Reason:    common.WrapNodeIDNotMatchMsg(req.GetBase().GetTargetID(), paramtable.GetNodeID()),
-		}
-		return status, nil
+	if err := merr.CheckTargetID(req.GetBase()); err != nil {
+		return merr.Status(err), nil
 	}
 
 	// get shard delegator
 	shardDelegator, ok := node.delegators.Get(req.GetChannel())
 	if !ok {
+		err := merr.WrapErrChannelNotFound(req.GetChannel())
 		log.Warn("failed to find shard cluster when sync")
-		return &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_UnexpectedError,
-			Reason:    "shard not exist",
-		}, nil
+		return merr.Status(err), nil
 	}
 
 	// translate segment action
@@ -1266,17 +1312,20 @@ func (node *QueryNode) SyncDistribution(ctx context.Context, req *querypb.SyncDi
 	addSegments := make(map[int64][]*querypb.SegmentLoadInfo)
 	for _, action := range req.GetActions() {
 		log := log.With(zap.String("Action",
-			action.GetType().String()),
-			zap.Int64("segmentID", action.SegmentID),
-			zap.Int64("TargetVersion", action.GetTargetVersion()),
-		)
-		log.Info("sync action")
+			action.GetType().String()))
 		switch action.GetType() {
 		case querypb.SyncType_Remove:
+			log.Info("sync action", zap.Int64("segmentID", action.SegmentID))
 			removeActions = append(removeActions, action)
 		case querypb.SyncType_Set:
+			log.Info("sync action", zap.Int64("segmentID", action.SegmentID))
+			if action.GetInfo() == nil {
+				log.Warn("sync request from legacy querycoord without load info, skip")
+				continue
+			}
 			addSegments[action.GetNodeID()] = append(addSegments[action.GetNodeID()], action.GetInfo())
 		case querypb.SyncType_UpdateVersion:
+			log.Info("sync action", zap.Int64("TargetVersion", action.GetTargetVersion()))
 			pipeline := node.pipelineManager.Get(req.GetChannel())
 			if pipeline != nil {
 				droppedInfos := lo.Map(action.GetDroppedInTarget(), func(id int64, _ int) *datapb.SegmentInfo {
@@ -1292,10 +1341,7 @@ func (node *QueryNode) SyncDistribution(ctx context.Context, req *querypb.SyncDi
 			shardDelegator.SyncTargetVersion(action.GetTargetVersion(), action.GetGrowingInTarget(),
 				action.GetSealedInTarget(), action.GetDroppedInTarget())
 		default:
-			return &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_UnexpectedError,
-				Reason:    "unexpected action type",
-			}, nil
+			return merr.Status(merr.WrapErrServiceInternal("unknown action type", action.GetType().String())), nil
 		}
 	}
 
@@ -1316,7 +1362,7 @@ func (node *QueryNode) SyncDistribution(ctx context.Context, req *querypb.SyncDi
 			LoadScope:    querypb.LoadScope_Delta,
 		})
 		if err != nil {
-			return util.WrapStatus(commonpb.ErrorCode_UnexpectedError, "failed to sync(load) segment", err), nil
+			return merr.Status(err), nil
 		}
 	}
 
@@ -1329,7 +1375,7 @@ func (node *QueryNode) SyncDistribution(ctx context.Context, req *querypb.SyncDi
 		}, true)
 	}
 
-	return merr.Status(nil), nil
+	return merr.Success(), nil
 }
 
 // Delete is used to forward delete message between delegator and workers.
@@ -1341,20 +1387,14 @@ func (node *QueryNode) Delete(ctx context.Context, req *querypb.DeleteRequest) (
 	)
 
 	// check node healthy
-	if !node.lifetime.Add(commonpbutil.IsHealthy) {
-		msg := fmt.Sprintf("query node %d is not ready", paramtable.GetNodeID())
-		err := merr.WrapErrServiceNotReady(msg)
+	if err := node.lifetime.Add(merr.IsHealthy); err != nil {
 		return merr.Status(err), nil
 	}
 	defer node.lifetime.Done()
 
 	// check target matches
-	if req.GetBase().GetTargetID() != paramtable.GetNodeID() {
-		status := &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_NodeIDNotMatch,
-			Reason:    common.WrapNodeIDNotMatchMsg(req.GetBase().GetTargetID(), paramtable.GetNodeID()),
-		}
-		return status, nil
+	if err := merr.CheckTargetID(req.GetBase()); err != nil {
+		return merr.Status(err), nil
 	}
 
 	log.Info("QueryNode received worker delete request")
@@ -1367,11 +1407,7 @@ func (node *QueryNode) Delete(ctx context.Context, req *querypb.DeleteRequest) (
 	if len(segments) == 0 {
 		err := merr.WrapErrSegmentNotFound(req.GetSegmentId())
 		log.Warn("segment not found for delete")
-		return &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_SegmentNotFound,
-			Reason:    fmt.Sprintf("segment %d not found", req.GetSegmentId()),
-			Code:      merr.Code(err),
-		}, nil
+		return merr.Status(err), nil
 	}
 
 	pks := storage.ParseIDs2PrimaryKeys(req.GetPrimaryKeys())
@@ -1379,12 +1415,9 @@ func (node *QueryNode) Delete(ctx context.Context, req *querypb.DeleteRequest) (
 		err := segment.Delete(pks, req.GetTimestamps())
 		if err != nil {
 			log.Warn("segment delete failed", zap.Error(err))
-			return &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_UnexpectedError,
-				Reason:    fmt.Sprintf("delete on segment %d failed, %s", req.GetSegmentId(), err.Error()),
-			}, nil
+			return merr.Status(err), nil
 		}
 	}
 
-	return merr.Status(nil), nil
+	return merr.Success(), nil
 }

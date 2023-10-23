@@ -355,13 +355,44 @@ func (sd *shardDelegator) LoadSegments(ctx context.Context, req *querypb.LoadSeg
 	}
 
 	req.Base.TargetID = req.GetDstNodeID()
-	log.Info("worker loads segments...")
-	err = worker.LoadSegments(ctx, req)
+	log.Debug("worker loads segments...")
+
+	sLoad := func(ctx context.Context, req *querypb.LoadSegmentsRequest) error {
+		segmentID := req.GetInfos()[0].GetSegmentID()
+		nodeID := req.GetDstNodeID()
+		_, err, _ := sd.sf.Do(fmt.Sprintf("%d-%d", nodeID, segmentID), func() (struct{}, error) {
+			err := worker.LoadSegments(ctx, req)
+			return struct{}{}, err
+		})
+		return err
+	}
+
+	// separate infos into different load task
+	if len(req.GetInfos()) > 1 {
+		var reqs []*querypb.LoadSegmentsRequest
+		for _, info := range req.GetInfos() {
+			newReq := typeutil.Clone(req)
+			newReq.Infos = []*querypb.SegmentLoadInfo{info}
+			reqs = append(reqs, newReq)
+		}
+
+		group, ctx := errgroup.WithContext(ctx)
+		for _, req := range reqs {
+			req := req
+			group.Go(func() error {
+				return sLoad(ctx, req)
+			})
+		}
+		err = group.Wait()
+	} else {
+		err = sLoad(ctx, req)
+	}
+
 	if err != nil {
 		log.Warn("worker failed to load segments", zap.Error(err))
 		return err
 	}
-	log.Info("work loads segments done")
+	log.Debug("work loads segments done")
 
 	// load index need no stream delete and distribution change
 	if req.GetLoadScope() == querypb.LoadScope_Index {
@@ -376,7 +407,7 @@ func (sd *shardDelegator) LoadSegments(ctx context.Context, req *querypb.LoadSeg
 			Version:     req.GetVersion(),
 		}
 	})
-	log.Info("load delete...")
+	log.Debug("load delete...")
 	err = sd.loadStreamDelete(ctx, candidates, infos, req.GetDeltaPositions(), targetNodeID, worker, entries)
 	if err != nil {
 		log.Warn("load stream delete failed", zap.Error(err))
@@ -404,11 +435,16 @@ func (sd *shardDelegator) loadStreamDelete(ctx context.Context,
 	defer sd.deleteMut.Unlock()
 	// apply buffered delete for new segments
 	// no goroutines here since qnv2 has no load merging logic
-	for i, info := range infos {
+	for _, info := range infos {
 		candidate := idCandidates[info.GetSegmentID()]
 		position := info.GetDeltaPosition()
 		if position == nil { // for compatibility of rolling upgrade from 2.2.x to 2.3
-			position = deltaPositions[i]
+			// During rolling upgrade, Querynode(2.3) may receive merged LoadSegmentRequest
+			// from QueryCoord(2.2); In version 2.2.x, only segments with the same dmlChannel
+			// can be merged, and deltaPositions will be merged into a single deltaPosition,
+			// so we should use `deltaPositions[0]` as the seek position for all the segments
+			// within the same LoadSegmentRequest.
+			position = deltaPositions[0]
 		}
 
 		deleteData := &storage.DeleteData{}
@@ -474,7 +510,6 @@ func (sd *shardDelegator) loadStreamDelete(ctx context.Context,
 }
 
 func (sd *shardDelegator) readDeleteFromMsgstream(ctx context.Context, position *msgpb.MsgPosition, safeTs uint64, candidate *pkoracle.BloomFilterSet) (*storage.DeleteData, error) {
-
 	log := sd.getLogger(ctx).With(
 		zap.String("channel", position.ChannelName),
 		zap.Int64("segmentID", candidate.ID()),
@@ -493,9 +528,12 @@ func (sd *shardDelegator) readDeleteFromMsgstream(ctx context.Context, position 
 	// Random the subname in case we trying to load same delta at the same time
 	subName := fmt.Sprintf("querynode-delta-loader-%d-%d-%d", paramtable.GetNodeID(), sd.collectionID, rand.Int())
 	log.Info("from dml check point load delete", zap.Any("position", position), zap.String("vChannel", vchannelName), zap.String("subName", subName), zap.Time("positionTs", ts))
-	stream.AsConsumer([]string{pChannelName}, subName, mqwrapper.SubscriptionPositionUnknown)
+	err = stream.AsConsumer(context.TODO(), []string{pChannelName}, subName, mqwrapper.SubscriptionPositionUnknown)
+	if err != nil {
+		return nil, err
+	}
 
-	err = stream.Seek([]*msgpb.MsgPosition{position})
+	err = stream.Seek(context.TODO(), []*msgpb.MsgPosition{position})
 	if err != nil {
 		return nil, err
 	}
@@ -541,7 +579,6 @@ func (sd *shardDelegator) readDeleteFromMsgstream(ctx context.Context, position 
 			// reach safe ts
 			if safeTs <= msgPack.EndPositions[0].GetTimestamp() {
 				hasMore = false
-				break
 			}
 		}
 	}
@@ -624,7 +661,8 @@ func (sd *shardDelegator) ReleaseSegments(ctx context.Context, req *querypb.Rele
 }
 
 func (sd *shardDelegator) SyncTargetVersion(newVersion int64, growingInTarget []int64,
-	sealedInTarget []int64, droppedInTarget []int64) {
+	sealedInTarget []int64, droppedInTarget []int64,
+) {
 	growings := sd.segmentManager.GetBy(
 		segments.WithType(segments.SegmentTypeGrowing),
 		segments.WithChannel(sd.vchannelName),

@@ -114,6 +114,14 @@ var simpleBinVecField = vecFieldParam{
 	fieldName:  "binVectorField",
 }
 
+var simpleFloat16VecField = vecFieldParam{
+	id:         112,
+	dim:        defaultDim,
+	metricType: defaultMetricType,
+	vecType:    schemapb.DataType_Float16Vector,
+	fieldName:  "float16VectorField",
+}
+
 var simpleBoolField = constFieldParam{
 	id:        102,
 	dataType:  schemapb.DataType_Bool,
@@ -244,6 +252,7 @@ func GenTestCollectionSchema(collectionName string, pkType schemapb.DataType) *s
 	fieldDouble := genConstantFieldSchema(simpleDoubleField)
 	// fieldArray := genConstantFieldSchema(simpleArrayField)
 	fieldJSON := genConstantFieldSchema(simpleJSONField)
+	fieldArray := genConstantFieldSchema(simpleArrayField)
 	floatVecFieldSchema := genVectorFieldSchema(simpleFloatVecField)
 	binVecFieldSchema := genVectorFieldSchema(simpleBinVecField)
 	var pkFieldSchema *schemapb.FieldSchema
@@ -265,11 +274,11 @@ func GenTestCollectionSchema(collectionName string, pkType schemapb.DataType) *s
 			fieldInt32,
 			fieldFloat,
 			fieldDouble,
-			// fieldArray,
 			fieldJSON,
 			floatVecFieldSchema,
 			binVecFieldSchema,
 			pkFieldSchema,
+			fieldArray,
 		},
 	}
 
@@ -386,6 +395,7 @@ func generateStringArray(numRows int) []string {
 	}
 	return ret
 }
+
 func generateArrayArray(numRows int) []*schemapb.ScalarField {
 	ret := make([]*schemapb.ScalarField, 0, numRows)
 	for i := 0; i < numRows; i++ {
@@ -399,6 +409,7 @@ func generateArrayArray(numRows int) []*schemapb.ScalarField {
 	}
 	return ret
 }
+
 func generateJSONArray(numRows int) [][]byte {
 	ret := make([][]byte, 0, numRows)
 	for i := 0; i < numRows; i++ {
@@ -426,6 +437,16 @@ func generateFloatVectors(numRows, dim int) []float32 {
 
 func generateBinaryVectors(numRows, dim int) []byte {
 	total := (numRows * dim) / 8
+	ret := make([]byte, total)
+	_, err := rand.Read(ret)
+	if err != nil {
+		panic(err)
+	}
+	return ret
+}
+
+func generateFloat16Vectors(numRows, dim int) []byte {
+	total := numRows * dim * 2
 	ret := make([]byte, total)
 	_, err := rand.Read(ret)
 	if err != nil {
@@ -550,8 +571,10 @@ func GenTestScalarFieldData(dType schemapb.DataType, fieldName string, fieldID i
 				Data: &schemapb.ScalarField_JsonData{
 					JsonData: &schemapb.JSONArray{
 						Data: generateJSONArray(numRows),
-					}},
-			}}
+					},
+				},
+			},
+		}
 
 	default:
 		panic("data type not supported")
@@ -586,6 +609,16 @@ func GenTestVectorFiledData(dType schemapb.DataType, fieldName string, fieldID i
 					FloatVector: &schemapb.FloatArray{
 						Data: generateFloatVectors(numRows, dim),
 					},
+				},
+			},
+		}
+	case schemapb.DataType_Float16Vector:
+		ret.FieldId = fieldID
+		ret.Field = &schemapb.FieldData_Vectors{
+			Vectors: &schemapb.VectorField{
+				Dim: int64(dim),
+				Data: &schemapb.VectorField_Float16Vector{
+					Float16Vector: generateFloat16Vectors(numRows, dim),
 				},
 			},
 		}
@@ -639,7 +672,7 @@ func SaveBinLog(ctx context.Context,
 		}
 
 		k := JoinIDPath(collectionID, partitionID, segmentID, fieldID)
-		//key := path.Join(defaultLocalStorage, "insert-log", k)
+		// key := path.Join(defaultLocalStorage, "insert-log", k)
 		key := path.Join(chunkManager.RootPath(), "insert-log", k)
 		kvs[key] = blob.Value
 		fieldBinlog = append(fieldBinlog, &datapb.FieldBinlog{
@@ -662,7 +695,7 @@ func SaveBinLog(ctx context.Context,
 		}
 
 		k := JoinIDPath(collectionID, partitionID, segmentID, fieldID)
-		//key := path.Join(defaultLocalStorage, "stats-log", k)
+		// key := path.Join(defaultLocalStorage, "stats-log", k)
 		key := path.Join(chunkManager.RootPath(), "stats-log", k)
 		kvs[key] = blob.Value[:]
 		statsBinlog = append(statsBinlog, &datapb.FieldBinlog{
@@ -680,7 +713,8 @@ func genStorageBlob(collectionID int64,
 	partitionID int64,
 	segmentID int64,
 	msgLength int,
-	schema *schemapb.CollectionSchema) ([]*storage.Blob, []*storage.Blob, error) {
+	schema *schemapb.CollectionSchema,
+) ([]*storage.Blob, []*storage.Blob, error) {
 	tmpSchema := &schemapb.CollectionSchema{
 		Name:   schema.Name,
 		AutoID: schema.AutoID,
@@ -778,6 +812,12 @@ func genInsertData(msgLength int, schema *schemapb.CollectionSchema) (*storage.I
 				Data: generateFloatVectors(msgLength, dim),
 				Dim:  dim,
 			}
+		case schemapb.DataType_Float16Vector:
+			dim := simpleFloat16VecField.dim
+			insertData.Data[f.FieldID] = &storage.Float16VectorFieldData{
+				Data: generateFloat16Vectors(msgLength, dim),
+				Dim:  dim,
+			}
 		case schemapb.DataType_BinaryVector:
 			dim := simpleBinVecField.dim
 			insertData.Data[f.FieldID] = &storage.BinaryVectorFieldData{
@@ -808,7 +848,6 @@ func SaveDeltaLog(collectionID int64,
 	segmentID int64,
 	cm storage.ChunkManager,
 ) ([]*datapb.FieldBinlog, error) {
-
 	binlogWriter := storage.NewDeleteBinlogWriter(schemapb.DataType_String, collectionID, partitionID, segmentID)
 	eventWriter, _ := binlogWriter.NextDeleteEventWriter()
 	dData := &storage.DeleteData{
@@ -840,12 +879,16 @@ func SaveDeltaLog(collectionID int64,
 	fieldBinlog := make([]*datapb.FieldBinlog, 0)
 	log.Debug("[query node unittest] save delta log", zap.Int64("fieldID", pkFieldID))
 	key := JoinIDPath(collectionID, partitionID, segmentID, pkFieldID)
-	//keyPath := path.Join(defaultLocalStorage, "delta-log", key)
+	// keyPath := path.Join(defaultLocalStorage, "delta-log", key)
 	keyPath := path.Join(cm.RootPath(), "delta-log", key)
 	kvs[keyPath] = blob.Value[:]
 	fieldBinlog = append(fieldBinlog, &datapb.FieldBinlog{
 		FieldID: pkFieldID,
-		Binlogs: []*datapb.Binlog{{LogPath: keyPath}},
+		Binlogs: []*datapb.Binlog{{
+			LogPath:       keyPath,
+			TimestampFrom: 100,
+			TimestampTo:   200,
+		}},
 	})
 	log.Debug("[query node unittest] save delta log file to MinIO/S3")
 
@@ -892,7 +935,7 @@ func GenAndSaveIndex(collectionID, partitionID, segmentID, fieldID int64, msgLen
 
 	indexPaths := make([]string, 0)
 	for _, index := range serializedIndexBlobs {
-		//indexPath := filepath.Join(defaultLocalStorage, strconv.Itoa(int(segmentID)), index.Key)
+		// indexPath := filepath.Join(defaultLocalStorage, strconv.Itoa(int(segmentID)), index.Key)
 		indexPath := filepath.Join(cm.RootPath(), "index_files",
 			strconv.Itoa(int(segmentID)), index.Key)
 		indexPaths = append(indexPaths, indexPath)
@@ -901,13 +944,15 @@ func GenAndSaveIndex(collectionID, partitionID, segmentID, fieldID int64, msgLen
 			return nil, err
 		}
 	}
+	_, cCurrentIndexVersion := getIndexEngineVersion()
 
 	return &querypb.FieldIndexInfo{
-		FieldID:        fieldID,
-		EnableIndex:    true,
-		IndexName:      "querynode-test",
-		IndexParams:    funcutil.Map2KeyValuePair(indexParams),
-		IndexFilePaths: indexPaths,
+		FieldID:             fieldID,
+		EnableIndex:         true,
+		IndexName:           "querynode-test",
+		IndexParams:         funcutil.Map2KeyValuePair(indexParams),
+		IndexFilePaths:      indexPaths,
+		CurrentIndexVersion: cCurrentIndexVersion,
 	}, nil
 }
 
@@ -932,13 +977,13 @@ func genIndexParams(indexType, metricType string) (map[string]string, map[string
 	} else if indexType == IndexHNSW {
 		indexParams["M"] = strconv.Itoa(16)
 		indexParams["efConstruction"] = strconv.Itoa(efConstruction)
-		//indexParams["ef"] = strconv.Itoa(ef)
+		// indexParams["ef"] = strconv.Itoa(ef)
 	} else if indexType == IndexFaissBinIVFFlat { // binary vector
 		indexParams["nlist"] = strconv.Itoa(nlist)
 		indexParams["m"] = strconv.Itoa(m)
 		indexParams["nbits"] = strconv.Itoa(nbits)
 	} else if indexType == IndexFaissBinIDMap {
-		//indexParams[common.DimKey] = strconv.Itoa(defaultDim)
+		// indexParams[common.DimKey] = strconv.Itoa(defaultDim)
 	} else {
 		panic("")
 	}
@@ -1001,7 +1046,7 @@ func genPlaceHolderGroup(nq int64) ([]byte, error) {
 		Values: make([][]byte, 0),
 	}
 	for i := int64(0); i < nq; i++ {
-		var vec = make([]float32, defaultDim)
+		vec := make([]float32, defaultDim)
 		for j := 0; j < defaultDim; j++ {
 			vec[j] = rand.Float32()
 		}
@@ -1042,7 +1087,7 @@ func genBruteForceDSL(schema *schemapb.CollectionSchema, topK int64, roundDecima
 	roundDecimalStr := strconv.FormatInt(roundDecimal, 10)
 	var fieldID int64
 	for _, f := range schema.Fields {
-		if f.DataType == schemapb.DataType_FloatVector {
+		if f.DataType == schemapb.DataType_FloatVector || f.DataType == schemapb.DataType_Float16Vector {
 			vecFieldName = f.Name
 			fieldID = f.FieldID
 			for _, p := range f.IndexParams {
@@ -1152,7 +1197,6 @@ func checkSearchResult(nq int64, plan *SearchPlan, searchResult *SearchResult) e
 }
 
 func genSearchPlanAndRequests(collection *Collection, segments []int64, indexType string, nq int64) (*SearchRequest, error) {
-
 	iReq, _ := genSearchRequest(nq, indexType, collection)
 	queryReq := &querypb.SearchRequest{
 		Req:             iReq,
@@ -1194,6 +1238,9 @@ func genInsertMsg(collection *Collection, partitionID, segment int64, numRows in
 			fieldsData = append(fieldsData, GenTestVectorFiledData(f.DataType, f.Name, f.FieldID, numRows, dim))
 		case schemapb.DataType_BinaryVector:
 			dim := simpleBinVecField.dim // if no dim specified, use simpleFloatVecField's dim
+			fieldsData = append(fieldsData, GenTestVectorFiledData(f.DataType, f.Name, f.FieldID, numRows, dim))
+		case schemapb.DataType_Float16Vector:
+			dim := simpleFloat16VecField.dim // if no dim specified, use simpleFloatVecField's dim
 			fieldsData = append(fieldsData, GenTestVectorFiledData(f.DataType, f.Name, f.FieldID, numRows, dim))
 		default:
 			err := errors.New("data type not supported")
@@ -1424,6 +1471,20 @@ func genFieldData(fieldName string, fieldID int64, fieldType schemapb.DataType, 
 						FloatVector: &schemapb.FloatArray{
 							Data: fieldValue.([]float32),
 						},
+					},
+				},
+			},
+			FieldId: fieldID,
+		}
+	case schemapb.DataType_Float16Vector:
+		fieldData = &schemapb.FieldData{
+			Type:      schemapb.DataType_Float16Vector,
+			FieldName: fieldName,
+			Field: &schemapb.FieldData_Vectors{
+				Vectors: &schemapb.VectorField{
+					Dim: dim,
+					Data: &schemapb.VectorField_Float16Vector{
+						Float16Vector: fieldValue.([]byte),
 					},
 				},
 			},

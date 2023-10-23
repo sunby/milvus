@@ -21,12 +21,12 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/errors"
-	"github.com/milvus-io/milvus/internal/util/mock"
-
-	"github.com/milvus-io/milvus/internal/proto/querypb"
-	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc"
+
+	"github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/util/mock"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
 
 func Test_NewClient(t *testing.T) {
@@ -41,12 +41,6 @@ func Test_NewClient(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, client)
 
-	err = client.Start()
-	assert.NoError(t, err)
-
-	err = client.Register()
-	assert.NoError(t, err)
-
 	ctx, cancel := context.WithCancel(ctx)
 
 	checkFunc := func(retNotNil bool) {
@@ -60,13 +54,13 @@ func Test_NewClient(t *testing.T) {
 			}
 		}
 
-		r1, err := client.GetComponentStates(ctx)
+		r1, err := client.GetComponentStates(ctx, nil)
 		retCheck(retNotNil, r1, err)
 
-		r2, err := client.GetTimeTickChannel(ctx)
+		r2, err := client.GetTimeTickChannel(ctx, nil)
 		retCheck(retNotNil, r2, err)
 
-		r3, err := client.GetStatisticsChannel(ctx)
+		r3, err := client.GetStatisticsChannel(ctx, nil)
 		retCheck(retNotNil, r3, err)
 
 		r6, err := client.WatchDmChannels(ctx, nil)
@@ -113,6 +107,10 @@ func Test_NewClient(t *testing.T) {
 
 		r20, err := client.SearchSegments(ctx, nil)
 		retCheck(retNotNil, r20, err)
+
+		// stream rpc
+		client, err := client.QueryStream(ctx, nil)
+		retCheck(retNotNil, client, err)
 	}
 
 	client.grpcClient = &mock.GRPCClientBase[querypb.QueryNodeClient]{
@@ -157,6 +155,6 @@ func Test_NewClient(t *testing.T) {
 	cancel() // make context canceled
 	checkFunc(false)
 
-	err = client.Stop()
+	err = client.Close()
 	assert.NoError(t, err)
 }

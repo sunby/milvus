@@ -14,31 +14,12 @@ set(INDEX_FILES
         Utils.cpp
         VectorMemIndex.cpp
         IndexFactory.cpp
-        VectorMemNMIndex.cpp
+        VectorDiskIndex.cpp
         )
-
-if ( BUILD_DISK_ANN STREQUAL "ON" )
-    set(INDEX_FILES
-            ${INDEX_FILES}
-            VectorDiskIndex.cpp
-            )
-endif ()
 
 milvus_add_pkg_config("milvus_index")
 add_library(milvus_index SHARED ${INDEX_FILES})
 
-set(PLATFORM_LIBS )
-if ( LINUX OR APPLE )
-    set(PLATFORM_LIBS marisa)
-endif()
-if (MSYS)
-    set(PLATFORM_LIBS -Wl,--allow-multiple-definition)
-endif ()
-
-target_link_libraries(milvus_index
-        milvus_storage
-        ${PLATFORM_LIBS}
-        milvus-storage
-        )
+target_link_libraries(milvus_index milvus_storage milvus-storage)
 
 install(TARGETS milvus_index DESTINATION "${CMAKE_INSTALL_LIBDIR}")

@@ -30,8 +30,9 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/kv"
-	"github.com/milvus-io/milvus/pkg/common"
+	"github.com/milvus-io/milvus/internal/kv/predicates"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
 // implementation assertion
@@ -60,7 +61,7 @@ func NewEmbededEtcdKV(cfg *embed.Config, rootPath string) (*EmbedEtcdKV, error) 
 		etcd:     e,
 	}
 
-	//wait until embed etcd is ready
+	// wait until embed etcd is ready
 	select {
 	case <-e.Server.ReadyNotify():
 		log.Info("Embedded etcd is ready!")
@@ -77,7 +78,6 @@ func (kv *EmbedEtcdKV) Close() {
 		kv.client.Close()
 		kv.etcd.Close()
 	})
-
 }
 
 // GetPath returns the full path by given key
@@ -130,6 +130,7 @@ func (kv *EmbedEtcdKV) LoadWithPrefix(key string) ([]string, []string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+
 	keys := make([]string, 0, resp.Count)
 	values := make([]string, 0, resp.Count)
 	for _, kv := range resp.Kvs {
@@ -218,7 +219,7 @@ func (kv *EmbedEtcdKV) Load(key string) (string, error) {
 		return "", err
 	}
 	if resp.Count <= 0 {
-		return "", common.NewKeyNotExistError(key)
+		return "", merr.WrapErrIoKeyNotFound(key)
 	}
 
 	return string(resp.Kvs[0].Value), nil
@@ -234,7 +235,7 @@ func (kv *EmbedEtcdKV) LoadBytes(key string) ([]byte, error) {
 		return nil, err
 	}
 	if resp.Count <= 0 {
-		return nil, common.NewKeyNotExistError(key)
+		return nil, merr.WrapErrIoKeyNotFound(key)
 	}
 
 	return resp.Kvs[0].Value, nil
@@ -422,7 +423,12 @@ func (kv *EmbedEtcdKV) MultiRemove(keys []string) error {
 }
 
 // MultiSaveAndRemove saves the key-value pairs and removes the keys in a transaction.
-func (kv *EmbedEtcdKV) MultiSaveAndRemove(saves map[string]string, removals []string) error {
+func (kv *EmbedEtcdKV) MultiSaveAndRemove(saves map[string]string, removals []string, preds ...predicates.Predicate) error {
+	cmps, err := parsePredicates(kv.rootPath, preds...)
+	if err != nil {
+		return err
+	}
+
 	ops := make([]clientv3.Op, 0, len(saves)+len(removals))
 	for key, value := range saves {
 		ops = append(ops, clientv3.OpPut(path.Join(kv.rootPath, key), value))
@@ -435,8 +441,15 @@ func (kv *EmbedEtcdKV) MultiSaveAndRemove(saves map[string]string, removals []st
 	ctx, cancel := context.WithTimeout(context.TODO(), RequestTimeout)
 	defer cancel()
 
-	_, err := kv.client.Txn(ctx).If().Then(ops...).Commit()
-	return err
+	resp, err := kv.client.Txn(ctx).If(cmps...).Then(ops...).Commit()
+	if err != nil {
+		return err
+	}
+
+	if !resp.Succeeded {
+		return merr.WrapErrIoFailedReason("failed to execute transaction")
+	}
+	return nil
 }
 
 // MultiSaveBytesAndRemove saves the key-value pairs and removes the keys in a transaction.
@@ -475,21 +488,13 @@ func (kv *EmbedEtcdKV) WatchWithRevision(key string, revision int64) clientv3.Wa
 	return rch
 }
 
-func (kv *EmbedEtcdKV) MultiRemoveWithPrefix(keys []string) error {
-	ops := make([]clientv3.Op, 0, len(keys))
-	for _, k := range keys {
-		op := clientv3.OpDelete(path.Join(kv.rootPath, k), clientv3.WithPrefix())
-		ops = append(ops, op)
-	}
-	ctx, cancel := context.WithTimeout(context.TODO(), RequestTimeout)
-	defer cancel()
-
-	_, err := kv.client.Txn(ctx).If().Then(ops...).Commit()
-	return err
-}
-
 // MultiSaveAndRemoveWithPrefix saves kv in @saves and removes the keys with given prefix in @removals.
-func (kv *EmbedEtcdKV) MultiSaveAndRemoveWithPrefix(saves map[string]string, removals []string) error {
+func (kv *EmbedEtcdKV) MultiSaveAndRemoveWithPrefix(saves map[string]string, removals []string, preds ...predicates.Predicate) error {
+	cmps, err := parsePredicates(kv.rootPath, preds...)
+	if err != nil {
+		return err
+	}
+
 	ops := make([]clientv3.Op, 0, len(saves)+len(removals))
 	for key, value := range saves {
 		ops = append(ops, clientv3.OpPut(path.Join(kv.rootPath, key), value))
@@ -502,8 +507,15 @@ func (kv *EmbedEtcdKV) MultiSaveAndRemoveWithPrefix(saves map[string]string, rem
 	ctx, cancel := context.WithTimeout(context.TODO(), RequestTimeout)
 	defer cancel()
 
-	_, err := kv.client.Txn(ctx).If().Then(ops...).Commit()
-	return err
+	resp, err := kv.client.Txn(ctx).If(cmps...).Then(ops...).Commit()
+	if err != nil {
+		return err
+	}
+
+	if !resp.Succeeded {
+		return merr.WrapErrIoFailedReason("failed to execute transaction")
+	}
+	return nil
 }
 
 // MultiSaveBytesAndRemoveWithPrefix saves kv in @saves and removes the keys with given prefix in @removals.

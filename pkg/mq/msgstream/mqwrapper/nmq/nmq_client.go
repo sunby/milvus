@@ -17,7 +17,9 @@
 package nmq
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"strconv"
 	"time"
 
@@ -38,11 +40,33 @@ type nmqClient struct {
 	conn *nats.Conn
 }
 
+type nmqDialer struct {
+	ctx func() context.Context
+}
+
+func (d *nmqDialer) Dial(network, address string) (net.Conn, error) {
+	ctx := d.ctx()
+
+	dial := &net.Dialer{}
+
+	// keep default 2s timeout
+	if _, ok := ctx.Deadline(); !ok {
+		dial.Timeout = 2 * time.Second
+	}
+
+	return dial.DialContext(ctx, network, address)
+}
+
 // NewClientWithDefaultOptions returns a new NMQ client with default options.
 // It retrieves the NMQ client URL from the server configuration.
-func NewClientWithDefaultOptions() (mqwrapper.Client, error) {
+func NewClientWithDefaultOptions(ctx context.Context) (mqwrapper.Client, error) {
 	url := Nmq.ClientURL()
-	return NewClient(url)
+
+	opt := nats.SetCustomDialer(&nmqDialer{
+		ctx: func() context.Context { return ctx },
+	})
+
+	return NewClient(url, opt)
 }
 
 // NewClient returns a new nmqClient object

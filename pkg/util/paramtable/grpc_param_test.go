@@ -61,6 +61,9 @@ func TestGrpcServerParams(t *testing.T) {
 
 	base.Save("grpc.serverMaxSendSize", "a")
 	assert.Equal(t, serverConfig.ServerMaxSendSize.GetAsInt(), DefaultServerMaxSendSize)
+
+	base.Save(serverConfig.GracefulStopTimeout.Key, "1")
+	assert.Equal(t, serverConfig.GracefulStopTimeout.GetAsInt(), 1)
 }
 
 func TestGrpcClientParams(t *testing.T) {
@@ -122,15 +125,14 @@ func TestGrpcClientParams(t *testing.T) {
 	assert.Equal(t, clientConfig.MaxAttempts.GetAsInt(), DefaultMaxAttempts)
 	base.Save("grpc.client.maxMaxAttempts", "a")
 	assert.Equal(t, clientConfig.MaxAttempts.GetAsInt(), DefaultMaxAttempts)
-	base.Save("grpc.client.maxMaxAttempts", "1")
-	assert.Equal(t, clientConfig.MaxAttempts.GetAsInt(), DefaultMaxAttempts)
-	base.Save("grpc.client.maxMaxAttempts", "10")
-	assert.Equal(t, clientConfig.MaxAttempts.GetAsInt(), DefaultMaxAttempts)
 	base.Save("grpc.client.maxMaxAttempts", "4")
 	assert.Equal(t, clientConfig.MaxAttempts.GetAsInt(), 4)
 
+	assert.Equal(t, clientConfig.InitialBackoff.GetAsFloat(), DefaultInitialBackoff)
 	base.Save("grpc.client.initialBackOff", "a")
+	assert.Equal(t, clientConfig.InitialBackoff.GetAsFloat(), DefaultInitialBackoff)
 	base.Save("grpc.client.initialBackOff", "2.0")
+	assert.Equal(t, clientConfig.InitialBackoff.GetAsFloat(), 2.0)
 
 	assert.Equal(t, clientConfig.MaxBackoff.GetAsFloat(), DefaultMaxBackoff)
 	base.Save("grpc.client.maxBackOff", "a")
@@ -138,17 +140,29 @@ func TestGrpcClientParams(t *testing.T) {
 	base.Save("grpc.client.maxBackOff", "50.0")
 	assert.Equal(t, clientConfig.MaxBackoff.GetAsFloat(), 50.0)
 
-	assert.Equal(t, clientConfig.BackoffMultiplier.GetAsFloat(), DefaultBackoffMultiplier)
-	base.Save("grpc.client.backoffMultiplier", "a")
-	assert.Equal(t, clientConfig.BackoffMultiplier.GetAsFloat(), DefaultBackoffMultiplier)
-	base.Save("grpc.client.backoffMultiplier", "3.0")
-	assert.Equal(t, clientConfig.BackoffMultiplier.GetAsFloat(), 3.0)
-
 	assert.Equal(t, clientConfig.CompressionEnabled.GetAsBool(), DefaultCompressionEnabled)
 	base.Save("grpc.client.CompressionEnabled", "a")
 	assert.Equal(t, clientConfig.CompressionEnabled.GetAsBool(), DefaultCompressionEnabled)
 	base.Save("grpc.client.CompressionEnabled", "true")
 	assert.Equal(t, clientConfig.CompressionEnabled.GetAsBool(), true)
+
+	assert.Equal(t, clientConfig.MinResetInterval.GetValue(), "1000")
+	base.Save("grpc.client.minResetInterval", "abc")
+	assert.Equal(t, clientConfig.MinResetInterval.GetValue(), "1000")
+	base.Save("grpc.client.minResetInterval", "5000")
+	assert.Equal(t, clientConfig.MinResetInterval.GetValue(), "5000")
+
+	assert.Equal(t, clientConfig.MinSessionCheckInterval.GetValue(), "200")
+	base.Save("grpc.client.minSessionCheckInterval", "abc")
+	assert.Equal(t, clientConfig.MinSessionCheckInterval.GetValue(), "200")
+	base.Save("grpc.client.minSessionCheckInterval", "500")
+	assert.Equal(t, clientConfig.MinSessionCheckInterval.GetValue(), "500")
+
+	assert.Equal(t, clientConfig.MaxCancelError.GetValue(), "32")
+	base.Save("grpc.client.maxCancelError", "abc")
+	assert.Equal(t, clientConfig.MaxCancelError.GetValue(), "32")
+	base.Save("grpc.client.maxCancelError", "64")
+	assert.Equal(t, clientConfig.MaxCancelError.GetValue(), "64")
 
 	base.Save("common.security.tlsMode", "1")
 	base.Save("tls.serverPemPath", "/pem")

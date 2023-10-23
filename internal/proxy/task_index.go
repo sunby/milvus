@@ -31,6 +31,7 @@ import (
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/indexparamcheck"
@@ -55,9 +56,11 @@ type createIndexTask struct {
 	Condition
 	req       *milvuspb.CreateIndexRequest
 	ctx       context.Context
-	rootCoord types.RootCoord
-	datacoord types.DataCoord
+	rootCoord types.RootCoordClient
+	datacoord types.DataCoordClient
 	result    *commonpb.Status
+
+	replicateMsgStream msgstream.MsgStream
 
 	isAutoIndex    bool
 	newIndexParams []*commonpb.KeyValuePair
@@ -101,7 +104,9 @@ func (cit *createIndexTask) SetTs(ts Timestamp) {
 }
 
 func (cit *createIndexTask) OnEnqueue() error {
-	cit.req.Base = commonpbutil.NewMsgBase()
+	if cit.req.Base == nil {
+		cit.req.Base = commonpbutil.NewMsgBase()
+	}
 	return nil
 }
 
@@ -140,18 +145,25 @@ func (cit *createIndexTask) parseIndexParams() error {
 	if !isVecIndex {
 		specifyIndexType, exist := indexParamsMap[common.IndexTypeKey]
 		if cit.fieldSchema.DataType == schemapb.DataType_VarChar {
-			if exist && specifyIndexType != DefaultStringIndexType {
+			if !exist {
+				indexParamsMap[common.IndexTypeKey] = DefaultStringIndexType
+			}
+
+			if exist && !validateStringIndexType(specifyIndexType) {
 				return merr.WrapErrParameterInvalid(DefaultStringIndexType, specifyIndexType, "index type not match")
 			}
-			indexParamsMap[common.IndexTypeKey] = DefaultStringIndexType
+		} else if typeutil.IsArithmetic(cit.fieldSchema.DataType) {
+			if !exist {
+				indexParamsMap[common.IndexTypeKey] = DefaultArithmeticIndexType
+			}
+
+			if exist && !validateArithmeticIndexType(specifyIndexType) {
+				return merr.WrapErrParameterInvalid(DefaultArithmeticIndexType, specifyIndexType, "index type not match")
+			}
 		} else {
-			if cit.fieldSchema.DataType == schemapb.DataType_JSON {
-				return merr.WrapErrParameterInvalid("not json field", "create index on json field", "create index on json field is not supported")
-			}
-			if exist && specifyIndexType != DefaultIndexType {
-				return merr.WrapErrParameterInvalid(DefaultStringIndexType, specifyIndexType, "index type not match")
-			}
-			indexParamsMap[common.IndexTypeKey] = DefaultIndexType
+			return merr.WrapErrParameterInvalid("supported field",
+				fmt.Sprintf("create index on %s field", cit.fieldSchema.DataType.String()),
+				"create index on json field is not supported")
 		}
 	}
 
@@ -250,7 +262,7 @@ func (cit *createIndexTask) parseIndexParams() error {
 	}
 
 	for k, v := range indexParamsMap {
-		//Currently, it is required that type_params and index_params do not have same keys.
+		// Currently, it is required that type_params and index_params do not have same keys.
 		if k == DimKey || k == common.MaxLengthKey {
 			delete(indexParamsMap, k)
 			continue
@@ -291,6 +303,7 @@ func fillDimension(field *schemapb.FieldSchema, indexParams map[string]string) e
 	vecDataTypes := []schemapb.DataType{
 		schemapb.DataType_FloatVector,
 		schemapb.DataType_BinaryVector,
+		schemapb.DataType_Float16Vector,
 	}
 	if !funcutil.SliceContain(vecDataTypes, field.GetDataType()) {
 		return nil
@@ -319,6 +332,7 @@ func checkTrain(field *schemapb.FieldSchema, indexParams map[string]string) erro
 	vecDataTypes := []schemapb.DataType{
 		schemapb.DataType_FloatVector,
 		schemapb.DataType_BinaryVector,
+		schemapb.DataType_Float16Vector,
 	}
 	if !funcutil.SliceContain(vecDataTypes, field.GetDataType()) {
 		return indexparamcheck.CheckIndexValid(field.GetDataType(), indexType, indexParams)
@@ -405,7 +419,8 @@ func (cit *createIndexTask) Execute(ctx context.Context) error {
 	if cit.result.ErrorCode != commonpb.ErrorCode_Success {
 		return errors.New(cit.result.Reason)
 	}
-	return err
+	SendReplicateMessagePack(ctx, cit.replicateMsgStream, cit.req)
+	return nil
 }
 
 func (cit *createIndexTask) PostExecute(ctx context.Context) error {
@@ -416,7 +431,7 @@ type describeIndexTask struct {
 	Condition
 	*milvuspb.DescribeIndexRequest
 	ctx       context.Context
-	datacoord types.DataCoord
+	datacoord types.DataCoordClient
 	result    *milvuspb.DescribeIndexResponse
 
 	collectionID UniqueID
@@ -488,13 +503,19 @@ func (dit *describeIndexTask) Execute(ctx context.Context) error {
 	}
 
 	resp, err := dit.datacoord.DescribeIndex(ctx, &indexpb.DescribeIndexRequest{CollectionID: dit.collectionID, IndexName: dit.IndexName, Timestamp: dit.Timestamp})
-	if err != nil || resp == nil {
+	if err != nil {
 		return err
 	}
+
 	dit.result = &milvuspb.DescribeIndexResponse{}
 	dit.result.Status = resp.GetStatus()
-	if dit.result.Status.ErrorCode != commonpb.ErrorCode_Success {
-		return errors.New(dit.result.Status.Reason)
+	err = merr.Error(resp.GetStatus())
+	if err != nil {
+		if errors.Is(err, merr.ErrIndexNotFound) && len(dit.GetIndexName()) == 0 {
+			err = merr.WrapErrIndexNotFoundForCollection(dit.GetCollectionName())
+			dit.result.Status = merr.Status(err)
+		}
+		return err
 	}
 	for _, indexInfo := range resp.IndexInfos {
 		field, err := schemaHelper.GetFieldFromID(indexInfo.FieldID)
@@ -533,7 +554,7 @@ type getIndexStatisticsTask struct {
 	Condition
 	*milvuspb.GetIndexStatisticsRequest
 	ctx       context.Context
-	datacoord types.DataCoord
+	datacoord types.DataCoordClient
 	result    *milvuspb.GetIndexStatisticsResponse
 
 	nodeID       int64
@@ -606,14 +627,15 @@ func (dit *getIndexStatisticsTask) Execute(ctx context.Context) error {
 	}
 
 	resp, err := dit.datacoord.GetIndexStatistics(ctx, &indexpb.GetIndexStatisticsRequest{
-		CollectionID: dit.collectionID, IndexName: dit.IndexName})
+		CollectionID: dit.collectionID, IndexName: dit.IndexName,
+	})
 	if err != nil || resp == nil {
 		return err
 	}
 	dit.result = &milvuspb.GetIndexStatisticsResponse{}
 	dit.result.Status = resp.GetStatus()
-	if dit.result.Status.ErrorCode != commonpb.ErrorCode_Success {
-		return errors.New(dit.result.Status.Reason)
+	if dit.result.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
+		return merr.Error(dit.result.GetStatus())
 	}
 	for _, indexInfo := range resp.IndexInfos {
 		field, err := schemaHelper.GetFieldFromID(indexInfo.FieldID)
@@ -648,11 +670,13 @@ type dropIndexTask struct {
 	Condition
 	ctx context.Context
 	*milvuspb.DropIndexRequest
-	dataCoord  types.DataCoord
-	queryCoord types.QueryCoord
+	dataCoord  types.DataCoordClient
+	queryCoord types.QueryCoordClient
 	result     *commonpb.Status
 
 	collectionID UniqueID
+
+	replicateMsgStream msgstream.MsgStream
 }
 
 func (dit *dropIndexTask) TraceCtx() context.Context {
@@ -688,7 +712,9 @@ func (dit *dropIndexTask) SetTs(ts Timestamp) {
 }
 
 func (dit *dropIndexTask) OnEnqueue() error {
-	dit.Base = commonpbutil.NewMsgBase()
+	if dit.Base == nil {
+		dit.Base = commonpbutil.NewMsgBase()
+	}
 	return nil
 }
 
@@ -727,6 +753,13 @@ func (dit *dropIndexTask) PreExecute(ctx context.Context) error {
 }
 
 func (dit *dropIndexTask) Execute(ctx context.Context) error {
+	ctxLog := log.Ctx(ctx)
+	ctxLog.Info("proxy drop index", zap.Int64("collID", dit.collectionID),
+		zap.String("field_name", dit.FieldName),
+		zap.String("index_name", dit.IndexName),
+		zap.String("db_name", dit.DbName),
+	)
+
 	var err error
 	dit.result, err = dit.dataCoord.DropIndex(ctx, &indexpb.DropIndexRequest{
 		CollectionID: dit.collectionID,
@@ -734,13 +767,18 @@ func (dit *dropIndexTask) Execute(ctx context.Context) error {
 		IndexName:    dit.IndexName,
 		DropAll:      false,
 	})
+	if err != nil {
+		ctxLog.Warn("drop index failed", zap.Error(err))
+		return err
+	}
 	if dit.result == nil {
 		return errors.New("drop index resp is nil")
 	}
 	if dit.result.ErrorCode != commonpb.ErrorCode_Success {
 		return errors.New(dit.result.Reason)
 	}
-	return err
+	SendReplicateMessagePack(ctx, dit.replicateMsgStream, dit.DropIndexRequest)
+	return nil
 }
 
 func (dit *dropIndexTask) PostExecute(ctx context.Context) error {
@@ -752,8 +790,8 @@ type getIndexBuildProgressTask struct {
 	Condition
 	*milvuspb.GetIndexBuildProgressRequest
 	ctx       context.Context
-	rootCoord types.RootCoord
-	dataCoord types.DataCoord
+	rootCoord types.RootCoordClient
+	dataCoord types.DataCoordClient
 	result    *milvuspb.GetIndexBuildProgressResponse
 
 	collectionID UniqueID
@@ -845,8 +883,8 @@ type getIndexStateTask struct {
 	Condition
 	*milvuspb.GetIndexStateRequest
 	ctx       context.Context
-	dataCoord types.DataCoord
-	rootCoord types.RootCoord
+	dataCoord types.DataCoordClient
+	rootCoord types.RootCoordClient
 	result    *milvuspb.GetIndexStateResponse
 
 	collectionID UniqueID
@@ -915,7 +953,7 @@ func (gist *getIndexStateTask) Execute(ctx context.Context) error {
 	}
 
 	gist.result = &milvuspb.GetIndexStateResponse{
-		Status:     merr.Status(nil),
+		Status:     merr.Success(),
 		State:      state.GetState(),
 		FailReason: state.GetFailReason(),
 	}

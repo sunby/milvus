@@ -18,15 +18,20 @@ package proxy
 
 import (
 	"context"
+	"encoding/base64"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"go.uber.org/zap"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
+	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus/internal/mocks"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/proxypb"
@@ -35,7 +40,12 @@ import (
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/mq/msgstream"
+	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
+	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/resource"
 )
 
 func TestProxy_InvalidateCollectionMetaCache_remove_stream(t *testing.T) {
@@ -44,14 +54,11 @@ func TestProxy_InvalidateCollectionMetaCache_remove_stream(t *testing.T) {
 	globalMetaCache = nil
 	defer func() { globalMetaCache = cache }()
 
-	chMgr := newMockChannelsMgr()
-	chMgr.removeDMLStreamFuncType = func(collectionID UniqueID) error {
-		log.Debug("TestProxy_InvalidateCollectionMetaCache_remove_stream, remove dml stream")
-		return nil
-	}
+	chMgr := NewMockChannelsMgr(t)
+	chMgr.EXPECT().removeDMLStream(mock.Anything).Return()
 
 	node := &Proxy{chMgr: chMgr}
-	node.stateCode.Store(commonpb.StateCode_Healthy)
+	node.UpdateStateCode(commonpb.StateCode_Healthy)
 
 	ctx := context.Background()
 	req := &proxypb.InvalidateCollMetaCacheRequest{
@@ -65,9 +72,9 @@ func TestProxy_InvalidateCollectionMetaCache_remove_stream(t *testing.T) {
 
 func TestProxy_CheckHealth(t *testing.T) {
 	t.Run("not healthy", func(t *testing.T) {
-		node := &Proxy{session: &sessionutil.Session{ServerID: 1}}
+		node := &Proxy{session: &sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 1}}}
 		node.multiRateLimiter = NewMultiRateLimiter()
-		node.stateCode.Store(commonpb.StateCode_Abnormal)
+		node.UpdateStateCode(commonpb.StateCode_Abnormal)
 		ctx := context.Background()
 		resp, err := node.CheckHealth(ctx, &milvuspb.CheckHealthRequest{})
 		assert.NoError(t, err)
@@ -76,16 +83,16 @@ func TestProxy_CheckHealth(t *testing.T) {
 	})
 
 	t.Run("proxy health check is ok", func(t *testing.T) {
-		qc := &mocks.MockQueryCoord{}
+		qc := &mocks.MockQueryCoordClient{}
 		qc.EXPECT().CheckHealth(mock.Anything, mock.Anything).Return(&milvuspb.CheckHealthResponse{IsHealthy: true}, nil)
 		node := &Proxy{
 			rootCoord:  NewRootCoordMock(),
 			queryCoord: qc,
 			dataCoord:  NewDataCoordMock(),
-			session:    &sessionutil.Session{ServerID: 1},
+			session:    &sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 1}},
 		}
 		node.multiRateLimiter = NewMultiRateLimiter()
-		node.stateCode.Store(commonpb.StateCode_Healthy)
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
 		ctx := context.Background()
 		resp, err := node.CheckHealth(ctx, &milvuspb.CheckHealthRequest{})
 		assert.NoError(t, err)
@@ -95,7 +102,9 @@ func TestProxy_CheckHealth(t *testing.T) {
 
 	t.Run("proxy health check is fail", func(t *testing.T) {
 		checkHealthFunc1 := func(ctx context.Context,
-			req *milvuspb.CheckHealthRequest) (*milvuspb.CheckHealthResponse, error) {
+			req *milvuspb.CheckHealthRequest,
+			opts ...grpc.CallOption,
+		) (*milvuspb.CheckHealthResponse, error) {
 			return &milvuspb.CheckHealthResponse{
 				IsHealthy: false,
 				Reasons:   []string{"unHealth"},
@@ -105,17 +114,18 @@ func TestProxy_CheckHealth(t *testing.T) {
 		dataCoordMock := NewDataCoordMock()
 		dataCoordMock.checkHealthFunc = checkHealthFunc1
 
-		qc := &mocks.MockQueryCoord{}
+		qc := &mocks.MockQueryCoordClient{}
 		qc.EXPECT().CheckHealth(mock.Anything, mock.Anything).Return(nil, errors.New("test"))
 		node := &Proxy{
-			session: &sessionutil.Session{ServerID: 1},
+			session: &sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 1}},
 			rootCoord: NewRootCoordMock(func(mock *RootCoordMock) {
 				mock.checkHealthFunc = checkHealthFunc1
 			}),
 			queryCoord: qc,
-			dataCoord:  dataCoordMock}
+			dataCoord:  dataCoordMock,
+		}
 		node.multiRateLimiter = NewMultiRateLimiter()
-		node.stateCode.Store(commonpb.StateCode_Healthy)
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
 		ctx := context.Background()
 		resp, err := node.CheckHealth(ctx, &milvuspb.CheckHealthRequest{})
 		assert.NoError(t, err)
@@ -124,7 +134,7 @@ func TestProxy_CheckHealth(t *testing.T) {
 	})
 
 	t.Run("check quota state", func(t *testing.T) {
-		qc := &mocks.MockQueryCoord{}
+		qc := &mocks.MockQueryCoordClient{}
 		qc.EXPECT().CheckHealth(mock.Anything, mock.Anything).Return(&milvuspb.CheckHealthResponse{IsHealthy: true}, nil)
 		node := &Proxy{
 			rootCoord:  NewRootCoordMock(),
@@ -132,7 +142,7 @@ func TestProxy_CheckHealth(t *testing.T) {
 			queryCoord: qc,
 		}
 		node.multiRateLimiter = NewMultiRateLimiter()
-		node.stateCode.Store(commonpb.StateCode_Healthy)
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
 		resp, err := node.CheckHealth(context.Background(), &milvuspb.CheckHealthRequest{})
 		assert.NoError(t, err)
 		assert.Equal(t, true, resp.IsHealthy)
@@ -158,32 +168,32 @@ func TestProxy_CheckHealth(t *testing.T) {
 
 func TestProxyRenameCollection(t *testing.T) {
 	t.Run("not healthy", func(t *testing.T) {
-		node := &Proxy{session: &sessionutil.Session{ServerID: 1}}
-		node.stateCode.Store(commonpb.StateCode_Abnormal)
+		node := &Proxy{session: &sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 1}}}
+		node.UpdateStateCode(commonpb.StateCode_Abnormal)
 		ctx := context.Background()
 		resp, err := node.RenameCollection(ctx, &milvuspb.RenameCollectionRequest{})
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.GetErrorCode())
+		assert.ErrorIs(t, merr.Error(resp), merr.ErrServiceNotReady)
 	})
 
 	t.Run("rename with illegal new collection name", func(t *testing.T) {
-		node := &Proxy{session: &sessionutil.Session{ServerID: 1}}
-		node.stateCode.Store(commonpb.StateCode_Healthy)
+		node := &Proxy{session: &sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 1}}}
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
 		ctx := context.Background()
 		resp, err := node.RenameCollection(ctx, &milvuspb.RenameCollectionRequest{NewName: "$#^%#&#$*!)#@!"})
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_IllegalCollectionName, resp.GetErrorCode())
+		assert.ErrorIs(t, merr.Error(resp), merr.ErrParameterInvalid)
 	})
 
 	t.Run("rename fail", func(t *testing.T) {
-		rc := mocks.NewRootCoord(t)
+		rc := mocks.NewMockRootCoordClient(t)
 		rc.On("RenameCollection", mock.Anything, mock.Anything).
 			Return(nil, errors.New("fail"))
 		node := &Proxy{
-			session:   &sessionutil.Session{ServerID: 1},
+			session:   &sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 1}},
 			rootCoord: rc,
 		}
-		node.stateCode.Store(commonpb.StateCode_Healthy)
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
 		ctx := context.Background()
 
 		resp, err := node.RenameCollection(ctx, &milvuspb.RenameCollectionRequest{NewName: "new"})
@@ -192,16 +202,14 @@ func TestProxyRenameCollection(t *testing.T) {
 	})
 
 	t.Run("rename ok", func(t *testing.T) {
-		rc := mocks.NewRootCoord(t)
+		rc := mocks.NewMockRootCoordClient(t)
 		rc.On("RenameCollection", mock.Anything, mock.Anything).
-			Return(&commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			}, nil)
+			Return(merr.Success(), nil)
 		node := &Proxy{
-			session:   &sessionutil.Session{ServerID: 1},
+			session:   &sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 1}},
 			rootCoord: rc,
 		}
-		node.stateCode.Store(commonpb.StateCode_Healthy)
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
 		ctx := context.Background()
 
 		resp, err := node.RenameCollection(ctx, &milvuspb.RenameCollectionRequest{NewName: "new"})
@@ -217,9 +225,9 @@ func TestProxy_ResourceGroup(t *testing.T) {
 	node, err := NewProxy(ctx, factory)
 	assert.NoError(t, err)
 	node.multiRateLimiter = NewMultiRateLimiter()
-	node.stateCode.Store(commonpb.StateCode_Healthy)
+	node.UpdateStateCode(commonpb.StateCode_Healthy)
 
-	qc := mocks.NewMockQueryCoord(t)
+	qc := mocks.NewMockQueryCoordClient(t)
 	node.SetQueryCoordClient(qc)
 
 	tsoAllocatorIns := newMockTsoAllocator()
@@ -279,7 +287,7 @@ func TestProxy_ResourceGroup(t *testing.T) {
 		qc.EXPECT().ListResourceGroups(mock.Anything, mock.Anything).Return(&milvuspb.ListResourceGroupsResponse{Status: successStatus}, nil)
 		resp, err := node.ListResourceGroups(ctx, &milvuspb.ListResourceGroupsRequest{})
 		assert.NoError(t, err)
-		assert.Equal(t, resp.Status.ErrorCode, commonpb.ErrorCode_Success)
+		assert.True(t, merr.Ok(resp.GetStatus()))
 	})
 
 	t.Run("describe resource group", func(t *testing.T) {
@@ -298,7 +306,7 @@ func TestProxy_ResourceGroup(t *testing.T) {
 			ResourceGroup: "rg",
 		})
 		assert.NoError(t, err)
-		assert.Equal(t, resp.Status.ErrorCode, commonpb.ErrorCode_Success)
+		assert.True(t, merr.Ok(resp.GetStatus()))
 	})
 }
 
@@ -309,9 +317,9 @@ func TestProxy_InvalidResourceGroupName(t *testing.T) {
 	node, err := NewProxy(ctx, factory)
 	assert.NoError(t, err)
 	node.multiRateLimiter = NewMultiRateLimiter()
-	node.stateCode.Store(commonpb.StateCode_Healthy)
+	node.UpdateStateCode(commonpb.StateCode_Healthy)
 
-	qc := mocks.NewMockQueryCoord(t)
+	qc := mocks.NewMockQueryCoordClient(t)
 	node.SetQueryCoordClient(qc)
 	qc.EXPECT().DropResourceGroup(mock.Anything, mock.Anything).Return(&commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}, nil)
 
@@ -330,7 +338,7 @@ func TestProxy_InvalidResourceGroupName(t *testing.T) {
 			ResourceGroup: "...",
 		})
 		assert.NoError(t, err)
-		assert.Equal(t, resp.ErrorCode, commonpb.ErrorCode_IllegalArgument)
+		assert.ErrorIs(t, merr.Error(resp), merr.ErrParameterInvalid)
 	})
 
 	t.Run("drop resource group", func(t *testing.T) {
@@ -348,7 +356,7 @@ func TestProxy_InvalidResourceGroupName(t *testing.T) {
 			NumNode:             1,
 		})
 		assert.NoError(t, err)
-		assert.Equal(t, resp.ErrorCode, commonpb.ErrorCode_IllegalArgument)
+		assert.ErrorIs(t, merr.Error(resp), merr.ErrParameterInvalid)
 	})
 
 	t.Run("transfer replica", func(t *testing.T) {
@@ -359,7 +367,7 @@ func TestProxy_InvalidResourceGroupName(t *testing.T) {
 			CollectionName:      "collection1",
 		})
 		assert.NoError(t, err)
-		assert.Equal(t, resp.ErrorCode, commonpb.ErrorCode_IllegalArgument)
+		assert.ErrorIs(t, merr.Error(resp), merr.ErrParameterInvalid)
 	})
 }
 
@@ -373,55 +381,61 @@ func TestProxy_FlushAll_DbCollection(t *testing.T) {
 		{"flushAll set db", &milvuspb.FlushAllRequest{DbName: "default"}, true},
 		{"flushAll set db, db not exist", &milvuspb.FlushAllRequest{DbName: "default2"}, false},
 	}
+
+	cacheBak := globalMetaCache
+	defer func() { globalMetaCache = cacheBak }()
+	// set expectations
+	cache := NewMockCache(t)
+	cache.On("GetCollectionID",
+		mock.Anything, // context.Context
+		mock.AnythingOfType("string"),
+		mock.AnythingOfType("string"),
+	).Return(UniqueID(0), nil).Maybe()
+
+	cache.On("RemoveDatabase",
+		mock.Anything, // context.Context
+		mock.AnythingOfType("string"),
+	).Maybe()
+
+	globalMetaCache = cache
+
 	for _, test := range tests {
-		factory := dependency.NewDefaultFactory(true)
-		ctx := context.Background()
-		paramtable.Init()
-
-		node, err := NewProxy(ctx, factory)
-		assert.NoError(t, err)
-		node.stateCode.Store(commonpb.StateCode_Healthy)
-		node.tsoAllocator = &timestampAllocator{
-			tso: newMockTimestampAllocatorInterface(),
-		}
-
-		Params.Save(Params.ProxyCfg.MaxTaskNum.Key, "1000")
-		node.sched, err = newTaskScheduler(ctx, node.tsoAllocator, node.factory)
-		assert.NoError(t, err)
-		err = node.sched.Start()
-		assert.NoError(t, err)
-		defer node.sched.Close()
-		node.dataCoord = mocks.NewMockDataCoord(t)
-		node.rootCoord = mocks.NewRootCoord(t)
-		successStatus := &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}
-
-		// set expectations
-		cache := NewMockCache(t)
-		cache.On("GetCollectionID",
-			mock.Anything, // context.Context
-			mock.AnythingOfType("string"),
-			mock.AnythingOfType("string"),
-		).Return(UniqueID(0), nil).Maybe()
-
-		cache.On("RemoveDatabase",
-			mock.Anything, // context.Context
-			mock.AnythingOfType("string"),
-		).Maybe()
-
-		globalMetaCache = cache
-
-		node.dataCoord.(*mocks.MockDataCoord).EXPECT().Flush(mock.Anything, mock.Anything).
-			Return(&datapb.FlushResponse{Status: successStatus}, nil).Maybe()
-		node.rootCoord.(*mocks.RootCoord).EXPECT().ShowCollections(mock.Anything, mock.Anything).
-			Return(&milvuspb.ShowCollectionsResponse{Status: successStatus, CollectionNames: []string{"col-0"}}, nil).Maybe()
-		node.rootCoord.(*mocks.RootCoord).EXPECT().ListDatabases(mock.Anything, mock.Anything).
-			Return(&milvuspb.ListDatabasesResponse{Status: successStatus, DbNames: []string{"default"}}, nil).Maybe()
-
 		t.Run(test.testName, func(t *testing.T) {
+			factory := dependency.NewDefaultFactory(true)
+			ctx := context.Background()
+			paramtable.Init()
+
+			node, err := NewProxy(ctx, factory)
+			assert.NoError(t, err)
+			node.UpdateStateCode(commonpb.StateCode_Healthy)
+			node.tsoAllocator = &timestampAllocator{
+				tso: newMockTimestampAllocatorInterface(),
+			}
+			rpcRequestChannel := Params.CommonCfg.ReplicateMsgChannel.GetValue()
+			node.replicateMsgStream, err = node.factory.NewMsgStream(node.ctx)
+			assert.NoError(t, err)
+			node.replicateMsgStream.AsProducer([]string{rpcRequestChannel})
+
+			Params.Save(Params.ProxyCfg.MaxTaskNum.Key, "1000")
+			node.sched, err = newTaskScheduler(ctx, node.tsoAllocator, node.factory)
+			assert.NoError(t, err)
+			err = node.sched.Start()
+			assert.NoError(t, err)
+			defer node.sched.Close()
+			node.dataCoord = mocks.NewMockDataCoordClient(t)
+			node.rootCoord = mocks.NewMockRootCoordClient(t)
+			successStatus := &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}
+			node.dataCoord.(*mocks.MockDataCoordClient).EXPECT().Flush(mock.Anything, mock.Anything).
+				Return(&datapb.FlushResponse{Status: successStatus}, nil).Maybe()
+			node.rootCoord.(*mocks.MockRootCoordClient).EXPECT().ShowCollections(mock.Anything, mock.Anything).
+				Return(&milvuspb.ShowCollectionsResponse{Status: successStatus, CollectionNames: []string{"col-0"}}, nil).Maybe()
+			node.rootCoord.(*mocks.MockRootCoordClient).EXPECT().ListDatabases(mock.Anything, mock.Anything).
+				Return(&milvuspb.ListDatabasesResponse{Status: successStatus, DbNames: []string{"default"}}, nil).Maybe()
+
 			resp, err := node.FlushAll(ctx, test.FlushRequest)
 			assert.NoError(t, err)
 			if test.ExpectedSuccess {
-				assert.Equal(t, resp.GetStatus().GetErrorCode(), commonpb.ErrorCode_Success)
+				assert.True(t, merr.Ok(resp.GetStatus()))
 			} else {
 				assert.NotEqual(t, resp.GetStatus().GetErrorCode(), commonpb.ErrorCode_Success)
 			}
@@ -436,10 +450,14 @@ func TestProxy_FlushAll(t *testing.T) {
 
 	node, err := NewProxy(ctx, factory)
 	assert.NoError(t, err)
-	node.stateCode.Store(commonpb.StateCode_Healthy)
+	node.UpdateStateCode(commonpb.StateCode_Healthy)
 	node.tsoAllocator = &timestampAllocator{
 		tso: newMockTimestampAllocatorInterface(),
 	}
+	rpcRequestChannel := Params.CommonCfg.ReplicateMsgChannel.GetValue()
+	node.replicateMsgStream, err = node.factory.NewMsgStream(node.ctx)
+	assert.NoError(t, err)
+	node.replicateMsgStream.AsProducer([]string{rpcRequestChannel})
 
 	Params.Save(Params.ProxyCfg.MaxTaskNum.Key, "1000")
 	node.sched, err = newTaskScheduler(ctx, node.tsoAllocator, node.factory)
@@ -447,8 +465,11 @@ func TestProxy_FlushAll(t *testing.T) {
 	err = node.sched.Start()
 	assert.NoError(t, err)
 	defer node.sched.Close()
-	node.dataCoord = mocks.NewMockDataCoord(t)
-	node.rootCoord = mocks.NewRootCoord(t)
+	node.dataCoord = mocks.NewMockDataCoordClient(t)
+	node.rootCoord = mocks.NewMockRootCoordClient(t)
+
+	cacheBak := globalMetaCache
+	defer func() { globalMetaCache = cacheBak }()
 
 	// set expectations
 	cache := NewMockCache(t)
@@ -465,25 +486,25 @@ func TestProxy_FlushAll(t *testing.T) {
 
 	globalMetaCache = cache
 	successStatus := &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}
-	node.dataCoord.(*mocks.MockDataCoord).EXPECT().Flush(mock.Anything, mock.Anything).
+	node.dataCoord.(*mocks.MockDataCoordClient).EXPECT().Flush(mock.Anything, mock.Anything).
 		Return(&datapb.FlushResponse{Status: successStatus}, nil).Maybe()
-	node.rootCoord.(*mocks.RootCoord).EXPECT().ShowCollections(mock.Anything, mock.Anything).
+	node.rootCoord.(*mocks.MockRootCoordClient).EXPECT().ShowCollections(mock.Anything, mock.Anything).
 		Return(&milvuspb.ShowCollectionsResponse{Status: successStatus, CollectionNames: []string{"col-0"}}, nil).Maybe()
-	node.rootCoord.(*mocks.RootCoord).EXPECT().ListDatabases(mock.Anything, mock.Anything).
+	node.rootCoord.(*mocks.MockRootCoordClient).EXPECT().ListDatabases(mock.Anything, mock.Anything).
 		Return(&milvuspb.ListDatabasesResponse{Status: successStatus, DbNames: []string{"default"}}, nil).Maybe()
 
 	t.Run("FlushAll", func(t *testing.T) {
 		resp, err := node.FlushAll(ctx, &milvuspb.FlushAllRequest{})
 		assert.NoError(t, err)
-		assert.Equal(t, resp.GetStatus().GetErrorCode(), commonpb.ErrorCode_Success)
+		assert.True(t, merr.Ok(resp.GetStatus()))
 	})
 
 	t.Run("FlushAll failed, server is abnormal", func(t *testing.T) {
-		node.stateCode.Store(commonpb.StateCode_Abnormal)
+		node.UpdateStateCode(commonpb.StateCode_Abnormal)
 		resp, err := node.FlushAll(ctx, &milvuspb.FlushAllRequest{})
 		assert.NoError(t, err)
-		assert.Equal(t, resp.GetStatus().GetErrorCode(), commonpb.ErrorCode_UnexpectedError)
-		node.stateCode.Store(commonpb.StateCode_Healthy)
+		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrServiceNotReady)
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
 	})
 
 	t.Run("FlushAll failed, get id failed", func(t *testing.T) {
@@ -503,8 +524,8 @@ func TestProxy_FlushAll(t *testing.T) {
 	})
 
 	t.Run("FlushAll failed, DataCoord flush failed", func(t *testing.T) {
-		node.dataCoord.(*mocks.MockDataCoord).ExpectedCalls = nil
-		node.dataCoord.(*mocks.MockDataCoord).EXPECT().Flush(mock.Anything, mock.Anything).
+		node.dataCoord.(*mocks.MockDataCoordClient).ExpectedCalls = nil
+		node.dataCoord.(*mocks.MockDataCoordClient).EXPECT().Flush(mock.Anything, mock.Anything).
 			Return(&datapb.FlushResponse{
 				Status: &commonpb.Status{
 					ErrorCode: commonpb.ErrorCode_UnexpectedError,
@@ -517,10 +538,10 @@ func TestProxy_FlushAll(t *testing.T) {
 	})
 
 	t.Run("FlushAll failed, RootCoord showCollections failed", func(t *testing.T) {
-		node.rootCoord.(*mocks.RootCoord).ExpectedCalls = nil
-		node.rootCoord.(*mocks.RootCoord).EXPECT().ListDatabases(mock.Anything, mock.Anything).
+		node.rootCoord.(*mocks.MockRootCoordClient).ExpectedCalls = nil
+		node.rootCoord.(*mocks.MockRootCoordClient).EXPECT().ListDatabases(mock.Anything, mock.Anything).
 			Return(&milvuspb.ListDatabasesResponse{Status: successStatus, DbNames: []string{"default"}}, nil).Maybe()
-		node.rootCoord.(*mocks.RootCoord).EXPECT().ShowCollections(mock.Anything, mock.Anything).
+		node.rootCoord.(*mocks.MockRootCoordClient).EXPECT().ShowCollections(mock.Anything, mock.Anything).
 			Return(&milvuspb.ShowCollectionsResponse{
 				Status: &commonpb.Status{
 					ErrorCode: commonpb.ErrorCode_UnexpectedError,
@@ -533,8 +554,8 @@ func TestProxy_FlushAll(t *testing.T) {
 	})
 
 	t.Run("FlushAll failed, RootCoord showCollections failed", func(t *testing.T) {
-		node.rootCoord.(*mocks.RootCoord).ExpectedCalls = nil
-		node.rootCoord.(*mocks.RootCoord).EXPECT().ListDatabases(mock.Anything, mock.Anything).
+		node.rootCoord.(*mocks.MockRootCoordClient).ExpectedCalls = nil
+		node.rootCoord.(*mocks.MockRootCoordClient).EXPECT().ListDatabases(mock.Anything, mock.Anything).
 			Return(&milvuspb.ListDatabasesResponse{
 				Status: &commonpb.Status{
 					ErrorCode: commonpb.ErrorCode_UnexpectedError,
@@ -553,35 +574,35 @@ func TestProxy_GetFlushAllState(t *testing.T) {
 
 	node, err := NewProxy(ctx, factory)
 	assert.NoError(t, err)
-	node.stateCode.Store(commonpb.StateCode_Healthy)
+	node.UpdateStateCode(commonpb.StateCode_Healthy)
 	node.tsoAllocator = &timestampAllocator{
 		tso: newMockTimestampAllocatorInterface(),
 	}
-	node.dataCoord = mocks.NewMockDataCoord(t)
-	node.rootCoord = mocks.NewRootCoord(t)
+	node.dataCoord = mocks.NewMockDataCoordClient(t)
+	node.rootCoord = mocks.NewMockRootCoordClient(t)
 
 	// set expectations
 	successStatus := &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}
-	node.dataCoord.(*mocks.MockDataCoord).EXPECT().GetFlushAllState(mock.Anything, mock.Anything).
+	node.dataCoord.(*mocks.MockDataCoordClient).EXPECT().GetFlushAllState(mock.Anything, mock.Anything).
 		Return(&milvuspb.GetFlushAllStateResponse{Status: successStatus}, nil).Maybe()
 
 	t.Run("GetFlushAllState success", func(t *testing.T) {
 		resp, err := node.GetFlushAllState(ctx, &milvuspb.GetFlushAllStateRequest{})
 		assert.NoError(t, err)
-		assert.Equal(t, resp.GetStatus().GetErrorCode(), commonpb.ErrorCode_Success)
+		assert.True(t, merr.Ok(resp.GetStatus()))
 	})
 
 	t.Run("GetFlushAllState failed, server is abnormal", func(t *testing.T) {
-		node.stateCode.Store(commonpb.StateCode_Abnormal)
+		node.UpdateStateCode(commonpb.StateCode_Abnormal)
 		resp, err := node.GetFlushAllState(ctx, &milvuspb.GetFlushAllStateRequest{})
 		assert.NoError(t, err)
-		assert.Equal(t, resp.GetStatus().GetErrorCode(), commonpb.ErrorCode_UnexpectedError)
-		node.stateCode.Store(commonpb.StateCode_Healthy)
+		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrServiceNotReady)
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
 	})
 
 	t.Run("DataCoord GetFlushAllState failed", func(t *testing.T) {
-		node.dataCoord.(*mocks.MockDataCoord).ExpectedCalls = nil
-		node.dataCoord.(*mocks.MockDataCoord).EXPECT().GetFlushAllState(mock.Anything, mock.Anything).
+		node.dataCoord.(*mocks.MockDataCoordClient).ExpectedCalls = nil
+		node.dataCoord.(*mocks.MockDataCoordClient).EXPECT().GetFlushAllState(mock.Anything, mock.Anything).
 			Return(&milvuspb.GetFlushAllStateResponse{
 				Status: &commonpb.Status{
 					ErrorCode: commonpb.ErrorCode_UnexpectedError,
@@ -594,18 +615,98 @@ func TestProxy_GetFlushAllState(t *testing.T) {
 	})
 }
 
+func TestProxy_GetFlushState(t *testing.T) {
+	factory := dependency.NewDefaultFactory(true)
+	ctx := context.Background()
+
+	node, err := NewProxy(ctx, factory)
+	assert.NoError(t, err)
+	node.UpdateStateCode(commonpb.StateCode_Healthy)
+	node.tsoAllocator = &timestampAllocator{
+		tso: newMockTimestampAllocatorInterface(),
+	}
+	node.dataCoord = mocks.NewMockDataCoordClient(t)
+	node.rootCoord = mocks.NewMockRootCoordClient(t)
+
+	// set expectations
+	successStatus := &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}
+	node.dataCoord.(*mocks.MockDataCoordClient).EXPECT().GetFlushState(mock.Anything, mock.Anything, mock.Anything).
+		Return(&milvuspb.GetFlushStateResponse{Status: successStatus}, nil).Maybe()
+
+	t.Run("GetFlushState success", func(t *testing.T) {
+		resp, err := node.GetFlushState(ctx, &milvuspb.GetFlushStateRequest{})
+		assert.NoError(t, err)
+		assert.Equal(t, resp.GetStatus().GetErrorCode(), commonpb.ErrorCode_Success)
+	})
+
+	t.Run("GetFlushState failed, server is abnormal", func(t *testing.T) {
+		node.UpdateStateCode(commonpb.StateCode_Abnormal)
+		resp, err := node.GetFlushState(ctx, &milvuspb.GetFlushStateRequest{})
+		assert.NoError(t, err)
+		assert.Equal(t, resp.GetStatus().GetErrorCode(), commonpb.ErrorCode_NotReadyServe)
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
+	})
+
+	t.Run("GetFlushState with collection name", func(t *testing.T) {
+		resp, err := node.GetFlushState(ctx, &milvuspb.GetFlushStateRequest{
+			CollectionName: "*",
+		})
+		assert.NoError(t, err)
+		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrParameterInvalid)
+
+		cacheBak := globalMetaCache
+		defer func() { globalMetaCache = cacheBak }()
+		cache := NewMockCache(t)
+		cache.On("GetCollectionID",
+			mock.Anything, // context.Context
+			mock.AnythingOfType("string"),
+			mock.AnythingOfType("string"),
+		).Return(UniqueID(0), nil).Maybe()
+		globalMetaCache = cache
+
+		resp, err = node.GetFlushState(ctx, &milvuspb.GetFlushStateRequest{
+			CollectionName: "collection1",
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, resp.GetStatus().GetErrorCode(), commonpb.ErrorCode_Success)
+	})
+
+	t.Run("DataCoord GetFlushState failed", func(t *testing.T) {
+		node.dataCoord.(*mocks.MockDataCoordClient).ExpectedCalls = nil
+		node.dataCoord.(*mocks.MockDataCoordClient).EXPECT().GetFlushState(mock.Anything, mock.Anything, mock.Anything).
+			Return(&milvuspb.GetFlushStateResponse{
+				Status: &commonpb.Status{
+					ErrorCode: commonpb.ErrorCode_UnexpectedError,
+					Reason:    "mock err",
+				},
+			}, nil)
+		resp, err := node.GetFlushState(ctx, &milvuspb.GetFlushStateRequest{})
+		assert.NoError(t, err)
+		assert.Equal(t, resp.GetStatus().GetErrorCode(), commonpb.ErrorCode_UnexpectedError)
+	})
+
+	t.Run("GetFlushState return error", func(t *testing.T) {
+		node.dataCoord.(*mocks.MockDataCoordClient).ExpectedCalls = nil
+		node.dataCoord.(*mocks.MockDataCoordClient).EXPECT().GetFlushState(mock.Anything, mock.Anything, mock.Anything).
+			Return(nil, errors.New("fake error"))
+		resp, err := node.GetFlushState(ctx, &milvuspb.GetFlushStateRequest{})
+		assert.NoError(t, err)
+		assert.Equal(t, resp.GetStatus().GetErrorCode(), commonpb.ErrorCode_UnexpectedError)
+	})
+}
+
 func TestProxy_GetReplicas(t *testing.T) {
 	factory := dependency.NewDefaultFactory(true)
 	ctx := context.Background()
 
 	node, err := NewProxy(ctx, factory)
 	assert.NoError(t, err)
-	node.stateCode.Store(commonpb.StateCode_Healthy)
+	node.UpdateStateCode(commonpb.StateCode_Healthy)
 	node.tsoAllocator = &timestampAllocator{
 		tso: newMockTimestampAllocatorInterface(),
 	}
-	mockQC := mocks.NewMockQueryCoord(t)
-	mockRC := mocks.NewRootCoord(t)
+	mockQC := mocks.NewMockQueryCoordClient(t)
+	mockRC := mocks.NewMockRootCoordClient(t)
 	node.queryCoord = mockQC
 	node.rootCoord = mockRC
 
@@ -617,17 +718,17 @@ func TestProxy_GetReplicas(t *testing.T) {
 			CollectionID: 1000,
 		})
 		assert.NoError(t, err)
-		assert.Equal(t, resp.GetStatus().GetErrorCode(), commonpb.ErrorCode_Success)
+		assert.True(t, merr.Ok(resp.GetStatus()))
 	})
 
 	t.Run("proxy_not_healthy", func(t *testing.T) {
-		node.stateCode.Store(commonpb.StateCode_Abnormal)
+		node.UpdateStateCode(commonpb.StateCode_Abnormal)
 		resp, err := node.GetReplicas(ctx, &milvuspb.GetReplicasRequest{
 			CollectionID: 1000,
 		})
 		assert.NoError(t, err)
-		assert.Equal(t, resp.GetStatus().GetErrorCode(), commonpb.ErrorCode_UnexpectedError)
-		node.stateCode.Store(commonpb.StateCode_Healthy)
+		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrServiceNotReady)
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
 	})
 
 	t.Run("QueryCoordClient_returnsError", func(t *testing.T) {
@@ -653,7 +754,7 @@ func TestProxy_Connect(t *testing.T) {
 	})
 
 	t.Run("failed to list database", func(t *testing.T) {
-		r := mocks.NewRootCoord(t)
+		r := mocks.NewMockRootCoordClient(t)
 		r.On("ListDatabases",
 			mock.Anything,
 			mock.Anything,
@@ -668,12 +769,12 @@ func TestProxy_Connect(t *testing.T) {
 	})
 
 	t.Run("list database error", func(t *testing.T) {
-		r := mocks.NewRootCoord(t)
+		r := mocks.NewMockRootCoordClient(t)
 		r.On("ListDatabases",
 			mock.Anything,
 			mock.Anything,
 		).Return(&milvuspb.ListDatabasesResponse{
-			Status: unhealthyStatus(),
+			Status: merr.Status(merr.WrapErrServiceNotReady(paramtable.GetRole(), paramtable.GetNodeID(), "initialization")),
 		}, nil)
 
 		node := &Proxy{rootCoord: r}
@@ -690,14 +791,12 @@ func TestProxy_Connect(t *testing.T) {
 		})
 		ctx := metadata.NewIncomingContext(context.TODO(), md)
 
-		r := mocks.NewRootCoord(t)
+		r := mocks.NewMockRootCoordClient(t)
 		r.On("ListDatabases",
 			mock.Anything,
 			mock.Anything,
 		).Return(&milvuspb.ListDatabasesResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status:  merr.Success(),
 			DbNames: []string{},
 		}, nil)
 
@@ -715,14 +814,12 @@ func TestProxy_Connect(t *testing.T) {
 		})
 		ctx := metadata.NewIncomingContext(context.TODO(), md)
 
-		r := mocks.NewRootCoord(t)
+		r := mocks.NewMockRootCoordClient(t)
 		r.On("ListDatabases",
 			mock.Anything,
 			mock.Anything,
 		).Return(&milvuspb.ListDatabasesResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status:  merr.Success(),
 			DbNames: []string{"20230525"},
 		}, nil)
 
@@ -748,14 +845,12 @@ func TestProxy_Connect(t *testing.T) {
 		})
 		ctx := metadata.NewIncomingContext(context.TODO(), md)
 
-		r := mocks.NewRootCoord(t)
+		r := mocks.NewMockRootCoordClient(t)
 		r.On("ListDatabases",
 			mock.Anything,
 			mock.Anything,
 		).Return(&milvuspb.ListDatabasesResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status:  merr.Success(),
 			DbNames: []string{"20230525"},
 		}, nil)
 
@@ -764,9 +859,7 @@ func TestProxy_Connect(t *testing.T) {
 			mock.Anything,
 			mock.Anything,
 		).Return(&rootcoordpb.AllocTimestampResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status:    merr.Success(),
 			Timestamp: 20230518,
 			Count:     1,
 		}, nil)
@@ -801,7 +894,6 @@ func TestProxy_ListClientInfos(t *testing.T) {
 		resp, err := node.ListClientInfos(context.TODO(), nil)
 		assert.NoError(t, err)
 		assert.Equal(t, commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
-
 	})
 }
 
@@ -809,12 +901,12 @@ func TestProxyCreateDatabase(t *testing.T) {
 	paramtable.Init()
 
 	t.Run("not healthy", func(t *testing.T) {
-		node := &Proxy{session: &sessionutil.Session{ServerID: 1}}
-		node.stateCode.Store(commonpb.StateCode_Abnormal)
+		node := &Proxy{session: &sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 1}}}
+		node.UpdateStateCode(commonpb.StateCode_Abnormal)
 		ctx := context.Background()
 		resp, err := node.CreateDatabase(ctx, &milvuspb.CreateDatabaseRequest{})
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.GetErrorCode())
+		assert.ErrorIs(t, merr.Error(resp), merr.ErrServiceNotReady)
 	})
 
 	factory := dependency.NewDefaultFactory(true)
@@ -826,7 +918,7 @@ func TestProxyCreateDatabase(t *testing.T) {
 		tso: newMockTimestampAllocatorInterface(),
 	}
 	node.multiRateLimiter = NewMultiRateLimiter()
-	node.stateCode.Store(commonpb.StateCode_Healthy)
+	node.UpdateStateCode(commonpb.StateCode_Healthy)
 	node.sched, err = newTaskScheduler(ctx, node.tsoAllocator, node.factory)
 	node.sched.ddQueue.setMaxTaskNum(10)
 	assert.NoError(t, err)
@@ -834,8 +926,13 @@ func TestProxyCreateDatabase(t *testing.T) {
 	assert.NoError(t, err)
 	defer node.sched.Close()
 
+	rpcRequestChannel := Params.CommonCfg.ReplicateMsgChannel.GetValue()
+	node.replicateMsgStream, err = node.factory.NewMsgStream(node.ctx)
+	assert.NoError(t, err)
+	node.replicateMsgStream.AsProducer([]string{rpcRequestChannel})
+
 	t.Run("create database fail", func(t *testing.T) {
-		rc := mocks.NewRootCoord(t)
+		rc := mocks.NewMockRootCoordClient(t)
 		rc.On("CreateDatabase", mock.Anything, mock.Anything).
 			Return(nil, errors.New("fail"))
 		node.rootCoord = rc
@@ -846,13 +943,11 @@ func TestProxyCreateDatabase(t *testing.T) {
 	})
 
 	t.Run("create database ok", func(t *testing.T) {
-		rc := mocks.NewRootCoord(t)
+		rc := mocks.NewMockRootCoordClient(t)
 		rc.On("CreateDatabase", mock.Anything, mock.Anything).
-			Return(&commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			}, nil)
+			Return(merr.Success(), nil)
 		node.rootCoord = rc
-		node.stateCode.Store(commonpb.StateCode_Healthy)
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
 		ctx := context.Background()
 
 		resp, err := node.CreateDatabase(ctx, &milvuspb.CreateDatabaseRequest{DbName: "db"})
@@ -865,12 +960,12 @@ func TestProxyDropDatabase(t *testing.T) {
 	paramtable.Init()
 
 	t.Run("not healthy", func(t *testing.T) {
-		node := &Proxy{session: &sessionutil.Session{ServerID: 1}}
-		node.stateCode.Store(commonpb.StateCode_Abnormal)
+		node := &Proxy{session: &sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 1}}}
+		node.UpdateStateCode(commonpb.StateCode_Abnormal)
 		ctx := context.Background()
 		resp, err := node.DropDatabase(ctx, &milvuspb.DropDatabaseRequest{})
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.GetErrorCode())
+		assert.ErrorIs(t, merr.Error(resp), merr.ErrServiceNotReady)
 	})
 
 	factory := dependency.NewDefaultFactory(true)
@@ -882,7 +977,7 @@ func TestProxyDropDatabase(t *testing.T) {
 		tso: newMockTimestampAllocatorInterface(),
 	}
 	node.multiRateLimiter = NewMultiRateLimiter()
-	node.stateCode.Store(commonpb.StateCode_Healthy)
+	node.UpdateStateCode(commonpb.StateCode_Healthy)
 	node.sched, err = newTaskScheduler(ctx, node.tsoAllocator, node.factory)
 	node.sched.ddQueue.setMaxTaskNum(10)
 	assert.NoError(t, err)
@@ -890,8 +985,13 @@ func TestProxyDropDatabase(t *testing.T) {
 	assert.NoError(t, err)
 	defer node.sched.Close()
 
+	rpcRequestChannel := Params.CommonCfg.ReplicateMsgChannel.GetValue()
+	node.replicateMsgStream, err = node.factory.NewMsgStream(node.ctx)
+	assert.NoError(t, err)
+	node.replicateMsgStream.AsProducer([]string{rpcRequestChannel})
+
 	t.Run("drop database fail", func(t *testing.T) {
-		rc := mocks.NewRootCoord(t)
+		rc := mocks.NewMockRootCoordClient(t)
 		rc.On("DropDatabase", mock.Anything, mock.Anything).
 			Return(nil, errors.New("fail"))
 		node.rootCoord = rc
@@ -902,13 +1002,11 @@ func TestProxyDropDatabase(t *testing.T) {
 	})
 
 	t.Run("drop database ok", func(t *testing.T) {
-		rc := mocks.NewRootCoord(t)
+		rc := mocks.NewMockRootCoordClient(t)
 		rc.On("DropDatabase", mock.Anything, mock.Anything).
-			Return(&commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			}, nil)
+			Return(merr.Success(), nil)
 		node.rootCoord = rc
-		node.stateCode.Store(commonpb.StateCode_Healthy)
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
 		ctx := context.Background()
 
 		resp, err := node.DropDatabase(ctx, &milvuspb.DropDatabaseRequest{DbName: "db"})
@@ -921,12 +1019,12 @@ func TestProxyListDatabase(t *testing.T) {
 	paramtable.Init()
 
 	t.Run("not healthy", func(t *testing.T) {
-		node := &Proxy{session: &sessionutil.Session{ServerID: 1}}
-		node.stateCode.Store(commonpb.StateCode_Abnormal)
+		node := &Proxy{session: &sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 1}}}
+		node.UpdateStateCode(commonpb.StateCode_Abnormal)
 		ctx := context.Background()
 		resp, err := node.ListDatabases(ctx, &milvuspb.ListDatabasesRequest{})
 		assert.NoError(t, err)
-		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.GetStatus().GetErrorCode())
+		assert.ErrorIs(t, merr.Error(resp.GetStatus()), merr.ErrServiceNotReady)
 	})
 
 	factory := dependency.NewDefaultFactory(true)
@@ -938,7 +1036,7 @@ func TestProxyListDatabase(t *testing.T) {
 		tso: newMockTimestampAllocatorInterface(),
 	}
 	node.multiRateLimiter = NewMultiRateLimiter()
-	node.stateCode.Store(commonpb.StateCode_Healthy)
+	node.UpdateStateCode(commonpb.StateCode_Healthy)
 	node.sched, err = newTaskScheduler(ctx, node.tsoAllocator, node.factory)
 	node.sched.ddQueue.setMaxTaskNum(10)
 	assert.NoError(t, err)
@@ -947,7 +1045,7 @@ func TestProxyListDatabase(t *testing.T) {
 	defer node.sched.Close()
 
 	t.Run("list database fail", func(t *testing.T) {
-		rc := mocks.NewRootCoord(t)
+		rc := mocks.NewMockRootCoordClient(t)
 		rc.On("ListDatabases", mock.Anything, mock.Anything).
 			Return(nil, errors.New("fail"))
 		node.rootCoord = rc
@@ -958,14 +1056,13 @@ func TestProxyListDatabase(t *testing.T) {
 	})
 
 	t.Run("list database ok", func(t *testing.T) {
-		rc := mocks.NewRootCoord(t)
+		rc := mocks.NewMockRootCoordClient(t)
 		rc.On("ListDatabases", mock.Anything, mock.Anything).
 			Return(&milvuspb.ListDatabasesResponse{
-				Status: &commonpb.Status{
-					ErrorCode: commonpb.ErrorCode_Success,
-				}}, nil)
+				Status: merr.Success(),
+			}, nil)
 		node.rootCoord = rc
-		node.stateCode.Store(commonpb.StateCode_Healthy)
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
 		ctx := context.Background()
 
 		resp, err := node.ListDatabases(ctx, &milvuspb.ListDatabasesRequest{})
@@ -1020,5 +1117,263 @@ func TestProxy_AllocTimestamp(t *testing.T) {
 		resp, err := node.AllocTimestamp(context.TODO(), nil)
 		assert.NoError(t, err)
 		assert.Equal(t, commonpb.ErrorCode_UnexpectedError, resp.GetStatus().GetErrorCode())
+	})
+}
+
+func TestProxy_ReplicateMessage(t *testing.T) {
+	paramtable.Init()
+	defer paramtable.Get().Save(paramtable.Get().CommonCfg.TTMsgEnabled.Key, "true")
+	t.Run("proxy unhealthy", func(t *testing.T) {
+		node := &Proxy{}
+		node.UpdateStateCode(commonpb.StateCode_Abnormal)
+
+		resp, err := node.ReplicateMessage(context.TODO(), nil)
+		assert.NoError(t, err)
+		assert.NotEqual(t, 0, resp.GetStatus().GetCode())
+	})
+
+	t.Run("not backup instance", func(t *testing.T) {
+		node := &Proxy{}
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
+
+		resp, err := node.ReplicateMessage(context.TODO(), nil)
+		assert.NoError(t, err)
+		assert.NotEqual(t, 0, resp.GetStatus().GetCode())
+	})
+
+	t.Run("empty channel name", func(t *testing.T) {
+		node := &Proxy{}
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
+		paramtable.Get().Save(paramtable.Get().CommonCfg.TTMsgEnabled.Key, "false")
+
+		resp, err := node.ReplicateMessage(context.TODO(), nil)
+		assert.NoError(t, err)
+		assert.NotEqual(t, 0, resp.GetStatus().GetCode())
+	})
+
+	t.Run("fail to get msg stream", func(t *testing.T) {
+		factory := newMockMsgStreamFactory()
+		factory.f = func(ctx context.Context) (msgstream.MsgStream, error) {
+			return nil, errors.New("mock error: get msg stream")
+		}
+		resourceManager := resource.NewManager(time.Second, 2*time.Second, nil)
+		manager := NewReplicateStreamManager(context.Background(), factory, resourceManager)
+
+		node := &Proxy{
+			replicateStreamManager: manager,
+		}
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
+		paramtable.Get().Save(paramtable.Get().CommonCfg.TTMsgEnabled.Key, "false")
+
+		resp, err := node.ReplicateMessage(context.TODO(), &milvuspb.ReplicateMessageRequest{ChannelName: "unit_test_replicate_message"})
+		assert.NoError(t, err)
+		assert.NotEqual(t, 0, resp.GetStatus().GetCode())
+	})
+
+	t.Run("get latest position", func(t *testing.T) {
+		paramtable.Get().Save(paramtable.Get().CommonCfg.TTMsgEnabled.Key, "false")
+		defer paramtable.Get().Save(paramtable.Get().CommonCfg.TTMsgEnabled.Key, "true")
+
+		factory := dependency.NewMockFactory(t)
+		stream := msgstream.NewMockMsgStream(t)
+		mockMsgID := mqwrapper.NewMockMessageID(t)
+
+		factory.EXPECT().NewMsgStream(mock.Anything).Return(stream, nil).Once()
+		mockMsgID.EXPECT().Serialize().Return([]byte("mock")).Once()
+		stream.EXPECT().AsConsumer(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
+		stream.EXPECT().GetLatestMsgID(mock.Anything).Return(mockMsgID, nil).Once()
+		stream.EXPECT().Close().Return()
+		node := &Proxy{
+			factory: factory,
+		}
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
+		resp, err := node.ReplicateMessage(context.TODO(), &milvuspb.ReplicateMessageRequest{
+			ChannelName: Params.CommonCfg.ReplicateMsgChannel.GetValue(),
+		})
+		assert.NoError(t, err)
+		assert.EqualValues(t, 0, resp.GetStatus().GetCode())
+		assert.Equal(t, base64.StdEncoding.EncodeToString([]byte("mock")), resp.GetPosition())
+
+		factory.EXPECT().NewMsgStream(mock.Anything).Return(nil, errors.New("mock")).Once()
+		resp, err = node.ReplicateMessage(context.TODO(), &milvuspb.ReplicateMessageRequest{
+			ChannelName: Params.CommonCfg.ReplicateMsgChannel.GetValue(),
+		})
+		assert.NoError(t, err)
+		assert.NotEqualValues(t, 0, resp.GetStatus().GetCode())
+	})
+
+	t.Run("invalid msg pack", func(t *testing.T) {
+		node := &Proxy{
+			replicateStreamManager: NewReplicateStreamManager(context.Background(), nil, nil),
+		}
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
+		paramtable.Get().Save(paramtable.Get().CommonCfg.TTMsgEnabled.Key, "false")
+		{
+			resp, err := node.ReplicateMessage(context.TODO(), &milvuspb.ReplicateMessageRequest{
+				ChannelName: "unit_test_replicate_message",
+				Msgs:        [][]byte{{1, 2, 3}},
+			})
+			assert.NoError(t, err)
+			assert.NotEqual(t, 0, resp.GetStatus().GetCode())
+		}
+
+		{
+			timeTickResult := msgpb.TimeTickMsg{}
+			timeTickMsg := &msgstream.TimeTickMsg{
+				BaseMsg: msgstream.BaseMsg{
+					BeginTimestamp: 1,
+					EndTimestamp:   10,
+					HashValues:     []uint32{0},
+				},
+				TimeTickMsg: timeTickResult,
+			}
+			msgBytes, _ := timeTickMsg.Marshal(timeTickMsg)
+			resp, err := node.ReplicateMessage(context.TODO(), &milvuspb.ReplicateMessageRequest{
+				ChannelName: "unit_test_replicate_message",
+				Msgs:        [][]byte{msgBytes.([]byte)},
+			})
+			assert.NoError(t, err)
+			log.Info("resp", zap.Any("resp", resp))
+			assert.NotEqual(t, 0, resp.GetStatus().GetCode())
+		}
+
+		{
+			timeTickResult := msgpb.TimeTickMsg{
+				Base: commonpbutil.NewMsgBase(
+					commonpbutil.WithMsgType(commonpb.MsgType(-1)),
+					commonpbutil.WithMsgID(0),
+					commonpbutil.WithTimeStamp(10),
+					commonpbutil.WithSourceID(-1),
+				),
+			}
+			timeTickMsg := &msgstream.TimeTickMsg{
+				BaseMsg: msgstream.BaseMsg{
+					BeginTimestamp: 1,
+					EndTimestamp:   10,
+					HashValues:     []uint32{0},
+				},
+				TimeTickMsg: timeTickResult,
+			}
+			msgBytes, _ := timeTickMsg.Marshal(timeTickMsg)
+			resp, err := node.ReplicateMessage(context.TODO(), &milvuspb.ReplicateMessageRequest{
+				ChannelName: "unit_test_replicate_message",
+				Msgs:        [][]byte{msgBytes.([]byte)},
+			})
+			assert.NoError(t, err)
+			log.Info("resp", zap.Any("resp", resp))
+			assert.NotEqual(t, 0, resp.GetStatus().GetCode())
+		}
+	})
+
+	t.Run("success", func(t *testing.T) {
+		paramtable.Init()
+		factory := newMockMsgStreamFactory()
+		msgStreamObj := msgstream.NewMockMsgStream(t)
+		msgStreamObj.EXPECT().SetRepackFunc(mock.Anything).Return()
+		msgStreamObj.EXPECT().AsProducer(mock.Anything).Return()
+		msgStreamObj.EXPECT().EnableProduce(mock.Anything).Return()
+		msgStreamObj.EXPECT().Close().Return()
+		mockMsgID1 := mqwrapper.NewMockMessageID(t)
+		mockMsgID2 := mqwrapper.NewMockMessageID(t)
+		mockMsgID2.EXPECT().Serialize().Return([]byte("mock message id 2"))
+		broadcastMock := msgStreamObj.EXPECT().Broadcast(mock.Anything).Return(map[string][]mqwrapper.MessageID{
+			"unit_test_replicate_message": {mockMsgID1, mockMsgID2},
+		}, nil)
+
+		factory.f = func(ctx context.Context) (msgstream.MsgStream, error) {
+			return msgStreamObj, nil
+		}
+		resourceManager := resource.NewManager(time.Second, 2*time.Second, nil)
+		manager := NewReplicateStreamManager(context.Background(), factory, resourceManager)
+
+		ctx := context.Background()
+		dataCoord := &mockDataCoord{}
+		dataCoord.expireTime = Timestamp(1000)
+		segAllocator, err := newSegIDAssigner(ctx, dataCoord, getLastTick1)
+		assert.NoError(t, err)
+		segAllocator.Start()
+
+		node := &Proxy{
+			replicateStreamManager: manager,
+			segAssigner:            segAllocator,
+		}
+		node.UpdateStateCode(commonpb.StateCode_Healthy)
+		paramtable.Get().Save(paramtable.Get().CommonCfg.TTMsgEnabled.Key, "false")
+
+		insertMsg := &msgstream.InsertMsg{
+			BaseMsg: msgstream.BaseMsg{
+				BeginTimestamp: 4,
+				EndTimestamp:   10,
+				HashValues:     []uint32{0},
+				MsgPosition: &msgstream.MsgPosition{
+					ChannelName: "unit_test_replicate_message",
+					MsgID:       []byte("mock message id 2"),
+				},
+			},
+			InsertRequest: msgpb.InsertRequest{
+				Base: &commonpb.MsgBase{
+					MsgType:   commonpb.MsgType_Insert,
+					MsgID:     10001,
+					Timestamp: 10,
+					SourceID:  -1,
+				},
+				ShardName:      "unit_test_replicate_message_v1",
+				DbName:         "default",
+				CollectionName: "foo_collection",
+				PartitionName:  "_default",
+				DbID:           1,
+				CollectionID:   11,
+				PartitionID:    22,
+				SegmentID:      33,
+				Timestamps:     []uint64{10},
+				RowIDs:         []int64{66},
+				NumRows:        1,
+			},
+		}
+		msgBytes, _ := insertMsg.Marshal(insertMsg)
+
+		replicateRequest := &milvuspb.ReplicateMessageRequest{
+			ChannelName: "unit_test_replicate_message",
+			BeginTs:     1,
+			EndTs:       10,
+			Msgs:        [][]byte{msgBytes.([]byte)},
+			StartPositions: []*msgpb.MsgPosition{
+				{ChannelName: "unit_test_replicate_message", MsgID: []byte("mock message id 1")},
+			},
+			EndPositions: []*msgpb.MsgPosition{
+				{ChannelName: "unit_test_replicate_message", MsgID: []byte("mock message id 2")},
+			},
+		}
+		resp, err := node.ReplicateMessage(context.TODO(), replicateRequest)
+		assert.NoError(t, err)
+		assert.EqualValues(t, 0, resp.GetStatus().GetCode())
+		assert.Equal(t, base64.StdEncoding.EncodeToString([]byte("mock message id 2")), resp.GetPosition())
+
+		res := resourceManager.Delete(ReplicateMsgStreamTyp, replicateRequest.GetChannelName())
+		assert.NotNil(t, res)
+		time.Sleep(2 * time.Second)
+
+		{
+			broadcastMock.Unset()
+			broadcastMock = msgStreamObj.EXPECT().Broadcast(mock.Anything).Return(nil, errors.New("mock error: broadcast"))
+			resp, err := node.ReplicateMessage(context.TODO(), replicateRequest)
+			assert.NoError(t, err)
+			assert.NotEqualValues(t, 0, resp.GetStatus().GetCode())
+			resourceManager.Delete(ReplicateMsgStreamTyp, replicateRequest.GetChannelName())
+			time.Sleep(2 * time.Second)
+		}
+		{
+			broadcastMock.Unset()
+			broadcastMock = msgStreamObj.EXPECT().Broadcast(mock.Anything).Return(map[string][]mqwrapper.MessageID{
+				"unit_test_replicate_message": {},
+			}, nil)
+			resp, err := node.ReplicateMessage(context.TODO(), replicateRequest)
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, resp.GetStatus().GetCode())
+			assert.Empty(t, resp.GetPosition())
+			resourceManager.Delete(ReplicateMsgStreamTyp, replicateRequest.GetChannelName())
+			time.Sleep(2 * time.Second)
+			broadcastMock.Unset()
+		}
 	})
 }

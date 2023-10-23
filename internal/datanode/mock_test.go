@@ -25,20 +25,21 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
-	"github.com/milvus-io/milvus/pkg/util/tsoutil"
+	"github.com/stretchr/testify/mock"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	"github.com/milvus-io/milvus/internal/datanode/broker"
 	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/etcdpb"
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
 	"github.com/milvus-io/milvus/internal/storage"
-	s "github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
@@ -47,13 +48,13 @@ import (
 	"github.com/milvus-io/milvus/pkg/mq/msgdispatcher"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 const ctxTimeInMillisecond = 5000
-
-const debug = false
 
 // As used in data_sync_service_test.go
 var segID2SegInfo = map[int64]*datapb.SegmentInfo{
@@ -80,60 +81,17 @@ var emptyFlushAndDropFunc flushAndDropFunc = func(_ []*segmentFlushPack) {}
 func newIDLEDataNodeMock(ctx context.Context, pkType schemapb.DataType) *DataNode {
 	factory := dependency.NewDefaultFactory(true)
 	node := NewDataNode(ctx, factory)
-	node.SetSession(&sessionutil.Session{ServerID: 1})
+	node.SetSession(&sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 1}})
 	node.dispClient = msgdispatcher.NewClient(factory, typeutil.DataNodeRole, paramtable.GetNodeID())
 
-	rc := &RootCoordFactory{
-		ID:             0,
-		collectionID:   1,
-		collectionName: "collection-1",
-		pkType:         pkType,
-	}
-	node.rootCoord = rc
+	broker := &broker.MockBroker{}
+	broker.EXPECT().ReportTimeTick(mock.Anything, mock.Anything).Return(nil).Maybe()
+	broker.EXPECT().GetSegmentInfo(mock.Anything, mock.Anything).Return([]*datapb.SegmentInfo{}, nil).Maybe()
 
-	ds := &DataCoordFactory{}
-	node.dataCoord = ds
+	node.broker = broker
+	node.timeTickSender = newTimeTickSender(node.broker, 0)
 
 	return node
-}
-
-func newHEALTHDataNodeMock(dmChannelName string) *DataNode {
-	var ctx context.Context
-
-	if debug {
-		ctx = context.Background()
-	} else {
-		var cancel context.CancelFunc
-		d := time.Now().Add(ctxTimeInMillisecond * time.Millisecond)
-		ctx, cancel = context.WithDeadline(context.Background(), d)
-		go func() {
-			<-ctx.Done()
-			cancel()
-		}()
-	}
-
-	factory := dependency.NewDefaultFactory(true)
-	node := NewDataNode(ctx, factory)
-
-	ms := &RootCoordFactory{
-		ID:             0,
-		collectionID:   1,
-		collectionName: "collection-1",
-	}
-	node.rootCoord = ms
-
-	ds := &DataCoordFactory{}
-	node.dataCoord = ds
-
-	return node
-}
-
-func makeNewChannelNames(names []string, suffix string) []string {
-	var ret []string
-	for _, name := range names {
-		ret = append(ret, name+suffix)
-	}
-	return ret
 }
 
 func newTestEtcdKV() (kv.WatchKV, error) {
@@ -186,11 +144,9 @@ func clearEtcd(rootPath string) error {
 	}
 	log.Debug("Clear ETCD with prefix writer/ddl")
 	return nil
-
 }
 
-type MetaFactory struct {
-}
+type MetaFactory struct{}
 
 func NewMetaFactory() *MetaFactory {
 	return &MetaFactory{}
@@ -202,7 +158,7 @@ type DataFactory struct {
 }
 
 type RootCoordFactory struct {
-	types.RootCoord
+	types.RootCoordClient
 	ID             UniqueID
 	collectionName string
 	collectionID   UniqueID
@@ -218,15 +174,15 @@ type RootCoordFactory struct {
 }
 
 type DataCoordFactory struct {
-	types.DataCoord
+	types.DataCoordClient
 
 	SaveBinlogPathError  bool
-	SaveBinlogPathStatus commonpb.ErrorCode
+	SaveBinlogPathStatus *commonpb.Status
 
 	CompleteCompactionError      bool
 	CompleteCompactionNotSuccess bool
+	DropVirtualChannelError      bool
 
-	DropVirtualChannelError  bool
 	DropVirtualChannelStatus commonpb.ErrorCode
 
 	GetSegmentInfosError      bool
@@ -241,14 +197,12 @@ type DataCoordFactory struct {
 	ReportDataNodeTtMsgsNotSuccess bool
 }
 
-func (ds *DataCoordFactory) AssignSegmentID(ctx context.Context, req *datapb.AssignSegmentIDRequest) (*datapb.AssignSegmentIDResponse, error) {
+func (ds *DataCoordFactory) AssignSegmentID(ctx context.Context, req *datapb.AssignSegmentIDRequest, opts ...grpc.CallOption) (*datapb.AssignSegmentIDResponse, error) {
 	if ds.AddSegmentError {
 		return nil, errors.New("Error")
 	}
 	res := &datapb.AssignSegmentIDResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status: merr.Success(),
 		SegIDAssignments: []*datapb.SegmentIDAssignment{
 			{
 				SegID: 666,
@@ -265,7 +219,7 @@ func (ds *DataCoordFactory) AssignSegmentID(ctx context.Context, req *datapb.Ass
 	return res, nil
 }
 
-func (ds *DataCoordFactory) CompleteCompaction(ctx context.Context, req *datapb.CompactionResult) (*commonpb.Status, error) {
+func (ds *DataCoordFactory) CompleteCompaction(ctx context.Context, req *datapb.CompactionResult, opts ...grpc.CallOption) (*commonpb.Status, error) {
 	if ds.CompleteCompactionError {
 		return nil, errors.New("Error")
 	}
@@ -276,14 +230,14 @@ func (ds *DataCoordFactory) CompleteCompaction(ctx context.Context, req *datapb.
 	return &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}, nil
 }
 
-func (ds *DataCoordFactory) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPathsRequest) (*commonpb.Status, error) {
+func (ds *DataCoordFactory) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPathsRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
 	if ds.SaveBinlogPathError {
 		return nil, errors.New("Error")
 	}
-	return &commonpb.Status{ErrorCode: ds.SaveBinlogPathStatus}, nil
+	return ds.SaveBinlogPathStatus, nil
 }
 
-func (ds *DataCoordFactory) DropVirtualChannel(ctx context.Context, req *datapb.DropVirtualChannelRequest) (*datapb.DropVirtualChannelResponse, error) {
+func (ds *DataCoordFactory) DropVirtualChannel(ctx context.Context, req *datapb.DropVirtualChannelRequest, opts ...grpc.CallOption) (*datapb.DropVirtualChannelResponse, error) {
 	if ds.DropVirtualChannelError {
 		return nil, errors.New("error")
 	}
@@ -294,19 +248,15 @@ func (ds *DataCoordFactory) DropVirtualChannel(ctx context.Context, req *datapb.
 	}, nil
 }
 
-func (ds *DataCoordFactory) UpdateSegmentStatistics(ctx context.Context, req *datapb.UpdateSegmentStatisticsRequest) (*commonpb.Status, error) {
-	return &commonpb.Status{
-		ErrorCode: commonpb.ErrorCode_Success,
-	}, nil
+func (ds *DataCoordFactory) UpdateSegmentStatistics(ctx context.Context, req *datapb.UpdateSegmentStatisticsRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	return merr.Success(), nil
 }
 
-func (ds *DataCoordFactory) UpdateChannelCheckpoint(ctx context.Context, req *datapb.UpdateChannelCheckpointRequest) (*commonpb.Status, error) {
-	return &commonpb.Status{
-		ErrorCode: commonpb.ErrorCode_Success,
-	}, nil
+func (ds *DataCoordFactory) UpdateChannelCheckpoint(ctx context.Context, req *datapb.UpdateChannelCheckpointRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	return merr.Success(), nil
 }
 
-func (ds *DataCoordFactory) ReportDataNodeTtMsgs(ctx context.Context, req *datapb.ReportDataNodeTtMsgsRequest) (*commonpb.Status, error) {
+func (ds *DataCoordFactory) ReportDataNodeTtMsgs(ctx context.Context, req *datapb.ReportDataNodeTtMsgsRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
 	if ds.ReportDataNodeTtMsgsError {
 		return nil, errors.New("mock ReportDataNodeTtMsgs error")
 	}
@@ -315,42 +265,32 @@ func (ds *DataCoordFactory) ReportDataNodeTtMsgs(ctx context.Context, req *datap
 			ErrorCode: commonpb.ErrorCode_UnexpectedError,
 		}, nil
 	}
-	return &commonpb.Status{
-		ErrorCode: commonpb.ErrorCode_Success,
-	}, nil
+	return merr.Success(), nil
 }
 
-func (ds *DataCoordFactory) SaveImportSegment(ctx context.Context, req *datapb.SaveImportSegmentRequest) (*commonpb.Status, error) {
-	return &commonpb.Status{
-		ErrorCode: commonpb.ErrorCode_Success,
-	}, nil
+func (ds *DataCoordFactory) SaveImportSegment(ctx context.Context, req *datapb.SaveImportSegmentRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	return merr.Success(), nil
 }
 
-func (ds *DataCoordFactory) UnsetIsImportingState(context.Context, *datapb.UnsetIsImportingStateRequest) (*commonpb.Status, error) {
-	return &commonpb.Status{
-		ErrorCode: commonpb.ErrorCode_Success,
-	}, nil
+func (ds *DataCoordFactory) UnsetIsImportingState(ctx context.Context, req *datapb.UnsetIsImportingStateRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	return merr.Success(), nil
 }
 
-func (ds *DataCoordFactory) MarkSegmentsDropped(context.Context, *datapb.MarkSegmentsDroppedRequest) (*commonpb.Status, error) {
-	return &commonpb.Status{
-		ErrorCode: commonpb.ErrorCode_Success,
-	}, nil
+func (ds *DataCoordFactory) MarkSegmentsDropped(ctx context.Context, req *datapb.MarkSegmentsDroppedRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	return merr.Success(), nil
 }
 
-func (ds *DataCoordFactory) BroadcastAlteredCollection(ctx context.Context, req *datapb.AlterCollectionRequest) (*commonpb.Status, error) {
-	return &commonpb.Status{
-		ErrorCode: commonpb.ErrorCode_Success,
-	}, nil
+func (ds *DataCoordFactory) BroadcastAlteredCollection(ctx context.Context, req *datapb.AlterCollectionRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	return merr.Success(), nil
 }
 
-func (ds *DataCoordFactory) CheckHealth(ctx context.Context, req *milvuspb.CheckHealthRequest) (*milvuspb.CheckHealthResponse, error) {
+func (ds *DataCoordFactory) CheckHealth(ctx context.Context, req *milvuspb.CheckHealthRequest, opts ...grpc.CallOption) (*milvuspb.CheckHealthResponse, error) {
 	return &milvuspb.CheckHealthResponse{
 		IsHealthy: true,
 	}, nil
 }
 
-func (ds *DataCoordFactory) GetSegmentInfo(ctx context.Context, req *datapb.GetSegmentInfoRequest) (*datapb.GetSegmentInfoResponse, error) {
+func (ds *DataCoordFactory) GetSegmentInfo(ctx context.Context, req *datapb.GetSegmentInfoRequest, opts ...grpc.CallOption) (*datapb.GetSegmentInfoResponse, error) {
 	if ds.GetSegmentInfosError {
 		return nil, errors.New("mock get segment info error")
 	}
@@ -370,15 +310,14 @@ func (ds *DataCoordFactory) GetSegmentInfo(ctx context.Context, req *datapb.GetS
 			segmentInfos = append(segmentInfos, segInfo)
 		} else {
 			segmentInfos = append(segmentInfos, &datapb.SegmentInfo{
-				ID: segmentID,
+				ID:           segmentID,
+				CollectionID: 1,
 			})
 		}
 	}
 	return &datapb.GetSegmentInfoResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
-		Infos: segmentInfos,
+		Status: merr.Success(),
+		Infos:  segmentInfos,
 	}, nil
 }
 
@@ -546,10 +485,9 @@ func NewDataFactory() *DataFactory {
 
 func GenRowData() (rawData []byte) {
 	const DIM = 2
-	const N = 1
 
 	// Float vector
-	var fvector = [DIM]float32{1, 2}
+	fvector := [DIM]float32{1, 2}
 	for _, ele := range fvector {
 		buf := make([]byte, 4)
 		common.Endian.PutUint32(buf, math.Float32bits(ele))
@@ -559,11 +497,11 @@ func GenRowData() (rawData []byte) {
 	// Binary vector
 	// Dimension of binary vector is 32
 	// size := 4,  = 32 / 8
-	var bvector = []byte{255, 255, 255, 0}
+	bvector := []byte{255, 255, 255, 0}
 	rawData = append(rawData, bvector...)
 
 	// Bool
-	var fieldBool = true
+	fieldBool := true
 	buf := new(bytes.Buffer)
 	if err := binary.Write(buf, common.Endian, fieldBool); err != nil {
 		panic(err)
@@ -612,7 +550,7 @@ func GenRowData() (rawData []byte) {
 	rawData = append(rawData, bfloat32.Bytes()...)
 
 	// float64
-	var datafloat64 = 2.2
+	datafloat64 := 2.2
 	bfloat64 := new(bytes.Buffer)
 	if err := binary.Write(bfloat64, common.Endian, datafloat64); err != nil {
 		panic(err)
@@ -624,7 +562,7 @@ func GenRowData() (rawData []byte) {
 
 func GenColumnData() (fieldsData []*schemapb.FieldData) {
 	// Float vector
-	var fVector = []float32{1, 2}
+	fVector := []float32{1, 2}
 	floatVectorData := &schemapb.FieldData{
 		Type:      schemapb.DataType_FloatVector,
 		FieldName: "float_vector_field",
@@ -769,7 +707,7 @@ func GenColumnData() (fieldsData []*schemapb.FieldData) {
 	}
 	fieldsData = append(fieldsData, floatFieldData)
 
-	//double
+	// double
 	doubleData := []float64{2.2}
 	doubleFieldData := &schemapb.FieldData{
 		Type:      schemapb.DataType_Double,
@@ -787,7 +725,7 @@ func GenColumnData() (fieldsData []*schemapb.FieldData) {
 	}
 	fieldsData = append(fieldsData, doubleFieldData)
 
-	//var char
+	// var char
 	varCharData := []string{"test"}
 	varCharFieldData := &schemapb.FieldData{
 		Type:      schemapb.DataType_VarChar,
@@ -809,7 +747,7 @@ func GenColumnData() (fieldsData []*schemapb.FieldData) {
 }
 
 func (df *DataFactory) GenMsgStreamInsertMsg(idx int, chanName string) *msgstream.InsertMsg {
-	var msg = &msgstream.InsertMsg{
+	msg := &msgstream.InsertMsg{
 		BaseMsg: msgstream.BaseMsg{
 			HashValues: []uint32{uint32(idx)},
 		},
@@ -837,7 +775,7 @@ func (df *DataFactory) GenMsgStreamInsertMsg(idx int, chanName string) *msgstrea
 }
 
 func (df *DataFactory) GenMsgStreamInsertMsgWithTs(idx int, chanName string, ts Timestamp) *msgstream.InsertMsg {
-	var msg = &msgstream.InsertMsg{
+	msg := &msgstream.InsertMsg{
 		BaseMsg: msgstream.BaseMsg{
 			HashValues:     []uint32{uint32(idx)},
 			BeginTimestamp: ts,
@@ -868,7 +806,7 @@ func (df *DataFactory) GenMsgStreamInsertMsgWithTs(idx int, chanName string, ts 
 
 func (df *DataFactory) GetMsgStreamTsInsertMsgs(n int, chanName string, ts Timestamp) (inMsgs []msgstream.TsMsg) {
 	for i := 0; i < n; i++ {
-		var msg = df.GenMsgStreamInsertMsgWithTs(i, chanName, ts)
+		msg := df.GenMsgStreamInsertMsgWithTs(i, chanName, ts)
 		var tsMsg msgstream.TsMsg = msg
 		inMsgs = append(inMsgs, tsMsg)
 	}
@@ -877,7 +815,7 @@ func (df *DataFactory) GetMsgStreamTsInsertMsgs(n int, chanName string, ts Times
 
 func (df *DataFactory) GetMsgStreamInsertMsgs(n int) (msgs []*msgstream.InsertMsg) {
 	for i := 0; i < n; i++ {
-		var msg = df.GenMsgStreamInsertMsg(i, "")
+		msg := df.GenMsgStreamInsertMsg(i, "")
 		msgs = append(msgs, msg)
 	}
 	return
@@ -889,7 +827,7 @@ func (df *DataFactory) GenMsgStreamDeleteMsg(pks []primaryKey, chanName string) 
 	for i := 0; i < len(pks); i++ {
 		timestamps[i] = Timestamp(i) + 1000
 	}
-	var msg = &msgstream.DeleteMsg{
+	msg := &msgstream.DeleteMsg{
 		BaseMsg: msgstream.BaseMsg{
 			HashValues: []uint32{uint32(idx)},
 		},
@@ -904,7 +842,7 @@ func (df *DataFactory) GenMsgStreamDeleteMsg(pks []primaryKey, chanName string) 
 			PartitionName:  "default",
 			PartitionID:    1,
 			ShardName:      chanName,
-			PrimaryKeys:    s.ParsePrimaryKeys2IDs(pks),
+			PrimaryKeys:    storage.ParsePrimaryKeys2IDs(pks),
 			Timestamps:     timestamps,
 			NumRows:        int64(len(pks)),
 		},
@@ -913,7 +851,7 @@ func (df *DataFactory) GenMsgStreamDeleteMsg(pks []primaryKey, chanName string) 
 }
 
 func (df *DataFactory) GenMsgStreamDeleteMsgWithTs(idx int, pks []primaryKey, chanName string, ts Timestamp) *msgstream.DeleteMsg {
-	var msg = &msgstream.DeleteMsg{
+	msg := &msgstream.DeleteMsg{
 		BaseMsg: msgstream.BaseMsg{
 			HashValues:     []uint32{uint32(idx)},
 			BeginTimestamp: ts,
@@ -931,7 +869,7 @@ func (df *DataFactory) GenMsgStreamDeleteMsgWithTs(idx int, pks []primaryKey, ch
 			PartitionID:    1,
 			CollectionID:   UniqueID(0),
 			ShardName:      chanName,
-			PrimaryKeys:    s.ParsePrimaryKeys2IDs(pks),
+			PrimaryKeys:    storage.ParsePrimaryKeys2IDs(pks),
 			Timestamps:     []Timestamp{ts},
 			NumRows:        int64(len(pks)),
 		},
@@ -953,7 +891,7 @@ func genFlowGraphInsertMsg(chanName string) flowGraphMsg {
 		},
 	}
 
-	var fgMsg = &flowGraphMsg{
+	fgMsg := &flowGraphMsg{
 		insertMessages: make([]*msgstream.InsertMsg, 0),
 		timeRange: TimeRange{
 			timestampMin: timeRange.timestampMin,
@@ -983,7 +921,7 @@ func genFlowGraphDeleteMsg(pks []primaryKey, chanName string) flowGraphMsg {
 		},
 	}
 
-	var fgMsg = &flowGraphMsg{
+	fgMsg := &flowGraphMsg{
 		insertMessages: make([]*msgstream.InsertMsg, 0),
 		timeRange: TimeRange{
 			timestampMin: timeRange.timestampMin,
@@ -999,12 +937,6 @@ func genFlowGraphDeleteMsg(pks []primaryKey, chanName string) flowGraphMsg {
 	return *fgMsg
 }
 
-// If id == 0, AllocID will return not successful status
-// If id == -1, AllocID will return err
-func (m *RootCoordFactory) setID(id UniqueID) {
-	m.ID = id // GOOSE TODO: random ID generator
-}
-
 func (m *RootCoordFactory) setCollectionID(id UniqueID) {
 	m.collectionID = id
 }
@@ -1013,11 +945,12 @@ func (m *RootCoordFactory) setCollectionName(name string) {
 	m.collectionName = name
 }
 
-func (m *RootCoordFactory) AllocID(ctx context.Context, in *rootcoordpb.AllocIDRequest) (*rootcoordpb.AllocIDResponse, error) {
+func (m *RootCoordFactory) AllocID(ctx context.Context, in *rootcoordpb.AllocIDRequest, opts ...grpc.CallOption) (*rootcoordpb.AllocIDResponse, error) {
 	resp := &rootcoordpb.AllocIDResponse{
 		Status: &commonpb.Status{
 			ErrorCode: commonpb.ErrorCode_UnexpectedError,
-		}}
+		},
+	}
 
 	if in.Count == 12 {
 		resp.Status.ErrorCode = commonpb.ErrorCode_Success
@@ -1031,7 +964,7 @@ func (m *RootCoordFactory) AllocID(ctx context.Context, in *rootcoordpb.AllocIDR
 	}
 
 	if m.ID == -1 {
-		return nil, errors.New(resp.Status.GetReason())
+		return nil, merr.Error(resp.Status)
 	}
 
 	resp.ID = m.ID
@@ -1040,7 +973,7 @@ func (m *RootCoordFactory) AllocID(ctx context.Context, in *rootcoordpb.AllocIDR
 	return resp, nil
 }
 
-func (m *RootCoordFactory) AllocTimestamp(ctx context.Context, in *rootcoordpb.AllocTimestampRequest) (*rootcoordpb.AllocTimestampResponse, error) {
+func (m *RootCoordFactory) AllocTimestamp(ctx context.Context, in *rootcoordpb.AllocTimestampRequest, opts ...grpc.CallOption) (*rootcoordpb.AllocTimestampResponse, error) {
 	resp := &rootcoordpb.AllocTimestampResponse{
 		Status:    &commonpb.Status{},
 		Timestamp: 1000,
@@ -1055,16 +988,15 @@ func (m *RootCoordFactory) AllocTimestamp(ctx context.Context, in *rootcoordpb.A
 	return resp, nil
 }
 
-func (m *RootCoordFactory) ShowCollections(ctx context.Context, in *milvuspb.ShowCollectionsRequest) (*milvuspb.ShowCollectionsResponse, error) {
+func (m *RootCoordFactory) ShowCollections(ctx context.Context, in *milvuspb.ShowCollectionsRequest, opts ...grpc.CallOption) (*milvuspb.ShowCollectionsResponse, error) {
 	resp := &milvuspb.ShowCollectionsResponse{
 		Status:          &commonpb.Status{},
 		CollectionNames: []string{m.collectionName},
 	}
 	return resp, nil
-
 }
 
-func (m *RootCoordFactory) DescribeCollectionInternal(ctx context.Context, in *milvuspb.DescribeCollectionRequest) (*milvuspb.DescribeCollectionResponse, error) {
+func (m *RootCoordFactory) DescribeCollectionInternal(ctx context.Context, in *milvuspb.DescribeCollectionRequest, opts ...grpc.CallOption) (*milvuspb.DescribeCollectionResponse, error) {
 	f := MetaFactory{}
 	meta := f.GetCollectionMeta(m.collectionID, m.collectionName, m.pkType)
 	resp := &milvuspb.DescribeCollectionResponse{
@@ -1079,8 +1011,7 @@ func (m *RootCoordFactory) DescribeCollectionInternal(ctx context.Context, in *m
 	}
 
 	if m.collectionID == -1 {
-		resp.Status.ErrorCode = commonpb.ErrorCode_Success
-		return resp, errors.New(resp.Status.GetReason())
+		return nil, merr.Error(resp.Status)
 	}
 
 	resp.CollectionID = m.collectionID
@@ -1090,12 +1021,10 @@ func (m *RootCoordFactory) DescribeCollectionInternal(ctx context.Context, in *m
 	return resp, nil
 }
 
-func (m *RootCoordFactory) ShowPartitions(ctx context.Context, req *milvuspb.ShowPartitionsRequest) (*milvuspb.ShowPartitionsResponse, error) {
+func (m *RootCoordFactory) ShowPartitions(ctx context.Context, req *milvuspb.ShowPartitionsRequest, opts ...grpc.CallOption) (*milvuspb.ShowPartitionsResponse, error) {
 	if m.ShowPartitionsErr {
 		return &milvuspb.ShowPartitionsResponse{
-			Status: &commonpb.Status{
-				ErrorCode: commonpb.ErrorCode_Success,
-			},
+			Status: merr.Success(),
 		}, fmt.Errorf("mock show partitions error")
 	}
 
@@ -1109,43 +1038,35 @@ func (m *RootCoordFactory) ShowPartitions(ctx context.Context, req *milvuspb.Sho
 	}
 
 	return &milvuspb.ShowPartitionsResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:         merr.Success(),
 		PartitionNames: m.ShowPartitionsNames,
 		PartitionIDs:   m.ShowPartitionsIDs,
 	}, nil
 }
 
-func (m *RootCoordFactory) GetComponentStates(ctx context.Context) (*milvuspb.ComponentStates, error) {
+func (m *RootCoordFactory) GetComponentStates(ctx context.Context, req *milvuspb.GetComponentStatesRequest, opts ...grpc.CallOption) (*milvuspb.ComponentStates, error) {
 	return &milvuspb.ComponentStates{
 		State:              &milvuspb.ComponentInfo{},
 		SubcomponentStates: make([]*milvuspb.ComponentInfo, 0),
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:             merr.Success(),
 	}, nil
 }
 
-func (m *RootCoordFactory) ReportImport(ctx context.Context, req *rootcoordpb.ImportResult) (*commonpb.Status, error) {
+func (m *RootCoordFactory) ReportImport(ctx context.Context, req *rootcoordpb.ImportResult, opts ...grpc.CallOption) (*commonpb.Status, error) {
 	if ctx != nil && ctx.Value(ctxKey{}) != nil {
 		if v := ctx.Value(ctxKey{}).(string); v == returnError {
 			return nil, fmt.Errorf("injected error")
 		}
 	}
 	if m.ReportImportErr {
-		return &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		}, fmt.Errorf("mock report import error")
+		return merr.Success(), fmt.Errorf("mock report import error")
 	}
 	if m.ReportImportNotSuccess {
 		return &commonpb.Status{
 			ErrorCode: commonpb.ErrorCode_UnexpectedError,
 		}, nil
 	}
-	return &commonpb.Status{
-		ErrorCode: commonpb.ErrorCode_Success,
-	}, nil
+	return merr.Success(), nil
 }
 
 // FailMessageStreamFactory mock MessageStreamFactory failure
@@ -1169,15 +1090,15 @@ func genInsertDataWithPKs(PKs [2]primaryKey, dataType schemapb.DataType) *Insert
 		for index, pk := range PKs {
 			values[index] = pk.(*int64PrimaryKey).Value
 		}
-		iD.Data[106].(*s.Int64FieldData).Data = values
+		iD.Data[106].(*storage.Int64FieldData).Data = values
 	case schemapb.DataType_VarChar:
 		values := make([]string, len(PKs))
 		for index, pk := range PKs {
 			values[index] = pk.(*varCharPrimaryKey).Value
 		}
-		iD.Data[109].(*s.StringFieldData).Data = values
+		iD.Data[109].(*storage.StringFieldData).Data = values
 	default:
-		//TODO::
+		// TODO::
 	}
 	return iD
 }
@@ -1195,134 +1116,137 @@ func genTestStat(meta *etcdpb.CollectionMeta) *storage.PrimaryKeyStats {
 
 func genInsertData() *InsertData {
 	return &InsertData{
-		Data: map[int64]s.FieldData{
-			0: &s.Int64FieldData{
+		Data: map[int64]storage.FieldData{
+			0: &storage.Int64FieldData{
 				Data: []int64{1, 2},
 			},
-			1: &s.Int64FieldData{
+			1: &storage.Int64FieldData{
 				Data: []int64{3, 4},
 			},
-			100: &s.FloatVectorFieldData{
+			100: &storage.FloatVectorFieldData{
 				Data: []float32{1.0, 6.0, 7.0, 8.0},
 				Dim:  2,
 			},
-			101: &s.BinaryVectorFieldData{
+			101: &storage.BinaryVectorFieldData{
 				Data: []byte{0, 255, 255, 255, 128, 128, 128, 0},
 				Dim:  32,
 			},
-			102: &s.BoolFieldData{
+			102: &storage.BoolFieldData{
 				Data: []bool{true, false},
 			},
-			103: &s.Int8FieldData{
+			103: &storage.Int8FieldData{
 				Data: []int8{5, 6},
 			},
-			104: &s.Int16FieldData{
+			104: &storage.Int16FieldData{
 				Data: []int16{7, 8},
 			},
-			105: &s.Int32FieldData{
+			105: &storage.Int32FieldData{
 				Data: []int32{9, 10},
 			},
-			106: &s.Int64FieldData{
+			106: &storage.Int64FieldData{
 				Data: []int64{1, 2},
 			},
-			107: &s.FloatFieldData{
+			107: &storage.FloatFieldData{
 				Data: []float32{2.333, 2.334},
 			},
-			108: &s.DoubleFieldData{
+			108: &storage.DoubleFieldData{
 				Data: []float64{3.333, 3.334},
 			},
-			109: &s.StringFieldData{
+			109: &storage.StringFieldData{
 				Data: []string{"test1", "test2"},
 			},
-		}}
+		},
+	}
 }
 
 func genEmptyInsertData() *InsertData {
 	return &InsertData{
-		Data: map[int64]s.FieldData{
-			0: &s.Int64FieldData{
+		Data: map[int64]storage.FieldData{
+			0: &storage.Int64FieldData{
 				Data: []int64{},
 			},
-			1: &s.Int64FieldData{
+			1: &storage.Int64FieldData{
 				Data: []int64{},
 			},
-			100: &s.FloatVectorFieldData{
+			100: &storage.FloatVectorFieldData{
 				Data: []float32{},
 				Dim:  2,
 			},
-			101: &s.BinaryVectorFieldData{
+			101: &storage.BinaryVectorFieldData{
 				Data: []byte{},
 				Dim:  32,
 			},
-			102: &s.BoolFieldData{
+			102: &storage.BoolFieldData{
 				Data: []bool{},
 			},
-			103: &s.Int8FieldData{
+			103: &storage.Int8FieldData{
 				Data: []int8{},
 			},
-			104: &s.Int16FieldData{
+			104: &storage.Int16FieldData{
 				Data: []int16{},
 			},
-			105: &s.Int32FieldData{
+			105: &storage.Int32FieldData{
 				Data: []int32{},
 			},
-			106: &s.Int64FieldData{
+			106: &storage.Int64FieldData{
 				Data: []int64{},
 			},
-			107: &s.FloatFieldData{
+			107: &storage.FloatFieldData{
 				Data: []float32{},
 			},
-			108: &s.DoubleFieldData{
+			108: &storage.DoubleFieldData{
 				Data: []float64{},
 			},
-			109: &s.StringFieldData{
+			109: &storage.StringFieldData{
 				Data: []string{},
 			},
-		}}
+		},
+	}
 }
 
 func genInsertDataWithExpiredTS() *InsertData {
 	return &InsertData{
-		Data: map[int64]s.FieldData{
-			0: &s.Int64FieldData{
+		Data: map[int64]storage.FieldData{
+			0: &storage.Int64FieldData{
 				Data: []int64{11, 22},
 			},
-			1: &s.Int64FieldData{
+			1: &storage.Int64FieldData{
 				Data: []int64{329749364736000000, 329500223078400000}, // 2009-11-10 23:00:00 +0000 UTC, 2009-10-31 23:00:00 +0000 UTC
 			},
-			100: &s.FloatVectorFieldData{
+			100: &storage.FloatVectorFieldData{
 				Data: []float32{1.0, 6.0, 7.0, 8.0},
 				Dim:  2,
 			},
-			101: &s.BinaryVectorFieldData{
+			101: &storage.BinaryVectorFieldData{
 				Data: []byte{0, 255, 255, 255, 128, 128, 128, 0},
 				Dim:  32,
 			},
-			102: &s.BoolFieldData{
+			102: &storage.BoolFieldData{
 				Data: []bool{true, false},
 			},
-			103: &s.Int8FieldData{
+			103: &storage.Int8FieldData{
 				Data: []int8{5, 6},
 			},
-			104: &s.Int16FieldData{
+			104: &storage.Int16FieldData{
 				Data: []int16{7, 8},
 			},
-			105: &s.Int32FieldData{
+			105: &storage.Int32FieldData{
 				Data: []int32{9, 10},
 			},
-			106: &s.Int64FieldData{
+			106: &storage.Int64FieldData{
 				Data: []int64{1, 2},
 			},
-			107: &s.FloatFieldData{
+			107: &storage.FloatFieldData{
 				Data: []float32{2.333, 2.334},
 			},
-			108: &s.DoubleFieldData{
+			108: &storage.DoubleFieldData{
 				Data: []float64{3.333, 3.334},
 			},
-			109: &s.StringFieldData{
+			109: &storage.StringFieldData{
 				Data: []string{"test1", "test2"},
 			},
-		}}
+		},
+	}
 }
 
 func genTimestamp() typeutil.Timestamp {
@@ -1331,6 +1255,6 @@ func genTimestamp() typeutil.Timestamp {
 	return tsoutil.ComposeTSByTime(gb, 0)
 }
 
-func genTestTickler() *tickler {
-	return newTickler(0, "", nil, nil, 0)
+func genTestTickler() *etcdTickler {
+	return newEtcdTickler(0, "", nil, nil, 0)
 }

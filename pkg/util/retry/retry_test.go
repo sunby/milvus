@@ -20,6 +20,8 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/lingdor/stackerror"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
 func TestDo(t *testing.T) {
@@ -130,5 +132,16 @@ func TestContextCancel(t *testing.T) {
 
 	err := Do(ctx, testFn)
 	assert.Error(t, err)
+	assert.True(t, merr.IsCanceledOrTimeout(err))
 	t.Log(err)
+}
+
+func TestWrap(t *testing.T) {
+	err := merr.WrapErrSegmentNotFound(1, "failed to get Segment")
+	assert.True(t, errors.Is(err, merr.ErrSegmentNotFound))
+	assert.True(t, IsRecoverable(err))
+	err2 := Unrecoverable(err)
+	fmt.Println(err2)
+	assert.True(t, errors.Is(err2, merr.ErrSegmentNotFound))
+	assert.False(t, IsRecoverable(err2))
 }

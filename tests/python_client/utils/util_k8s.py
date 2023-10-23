@@ -56,8 +56,8 @@ def wait_pods_ready(namespace, label_selector, expected_num=None, timeout=360):
     api_instance = client.CoreV1Api()
     try:
         all_pos_ready_flag = False
-        time_cnt = 0
-        while not all_pos_ready_flag and time_cnt < timeout:
+        t0 = time.time()
+        while not all_pos_ready_flag and time.time() - t0 < timeout:
             api_response = api_instance.list_namespaced_pod(namespace=namespace, label_selector=label_selector)
             all_pos_ready_flag = True
             if expected_num is not None and len(api_response.items) < expected_num:
@@ -74,8 +74,7 @@ def wait_pods_ready(namespace, label_selector, expected_num=None, timeout=360):
                             break
             if not all_pos_ready_flag:
                 log.debug("all pods are not ready, please wait")
-                time.sleep(30)
-                time_cnt += 30
+                time.sleep(5)
         if all_pos_ready_flag:
             log.info(f"all pods in namespace {namespace} with label {label_selector} are ready")
         else:
@@ -423,12 +422,14 @@ def find_activate_standby_coord_pod(namespace, release_name, coord_type):
     return activate_pod_list, standby_pod_list
 
 
-def reset_healthy_checker_after_standby_activated(namespace, release_name, coord_type, health_checkers, timeout=360):
+def record_time_when_standby_activated(namespace, release_name, coord_type, timeout=360):
     activate_pod_list_before, standby_pod_list_before = find_activate_standby_coord_pod(namespace, release_name,
                                                                                         coord_type)
     log.info(f"check standby switch: activate_pod_list_before {activate_pod_list_before}, "
              f"standby_pod_list_before {standby_pod_list_before}")
     standby_activated = False
+    activate_pod_list_after, standby_pod_list_after = find_activate_standby_coord_pod(namespace, release_name,
+                                                                                      coord_type)
     start_time = time.time()
     end_time = time.time()
     while not standby_activated and end_time - start_time < timeout:
@@ -443,14 +444,10 @@ def reset_healthy_checker_after_standby_activated(namespace, release_name, coord
                 break
         except Exception as e:
             log.error(f"Exception when check standby switch: {e}")
-        time.sleep(10)
+        time.sleep(1)
         end_time = time.time()
     if standby_activated:
-        time.sleep(30)
-        cc.reset_counting(health_checkers)
-        for k, v in health_checkers.items():
-            log.info("reset health checkers")
-            v.check_result()
+        log.info(f"Standby {coord_type} pod {activate_pod_list_after[0]} activated")
     else:
         log.info(f"Standby {coord_type} pod does not switch standby mode")
 

@@ -91,12 +91,70 @@ struct StorageConfig {
     std::string access_key_value = "minioadmin";
     std::string root_path = "files";
     std::string storage_type = "minio";
+    std::string cloud_provider = "aws";
     std::string iam_endpoint = "";
-    std::string log_level = "error";
+    std::string log_level = "warn";
     std::string region = "";
     bool useSSL = false;
     bool useIAM = false;
     bool useVirtualHost = false;
+    int64_t requestTimeoutMs = 3000;
 };
 
 }  // namespace milvus::storage
+
+template <>
+struct fmt::formatter<milvus::storage::EventType> : formatter<string_view> {
+    auto
+    format(milvus::storage::EventType c, format_context& ctx) const {
+        string_view name = "unknown";
+        switch (c) {
+            case milvus::storage::EventType::DescriptorEvent:
+                name = "DescriptorEvent";
+                break;
+            case milvus::storage::EventType::InsertEvent:
+                name = "InsertEvent";
+                break;
+            case milvus::storage::EventType::DeleteEvent:
+                name = "DeleteEvent";
+                break;
+            case milvus::storage::EventType::CreateCollectionEvent:
+                name = "CreateCollectionEvent";
+                break;
+            case milvus::storage::EventType::DropCollectionEvent:
+                name = "DropCollectionEvent";
+                break;
+            case milvus::storage::EventType::CreatePartitionEvent:
+                name = "CreatePartitionEvent";
+                break;
+            case milvus::storage::EventType::DropPartitionEvent:
+                name = "DropPartitionEvent";
+                break;
+            case milvus::storage::EventType::IndexFileEvent:
+                name = "IndexFileEvent";
+                break;
+            case milvus::storage::EventType::EventTypeEnd:
+                name = "EventTypeEnd";
+                break;
+        }
+        return formatter<string_view>::format(name, ctx);
+    }
+};
+
+template <>
+struct fmt::formatter<milvus::storage::StorageType> : formatter<string_view> {
+    auto
+    format(milvus::storage::StorageType c, format_context& ctx) const {
+        switch (c) {
+            case milvus::storage::StorageType::None:
+                return formatter<string_view>::format("None", ctx);
+            case milvus::storage::StorageType::Memory:
+                return formatter<string_view>::format("Memory", ctx);
+            case milvus::storage::StorageType::LocalDisk:
+                return formatter<string_view>::format("LocalDisk", ctx);
+            case milvus::storage::StorageType::Remote:
+                return formatter<string_view>::format("Remote", ctx);
+        }
+        return formatter<string_view>::format("unknown", ctx);
+    }
+};

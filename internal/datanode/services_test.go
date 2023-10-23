@@ -23,7 +23,9 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -35,6 +37,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	allocator2 "github.com/milvus-io/milvus/internal/allocator"
 	"github.com/milvus-io/milvus/internal/datanode/allocator"
+	"github.com/milvus-io/milvus/internal/datanode/broker"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/storage"
@@ -48,11 +51,13 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 )
 
 type DataNodeServicesSuite struct {
 	suite.Suite
 
+	broker  *broker.MockBroker
 	node    *DataNode
 	etcdCli *clientv3.Client
 	ctx     context.Context
@@ -96,6 +101,25 @@ func (s *DataNodeServicesSuite) SetupTest() {
 		}, nil).Maybe()
 	s.node.allocator = alloc
 
+	meta := NewMetaFactory().GetCollectionMeta(1, "collection", schemapb.DataType_Int64)
+	broker := broker.NewMockBroker(s.T())
+	broker.EXPECT().GetSegmentInfo(mock.Anything, mock.Anything).
+		Return([]*datapb.SegmentInfo{}, nil).Maybe()
+	broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+		Return(&milvuspb.DescribeCollectionResponse{
+			Status:    merr.Status(nil),
+			Schema:    meta.GetSchema(),
+			ShardsNum: common.DefaultShardsNum,
+		}, nil).Maybe()
+	broker.EXPECT().ReportTimeTick(mock.Anything, mock.Anything).Return(nil).Maybe()
+	broker.EXPECT().SaveBinlogPaths(mock.Anything, mock.Anything).Return(nil).Maybe()
+	broker.EXPECT().UpdateChannelCheckpoint(mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	broker.EXPECT().AllocTimestamp(mock.Anything, mock.Anything).Call.Return(tsoutil.ComposeTSByTime(time.Now(), 0),
+		func(_ context.Context, num uint32) uint32 { return num }, nil).Maybe()
+
+	s.broker = broker
+	s.node.broker = broker
+
 	err = s.node.Start()
 	s.Require().NoError(err)
 
@@ -104,8 +128,15 @@ func (s *DataNodeServicesSuite) SetupTest() {
 }
 
 func (s *DataNodeServicesSuite) TearDownTest() {
-	s.node.Stop()
-	s.node = nil
+	if s.broker != nil {
+		s.broker.AssertExpectations(s.T())
+		s.broker = nil
+	}
+
+	if s.node != nil {
+		s.node.Stop()
+		s.node = nil
+	}
 }
 
 func (s *DataNodeServicesSuite) TearDownSuite() {
@@ -121,25 +152,25 @@ func (s *DataNodeServicesSuite) TestNotInUseAPIs() {
 		s.Assert().True(merr.Ok(status))
 	})
 	s.Run("GetTimeTickChannel", func() {
-		_, err := s.node.GetTimeTickChannel(s.ctx)
+		_, err := s.node.GetTimeTickChannel(s.ctx, nil)
 		s.Assert().NoError(err)
 	})
 
 	s.Run("GetStatisticsChannel", func() {
-		_, err := s.node.GetStatisticsChannel(s.ctx)
+		_, err := s.node.GetStatisticsChannel(s.ctx, nil)
 		s.Assert().NoError(err)
 	})
 }
 
 func (s *DataNodeServicesSuite) TestGetComponentStates() {
-	resp, err := s.node.GetComponentStates(s.ctx)
+	resp, err := s.node.GetComponentStates(s.ctx, nil)
 	s.Assert().NoError(err)
 	s.Assert().True(merr.Ok(resp.GetStatus()))
 	s.Assert().Equal(common.NotRegisteredID, resp.State.NodeID)
 
 	s.node.SetSession(&sessionutil.Session{})
 	s.node.session.UpdateRegistered(true)
-	resp, err = s.node.GetComponentStates(context.Background())
+	resp, err = s.node.GetComponentStates(context.Background(), nil)
 	s.Assert().NoError(err)
 	s.Assert().True(merr.Ok(resp.GetStatus()))
 }
@@ -190,20 +221,22 @@ func (s *DataNodeServicesSuite) TestFlushSegments() {
 		FlushedSegmentIds:   []int64{},
 	}
 
-	err := s.node.flowgraphManager.addAndStart(s.node, vchan, nil, genTestTickler())
+	err := s.node.flowgraphManager.addAndStartWithEtcdTickler(s.node, vchan, nil, genTestTickler())
 	s.Require().NoError(err)
 
 	fgservice, ok := s.node.flowgraphManager.getFlowgraphService(dmChannelName)
 	s.Require().True(ok)
 
-	err = fgservice.channel.addSegment(addSegmentReq{
-		segType:     datapb.SegmentType_New,
-		segID:       0,
-		collID:      1,
-		partitionID: 1,
-		startPos:    &msgpb.MsgPosition{},
-		endPos:      &msgpb.MsgPosition{},
-	})
+	err = fgservice.channel.addSegment(
+		context.TODO(),
+		addSegmentReq{
+			segType:     datapb.SegmentType_New,
+			segID:       0,
+			collID:      1,
+			partitionID: 1,
+			startPos:    &msgpb.MsgPosition{},
+			endPos:      &msgpb.MsgPosition{},
+		})
 	s.Require().NoError(err)
 
 	req := &datapb.FlushSegmentsRequest{
@@ -317,9 +350,9 @@ func (s *DataNodeServicesSuite) TestShowConfigurations() {
 		Pattern: pattern,
 	}
 
-	//test closed server
+	// test closed server
 	node := &DataNode{}
-	node.SetSession(&sessionutil.Session{ServerID: 1})
+	node.SetSession(&sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 1}})
 	node.stateCode.Store(commonpb.StateCode_Abnormal)
 
 	resp, err := node.ShowConfigurations(s.ctx, req)
@@ -336,7 +369,7 @@ func (s *DataNodeServicesSuite) TestShowConfigurations() {
 
 func (s *DataNodeServicesSuite) TestGetMetrics() {
 	node := &DataNode{}
-	node.SetSession(&sessionutil.Session{ServerID: 1})
+	node.SetSession(&sessionutil.Session{SessionRaw: sessionutil.SessionRaw{ServerID: 1}})
 	node.flowgraphManager = newFlowgraphManager()
 	// server is closed
 	node.stateCode.Store(commonpb.StateCode_Abnormal)
@@ -378,9 +411,8 @@ func (s *DataNodeServicesSuite) TestImport() {
 		collectionID: 100,
 		pkType:       schemapb.DataType_Int64,
 	}
-	s.node.reportImportRetryTimes = 1 // save test time cost from 440s to 180s
-	s.Run("test normal", func() {
-		content := []byte(`{
+
+	content := []byte(`{
 		"rows":[
 			{"bool_field": true, "int8_field": 10, "int16_field": 101, "int32_field": 1001, "int64_field": 10001, "float32_field": 3.14, "float64_field": 1.56, "varChar_field": "hello world", "binary_vector_field": [254, 0, 254, 0], "float_vector_field": [1.1, 1.2]},
 			{"bool_field": false, "int8_field": 11, "int16_field": 102, "int32_field": 1002, "int64_field": 10002, "float32_field": 3.15, "float64_field": 2.56, "varChar_field": "hello world", "binary_vector_field": [253, 0, 253, 0], "float_vector_field": [2.1, 2.2]},
@@ -389,17 +421,25 @@ func (s *DataNodeServicesSuite) TestImport() {
 			{"bool_field": true, "int8_field": 14, "int16_field": 105, "int32_field": 1005, "int64_field": 10005, "float32_field": 3.18, "float64_field": 5.56, "varChar_field": "hello world", "binary_vector_field": [250, 0, 250, 0], "float_vector_field": [5.1, 5.2]}
 		]
 		}`)
+	filePath := filepath.Join(s.node.chunkManager.RootPath(), "rows_1.json")
+	err := s.node.chunkManager.Write(s.ctx, filePath, content)
+	s.Require().NoError(err)
 
+	s.node.reportImportRetryTimes = 1 // save test time cost from 440s to 180s
+	s.Run("test normal", func() {
+		defer func() {
+			s.TearDownTest()
+		}()
 		chName1 := "fake-by-dev-rootcoord-dml-testimport-1"
 		chName2 := "fake-by-dev-rootcoord-dml-testimport-2"
-		err := s.node.flowgraphManager.addAndStart(s.node, &datapb.VchannelInfo{
+		err := s.node.flowgraphManager.addAndStartWithEtcdTickler(s.node, &datapb.VchannelInfo{
 			CollectionID:        100,
 			ChannelName:         chName1,
 			UnflushedSegmentIds: []int64{},
 			FlushedSegmentIds:   []int64{},
 		}, nil, genTestTickler())
 		s.Require().Nil(err)
-		err = s.node.flowgraphManager.addAndStart(s.node, &datapb.VchannelInfo{
+		err = s.node.flowgraphManager.addAndStartWithEtcdTickler(s.node, &datapb.VchannelInfo{
 			CollectionID:        100,
 			ChannelName:         chName2,
 			UnflushedSegmentIds: []int64{},
@@ -412,9 +452,6 @@ func (s *DataNodeServicesSuite) TestImport() {
 		_, ok = s.node.flowgraphManager.getFlowgraphService(chName2)
 		s.Require().True(ok)
 
-		filePath := filepath.Join(s.node.chunkManager.RootPath(), "rows_1.json")
-		err = s.node.chunkManager.Write(s.ctx, filePath, content)
-		s.Require().Nil(err)
 		req := &datapb.ImportTaskRequest{
 			ImportTask: &datapb.ImportTask{
 				CollectionId: 100,
@@ -424,48 +461,48 @@ func (s *DataNodeServicesSuite) TestImport() {
 				RowBased:     true,
 			},
 		}
-		s.node.rootCoord.(*RootCoordFactory).ReportImportErr = true
-		_, err = s.node.Import(s.ctx, req)
-		s.Assert().NoError(err)
-		s.node.rootCoord.(*RootCoordFactory).ReportImportErr = false
 
-		s.node.rootCoord.(*RootCoordFactory).ReportImportNotSuccess = true
-		_, err = s.node.Import(context.WithValue(s.ctx, ctxKey{}, ""), req)
-		s.Assert().NoError(err)
-		s.node.rootCoord.(*RootCoordFactory).ReportImportNotSuccess = false
+		s.broker.EXPECT().ReportImport(mock.Anything, mock.Anything).Return(nil)
+		s.broker.EXPECT().UpdateSegmentStatistics(mock.Anything, mock.Anything).Return(nil)
+		s.broker.EXPECT().AssignSegmentID(mock.Anything, mock.Anything).
+			Return([]int64{10001}, nil)
+		s.broker.EXPECT().SaveImportSegment(mock.Anything, mock.Anything).Return(nil)
 
-		s.node.dataCoord.(*DataCoordFactory).AddSegmentError = true
-		_, err = s.node.Import(context.WithValue(s.ctx, ctxKey{}, ""), req)
-		s.Assert().NoError(err)
-		s.node.dataCoord.(*DataCoordFactory).AddSegmentError = false
-
-		s.node.dataCoord.(*DataCoordFactory).AddSegmentNotSuccess = true
-		_, err = s.node.Import(context.WithValue(s.ctx, ctxKey{}, ""), req)
-		s.Assert().NoError(err)
-		s.node.dataCoord.(*DataCoordFactory).AddSegmentNotSuccess = false
-
-		s.node.dataCoord.(*DataCoordFactory).AddSegmentEmpty = true
-		_, err = s.node.Import(context.WithValue(s.ctx, ctxKey{}, ""), req)
-		s.Assert().NoError(err)
-		s.node.dataCoord.(*DataCoordFactory).AddSegmentEmpty = false
+		s.node.Import(s.ctx, req)
 
 		stat, err := s.node.Import(context.WithValue(s.ctx, ctxKey{}, ""), req)
 		s.Assert().NoError(err)
 		s.Assert().True(merr.Ok(stat))
 		s.Assert().Equal("", stat.GetReason())
+
+		reqWithoutPartition := &datapb.ImportTaskRequest{
+			ImportTask: &datapb.ImportTask{
+				CollectionId: 100,
+				ChannelNames: []string{chName1, chName2},
+				Files:        []string{filePath},
+				RowBased:     true,
+			},
+		}
+		stat2, err := s.node.Import(context.WithValue(s.ctx, ctxKey{}, ""), reqWithoutPartition)
+		s.Assert().NoError(err)
+		s.Assert().False(merr.Ok(stat2))
 	})
 
 	s.Run("Test Import bad flow graph", func() {
+		s.SetupTest()
+		defer func() {
+			s.TearDownTest()
+		}()
 		chName1 := "fake-by-dev-rootcoord-dml-testimport-1-badflowgraph"
 		chName2 := "fake-by-dev-rootcoord-dml-testimport-2-badflowgraph"
-		err := s.node.flowgraphManager.addAndStart(s.node, &datapb.VchannelInfo{
+		err := s.node.flowgraphManager.addAndStartWithEtcdTickler(s.node, &datapb.VchannelInfo{
 			CollectionID:        100,
 			ChannelName:         chName1,
 			UnflushedSegmentIds: []int64{},
 			FlushedSegmentIds:   []int64{},
 		}, nil, genTestTickler())
 		s.Require().Nil(err)
-		err = s.node.flowgraphManager.addAndStart(s.node, &datapb.VchannelInfo{
+		err = s.node.flowgraphManager.addAndStartWithEtcdTickler(s.node, &datapb.VchannelInfo{
 			CollectionID:        999, // wrong collection ID.
 			ChannelName:         chName2,
 			UnflushedSegmentIds: []int64{},
@@ -478,19 +515,12 @@ func (s *DataNodeServicesSuite) TestImport() {
 		_, ok = s.node.flowgraphManager.getFlowgraphService(chName2)
 		s.Require().True(ok)
 
-		content := []byte(`{
-		"rows":[
-			{"bool_field": true, "int8_field": 10, "int16_field": 101, "int32_field": 1001, "int64_field": 10001, "float32_field": 3.14, "float64_field": 1.56, "varChar_field": "hello world", "binary_vector_field": [254, 0, 254, 0], "float_vector_field": [1.1, 1.2]},
-			{"bool_field": false, "int8_field": 11, "int16_field": 102, "int32_field": 1002, "int64_field": 10002, "float32_field": 3.15, "float64_field": 2.56, "varChar_field": "hello world", "binary_vector_field": [253, 0, 253, 0], "float_vector_field": [2.1, 2.2]},
-			{"bool_field": true, "int8_field": 12, "int16_field": 103, "int32_field": 1003, "int64_field": 10003, "float32_field": 3.16, "float64_field": 3.56, "varChar_field": "hello world", "binary_vector_field": [252, 0, 252, 0], "float_vector_field": [3.1, 3.2]},
-			{"bool_field": false, "int8_field": 13, "int16_field": 104, "int32_field": 1004, "int64_field": 10004, "float32_field": 3.17, "float64_field": 4.56, "varChar_field": "hello world", "binary_vector_field": [251, 0, 251, 0], "float_vector_field": [4.1, 4.2]},
-			{"bool_field": true, "int8_field": 14, "int16_field": 105, "int32_field": 1005, "int64_field": 10005, "float32_field": 3.18, "float64_field": 5.56, "varChar_field": "hello world", "binary_vector_field": [250, 0, 250, 0], "float_vector_field": [5.1, 5.2]}
-		]
-		}`)
+		s.broker.EXPECT().UpdateSegmentStatistics(mock.Anything, mock.Anything).Return(nil)
+		s.broker.EXPECT().ReportImport(mock.Anything, mock.Anything).Return(nil)
+		s.broker.EXPECT().AssignSegmentID(mock.Anything, mock.Anything).
+			Return([]int64{10001}, nil)
+		s.broker.EXPECT().SaveImportSegment(mock.Anything, mock.Anything).Return(nil)
 
-		filePath := filepath.Join(s.node.chunkManager.RootPath(), "rows_1.json")
-		err = s.node.chunkManager.Write(s.ctx, filePath, content)
-		s.Assert().NoError(err)
 		req := &datapb.ImportTaskRequest{
 			ImportTask: &datapb.ImportTask{
 				CollectionId: 100,
@@ -505,25 +535,19 @@ func (s *DataNodeServicesSuite) TestImport() {
 		s.Assert().True(merr.Ok(stat))
 		s.Assert().Equal("", stat.GetReason())
 	})
-	s.Run("Test Import report import error", func() {
-		s.node.rootCoord = &RootCoordFactory{
-			collectionID:    100,
-			pkType:          schemapb.DataType_Int64,
-			ReportImportErr: true,
-		}
-		content := []byte(`{
-		"rows":[
-			{"bool_field": true, "int8_field": 10, "int16_field": 101, "int32_field": 1001, "int64_field": 10001, "float32_field": 3.14, "float64_field": 1.56, "varChar_field": "hello world", "binary_vector_field": [254, 0, 254, 0], "float_vector_field": [1.1, 1.2]},
-			{"bool_field": false, "int8_field": 11, "int16_field": 102, "int32_field": 1002, "int64_field": 10002, "float32_field": 3.15, "float64_field": 2.56, "varChar_field": "hello world", "binary_vector_field": [253, 0, 253, 0], "float_vector_field": [2.1, 2.2]},
-			{"bool_field": true, "int8_field": 12, "int16_field": 103, "int32_field": 1003, "int64_field": 10003, "float32_field": 3.16, "float64_field": 3.56, "varChar_field": "hello world", "binary_vector_field": [252, 0, 252, 0], "float_vector_field": [3.1, 3.2]},
-			{"bool_field": false, "int8_field": 13, "int16_field": 104, "int32_field": 1004, "int64_field": 10004, "float32_field": 3.17, "float64_field": 4.56, "varChar_field": "hello world", "binary_vector_field": [251, 0, 251, 0], "float_vector_field": [4.1, 4.2]},
-			{"bool_field": true, "int8_field": 14, "int16_field": 105, "int32_field": 1005, "int64_field": 10005, "float32_field": 3.18, "float64_field": 5.56, "varChar_field": "hello world", "binary_vector_field": [250, 0, 250, 0], "float_vector_field": [5.1, 5.2]}
-		]
-		}`)
+	s.Run("test_Import_report_import_error", func() {
+		s.SetupTest()
+		s.node.reportImportRetryTimes = 1
+		defer func() {
+			s.TearDownTest()
+		}()
 
-		filePath := filepath.Join(s.node.chunkManager.RootPath(), "rows_1.json")
-		err := s.node.chunkManager.Write(s.ctx, filePath, content)
-		s.Assert().NoError(err)
+		s.broker.EXPECT().AssignSegmentID(mock.Anything, mock.Anything).
+			Return([]int64{10001}, nil)
+		s.broker.EXPECT().ReportImport(mock.Anything, mock.Anything).Return(errors.New("mocked"))
+		s.broker.EXPECT().UpdateSegmentStatistics(mock.Anything, mock.Anything).Return(nil)
+		s.broker.EXPECT().SaveImportSegment(mock.Anything, mock.Anything).Return(nil)
+
 		req := &datapb.ImportTaskRequest{
 			ImportTask: &datapb.ImportTask{
 				CollectionId: 100,
@@ -538,8 +562,25 @@ func (s *DataNodeServicesSuite) TestImport() {
 		s.Assert().False(merr.Ok(stat))
 	})
 
-	s.Run("Test Import error", func() {
-		s.node.rootCoord = &RootCoordFactory{collectionID: -1}
+	s.Run("test_import_error", func() {
+		s.SetupTest()
+		defer func() {
+			s.TearDownTest()
+		}()
+		s.broker.ExpectedCalls = nil
+		s.broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+			Return(&milvuspb.DescribeCollectionResponse{
+				Status: merr.Status(merr.WrapErrCollectionNotFound("collection")),
+			}, nil)
+		s.broker.EXPECT().GetSegmentInfo(mock.Anything, mock.Anything).
+			Return([]*datapb.SegmentInfo{}, nil).Maybe()
+		s.broker.EXPECT().ReportTimeTick(mock.Anything, mock.Anything).Return(nil).Maybe()
+		s.broker.EXPECT().SaveBinlogPaths(mock.Anything, mock.Anything).Return(nil).Maybe()
+		s.broker.EXPECT().UpdateChannelCheckpoint(mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+		s.broker.EXPECT().AllocTimestamp(mock.Anything, mock.Anything).Call.Return(tsoutil.ComposeTSByTime(time.Now(), 0),
+			func(_ context.Context, num uint32) uint32 { return num }, nil).Maybe()
+
+		s.broker.EXPECT().ReportImport(mock.Anything, mock.Anything).Return(nil)
 		req := &datapb.ImportTaskRequest{
 			ImportTask: &datapb.ImportTask{
 				CollectionId: 100,
@@ -559,42 +600,6 @@ func (s *DataNodeServicesSuite) TestImport() {
 		s.Assert().NoError(err)
 		s.Assert().False(merr.Ok(stat))
 	})
-
-	s.Run("test get partitions", func() {
-		s.node.rootCoord = &RootCoordFactory{
-			ShowPartitionsErr: true,
-		}
-
-		_, err := s.node.getPartitions(context.Background(), "", "")
-		s.Assert().Error(err)
-
-		s.node.rootCoord = &RootCoordFactory{
-			ShowPartitionsNotSuccess: true,
-		}
-
-		_, err = s.node.getPartitions(context.Background(), "", "")
-		s.Assert().Error(err)
-
-		s.node.rootCoord = &RootCoordFactory{
-			ShowPartitionsNames: []string{"a", "b"},
-			ShowPartitionsIDs:   []int64{1},
-		}
-
-		_, err = s.node.getPartitions(context.Background(), "", "")
-		s.Assert().Error(err)
-
-		s.node.rootCoord = &RootCoordFactory{
-			ShowPartitionsNames: []string{"a", "b"},
-			ShowPartitionsIDs:   []int64{1, 2},
-		}
-
-		partitions, err := s.node.getPartitions(context.Background(), "", "")
-		s.Assert().NoError(err)
-		s.Assert().Contains(partitions, "a")
-		s.Assert().Equal(int64(1), partitions["a"])
-		s.Assert().Contains(partitions, "b")
-		s.Assert().Equal(int64(2), partitions["b"])
-	})
 }
 
 func (s *DataNodeServicesSuite) TestAddImportSegment() {
@@ -606,14 +611,14 @@ func (s *DataNodeServicesSuite) TestAddImportSegment() {
 
 		chName1 := "fake-by-dev-rootcoord-dml-testaddsegment-1"
 		chName2 := "fake-by-dev-rootcoord-dml-testaddsegment-2"
-		err := s.node.flowgraphManager.addAndStart(s.node, &datapb.VchannelInfo{
+		err := s.node.flowgraphManager.addAndStartWithEtcdTickler(s.node, &datapb.VchannelInfo{
 			CollectionID:        100,
 			ChannelName:         chName1,
 			UnflushedSegmentIds: []int64{},
 			FlushedSegmentIds:   []int64{},
 		}, nil, genTestTickler())
 		s.Require().NoError(err)
-		err = s.node.flowgraphManager.addAndStart(s.node, &datapb.VchannelInfo{
+		err = s.node.flowgraphManager.addAndStartWithEtcdTickler(s.node, &datapb.VchannelInfo{
 			CollectionID:        100,
 			ChannelName:         chName2,
 			UnflushedSegmentIds: []int64{},
@@ -651,13 +656,13 @@ func (s *DataNodeServicesSuite) TestAddImportSegment() {
 		s.Assert().False(merr.Ok(resp.GetStatus()))
 		// s.Assert().Equal(merr.Code(merr.ErrChannelNotFound), stat.GetStatus().GetCode())
 	})
-
 }
 
 func (s *DataNodeServicesSuite) TestSyncSegments() {
 	chanName := "fake-by-dev-rootcoord-dml-test-syncsegments-1"
 
-	err := s.node.flowgraphManager.addAndStart(s.node, &datapb.VchannelInfo{
+	err := s.node.flowgraphManager.addAndStartWithEtcdTickler(s.node, &datapb.VchannelInfo{
+		CollectionID:        1,
 		ChannelName:         chanName,
 		UnflushedSegmentIds: []int64{},
 		FlushedSegmentIds:   []int64{100, 200, 300},
@@ -666,9 +671,9 @@ func (s *DataNodeServicesSuite) TestSyncSegments() {
 	fg, ok := s.node.flowgraphManager.getFlowgraphService(chanName)
 	s.Assert().True(ok)
 
-	s1 := Segment{segmentID: 100}
-	s2 := Segment{segmentID: 200}
-	s3 := Segment{segmentID: 300}
+	s1 := Segment{segmentID: 100, collectionID: 1}
+	s2 := Segment{segmentID: 200, collectionID: 1}
+	s3 := Segment{segmentID: 300, collectionID: 1}
 	s1.setType(datapb.SegmentType_Flushed)
 	s2.setType(datapb.SegmentType_Flushed)
 	s3.setType(datapb.SegmentType_Flushed)
@@ -701,13 +706,7 @@ func (s *DataNodeServicesSuite) TestSyncSegments() {
 			CompactedTo:   102,
 			NumOfRows:     100,
 		}
-		cancelCtx, cancel := context.WithCancel(context.Background())
-		cancel()
-		status, err := s.node.SyncSegments(cancelCtx, req)
-		s.Assert().NoError(err)
-		s.Assert().False(merr.Ok(status))
-
-		status, err = s.node.SyncSegments(s.ctx, req)
+		status, err := s.node.SyncSegments(s.ctx, req)
 		s.Assert().NoError(err)
 		s.Assert().True(merr.Ok(status))
 
@@ -755,38 +754,44 @@ func (s *DataNodeServicesSuite) TestResendSegmentStats() {
 		FlushedSegmentIds:   []int64{},
 	}
 
-	err := s.node.flowgraphManager.addAndStart(s.node, vChan, nil, genTestTickler())
+	err := s.node.flowgraphManager.addAndStartWithEtcdTickler(s.node, vChan, nil, genTestTickler())
 	s.Require().Nil(err)
 
 	fgService, ok := s.node.flowgraphManager.getFlowgraphService(dmChannelName)
 	s.Assert().True(ok)
 
-	err = fgService.channel.addSegment(addSegmentReq{
-		segType:     datapb.SegmentType_New,
-		segID:       0,
-		collID:      1,
-		partitionID: 1,
-		startPos:    &msgpb.MsgPosition{},
-		endPos:      &msgpb.MsgPosition{},
-	})
+	err = fgService.channel.addSegment(
+		context.TODO(),
+		addSegmentReq{
+			segType:     datapb.SegmentType_New,
+			segID:       0,
+			collID:      1,
+			partitionID: 1,
+			startPos:    &msgpb.MsgPosition{},
+			endPos:      &msgpb.MsgPosition{},
+		})
 	s.Assert().Nil(err)
-	err = fgService.channel.addSegment(addSegmentReq{
-		segType:     datapb.SegmentType_New,
-		segID:       1,
-		collID:      1,
-		partitionID: 2,
-		startPos:    &msgpb.MsgPosition{},
-		endPos:      &msgpb.MsgPosition{},
-	})
+	err = fgService.channel.addSegment(
+		context.TODO(),
+		addSegmentReq{
+			segType:     datapb.SegmentType_New,
+			segID:       1,
+			collID:      1,
+			partitionID: 2,
+			startPos:    &msgpb.MsgPosition{},
+			endPos:      &msgpb.MsgPosition{},
+		})
 	s.Assert().Nil(err)
-	err = fgService.channel.addSegment(addSegmentReq{
-		segType:     datapb.SegmentType_New,
-		segID:       2,
-		collID:      1,
-		partitionID: 3,
-		startPos:    &msgpb.MsgPosition{},
-		endPos:      &msgpb.MsgPosition{},
-	})
+	err = fgService.channel.addSegment(
+		context.TODO(),
+		addSegmentReq{
+			segType:     datapb.SegmentType_New,
+			segID:       2,
+			collID:      1,
+			partitionID: 3,
+			startPos:    &msgpb.MsgPosition{},
+			endPos:      &msgpb.MsgPosition{},
+		})
 	s.Assert().Nil(err)
 
 	req := &datapb.ResendSegmentStatsRequest{
@@ -799,11 +804,55 @@ func (s *DataNodeServicesSuite) TestResendSegmentStats() {
 	resp, err := s.node.ResendSegmentStats(s.ctx, req)
 	s.Assert().NoError(err)
 	s.Assert().True(merr.Ok(resp.GetStatus()))
-	s.Assert().ElementsMatch([]UniqueID{0, 1, 2}, resp.GetSegResent())
+	s.Assert().Empty(resp.GetSegResent())
 
 	// Duplicate call.
 	resp, err = s.node.ResendSegmentStats(s.ctx, req)
 	s.Assert().NoError(err)
 	s.Assert().True(merr.Ok(resp.GetStatus()))
-	s.Assert().ElementsMatch([]UniqueID{0, 1, 2}, resp.GetSegResent())
+	s.Assert().Empty(resp.GetSegResent())
+}
+
+func (s *DataNodeServicesSuite) TestFlushChannels() {
+	dmChannelName := "fake-by-dev-rootcoord-dml-channel-TestFlushChannels"
+
+	vChan := &datapb.VchannelInfo{
+		CollectionID:        1,
+		ChannelName:         dmChannelName,
+		UnflushedSegmentIds: []int64{},
+		FlushedSegmentIds:   []int64{},
+	}
+
+	err := s.node.flowgraphManager.addAndStartWithEtcdTickler(s.node, vChan, nil, genTestTickler())
+	s.Require().NoError(err)
+
+	fgService, ok := s.node.flowgraphManager.getFlowgraphService(dmChannelName)
+	s.Require().True(ok)
+
+	flushTs := Timestamp(100)
+
+	req := &datapb.FlushChannelsRequest{
+		Base: &commonpb.MsgBase{
+			TargetID: s.node.GetSession().ServerID,
+		},
+		FlushTs:  flushTs,
+		Channels: []string{dmChannelName},
+	}
+
+	status, err := s.node.FlushChannels(s.ctx, req)
+	s.Assert().NoError(err)
+	s.Assert().True(merr.Ok(status))
+
+	s.Assert().True(fgService.channel.getFlushTs() == flushTs)
+}
+
+func (s *DataNodeServicesSuite) TestRPCWatch() {
+	ctx := context.Background()
+	status, err := s.node.NotifyChannelOperation(ctx, nil)
+	s.NoError(err)
+	s.NotNil(status)
+
+	resp, err := s.node.CheckChannelOperationProgress(ctx, nil)
+	s.NoError(err)
+	s.NotNil(resp)
 }

@@ -27,7 +27,6 @@ kafka:
 etcd:
   replicaCount: 3
   image:
-    debug: true
     repository: milvusdb/etcd
     tag: 3.5.5-r2  
 minio:
@@ -39,3 +38,9 @@ extraConfigFiles:
   user.yaml: |+
     mq:
      type: natsmq
+    dataCoord:
+      compaction:
+        indexBasedCompaction: false
+    indexCoord:
+      scheduler:
+        interval: 100        

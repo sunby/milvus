@@ -24,6 +24,8 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
+	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/pkg/mq/msgdispatcher"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
@@ -36,13 +38,14 @@ type mockMsgStreamFactory struct {
 	NewMsgStreamNoError bool
 }
 
-var _ msgstream.Factory = &mockMsgStreamFactory{}
+var (
+	_ msgstream.Factory  = &mockMsgStreamFactory{}
+	_ dependency.Factory = (*mockMsgStreamFactory)(nil)
+)
 
-func (mm *mockMsgStreamFactory) Init(params *paramtable.ComponentParam) error {
-	if !mm.InitReturnNil {
-		return errors.New("Init Error")
-	}
-	return nil
+func (mm *mockMsgStreamFactory) Init(params *paramtable.ComponentParam) {}
+func (mm *mockMsgStreamFactory) NewPersistentStorageChunkManager(ctx context.Context) (storage.ChunkManager, error) {
+	return nil, nil
 }
 
 func (mm *mockMsgStreamFactory) NewMsgStream(ctx context.Context) (msgstream.MsgStream, error) {
@@ -60,8 +63,7 @@ func (mm *mockMsgStreamFactory) NewMsgStreamDisposer(ctx context.Context) func([
 	return nil
 }
 
-type mockTtMsgStream struct {
-}
+type mockTtMsgStream struct{}
 
 func (mtm *mockTtMsgStream) Close() {}
 
@@ -71,7 +73,8 @@ func (mtm *mockTtMsgStream) Chan() <-chan *msgstream.MsgPack {
 
 func (mtm *mockTtMsgStream) AsProducer(channels []string) {}
 
-func (mtm *mockTtMsgStream) AsConsumer(channels []string, subName string, position mqwrapper.SubscriptionInitialPosition) {
+func (mtm *mockTtMsgStream) AsConsumer(ctx context.Context, channels []string, subName string, position mqwrapper.SubscriptionInitialPosition) error {
+	return nil
 }
 
 func (mtm *mockTtMsgStream) SetRepackFunc(repackFunc msgstream.RepackFunc) {}
@@ -88,7 +91,7 @@ func (mtm *mockTtMsgStream) Broadcast(*msgstream.MsgPack) (map[string][]msgstrea
 	return nil, nil
 }
 
-func (mtm *mockTtMsgStream) Seek(offset []*msgpb.MsgPosition) error {
+func (mtm *mockTtMsgStream) Seek(ctx context.Context, offset []*msgpb.MsgPosition) error {
 	return nil
 }
 
@@ -100,9 +103,12 @@ func (mtm *mockTtMsgStream) CheckTopicValid(channel string) error {
 	return nil
 }
 
+func (mtm *mockTtMsgStream) EnableProduce(can bool) {
+}
+
 func TestNewDmInputNode(t *testing.T) {
 	client := msgdispatcher.NewClient(&mockMsgStreamFactory{}, typeutil.DataNodeRole, paramtable.GetNodeID())
-	_, err := newDmInputNode(client, new(msgpb.MsgPosition), &nodeConfig{
+	_, err := newDmInputNode(context.Background(), client, new(msgpb.MsgPosition), &nodeConfig{
 		msFactory:    &mockMsgStreamFactory{},
 		vChannelName: "mock_vchannel_0",
 	})

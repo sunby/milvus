@@ -31,12 +31,14 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"go.uber.org/atomic"
+	"google.golang.org/grpc"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/datanode/allocator"
+	"github.com/milvus-io/milvus/internal/datanode/broker"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/etcdpb"
 	"github.com/milvus-io/milvus/internal/storage"
@@ -44,6 +46,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/internal/util/flowgraph"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/retry"
 	"github.com/milvus-io/milvus/pkg/util/tsoutil"
@@ -79,14 +82,19 @@ func TestFlowGraphInsertBufferNodeCreate(t *testing.T) {
 	require.NoError(t, err)
 	Params.Save("etcd.rootPath", "/test/datanode/root")
 
-	Factory := &MetaFactory{}
-	collMeta := Factory.GetCollectionMeta(UniqueID(0), "coll1", schemapb.DataType_Int64)
-	mockRootCoord := &RootCoordFactory{
-		pkType: schemapb.DataType_Int64,
-	}
+	collMeta := NewMetaFactory().GetCollectionMeta(UniqueID(0), "coll1", schemapb.DataType_Int64)
+	broker := broker.NewMockBroker(t)
+	broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+		Return(&milvuspb.DescribeCollectionResponse{
+			Status: merr.Status(nil),
+			Schema: collMeta.GetSchema(),
+		}, nil).Maybe()
+	broker.EXPECT().ReportTimeTick(mock.Anything, mock.Anything).
+		Return(nil).Maybe()
 
-	channel := newChannel(insertChannelName, collMeta.ID, collMeta.Schema, mockRootCoord, cm)
+	channel := newChannel(insertChannelName, collMeta.ID, collMeta.Schema, broker, cm)
 	err = channel.addSegment(
+		context.TODO(),
 		addSegmentReq{
 			segType:     datapb.SegmentType_New,
 			segID:       1,
@@ -116,9 +124,8 @@ func TestFlowGraphInsertBufferNodeCreate(t *testing.T) {
 		delBufHeap: &PriorityQueue{},
 	}
 
-	dataCoord := &DataCoordFactory{}
-	atimeTickSender := newTimeTickSender(dataCoord, 0)
-	iBNode, err := newInsertBufferNode(ctx, collMeta.ID, delBufManager, flushChan, resendTTChan, fm, newCache(), c, atimeTickSender)
+	atimeTickSender := newTimeTickSender(broker, 0)
+	iBNode, err := newInsertBufferNode(ctx, flushChan, resendTTChan, delBufManager, fm, newCache(), atimeTickSender, c)
 	assert.NotNil(t, iBNode)
 	require.NoError(t, err)
 }
@@ -141,12 +148,18 @@ func TestFlowGraphInsertBufferNode_Operate(t *testing.T) {
 			in          []Msg
 			description string
 		}{
-			{[]Msg{},
-				"Invalid input length == 0"},
-			{[]Msg{&flowGraphMsg{}, &flowGraphMsg{}, &flowGraphMsg{}},
-				"Invalid input length == 3"},
-			{[]Msg{&mockMsg{}},
-				"Invalid input length == 1 but input message is not flowGraphMsg"},
+			{
+				[]Msg{},
+				"Invalid input length == 0",
+			},
+			{
+				[]Msg{&flowGraphMsg{}, &flowGraphMsg{}, &flowGraphMsg{}},
+				"Invalid input length == 3",
+			},
+			{
+				[]Msg{&mockMsg{}},
+				"Invalid input length == 1 but input message is not flowGraphMsg",
+			},
 		}
 
 		for _, test := range invalidInTests {
@@ -171,13 +184,19 @@ func TestFlowGraphInsertBufferNode_Operate(t *testing.T) {
 
 	Factory := &MetaFactory{}
 	collMeta := Factory.GetCollectionMeta(UniqueID(0), "coll1", schemapb.DataType_Int64)
-	mockRootCoord := &RootCoordFactory{
-		pkType: schemapb.DataType_Int64,
-	}
+	broker := broker.NewMockBroker(t)
+	broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+		Return(&milvuspb.DescribeCollectionResponse{
+			Status: merr.Status(nil),
+			Schema: collMeta.GetSchema(),
+		}, nil).Maybe()
+	broker.EXPECT().ReportTimeTick(mock.Anything, mock.Anything).
+		Return(nil).Maybe()
 
-	channel := newChannel(insertChannelName, collMeta.ID, collMeta.Schema, mockRootCoord, cm)
+	channel := newChannel(insertChannelName, collMeta.ID, collMeta.Schema, broker, cm)
 
 	err = channel.addSegment(
+		context.TODO(),
 		addSegmentReq{
 			segType:     datapb.SegmentType_New,
 			segID:       1,
@@ -210,9 +229,8 @@ func TestFlowGraphInsertBufferNode_Operate(t *testing.T) {
 		delBufHeap: &PriorityQueue{},
 	}
 
-	dataCoord := &DataCoordFactory{}
-	atimeTickSender := newTimeTickSender(dataCoord, 0)
-	iBNode, err := newInsertBufferNode(ctx, collMeta.ID, delBufManager, flushChan, resendTTChan, fm, newCache(), c, atimeTickSender)
+	atimeTickSender := newTimeTickSender(broker, 0)
+	iBNode, err := newInsertBufferNode(ctx, flushChan, resendTTChan, delBufManager, fm, newCache(), atimeTickSender, c)
 	require.NoError(t, err)
 
 	flushChan <- flushMsg{
@@ -332,21 +350,25 @@ func TestFlowGraphInsertBufferNode_AutoFlush(t *testing.T) {
 	require.NoError(t, err)
 	Params.Save("etcd.rootPath", "/test/datanode/root")
 
-	Factory := &MetaFactory{}
-	collMeta := Factory.GetCollectionMeta(UniqueID(0), "coll1", schemapb.DataType_Int64)
-	dataFactory := NewDataFactory()
+	collMeta := NewMetaFactory().GetCollectionMeta(UniqueID(0), "coll1", schemapb.DataType_Int64)
+	broker := broker.NewMockBroker(t)
+	broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+		Return(&milvuspb.DescribeCollectionResponse{
+			Status: merr.Status(nil),
+			Schema: collMeta.GetSchema(),
+		}, nil).Maybe()
+	broker.EXPECT().ReportTimeTick(mock.Anything, mock.Anything).
+		Return(nil).Maybe()
 
-	mockRootCoord := &RootCoordFactory{
-		pkType: schemapb.DataType_Int64,
-	}
+	dataFactory := NewDataFactory()
 
 	channel := &ChannelMeta{
 		collectionID: collMeta.ID,
 		segments:     make(map[UniqueID]*Segment),
-		needToSync:   atomic.NewBool(false),
+		isHighMemory: atomic.NewBool(false),
 	}
 
-	channel.metaService = newMetaService(mockRootCoord, collMeta.ID)
+	channel.metaService = newMetaService(broker, collMeta.ID)
 
 	factory := dependency.NewDefaultFactory(true)
 
@@ -378,6 +400,7 @@ func TestFlowGraphInsertBufferNode_AutoFlush(t *testing.T) {
 	flushChan := make(chan flushMsg, 100)
 	resendTTChan := make(chan resendTTMsg, 100)
 	c := &nodeConfig{
+		collectionID: collMeta.GetID(),
 		channel:      channel,
 		msFactory:    factory,
 		allocator:    alloc,
@@ -387,9 +410,8 @@ func TestFlowGraphInsertBufferNode_AutoFlush(t *testing.T) {
 		channel:    channel,
 		delBufHeap: &PriorityQueue{},
 	}
-	dataCoord := &DataCoordFactory{}
-	atimeTickSender := newTimeTickSender(dataCoord, 0)
-	iBNode, err := newInsertBufferNode(ctx, collMeta.ID, delBufManager, flushChan, resendTTChan, fm, newCache(), c, atimeTickSender)
+	atimeTickSender := newTimeTickSender(broker, 0)
+	iBNode, err := newInsertBufferNode(ctx, flushChan, resendTTChan, delBufManager, fm, newCache(), atimeTickSender, c)
 	require.NoError(t, err)
 
 	// Auto flush number of rows set to 2
@@ -488,7 +510,6 @@ func TestFlowGraphInsertBufferNode_AutoFlush(t *testing.T) {
 			//     // assert.Equal(t, int64(1), iBNode.insertBuffer.size(UniqueID(i+1)))
 			// }
 		}
-
 	})
 
 	t.Run("Auto with manual flush", func(t *testing.T) {
@@ -566,7 +587,6 @@ func TestFlowGraphInsertBufferNode_AutoFlush(t *testing.T) {
 				assert.Equal(t, false, pack.flushed)
 			}
 		}
-
 	})
 }
 
@@ -579,21 +599,25 @@ func TestInsertBufferNodeRollBF(t *testing.T) {
 	require.NoError(t, err)
 	Params.Save("etcd.rootPath", "/test/datanode/root")
 
-	Factory := &MetaFactory{}
-	collMeta := Factory.GetCollectionMeta(UniqueID(0), "coll1", schemapb.DataType_Int64)
-	dataFactory := NewDataFactory()
+	collMeta := NewMetaFactory().GetCollectionMeta(UniqueID(0), "coll1", schemapb.DataType_Int64)
+	broker := broker.NewMockBroker(t)
+	broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+		Return(&milvuspb.DescribeCollectionResponse{
+			Status: merr.Status(nil),
+			Schema: collMeta.GetSchema(),
+		}, nil).Maybe()
+	broker.EXPECT().ReportTimeTick(mock.Anything, mock.Anything).
+		Return(nil).Maybe()
 
-	mockRootCoord := &RootCoordFactory{
-		pkType: schemapb.DataType_Int64,
-	}
+	dataFactory := NewDataFactory()
 
 	channel := &ChannelMeta{
 		collectionID: collMeta.ID,
 		segments:     make(map[UniqueID]*Segment),
-		needToSync:   atomic.NewBool(false),
+		isHighMemory: atomic.NewBool(false),
 	}
 
-	channel.metaService = newMetaService(mockRootCoord, collMeta.ID)
+	channel.metaService = newMetaService(broker, collMeta.ID)
 
 	factory := dependency.NewDefaultFactory(true)
 
@@ -625,6 +649,7 @@ func TestInsertBufferNodeRollBF(t *testing.T) {
 	flushChan := make(chan flushMsg, 100)
 	resendTTChan := make(chan resendTTMsg, 100)
 	c := &nodeConfig{
+		collectionID: collMeta.ID,
 		channel:      channel,
 		msFactory:    factory,
 		allocator:    alloc,
@@ -635,9 +660,8 @@ func TestInsertBufferNodeRollBF(t *testing.T) {
 		delBufHeap: &PriorityQueue{},
 	}
 
-	dataCoord := &DataCoordFactory{}
-	atimeTickSender := newTimeTickSender(dataCoord, 0)
-	iBNode, err := newInsertBufferNode(ctx, collMeta.ID, delBufManager, flushChan, resendTTChan, fm, newCache(), c, atimeTickSender)
+	atimeTickSender := newTimeTickSender(broker, 0)
+	iBNode, err := newInsertBufferNode(ctx, flushChan, resendTTChan, delBufManager, fm, newCache(), atimeTickSender, c)
 	require.NoError(t, err)
 
 	// Auto flush number of rows set to 2
@@ -728,13 +752,18 @@ type InsertBufferNodeSuite struct {
 
 func (s *InsertBufferNodeSuite) SetupSuite() {
 	insertBufferNodeTestDir := "/tmp/milvus_test/insert_buffer_node"
-	rc := &RootCoordFactory{
-		pkType: schemapb.DataType_Int64,
-	}
+
+	collMeta := NewMetaFactory().GetCollectionMeta(1, "coll1", schemapb.DataType_Int64)
+	broker := broker.NewMockBroker(s.T())
+	broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+		Return(&milvuspb.DescribeCollectionResponse{
+			Status: merr.Status(nil),
+			Schema: collMeta.GetSchema(),
+		}, nil).Maybe()
 
 	s.collID = 1
 	s.partID = 10
-	s.channel = newChannel("channel", s.collID, nil, rc, s.cm)
+	s.channel = newChannel("channel", s.collID, nil, broker, s.cm)
 
 	s.delBufManager = &DeltaBufferManager{
 		channel:    s.channel,
@@ -763,14 +792,16 @@ func (s *InsertBufferNodeSuite) SetupTest() {
 	}
 
 	for _, seg := range segs {
-		err := s.channel.addSegment(addSegmentReq{
-			segType:     seg.sType,
-			segID:       seg.segID,
-			collID:      s.collID,
-			partitionID: s.partID,
-			startPos:    new(msgpb.MsgPosition),
-			endPos:      new(msgpb.MsgPosition),
-		})
+		err := s.channel.addSegment(
+			context.TODO(),
+			addSegmentReq{
+				segType:     seg.sType,
+				segID:       seg.segID,
+				collID:      s.collID,
+				partitionID: s.partID,
+				startPos:    new(msgpb.MsgPosition),
+				endPos:      new(msgpb.MsgPosition),
+			})
 		s.Require().NoError(err)
 	}
 }
@@ -925,7 +956,6 @@ func (s *InsertBufferNodeSuite) TestFillInSyncTasks() {
 			s.Assert().True(task.auto)
 		}
 	})
-
 }
 
 func TestInsertBufferNodeSuite(t *testing.T) {
@@ -934,11 +964,11 @@ func TestInsertBufferNodeSuite(t *testing.T) {
 
 // CompactedRootCoord has meta info compacted at ts
 type CompactedRootCoord struct {
-	types.RootCoord
+	types.RootCoordClient
 	compactTs Timestamp
 }
 
-func (m *CompactedRootCoord) DescribeCollection(ctx context.Context, in *milvuspb.DescribeCollectionRequest) (*milvuspb.DescribeCollectionResponse, error) {
+func (m *CompactedRootCoord) DescribeCollection(ctx context.Context, in *milvuspb.DescribeCollectionRequest, opts ...grpc.CallOption) (*milvuspb.DescribeCollectionResponse, error) {
 	if in.TimeStamp != 0 && in.GetTimeStamp() <= m.compactTs {
 		return &milvuspb.DescribeCollectionResponse{
 			Status: &commonpb.Status{
@@ -947,7 +977,7 @@ func (m *CompactedRootCoord) DescribeCollection(ctx context.Context, in *milvusp
 			},
 		}, nil
 	}
-	return m.RootCoord.DescribeCollection(ctx, in)
+	return m.RootCoordClient.DescribeCollection(ctx, in)
 }
 
 func TestInsertBufferNode_bufferInsertMsg(t *testing.T) {
@@ -961,7 +991,7 @@ func TestInsertBufferNode_bufferInsertMsg(t *testing.T) {
 	require.NoError(t, err)
 	Params.Save("etcd.rootPath", "/test/datanode/root")
 
-	Factory := &MetaFactory{}
+	factory := &MetaFactory{}
 	tests := []struct {
 		collID      UniqueID
 		pkType      schemapb.DataType
@@ -974,17 +1004,20 @@ func TestInsertBufferNode_bufferInsertMsg(t *testing.T) {
 	cm := storage.NewLocalChunkManager(storage.RootPath(insertNodeTestDir))
 	defer cm.RemoveWithPrefix(ctx, cm.RootPath())
 	for _, test := range tests {
-		collMeta := Factory.GetCollectionMeta(test.collID, "collection", test.pkType)
-		rcf := &RootCoordFactory{
-			pkType: test.pkType,
-		}
-		mockRootCoord := &CompactedRootCoord{
-			RootCoord: rcf,
-			compactTs: 100,
-		}
+		collMeta := factory.GetCollectionMeta(test.collID, "collection", test.pkType)
 
-		channel := newChannel(insertChannelName, collMeta.ID, collMeta.Schema, mockRootCoord, cm)
+		broker := broker.NewMockBroker(t)
+		broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+			Return(&milvuspb.DescribeCollectionResponse{
+				Status: merr.Status(nil),
+				Schema: collMeta.GetSchema(),
+			}, nil).Maybe()
+		broker.EXPECT().ReportTimeTick(mock.Anything, mock.Anything).
+			Return(nil).Maybe()
+
+		channel := newChannel(insertChannelName, collMeta.ID, collMeta.Schema, broker, cm)
 		err = channel.addSegment(
+			context.TODO(),
 			addSegmentReq{
 				segType:     datapb.SegmentType_New,
 				segID:       1,
@@ -1003,6 +1036,7 @@ func TestInsertBufferNode_bufferInsertMsg(t *testing.T) {
 		flushChan := make(chan flushMsg, 100)
 		resendTTChan := make(chan resendTTMsg, 100)
 		c := &nodeConfig{
+			collectionID: collMeta.ID,
 			channel:      channel,
 			msFactory:    factory,
 			allocator:    alloc,
@@ -1013,9 +1047,8 @@ func TestInsertBufferNode_bufferInsertMsg(t *testing.T) {
 			delBufHeap: &PriorityQueue{},
 		}
 
-		dataCoord := &DataCoordFactory{}
-		atimeTickSender := newTimeTickSender(dataCoord, 0)
-		iBNode, err := newInsertBufferNode(ctx, collMeta.ID, delBufManager, flushChan, resendTTChan, fm, newCache(), c, atimeTickSender)
+		atimeTickSender := newTimeTickSender(broker, 0)
+		iBNode, err := newInsertBufferNode(ctx, flushChan, resendTTChan, delBufManager, fm, newCache(), atimeTickSender, c)
 		require.NoError(t, err)
 
 		inMsg := genFlowGraphInsertMsg(insertChannelName)
@@ -1027,7 +1060,7 @@ func TestInsertBufferNode_bufferInsertMsg(t *testing.T) {
 
 		for _, msg := range inMsg.insertMessages {
 			msg.EndTimestamp = 101 // ts valid
-			msg.RowIDs = []int64{} //misaligned data
+			msg.RowIDs = []int64{} // misaligned data
 			err = iBNode.bufferInsertMsg(msg, &msgpb.MsgPosition{}, &msgpb.MsgPosition{})
 			assert.Error(t, err)
 		}
@@ -1050,7 +1083,8 @@ func TestInsertBufferNode_updateSegmentStates(te *testing.T) {
 	}
 
 	for _, test := range invalideTests {
-		channel := newChannel("channel", test.channelCollID, nil, &RootCoordFactory{pkType: schemapb.DataType_Int64}, cm)
+		broker := broker.NewMockBroker(te)
+		channel := newChannel("channel", test.channelCollID, nil, broker, cm)
 
 		ibNode := &insertBufferNode{
 			channel: channel,
@@ -1073,7 +1107,6 @@ func TestInsertBufferNode_updateSegmentStates(te *testing.T) {
 }
 
 func TestInsertBufferNode_getTimestampRange(t *testing.T) {
-
 	type testCase struct {
 		tag string
 
@@ -1160,14 +1193,26 @@ func TestInsertBufferNode_task_pool_is_full(t *testing.T) {
 	collection := UniqueID(0)
 	segmentID := UniqueID(100)
 
-	channel := newChannel(channelName, collection, nil, &RootCoordFactory{pkType: schemapb.DataType_Int64}, cm)
-	err := channel.addSegment(addSegmentReq{
-		segType:  datapb.SegmentType_New,
-		segID:    segmentID,
-		collID:   collection,
-		startPos: new(msgpb.MsgPosition),
-		endPos:   new(msgpb.MsgPosition),
-	})
+	meta := NewMetaFactory().GetCollectionMeta(collection, "test_collection", schemapb.DataType_Int64)
+	broker := broker.NewMockBroker(t)
+	broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+		Return(&milvuspb.DescribeCollectionResponse{
+			Status:         merr.Status(nil),
+			CollectionID:   1,
+			CollectionName: "test_collection",
+			Schema:         meta.GetSchema(),
+		}, nil)
+
+	channel := newChannel(channelName, collection, nil, broker, cm)
+	err := channel.addSegment(
+		context.TODO(),
+		addSegmentReq{
+			segType:  datapb.SegmentType_New,
+			segID:    segmentID,
+			collID:   collection,
+			startPos: new(msgpb.MsgPosition),
+			endPos:   new(msgpb.MsgPosition),
+		})
 	assert.NoError(t, err)
 	channel.setCurInsertBuffer(segmentID, &BufferData{size: 100})
 

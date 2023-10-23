@@ -32,7 +32,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
-type executeFunc func(context.Context, UniqueID, types.QueryNode, ...string) error
+type executeFunc func(context.Context, UniqueID, types.QueryNodeClient, ...string) error
 
 type ChannelWorkload struct {
 	db             string
@@ -91,7 +91,7 @@ func (lb *LBPolicyImpl) Start(ctx context.Context) {
 
 // try to select the best node from the available nodes
 func (lb *LBPolicyImpl) selectNode(ctx context.Context, workload ChannelWorkload, excludeNodes typeutil.UniqueSet) (int64, error) {
-	log := log.With(
+	log := log.Ctx(ctx).With(
 		zap.Int64("collectionID", workload.collectionID),
 		zap.String("collectionName", workload.collectionName),
 		zap.String("channelName", workload.channel),

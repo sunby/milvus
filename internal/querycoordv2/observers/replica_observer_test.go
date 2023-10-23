@@ -16,7 +16,6 @@
 package observers
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -39,7 +38,7 @@ type ReplicaObserverSuite struct {
 	suite.Suite
 
 	kv kv.MetaKv
-	//dependency
+	// dependency
 	meta    *meta.Meta
 	distMgr *meta.DistributionManager
 
@@ -77,7 +76,7 @@ func (suite *ReplicaObserverSuite) SetupTest() {
 
 	suite.distMgr = meta.NewDistributionManager()
 	suite.observer = NewReplicaObserver(suite.meta, suite.distMgr)
-	suite.observer.Start(context.TODO())
+	suite.observer.Start()
 	suite.collectionID = int64(1000)
 	suite.partitionID = int64(100)
 }

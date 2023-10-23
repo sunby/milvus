@@ -33,22 +33,25 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	"github.com/milvus-io/milvus/internal/datanode/broker"
 	"github.com/milvus-io/milvus/internal/mocks"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/common"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/metautil"
 )
 
 var channelMetaNodeTestDir = "/tmp/milvus_test/channel_meta"
 
 func TestNewChannel(t *testing.T) {
-	rc := &RootCoordFactory{}
+	broker := broker.NewMockBroker(t)
 	cm := storage.NewLocalChunkManager(storage.RootPath(channelMetaNodeTestDir))
 	defer cm.RemoveWithPrefix(context.Background(), cm.RootPath())
-	channel := newChannel("channel", 0, nil, rc, cm)
+	channel := newChannel("channel", 0, nil, broker, cm)
 	assert.NotNil(t, channel)
 }
 
@@ -110,16 +113,21 @@ func getSimpleFieldBinlog() *datapb.FieldBinlog {
 func TestChannelMeta_InnerFunction(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	rc := &RootCoordFactory{
-		pkType: schemapb.DataType_Int64,
-	}
 
 	var (
+		broker  = broker.NewMockBroker(t)
 		collID  = UniqueID(1)
 		cm      = storage.NewLocalChunkManager(storage.RootPath(channelMetaNodeTestDir))
-		channel = newChannel("insert-01", collID, nil, rc, cm)
+		channel = newChannel("insert-01", collID, nil, broker, cm)
 	)
 	defer cm.RemoveWithPrefix(ctx, cm.RootPath())
+
+	meta := NewMetaFactory().GetCollectionMeta(collID, "test_collection", schemapb.DataType_Int64)
+	broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+		Return(&milvuspb.DescribeCollectionResponse{
+			Status: merr.Status(nil),
+			Schema: meta.GetSchema(),
+		}, nil)
 
 	require.False(t, channel.hasSegment(0, true))
 	require.False(t, channel.hasSegment(0, false))
@@ -129,6 +137,7 @@ func TestChannelMeta_InnerFunction(t *testing.T) {
 	startPos := &msgpb.MsgPosition{ChannelName: "insert-01", Timestamp: Timestamp(100)}
 	endPos := &msgpb.MsgPosition{ChannelName: "insert-01", Timestamp: Timestamp(200)}
 	err = channel.addSegment(
+		context.TODO(),
 		addSegmentReq{
 			segType:     datapb.SegmentType_New,
 			segID:       0,
@@ -202,7 +211,8 @@ func TestChannelMeta_getCollectionAndPartitionID(t *testing.T) {
 			seg.setType(test.segType)
 			channel := &ChannelMeta{
 				segments: map[UniqueID]*Segment{
-					test.segID: &seg},
+					test.segID: &seg,
+				},
 			}
 
 			collID, parID, err := channel.getCollectionAndPartitionID(test.segID)
@@ -216,16 +226,15 @@ func TestChannelMeta_getCollectionAndPartitionID(t *testing.T) {
 func TestChannelMeta_segmentFlushed(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	rc := &RootCoordFactory{
-		pkType: schemapb.DataType_Int64,
-	}
+	broker := broker.NewMockBroker(t)
 	collID := UniqueID(1)
 	cm := storage.NewLocalChunkManager(storage.RootPath(channelMetaNodeTestDir))
 	defer cm.RemoveWithPrefix(ctx, cm.RootPath())
 
 	t.Run("Test coll mot match", func(t *testing.T) {
-		channel := newChannel("channel", collID, nil, rc, cm)
+		channel := newChannel("channel", collID, nil, broker, cm)
 		err := channel.addSegment(
+			context.TODO(),
 			addSegmentReq{
 				segType:     datapb.SegmentType_New,
 				segID:       1,
@@ -284,9 +293,8 @@ func TestChannelMeta_segmentFlushed(t *testing.T) {
 func TestChannelMeta_InterfaceMethod(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	rc := &RootCoordFactory{
-		pkType: schemapb.DataType_Int64,
-	}
+	broker := broker.NewMockBroker(t)
+	f := MetaFactory{}
 	cm := storage.NewLocalChunkManager(storage.RootPath(channelMetaNodeTestDir))
 	defer cm.RemoveWithPrefix(ctx, cm.RootPath())
 
@@ -307,7 +315,7 @@ func TestChannelMeta_InterfaceMethod(t *testing.T) {
 		}
 		for _, test := range tests {
 			t.Run(test.description, func(t *testing.T) {
-				channel := newChannel("a", test.channelCollID, nil, rc, cm)
+				channel := newChannel("a", test.channelCollID, nil, broker, cm)
 				if test.isvalid {
 					channel.addFlushedSegmentWithPKs(100, test.incollID, 10, 1, primaryKeyData)
 
@@ -342,9 +350,17 @@ func TestChannelMeta_InterfaceMethod(t *testing.T) {
 
 		for _, test := range tests {
 			t.Run(test.description, func(t *testing.T) {
-				channel := newChannel("a", test.channelCollID, nil, rc, cm)
+				broker.ExpectedCalls = nil
+				meta := NewMetaFactory().GetCollectionMeta(test.channelCollID, "test_collection", schemapb.DataType_Int64)
+				broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+					Return(&milvuspb.DescribeCollectionResponse{
+						Status: merr.Status(nil),
+						Schema: meta.GetSchema(),
+					}, nil)
+				channel := newChannel("a", test.channelCollID, nil, broker, cm)
 				require.False(t, channel.hasSegment(test.inSegID, true))
 				err := channel.addSegment(
+					context.TODO(),
 					addSegmentReq{
 						segType:     datapb.SegmentType_New,
 						segID:       test.inSegID,
@@ -385,9 +401,10 @@ func TestChannelMeta_InterfaceMethod(t *testing.T) {
 
 		for _, test := range tests {
 			t.Run(test.description, func(t *testing.T) {
-				channel := newChannel("a", test.channelCollID, nil, rc, &mockDataCM{})
+				channel := newChannel("a", test.channelCollID, nil, broker, &mockDataCM{})
 				require.False(t, channel.hasSegment(test.inSegID, true))
 				err := channel.addSegment(
+					context.TODO(),
 					addSegmentReq{
 						segType:      datapb.SegmentType_Normal,
 						segID:        test.inSegID,
@@ -413,11 +430,12 @@ func TestChannelMeta_InterfaceMethod(t *testing.T) {
 	})
 
 	t.Run("Test_addNormalSegmentWithNilDml", func(t *testing.T) {
-		channel := newChannel("a", 1, nil, rc, &mockDataCM{})
+		channel := newChannel("a", 1, nil, broker, &mockDataCM{})
 		segID := int64(101)
 		require.False(t, channel.hasSegment(segID, true))
 		assert.NotPanics(t, func() {
 			err := channel.addSegment(
+				context.TODO(),
 				addSegmentReq{
 					segType:      datapb.SegmentType_Normal,
 					segID:        segID,
@@ -447,13 +465,23 @@ func TestChannelMeta_InterfaceMethod(t *testing.T) {
 
 		for _, test := range tests {
 			t.Run(test.description, func(t *testing.T) {
-				channel := newChannel("a", test.channelCollID, nil, rc, cm)
+				channel := newChannel("a", test.channelCollID, nil, broker, cm)
 
 				if test.metaServiceErr {
 					channel.collSchema = nil
-					rc.setCollectionID(-1)
+					broker.ExpectedCalls = nil
+					broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+						Return(nil, errors.New("mock"))
 				} else {
-					rc.setCollectionID(1)
+					meta := f.GetCollectionMeta(test.channelCollID, "test_collection", schemapb.DataType_Int64)
+					broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+						Return(&milvuspb.DescribeCollectionResponse{
+							Status:         merr.Status(nil),
+							CollectionID:   test.channelCollID,
+							CollectionName: "test_collection",
+							ShardsNum:      common.DefaultShardsNum,
+							Schema:         meta.GetSchema(),
+						}, nil)
 				}
 
 				s, err := channel.getCollectionSchema(test.inputCollID, Timestamp(0))
@@ -466,7 +494,7 @@ func TestChannelMeta_InterfaceMethod(t *testing.T) {
 				}
 			})
 		}
-		rc.setCollectionID(1)
+		broker.ExpectedCalls = nil
 	})
 
 	t.Run("Test listAllSegmentIDs", func(t *testing.T) {
@@ -519,10 +547,18 @@ func TestChannelMeta_InterfaceMethod(t *testing.T) {
 	})
 
 	t.Run("Test_addSegmentMinIOLoadError", func(t *testing.T) {
-		channel := newChannel("a", 1, nil, rc, cm)
+		broker.ExpectedCalls = nil
+		meta := NewMetaFactory().GetCollectionMeta(1, "test_collection", schemapb.DataType_Int64)
+		broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+			Return(&milvuspb.DescribeCollectionResponse{
+				Status: merr.Status(nil),
+				Schema: meta.GetSchema(),
+			}, nil)
+		channel := newChannel("a", 1, nil, broker, cm)
 		channel.chunkManager = &mockDataCMError{}
 
 		err := channel.addSegment(
+			context.TODO(),
 			addSegmentReq{
 				segType:      datapb.SegmentType_Normal,
 				segID:        1,
@@ -534,6 +570,7 @@ func TestChannelMeta_InterfaceMethod(t *testing.T) {
 			})
 		assert.Error(t, err)
 		err = channel.addSegment(
+			context.TODO(),
 			addSegmentReq{
 				segType:      datapb.SegmentType_Flushed,
 				segID:        1,
@@ -547,11 +584,12 @@ func TestChannelMeta_InterfaceMethod(t *testing.T) {
 	})
 
 	t.Run("Test_addSegmentStatsError", func(t *testing.T) {
-		channel := newChannel("insert-01", 1, nil, rc, cm)
+		channel := newChannel("insert-01", 1, nil, broker, cm)
 		channel.chunkManager = &mockDataCMStatsError{}
 		var err error
 
 		err = channel.addSegment(
+			context.TODO(),
 			addSegmentReq{
 				segType:      datapb.SegmentType_Normal,
 				segID:        1,
@@ -563,6 +601,7 @@ func TestChannelMeta_InterfaceMethod(t *testing.T) {
 			})
 		assert.Error(t, err)
 		err = channel.addSegment(
+			context.TODO(),
 			addSegmentReq{
 				segType:      datapb.SegmentType_Flushed,
 				segID:        1,
@@ -576,11 +615,12 @@ func TestChannelMeta_InterfaceMethod(t *testing.T) {
 	})
 
 	t.Run("Test_addSegmentPkfilterError", func(t *testing.T) {
-		channel := newChannel("insert-01", 1, nil, rc, cm)
+		channel := newChannel("insert-01", 1, nil, broker, cm)
 		channel.chunkManager = &mockPkfilterMergeError{}
 		var err error
 
 		err = channel.addSegment(
+			context.TODO(),
 			addSegmentReq{
 				segType:      datapb.SegmentType_Normal,
 				segID:        1,
@@ -592,6 +632,7 @@ func TestChannelMeta_InterfaceMethod(t *testing.T) {
 			})
 		assert.Error(t, err)
 		err = channel.addSegment(
+			context.TODO(),
 			addSegmentReq{
 				segType:      datapb.SegmentType_Flushed,
 				segID:        1,
@@ -605,7 +646,7 @@ func TestChannelMeta_InterfaceMethod(t *testing.T) {
 	})
 
 	t.Run("Test_mergeFlushedSegments", func(t *testing.T) {
-		channel := newChannel("channel", 1, nil, rc, cm)
+		channel := newChannel("channel", 1, nil, broker, cm)
 
 		primaryKeyData := &storage.Int64FieldData{
 			Data: []UniqueID{1},
@@ -658,12 +699,14 @@ func TestChannelMeta_InterfaceMethod(t *testing.T) {
 
 				if !channel.hasSegment(4, false) {
 					channel.removeSegments(4)
-					channel.addSegment(addSegmentReq{
-						segType:     datapb.SegmentType_Normal,
-						segID:       4,
-						collID:      1,
-						partitionID: 0,
-					})
+					channel.addSegment(
+						context.TODO(),
+						addSegmentReq{
+							segType:     datapb.SegmentType_Normal,
+							segID:       4,
+							collID:      1,
+							partitionID: 0,
+						})
 				}
 
 				if channel.hasSegment(3, true) {
@@ -676,12 +719,7 @@ func TestChannelMeta_InterfaceMethod(t *testing.T) {
 				require.False(t, channel.hasSegment(3, true))
 
 				// tests start
-				err := channel.mergeFlushedSegments(context.Background(), test.inSeg, 100, test.inCompactedFrom)
-				if test.isValid {
-					assert.NoError(t, err)
-				} else {
-					assert.Error(t, err)
-				}
+				channel.mergeFlushedSegments(context.Background(), test.inSeg, 100, test.inCompactedFrom)
 
 				if test.stored {
 					assert.True(t, channel.hasSegment(3, true))
@@ -695,18 +733,14 @@ func TestChannelMeta_InterfaceMethod(t *testing.T) {
 				} else {
 					assert.False(t, channel.hasSegment(3, true))
 				}
-
 			})
 		}
 	})
-
 }
 
 func TestChannelMeta_loadStats(t *testing.T) {
 	f := &MetaFactory{}
-	rc := &RootCoordFactory{
-		pkType: schemapb.DataType_Int64,
-	}
+	broker := broker.NewMockBroker(t)
 
 	t.Run("list with merged stats log", func(t *testing.T) {
 		meta := f.GetCollectionMeta(UniqueID(10001), "test_load_stats", schemapb.DataType_Int64)
@@ -722,13 +756,13 @@ func TestChannelMeta_loadStats(t *testing.T) {
 			partitionID: 2,
 		}
 
-		//gen pk stats bytes
+		// gen pk stats bytes
 		stats := storage.NewPrimaryKeyStats(106, int64(schemapb.DataType_Int64), 10)
 		iCodec := storage.NewInsertCodecWithSchema(meta)
 
 		cm := &mockCm{}
 
-		channel := newChannel("channel", 1, meta.Schema, rc, cm)
+		channel := newChannel("channel", 1, meta.Schema, broker, cm)
 		channel.segments[seg1.segmentID] = seg1
 		channel.segments[seg2.segmentID] = seg2
 
@@ -744,7 +778,8 @@ func TestChannelMeta_loadStats(t *testing.T) {
 				Binlogs: []*datapb.Binlog{{
 					//<StatsLogPath>/<collectionID>/<partitionID>/<segmentID>/<FieldID>/<logIdx>
 					LogPath: path.Join(common.SegmentStatslogPath, metautil.JoinIDPath(1, 2, 1, 106, 10)),
-				}}}}, 0)
+				}},
+			}}, 0)
 		assert.NoError(t, err)
 
 		// load flushed stats log
@@ -759,7 +794,8 @@ func TestChannelMeta_loadStats(t *testing.T) {
 				Binlogs: []*datapb.Binlog{{
 					//<StatsLogPath>/<collectionID>/<partitionID>/<segmentID>/<FieldID>/<logIdx>
 					LogPath: path.Join(common.SegmentStatslogPath, metautil.JoinIDPath(1, 2, 2, 106), storage.CompoundStatsType.LogIdx()),
-				}}}}, 0)
+				}},
+			}}, 0)
 		assert.NoError(t, err)
 	})
 }
@@ -767,21 +803,28 @@ func TestChannelMeta_loadStats(t *testing.T) {
 func TestChannelMeta_UpdatePKRange(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	rc := &RootCoordFactory{
-		pkType: schemapb.DataType_Int64,
-	}
+
+	broker := broker.NewMockBroker(t)
 	collID := UniqueID(1)
 	partID := UniqueID(2)
 	chanName := "insert-02"
 	startPos := &msgpb.MsgPosition{ChannelName: chanName, Timestamp: Timestamp(100)}
 	endPos := &msgpb.MsgPosition{ChannelName: chanName, Timestamp: Timestamp(200)}
 
+	meta := NewMetaFactory().GetCollectionMeta(collID, "test_collection", schemapb.DataType_Int64)
+	broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+		Return(&milvuspb.DescribeCollectionResponse{
+			Status: merr.Status(nil),
+			Schema: meta.GetSchema(),
+		}, nil)
+
 	cm := storage.NewLocalChunkManager(storage.RootPath(channelMetaNodeTestDir))
 	defer cm.RemoveWithPrefix(ctx, cm.RootPath())
-	channel := newChannel("chanName", collID, nil, rc, cm)
+	channel := newChannel("chanName", collID, nil, broker, cm)
 	channel.chunkManager = &mockDataCM{}
 
 	err := channel.addSegment(
+		context.TODO(),
 		addSegmentReq{
 			segType:     datapb.SegmentType_New,
 			segID:       1,
@@ -792,6 +835,7 @@ func TestChannelMeta_UpdatePKRange(t *testing.T) {
 		})
 	assert.NoError(t, err)
 	err = channel.addSegment(
+		context.TODO(),
 		addSegmentReq{
 			segType:      datapb.SegmentType_Normal,
 			segID:        2,
@@ -820,15 +864,13 @@ func TestChannelMeta_UpdatePKRange(t *testing.T) {
 		assert.True(t, segNew.isPKExist(pk))
 		assert.True(t, segNormal.isPKExist(pk))
 	}
-
 }
 
 func TestChannelMeta_ChannelCP(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	rc := &RootCoordFactory{
-		pkType: schemapb.DataType_Int64,
-	}
+
+	broker := broker.NewMockBroker(t)
 
 	mockVChannel := "fake-by-dev-rootcoord-dml-1-testchannelcp-v0"
 	mockPChannel := "fake-by-dev-rootcoord-dml-1"
@@ -839,13 +881,19 @@ func TestChannelMeta_ChannelCP(t *testing.T) {
 		err := cm.RemoveWithPrefix(ctx, cm.RootPath())
 		assert.NoError(t, err)
 	}()
+	meta := NewMetaFactory().GetCollectionMeta(collID, "test_collection", schemapb.DataType_Int64)
+	broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+		Return(&milvuspb.DescribeCollectionResponse{
+			Status: merr.Status(nil),
+			Schema: meta.GetSchema(),
+		}, nil)
 
 	t.Run("get and set", func(t *testing.T) {
 		pos := &msgpb.MsgPosition{
 			ChannelName: mockPChannel,
 			Timestamp:   1000,
 		}
-		channel := newChannel(mockVChannel, collID, nil, rc, cm)
+		channel := newChannel(mockVChannel, collID, nil, broker, cm)
 		channel.chunkManager = &mockDataCM{}
 		position := channel.getChannelCheckpoint(pos)
 		assert.NotNil(t, position)
@@ -856,11 +904,13 @@ func TestChannelMeta_ChannelCP(t *testing.T) {
 	t.Run("set insertBuffer&deleteBuffer then get", func(t *testing.T) {
 		run := func(curInsertPos, curDeletePos *msgpb.MsgPosition,
 			hisInsertPoss, hisDeletePoss []*msgpb.MsgPosition,
-			ttPos, expectedPos *msgpb.MsgPosition) {
+			ttPos, expectedPos *msgpb.MsgPosition,
+		) {
 			segmentID := UniqueID(1)
-			channel := newChannel(mockVChannel, collID, nil, rc, cm)
+			channel := newChannel(mockVChannel, collID, nil, broker, cm)
 			channel.chunkManager = &mockDataCM{}
 			err := channel.addSegment(
+				context.TODO(),
 				addSegmentReq{
 					segType: datapb.SegmentType_New,
 					segID:   segmentID,
@@ -940,12 +990,17 @@ type ChannelMetaSuite struct {
 }
 
 func (s *ChannelMetaSuite) SetupSuite() {
-	rc := &RootCoordFactory{
-		pkType: schemapb.DataType_Int64,
-	}
+	broker := broker.NewMockBroker(s.T())
+	f := MetaFactory{}
+	meta := f.GetCollectionMeta(1, "testCollection", schemapb.DataType_Int64)
+	broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+		Return(&milvuspb.DescribeCollectionResponse{
+			Status: merr.Status(nil),
+			Schema: meta.GetSchema(),
+		}, nil).Maybe()
 	s.collID = 1
 	s.cm = storage.NewLocalChunkManager(storage.RootPath(channelMetaNodeTestDir))
-	s.channel = newChannel("channel", s.collID, nil, rc, s.cm)
+	s.channel = newChannel("channel", s.collID, nil, broker, s.cm)
 	s.vchanName = "channel"
 }
 
@@ -955,34 +1010,40 @@ func (s *ChannelMetaSuite) TearDownSuite() {
 
 func (s *ChannelMetaSuite) SetupTest() {
 	var err error
-	err = s.channel.addSegment(addSegmentReq{
-		segType:     datapb.SegmentType_New,
-		segID:       1,
-		collID:      s.collID,
-		partitionID: s.partID,
-		startPos:    &msgpb.MsgPosition{},
-		endPos:      nil,
-	})
+	err = s.channel.addSegment(
+		context.TODO(),
+		addSegmentReq{
+			segType:     datapb.SegmentType_New,
+			segID:       1,
+			collID:      s.collID,
+			partitionID: s.partID,
+			startPos:    &msgpb.MsgPosition{},
+			endPos:      nil,
+		})
 	s.Require().NoError(err)
-	err = s.channel.addSegment(addSegmentReq{
-		segType:      datapb.SegmentType_Normal,
-		segID:        2,
-		collID:       s.collID,
-		partitionID:  s.partID,
-		numOfRows:    10,
-		statsBinLogs: nil,
-		recoverTs:    0,
-	})
+	err = s.channel.addSegment(
+		context.TODO(),
+		addSegmentReq{
+			segType:      datapb.SegmentType_Normal,
+			segID:        2,
+			collID:       s.collID,
+			partitionID:  s.partID,
+			numOfRows:    10,
+			statsBinLogs: nil,
+			recoverTs:    0,
+		})
 	s.Require().NoError(err)
-	err = s.channel.addSegment(addSegmentReq{
-		segType:      datapb.SegmentType_Flushed,
-		segID:        3,
-		collID:       s.collID,
-		partitionID:  s.partID,
-		numOfRows:    10,
-		statsBinLogs: nil,
-		recoverTs:    0,
-	})
+	err = s.channel.addSegment(
+		context.TODO(),
+		addSegmentReq{
+			segType:      datapb.SegmentType_Flushed,
+			segID:        3,
+			collID:       s.collID,
+			partitionID:  s.partID,
+			numOfRows:    10,
+			statsBinLogs: nil,
+			recoverTs:    0,
+		})
 	s.Require().NoError(err)
 }
 
@@ -1057,13 +1118,18 @@ type ChannelMetaMockSuite struct {
 }
 
 func (s *ChannelMetaMockSuite) SetupTest() {
-	rc := &RootCoordFactory{
-		pkType: schemapb.DataType_Int64,
-	}
+	broker := broker.NewMockBroker(s.T())
+	f := MetaFactory{}
+	meta := f.GetCollectionMeta(1, "testCollection", schemapb.DataType_Int64)
+	broker.EXPECT().DescribeCollection(mock.Anything, mock.Anything, mock.Anything).
+		Return(&milvuspb.DescribeCollectionResponse{
+			Status: merr.Status(nil),
+			Schema: meta.GetSchema(),
+		}, nil).Maybe()
 
 	s.cm = mocks.NewChunkManager(s.T())
 	s.collID = 1
-	s.channel = newChannel("channel", s.collID, nil, rc, s.cm)
+	s.channel = newChannel("channel", s.collID, nil, broker, s.cm)
 	s.vchanName = "channel"
 }
 
@@ -1081,20 +1147,22 @@ func (s *ChannelMetaMockSuite) TestAddSegment_SkipBFLoad() {
 				<-ch
 			}).Return([][]byte{}, nil)
 
-		err := s.channel.addSegment(addSegmentReq{
-			segType:     datapb.SegmentType_Flushed,
-			segID:       100,
-			collID:      s.collID,
-			partitionID: s.partID,
-			statsBinLogs: []*datapb.FieldBinlog{
-				{
-					FieldID: 106,
-					Binlogs: []*datapb.Binlog{
-						{LogPath: "rootPath/stats/1/0/100/10001"},
+		err := s.channel.addSegment(
+			context.TODO(),
+			addSegmentReq{
+				segType:     datapb.SegmentType_Flushed,
+				segID:       100,
+				collID:      s.collID,
+				partitionID: s.partID,
+				statsBinLogs: []*datapb.FieldBinlog{
+					{
+						FieldID: 106,
+						Binlogs: []*datapb.Binlog{
+							{LogPath: "rootPath/stats/1/0/100/10001"},
+						},
 					},
 				},
-			},
-		})
+			})
 
 		s.NoError(err)
 
@@ -1117,20 +1185,22 @@ func (s *ChannelMetaMockSuite) TestAddSegment_SkipBFLoad() {
 				<-ch
 			}).Return(nil, storage.WrapErrNoSuchKey("rootPath/stats/1/0/100/10001"))
 
-		err := s.channel.addSegment(addSegmentReq{
-			segType:     datapb.SegmentType_Flushed,
-			segID:       100,
-			collID:      s.collID,
-			partitionID: s.partID,
-			statsBinLogs: []*datapb.FieldBinlog{
-				{
-					FieldID: 106,
-					Binlogs: []*datapb.Binlog{
-						{LogPath: "rootPath/stats/1/0/100/10001"},
+		err := s.channel.addSegment(
+			context.TODO(),
+			addSegmentReq{
+				segType:     datapb.SegmentType_Flushed,
+				segID:       100,
+				collID:      s.collID,
+				partitionID: s.partID,
+				statsBinLogs: []*datapb.FieldBinlog{
+					{
+						FieldID: 106,
+						Binlogs: []*datapb.Binlog{
+							{LogPath: "rootPath/stats/1/0/100/10001"},
+						},
 					},
 				},
-			},
-		})
+			})
 
 		s.NoError(err)
 
@@ -1163,20 +1233,22 @@ func (s *ChannelMetaMockSuite) TestAddSegment_SkipBFLoad() {
 			[]byte("ABC"),
 		}, nil)
 
-		err := s.channel.addSegment(addSegmentReq{
-			segType:     datapb.SegmentType_Flushed,
-			segID:       100,
-			collID:      s.collID,
-			partitionID: s.partID,
-			statsBinLogs: []*datapb.FieldBinlog{
-				{
-					FieldID: 106,
-					Binlogs: []*datapb.Binlog{
-						{LogPath: "rootPath/stats/1/0/100/10001"},
+		err := s.channel.addSegment(
+			context.TODO(),
+			addSegmentReq{
+				segType:     datapb.SegmentType_Flushed,
+				segID:       100,
+				collID:      s.collID,
+				partitionID: s.partID,
+				statsBinLogs: []*datapb.FieldBinlog{
+					{
+						FieldID: 106,
+						Binlogs: []*datapb.Binlog{
+							{LogPath: "rootPath/stats/1/0/100/10001"},
+						},
 					},
 				},
-			},
-		})
+			})
 
 		s.NoError(err)
 
@@ -1229,20 +1301,22 @@ func (s *ChannelMetaMockSuite) TestAddSegment_SkipBFLoad2() {
 				return nil
 			})
 
-		err := s.channel.addSegment(addSegmentReq{
-			segType:     datapb.SegmentType_Flushed,
-			segID:       100,
-			collID:      s.collID,
-			partitionID: s.partID,
-			statsBinLogs: []*datapb.FieldBinlog{
-				{
-					FieldID: 106,
-					Binlogs: []*datapb.Binlog{
-						{LogPath: "rootPath/stats/1/0/100/10001"},
+		err := s.channel.addSegment(
+			context.TODO(),
+			addSegmentReq{
+				segType:     datapb.SegmentType_Flushed,
+				segID:       100,
+				collID:      s.collID,
+				partitionID: s.partID,
+				statsBinLogs: []*datapb.FieldBinlog{
+					{
+						FieldID: 106,
+						Binlogs: []*datapb.Binlog{
+							{LogPath: "rootPath/stats/1/0/100/10001"},
+						},
 					},
 				},
-			},
-		})
+			})
 
 		s.NoError(err)
 

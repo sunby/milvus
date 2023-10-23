@@ -27,6 +27,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
+	"google.golang.org/grpc"
+
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
@@ -36,9 +40,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
-	"github.com/stretchr/testify/assert"
-	"go.uber.org/zap"
-	"google.golang.org/grpc"
 )
 
 func TestMain(t *testing.M) {
@@ -221,8 +222,10 @@ func TestConnectionManager_processEvent(t *testing.T) {
 		cm := &ConnectionManager{
 			closeCh: make(chan struct{}),
 			session: &sessionutil.Session{
-				ServerID:    1,
-				TriggerKill: true,
+				SessionRaw: sessionutil.SessionRaw{
+					ServerID:    1,
+					TriggerKill: true,
+				},
 			},
 		}
 

@@ -123,7 +123,7 @@ func (suite *JobSuite) SetupSuite() {
 				})
 			}
 		}
-		suite.broker.EXPECT().GetRecoveryInfoV2(mock.Anything, collection).Return(vChannels, segmentBinlogs, nil)
+		suite.broker.EXPECT().GetRecoveryInfoV2(mock.Anything, collection).Return(vChannels, segmentBinlogs, nil).Maybe()
 	}
 
 	suite.broker.EXPECT().GetCollectionSchema(mock.Anything, mock.Anything).
@@ -134,10 +134,10 @@ func (suite *JobSuite) SetupSuite() {
 	suite.cluster = session.NewMockCluster(suite.T())
 	suite.cluster.EXPECT().
 		LoadPartitions(mock.Anything, mock.Anything, mock.Anything).
-		Return(merr.Status(nil), nil)
+		Return(merr.Success(), nil)
 	suite.cluster.EXPECT().
 		ReleasePartitions(mock.Anything, mock.Anything, mock.Anything).
-		Return(merr.Status(nil), nil)
+		Return(merr.Success(), nil).Maybe()
 }
 
 func (suite *JobSuite) SetupTest() {
@@ -163,10 +163,10 @@ func (suite *JobSuite) SetupTest() {
 		suite.dist,
 		suite.broker,
 	)
-	suite.targetObserver.Start(context.Background())
+	suite.targetObserver.Start()
 	suite.scheduler = NewScheduler()
 
-	suite.scheduler.Start(context.Background())
+	suite.scheduler.Start()
 	meta.GlobalFailedLoadCache = meta.NewFailedLoadCache()
 
 	suite.nodeMgr.Add(session.NewNodeInfo(1000, "localhost"))
@@ -1339,7 +1339,7 @@ func (suite *JobSuite) TestCallReleasePartitionFailed() {
 		return call.Method != "ReleasePartitions"
 	})
 	suite.cluster.EXPECT().ReleasePartitions(mock.Anything, mock.Anything, mock.Anything).
-		Return(merr.Status(nil), nil)
+		Return(merr.Success(), nil)
 }
 
 func (suite *JobSuite) TestSyncNewCreatedPartition() {

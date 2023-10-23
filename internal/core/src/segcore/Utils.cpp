@@ -27,7 +27,8 @@ namespace milvus::segcore {
 
 void
 ParsePksFromFieldData(std::vector<PkType>& pks, const DataArray& data) {
-    switch (static_cast<DataType>(data.type())) {
+    auto data_type = static_cast<DataType>(data.type());
+    switch (data_type) {
         case DataType::INT64: {
             auto source_data = reinterpret_cast<const int64_t*>(
                 data.scalars().long_data().data().data());
@@ -40,7 +41,8 @@ ParsePksFromFieldData(std::vector<PkType>& pks, const DataArray& data) {
             break;
         }
         default: {
-            PanicInfo("unsupported");
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported PK {}", data_type));
         }
     }
 }
@@ -69,7 +71,8 @@ ParsePksFromFieldData(DataType data_type,
                 break;
             }
             default: {
-                PanicInfo("unsupported");
+                PanicInfo(DataTypeInvalid,
+                          fmt::format("unsupported PK {}", data_type));
             }
         }
         offset += row_count;
@@ -93,7 +96,8 @@ ParsePksFromIDs(std::vector<PkType>& pks,
             break;
         }
         default: {
-            PanicInfo("unsupported");
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported PK {}", data_type));
         }
     }
 }
@@ -108,7 +112,8 @@ GetSizeOfIdArray(const IdArray& data) {
         return data.str_id().data_size();
     }
 
-    PanicInfo("unsupported id type");
+    PanicInfo(DataTypeInvalid,
+              fmt::format("unsupported id {}", data.descriptor()->name()));
 }
 
 int64_t
@@ -136,8 +141,70 @@ GetRawDataSizeOfDataArray(const DataArray* data,
                 }
                 break;
             }
+            case DataType::ARRAY: {
+                auto& array_data = FIELD_DATA(data, array);
+                switch (field_meta.get_element_type()) {
+                    case DataType::BOOL: {
+                        for (auto& array_bytes : array_data) {
+                            result += array_bytes.bool_data().data_size() *
+                                      sizeof(bool);
+                        }
+                        break;
+                    }
+                    case DataType::INT8:
+                    case DataType::INT16:
+                    case DataType::INT32: {
+                        for (auto& array_bytes : array_data) {
+                            result += array_bytes.int_data().data_size() *
+                                      sizeof(int);
+                        }
+                        break;
+                    }
+                    case DataType::INT64: {
+                        for (auto& array_bytes : array_data) {
+                            result += array_bytes.long_data().data_size() *
+                                      sizeof(int64_t);
+                        }
+                        break;
+                    }
+                    case DataType::FLOAT: {
+                        for (auto& array_bytes : array_data) {
+                            result += array_bytes.float_data().data_size() *
+                                      sizeof(float);
+                        }
+                        break;
+                    }
+                    case DataType::DOUBLE: {
+                        for (auto& array_bytes : array_data) {
+                            result += array_bytes.double_data().data_size() *
+                                      sizeof(double);
+                        }
+                        break;
+                    }
+                    case DataType::VARCHAR:
+                    case DataType::STRING: {
+                        for (auto& array_bytes : array_data) {
+                            auto element_num =
+                                array_bytes.string_data().data_size();
+                            for (int i = 0; i < element_num; ++i) {
+                                result +=
+                                    array_bytes.string_data().data(i).size();
+                            }
+                        }
+                        break;
+                    }
+                    default:
+                        PanicInfo(
+                            DataTypeInvalid,
+                            fmt::format("unsupported element type for array",
+                                        field_meta.get_element_type()));
+                }
+
+                break;
+            }
             default: {
                 PanicInfo(
+                    DataTypeInvalid,
                     fmt::format("unsupported variable datatype {}", data_type));
             }
         }
@@ -210,8 +277,17 @@ CreateScalarDataArray(int64_t count, const FieldMeta& field_meta) {
             }
             break;
         }
+        case DataType::ARRAY: {
+            auto obj = scalar_array->mutable_array_data();
+            obj->mutable_data()->Reserve(count);
+            for (int i = 0; i < count; i++) {
+                *(obj->mutable_data()->Add()) = proto::schema::ScalarField();
+            }
+            break;
+        }
         default: {
-            PanicInfo("unsupported datatype");
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported datatype {}", data_type));
         }
     }
 
@@ -244,8 +320,15 @@ CreateVectorDataArray(int64_t count, const FieldMeta& field_meta) {
             obj->resize(num_bytes);
             break;
         }
+        case DataType::VECTOR_FLOAT16: {
+            auto length = count * dim;
+            auto obj = vector_array->mutable_float16_vector();
+            obj->resize(length * sizeof(float16));
+            break;
+        }
         default: {
-            PanicInfo("unsupported datatype");
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported datatype {}", data_type));
         }
     }
     return data_array;
@@ -321,8 +404,17 @@ CreateScalarDataArrayFrom(const void* data_raw,
             }
             break;
         }
+        case DataType::ARRAY: {
+            auto data = reinterpret_cast<const ScalarArray*>(data_raw);
+            auto obj = scalar_array->mutable_array_data();
+            for (auto i = 0; i < count; i++) {
+                *(obj->mutable_data()->Add()) = data[i];
+            }
+            break;
+        }
         default: {
-            PanicInfo("unsupported datatype");
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported datatype {}", data_type));
         }
     }
 
@@ -359,8 +451,16 @@ CreateVectorDataArrayFrom(const void* data_raw,
             obj->assign(data, num_bytes);
             break;
         }
+        case DataType::VECTOR_FLOAT16: {
+            auto length = count * dim;
+            auto data = reinterpret_cast<const char*>(data_raw);
+            auto obj = vector_array->mutable_float16_vector();
+            obj->assign(data, length * sizeof(float16));
+            break;
+        }
         default: {
-            PanicInfo("unsupported datatype");
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported datatype {}", data_type));
         }
     }
     return data_array;
@@ -414,7 +514,8 @@ MergeDataArray(
                 auto obj = vector_array->mutable_binary_vector();
                 obj->assign(data + src_offset * num_bytes, num_bytes);
             } else {
-                PanicInfo("logical error");
+                PanicInfo(DataTypeInvalid,
+                          fmt::format("unsupported datatype {}", data_type));
             }
             continue;
         }
@@ -465,8 +566,17 @@ MergeDataArray(
                 *(obj->mutable_data()->Add()) = data[src_offset];
                 break;
             }
+            case DataType::ARRAY: {
+                auto& data = FIELD_DATA(src_field_data, array);
+                auto obj = scalar_array->mutable_array_data();
+                obj->set_element_type(
+                    proto::schema::DataType(field_meta.get_element_type()));
+                *(obj->mutable_data()->Add()) = data[src_offset];
+                break;
+            }
             default: {
-                PanicInfo(fmt::format("unsupported data type {}", data_type));
+                PanicInfo(DataTypeInvalid,
+                          fmt::format("unsupported datatype {}", data_type));
             }
         }
     }
@@ -577,7 +687,8 @@ ReverseDataFromIndex(const index::IndexBase* index,
             break;
         }
         default: {
-            PanicInfo("unsupported datatype");
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported datatype {}", data_type));
         }
     }
 

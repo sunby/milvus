@@ -12,7 +12,6 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
 	"path"
 	"runtime"
@@ -31,7 +30,6 @@ import (
 	"github.com/milvus-io/milvus/internal/kv"
 	rocksdbkv "github.com/milvus-io/milvus/internal/kv/rocksdb"
 	"github.com/milvus-io/milvus/pkg/log"
-	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
 	"github.com/milvus-io/milvus/pkg/util/hardware"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
@@ -623,7 +621,6 @@ func (rmq *rocksmq) Produce(topicName string, messages []ProducerMessage) ([]Uni
 
 	msgLen := len(messages)
 	idStart, idEnd, err := rmq.idAllocator.Alloc(uint32(msgLen))
-
 	if err != nil {
 		return []UniqueID{}, err
 	}
@@ -631,7 +628,6 @@ func (rmq *rocksmq) Produce(topicName string, messages []ProducerMessage) ([]Uni
 	if UniqueID(msgLen) != idEnd-idStart {
 		return []UniqueID{}, errors.New("Obtained id length is not equal that of message")
 	}
-
 	// Insert data to store system
 	batch := gorocksdb.NewWriteBatch()
 	defer batch.Destroy()
@@ -641,16 +637,6 @@ func (rmq *rocksmq) Produce(topicName string, messages []ProducerMessage) ([]Uni
 		msgID := idStart + UniqueID(i)
 		key := path.Join(topicName, strconv.FormatInt(msgID, 10))
 		batch.PutCF(rmq.cfh[0], []byte(key), messages[i].Payload)
-		// batch.Put([]byte(key), messages[i].Payload)
-		if messages[i].Properties != nil {
-			properties, err := json.Marshal(messages[i].Properties)
-			if err != nil {
-				log.Warn("properties marshal failed", zap.Int64("msgID", msgID), zap.String("topicName", topicName),
-					zap.Error(err))
-				return nil, err
-			}
-			batch.PutCF(rmq.cfh[1], []byte(key), properties)
-		}
 		msgIDs[i] = msgID
 		msgSizes[msgID] = int64(len(messages[i].Payload))
 	}
@@ -784,9 +770,7 @@ func (rmq *rocksmq) Consume(topicName string, groupName string, n int) ([]Consum
 	defer readOpts.Destroy()
 	prefix := topicName + "/"
 	iter := rocksdbkv.NewRocksIteratorCFWithUpperBound(rmq.store, rmq.cfh[0], typeutil.AddOne(prefix), readOpts)
-	iterProperty := rocksdbkv.NewRocksIteratorCFWithUpperBound(rmq.store, rmq.cfh[1], typeutil.AddOne(prefix), readOpts)
 	defer iter.Close()
-	defer iterProperty.Close()
 
 	var dataKey string
 	if currentID == DefaultMessageID {
@@ -795,7 +779,6 @@ func (rmq *rocksmq) Consume(topicName string, groupName string, n int) ([]Consum
 		dataKey = path.Join(topicName, strconv.FormatInt(currentID, 10))
 	}
 	iter.Seek([]byte(dataKey))
-	iterProperty.Seek([]byte(dataKey))
 
 	consumerMessage := make([]ConsumerMessage, 0, n)
 	offset := 0
@@ -803,11 +786,9 @@ func (rmq *rocksmq) Consume(topicName string, groupName string, n int) ([]Consum
 	for ; iter.Valid() && offset < n; iter.Next() {
 		key := iter.Key()
 		val := iter.Value()
-		strKey := string(key.Data())
 		key.Free()
-		properties := make(map[string]string)
-		var propertiesValue []byte
 
+		strKey := string(key.Data())
 		msgID, err := strconv.ParseInt(strKey[len(topicName)+1:], 10, 64)
 		if err != nil {
 			val.Free()
@@ -815,23 +796,6 @@ func (rmq *rocksmq) Consume(topicName string, groupName string, n int) ([]Consum
 		}
 		offset++
 
-		if iterProperty.Valid() && string(iterProperty.Key().Data()) == string(iter.Key().Data()) {
-			// the key of properties is the same with the key of payload
-			// to prevent mix message with or without property column family
-			propertiesValue = iterProperty.Value().Data()
-			iterProperty.Next()
-		}
-
-		// between 2.2.0 and 2.3.0, the key of Payload is topic/properties/msgid/Payload
-		// will ingnore the property before 2.3.0, just make sure property empty is ok for 2.3
-
-		// before 2.2.0, there have no properties in ProducerMessage and ConsumerMessage in rocksmq
-		// when produce before 2.2.0, but consume after 2.2.0, propertiesValue will be []
-		if len(propertiesValue) != 0 {
-			if err = json.Unmarshal(propertiesValue, &properties); err != nil {
-				return nil, err
-			}
-		}
 		msg := ConsumerMessage{
 			MsgID: msgID,
 		}
@@ -839,10 +803,8 @@ func (rmq *rocksmq) Consume(topicName string, groupName string, n int) ([]Consum
 		dataLen := len(origData)
 		if dataLen == 0 {
 			msg.Payload = nil
-			msg.Properties = nil
 		} else {
 			msg.Payload = make([]byte, dataLen)
-			msg.Properties = properties
 			copy(msg.Payload, origData)
 		}
 		consumerMessage = append(consumerMessage, msg)
@@ -902,7 +864,7 @@ func (rmq *rocksmq) seek(topicName string, groupName string, msgID UniqueID) err
 		log.Warn("RocksMQ: trying to seek to no exist position, reset current id",
 			zap.String("topic", topicName), zap.String("group", groupName), zap.Int64("msgId", msgID))
 		err := rmq.moveConsumePos(topicName, groupName, DefaultMessageID)
-		//skip seek if key is not found, this is the behavior as pulsar
+		// skip seek if key is not found, this is the behavior as pulsar
 		return err
 	}
 	/* Step II: update current_id */
@@ -922,7 +884,7 @@ func (rmq *rocksmq) moveConsumePos(topicName string, groupName string, msgID Uni
 		panic("move consume position backward")
 	}
 
-	//update ack if position move forward
+	// update ack if position move forward
 	err := rmq.updateAckedInfo(topicName, groupName, oldPos, msgID-1)
 	if err != nil {
 		log.Warn("failed to update acked info ", zap.String("topic", topicName),
@@ -942,7 +904,7 @@ func (rmq *rocksmq) Seek(topicName string, groupName string, msgID UniqueID) err
 	/* Step I: Check if key exists */
 	ll, ok := topicMu.Load(topicName)
 	if !ok {
-		return fmt.Errorf("topic %s not exist, %w", topicName, mqwrapper.ErrTopicNotExist)
+		return merr.WrapErrMqTopicNotFound(topicName)
 	}
 	lock, ok := ll.(*sync.Mutex)
 	if !ok {
@@ -968,7 +930,7 @@ func (rmq *rocksmq) ForceSeek(topicName string, groupName string, msgID UniqueID
 	/* Step I: Check if key exists */
 	ll, ok := topicMu.Load(topicName)
 	if !ok {
-		return fmt.Errorf("topic %s not exist, %w", topicName, mqwrapper.ErrTopicNotExist)
+		return merr.WrapErrMqTopicNotFound(topicName)
 	}
 	lock, ok := ll.(*sync.Mutex)
 	if !ok {
@@ -1054,7 +1016,6 @@ func (rmq *rocksmq) getLatestMsg(topicName string) (int64, error) {
 	}
 
 	msgID, err := strconv.ParseInt(seekMsgID[len(topicName)+1:], 10, 64)
-
 	if err != nil {
 		return DefaultMessageID, err
 	}
@@ -1154,22 +1115,14 @@ func (rmq *rocksmq) updateAckedInfo(topicName, groupName string, firstID UniqueI
 }
 
 func (rmq *rocksmq) CheckTopicValid(topic string) error {
-	// Check if key exists
-	log := log.With(zap.String("topic", topic))
-
 	_, ok := topicMu.Load(topic)
 	if !ok {
-		return merr.WrapErrTopicNotFound(topic, "failed to get topic")
+		return merr.WrapErrMqTopicNotFound(topic, "failed to get topic")
 	}
 
-	latestMsgID, err := rmq.GetLatestMsg(topic)
+	_, err := rmq.GetLatestMsg(topic)
 	if err != nil {
 		return err
 	}
-
-	if latestMsgID != DefaultMessageID {
-		return merr.WrapErrTopicNotEmpty(topic, "topic is not empty")
-	}
-	log.Info("created topic is empty")
 	return nil
 }

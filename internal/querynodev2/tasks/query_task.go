@@ -2,12 +2,13 @@ package tasks
 
 import (
 	"context"
+	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
-	"github.com/milvus-io/milvus/internal/proto/segcorepb"
 	"github.com/milvus-io/milvus/internal/querynodev2/collector"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
 	"github.com/milvus-io/milvus/pkg/metrics"
@@ -88,31 +89,8 @@ func (t *QueryTask) Execute() error {
 		return err
 	}
 	defer retrievePlan.Delete()
-
-	var (
-		results          []*segcorepb.RetrieveResults
-		searchedSegments []segments.Segment
-	)
-	if t.req.GetScope() == querypb.DataScope_Historical {
-		results, searchedSegments, err = segments.RetrieveHistorical(
-			t.ctx,
-			t.segmentManager,
-			retrievePlan,
-			t.req.Req.CollectionID,
-			nil,
-			t.req.GetSegmentIDs(),
-		)
-	} else {
-		results, searchedSegments, err = segments.RetrieveStreaming(
-			t.ctx,
-			t.segmentManager,
-			retrievePlan,
-			t.req.Req.CollectionID,
-			nil,
-			t.req.GetSegmentIDs(),
-		)
-	}
-	defer t.segmentManager.Segment.Unpin(searchedSegments)
+	results, querySegments, err := segments.Retrieve(t.ctx, t.segmentManager, retrievePlan, t.req)
+	defer t.segmentManager.Segment.Unpin(querySegments)
 	if err != nil {
 		return err
 	}
@@ -121,8 +99,13 @@ func (t *QueryTask) Execute() error {
 		t.req,
 		t.collection.Schema(),
 	)
-
+	beforeReduce := time.Now()
 	reducedResult, err := reducer.Reduce(t.ctx, results)
+
+	metrics.QueryNodeReduceLatency.WithLabelValues(
+		fmt.Sprint(paramtable.GetNodeID()),
+		metrics.QueryLabel,
+		metrics.ReduceSegments).Observe(float64(time.Since(beforeReduce).Milliseconds()))
 	if err != nil {
 		return err
 	}
@@ -131,7 +114,7 @@ func (t *QueryTask) Execute() error {
 		Base: &commonpb.MsgBase{
 			SourceID: paramtable.GetNodeID(),
 		},
-		Status:     merr.Status(nil),
+		Status:     merr.Success(),
 		Ids:        reducedResult.Ids,
 		FieldsData: reducedResult.FieldsData,
 		CostAggregation: &internalpb.CostAggregation{

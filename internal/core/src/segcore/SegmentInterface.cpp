@@ -14,6 +14,7 @@
 #include <cstdint>
 
 #include "Utils.h"
+#include "common/EasyAssert.h"
 #include "common/SystemProperty.h"
 #include "common/Tracer.h"
 #include "common/Types.h"
@@ -93,8 +94,9 @@ SegmentInternalInterface::Retrieve(const query::RetrievePlan* plan,
         output_data_size += get_field_avg_size(field_id) * result_rows;
     }
     if (output_data_size > limit_size) {
-        throw std::runtime_error("query results exceed the limit size " +
-                                 std::to_string(limit_size));
+        throw SegcoreError(
+            RetrieveError,
+            fmt::format("query results exceed the limit size ", limit_size));
     }
 
     if (plan->plan_node_->is_count_) {
@@ -139,6 +141,10 @@ SegmentInternalInterface::Retrieve(const query::RetrievePlan* plan,
         auto col = bulk_subscript(field_id,
                                   retrieve_results.result_offsets_.data(),
                                   retrieve_results.result_offsets_.size());
+        if (field_meta.get_data_type() == DataType::ARRAY) {
+            col->mutable_scalars()->mutable_array_data()->set_element_type(
+                proto::schema::DataType(field_meta.get_element_type()));
+        }
         auto col_data = col.release();
         fields_data->AddAllocated(col_data);
         if (pk_field_id.has_value() && pk_field_id.value() == field_id) {
@@ -159,7 +165,9 @@ SegmentInternalInterface::Retrieve(const query::RetrievePlan* plan,
                     break;
                 }
                 default: {
-                    PanicInfo("unsupported data type");
+                    PanicInfo(DataTypeInvalid,
+                              fmt::format("unsupported datatype {}",
+                                          field_meta.get_data_type()));
                 }
             }
         }
@@ -200,7 +208,7 @@ SegmentInternalInterface::get_field_avg_size(FieldId field_id) const {
             return sizeof(int64_t);
         }
 
-        throw std::runtime_error("unsupported system field id");
+        throw SegcoreError(FieldIDInvalid, "unsupported system field id");
     }
 
     auto schema = get_schema();

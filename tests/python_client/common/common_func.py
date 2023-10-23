@@ -333,7 +333,7 @@ def gen_default_rows_data(nb=ct.default_nb, dim=ct.default_dim, start=0, with_js
         dict = {ct.default_int64_field_name: i,
                 ct.default_float_field_name: i*1.0,
                 ct.default_string_field_name: str(i),
-                ct.default_json_field_name: {"number": i},
+                ct.default_json_field_name: {"number": i, "float": i*1.0},
                 ct.default_float_vec_field_name: gen_vectors(1, dim)[0]
                 }
         if with_json is False:
@@ -850,6 +850,12 @@ def gen_invalid_search_params_type():
                     continue
                 annoy_search_param = {"index_type": index_type, "search_params": {"search_k": search_k}}
                 search_params.append(annoy_search_param)
+        elif index_type == "SCANN":
+            for reorder_k in ct.get_invalid_ints:
+                if isinstance(reorder_k, int):
+                    continue
+                scann_search_param = {"index_type": index_type, "search_params": {"nprobe": 8, "reorder_k": reorder_k}}
+                search_params.append(scann_search_param)
         elif index_type == "DISKANN":
             for search_list in ct.get_invalid_ints:
                 diskann_search_param = {"index_type": index_type, "search_params": {"search_list": search_list}}
@@ -883,6 +889,10 @@ def gen_search_param(index_type, metric_type="L2"):
         for search_k in [1000, 5000]:
             annoy_search_param = {"metric_type": metric_type, "params": {"search_k": search_k}}
             search_params.append(annoy_search_param)
+    elif index_type == "SCANN":
+        for reorder_k in [1200, 3000]:
+            scann_search_param = {"metric_type": metric_type, "params": {"nprobe": 64, "reorder_k": reorder_k}}
+            search_params.append(scann_search_param)
     elif index_type == "DISKANN":
         for search_list in [20, 300, 1500]:
             diskann_search_param = {"metric_type": metric_type, "params": {"search_list": search_list}}
@@ -925,7 +935,10 @@ def gen_invalid_search_param(index_type, metric_type="L2"):
         for search_list in ["-1"]:
             diskann_search_param = {"metric_type": metric_type, "params": {"search_list": search_list}}
             search_params.append(diskann_search_param)
-
+    elif index_type == "SCANN":
+        for reorder_k in [-1]:
+            scann_search_param = {"metric_type": metric_type, "params": {"reorder_k": reorder_k, "nprobe": 10}}
+            search_params.append(scann_search_param)
     else:
         log.error("Invalid index_type.")
         raise Exception("Invalid index_type.")
@@ -948,54 +961,71 @@ def gen_normal_expressions():
         "(int64 > 0 && int64 < 400) or (int64 > 500 && int64 < 1000)",
         "int64 not in [1, 2, 3]",
         "int64 in [1, 2, 3] and float != 2",
-        "int64 == 0 || int64 == 1 || int64 == 2",
-        "0 < int64 < 400",
-        "500 <= int64 < 1000",
+        "int64 == 0 || float == 10**2 || (int64 + 1) == 3",
+        "0 <= int64 < 400 and int64 % 100 == 0",
         "200+300 < int64 <= 500+500",
-        "int64 in [300/2, 900%40, -10*30+800, 2048/2%200, (100+200)*2]",
-        "float in [+3**6, 2**10/2]",
-        "(int64 % 100 == 0) && int64 < 500",
-        "float <= 4**5/2 && float > 500-1 && float != 500/2+260",
         "int64 > 400 && int64 < 200",
-        "float < -2**8",
-        "(int64 + 1) == 3 || int64 * 2 == 64 || float == 10**2"
+        "int64 in [300/2, 900%40, -10*30+800, (100+200)*2] or float in [+3**6, 2**10/2]",
+        "float <= -4**5/2 && float > 500-1 && float != 500/2+260"
     ]
     return expressions
 
 
-def gen_field_compare_expressions():
+def gen_json_field_expressions():
     expressions = [
-        "int64_1 | int64_2 == 1",
-        "int64_1 && int64_2 ==1",
-        "int64_1 + int64_2 == 10",
-        "int64_1 - int64_2 == 2",
-        "int64_1 * int64_2 == 8",
-        "int64_1 / int64_2 == 2",
-        "int64_1 ** int64_2 == 4",
-        "int64_1 % int64_2 == 0",
-        "int64_1 in int64_2",
-        "int64_1 + int64_2 >= 10"
+        "json_field['number'] > 0",
+        "0 <= json_field['number'] < 400 or 1000 > json_field['number'] >= 500",
+        "json_field['number'] not in [1, 2, 3]",
+        "json_field['number'] in [1, 2, 3] and json_field['float'] != 2",
+        "json_field['number'] == 0 || json_field['float'] == 10**2 || json_field['number'] + 1 == 3",
+        "json_field['number'] < 400 and json_field['number'] >= 100 and json_field['number'] % 100 == 0",
+        "json_field['float'] > 400 && json_field['float'] < 200",
+        "json_field['number'] in [300/2, -10*30+800, (100+200)*2] or json_field['float'] in [+3**6, 2**10/2]",
+        "json_field['float'] <= -4**5/2 && json_field['float'] > 500-1 && json_field['float'] != 500/2+260"
     ]
     return expressions
 
 
-def gen_normal_string_expressions(field):
-    expressions = [
-        f"\"0\"< {field} < \"3\"",
-        f"{field} >= \"0\"",
-        f"({field} > \"0\" && {field} < \"100\") or ({field} > \"200\" && {field} < \"300\")",
-        f"\"0\" <= {field} <= \"100\"",
-        f"{field} == \"0\"|| {field} == \"1\"|| {field} ==\"2\"",
-        f"{field} != \"0\"",
-        f"{field} not in [\"0\", \"1\", \"2\"]",
-        f"{field} in [\"0\", \"1\", \"2\"]"
-    ]
+def gen_field_compare_expressions(fields1=None, fields2=None):
+    if fields1 is None:
+        fields1 = ["int64_1"]
+        fields2 = ["int64_2"]
+    expressions = []
+    for field1, field2 in zip(fields1, fields2):
+        expression = [
+            f"{field1} | {field2} == 1",
+            f"{field1} + {field2} <= 10 || {field1} - {field2} == 2",
+            f"{field1} * {field2} >= 8 && {field1} / {field2} < 2",
+            f"{field1} ** {field2} != 4 and {field1} + {field2} > 5",
+            f"{field1} not in {field2}",
+            f"{field1} in {field2}",
+        ]
+        expressions.extend(expression)
+    return expressions
+
+
+def gen_normal_string_expressions(fields=None):
+    if fields is None:
+        fields = [ct.default_string_field_name]
+    expressions = []
+    for field in fields:
+        expression = [
+            f"\"0\"< {field} < \"3\"",
+            f"{field} >= \"0\"",
+            f"({field} > \"0\" && {field} < \"100\") or ({field} > \"200\" && {field} < \"300\")",
+            f"\"0\" <= {field} <= \"100\"",
+            f"{field} == \"0\"|| {field} == \"1\"|| {field} ==\"2\"",
+            f"{field} != \"0\"",
+            f"{field} not in [\"0\", \"1\", \"2\"]",
+            f"{field} in [\"0\", \"1\", \"2\"]"
+        ]
+        expressions.extend(expression)
     return expressions
 
 
 def gen_invalid_string_expressions():
     expressions = [
-        "varchar in [0,  \"1\"]",
+        "varchar in [0, \"1\"]",
         "varchar not in [\"0\", 1, 2]"
     ]
     return expressions
@@ -1185,6 +1215,29 @@ def index_to_dict(index):
         # "name": index.name,
         "params": index.params
     }
+
+
+def assert_json_contains(expr, list_data):
+    result_ids = []
+    expr_prefix = expr.split('(', 1)[0]
+    exp_ids = eval(expr.split(', ', 1)[1].split(')', 1)[0])
+    if expr_prefix in ["json_contains", "JSON_CONTAINS"]:
+        for i in range(len(list_data)):
+            if exp_ids in list_data[i]:
+                result_ids.append(i)
+    elif expr_prefix in ["json_contains_all", "JSON_CONTAINS_ALL"]:
+        for i in range(len(list_data)):
+            set_list_data = set(tuple(element) if isinstance(element, list) else element for element in list_data[i])
+            if set(exp_ids).issubset(set_list_data):
+                result_ids.append(i)
+    elif expr_prefix in ["json_contains_any", "JSON_CONTAINS_ANY"]:
+        for i in range(len(list_data)):
+            set_list_data = set(tuple(element) if isinstance(element, list) else element for element in list_data[i])
+            if set(exp_ids) & set_list_data:
+                result_ids.append(i)
+    else:
+        log.warning("unknown expr: %s" % expr)
+    return result_ids
 
 
 def assert_equal_index(index_1, index_2):

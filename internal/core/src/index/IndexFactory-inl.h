@@ -23,45 +23,35 @@ namespace milvus::index {
 
 template <typename T>
 inline ScalarIndexPtr<T>
-IndexFactory::CreateScalarIndex(const IndexType& index_type,
-                                storage::FileManagerImplPtr file_manager) {
-    return CreateScalarIndexSort<T>(file_manager);
+IndexFactory::CreateScalarIndex(
+    const IndexType& index_type,
+    const storage::FileManagerContext& file_manager_context) {
+    return CreateScalarIndexSort<T>(file_manager_context);
 }
 template <typename T>
 inline ScalarIndexPtr<T>
-IndexFactory::CreateScalarIndex(const IndexType& index_type,
-                                storage::FileManagerImplPtr file_manager,
-                                std::shared_ptr<milvus_storage::Space> space) {
-    return CreateScalarIndexSort<T>(file_manager, space);
-}
-
-// template <>
-// inline ScalarIndexPtr<bool>
-// IndexFactory::CreateScalarIndex(const IndexType& index_type) {
-//    return CreateBoolIndex();
-//}
-
-template <>
-inline ScalarIndexPtr<std::string>
-IndexFactory::CreateScalarIndex(const IndexType& index_type,
-                                storage::FileManagerImplPtr file_manager) {
-#if defined(__linux__) || defined(__APPLE__)
-    return CreateStringIndexMarisa(file_manager);
-#else
-    throw std::runtime_error("unsupported platform");
-#endif
+IndexFactory::CreateScalarIndex(
+    const IndexType& index_type,
+    const storage::FileManagerContext& file_manager_context,
+    std::shared_ptr<milvus_storage::Space> space) {
+    return CreateScalarIndexSort<T>(file_manager_context, space);
 }
 
 template <>
 inline ScalarIndexPtr<std::string>
-IndexFactory::CreateScalarIndex(const IndexType& index_type,
-                                storage::FileManagerImplPtr file_manager,
-                                std::shared_ptr<milvus_storage::Space> space) {
-#if defined(__linux__) || defined(__APPLE__)
-    return CreateStringIndexMarisa(file_manager, space);
-#else
-    throw std::runtime_error("unsupported platform");
-#endif
+IndexFactory::CreateScalarIndex(
+    const IndexType& index_type,
+    const storage::FileManagerContext& file_manager_context) {
+    return CreateStringIndexMarisa(file_manager_context);
+}
+
+template <>
+inline ScalarIndexPtr<std::string>
+IndexFactory::CreateScalarIndex(
+    const IndexType& index_type,
+    const storage::FileManagerContext& file_manager_context,
+    std::shared_ptr<milvus_storage::Space> space) {
+    return CreateStringIndexMarisa(file_manager_context, space);
 }
 
 }  // namespace milvus::index

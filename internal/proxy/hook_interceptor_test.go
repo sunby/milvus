@@ -5,11 +5,10 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/errors"
-
+	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc"
 
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
-	"github.com/stretchr/testify/assert"
 )
 
 func TestInitHook(t *testing.T) {
@@ -143,7 +142,19 @@ func TestHookInterceptor(t *testing.T) {
 func TestDefaultHook(t *testing.T) {
 	d := defaultHook{}
 	assert.NoError(t, d.Init(nil))
+	{
+		_, err := d.VerifyAPIKey("key")
+		assert.Error(t, err)
+	}
 	assert.NotPanics(t, func() {
 		d.Release()
+	})
+}
+
+func TestUpdateProxyFunctionCallMetric(t *testing.T) {
+	assert.NotPanics(t, func() {
+		updateProxyFunctionCallMetric("/milvus.proto.milvus.MilvusService/Flush")
+		updateProxyFunctionCallMetric("Flush")
+		updateProxyFunctionCallMetric("")
 	})
 }

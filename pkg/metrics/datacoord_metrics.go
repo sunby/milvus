@@ -19,9 +19,10 @@ package metrics
 import (
 	"fmt"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 const (
@@ -41,7 +42,7 @@ const (
 )
 
 var (
-	//DataCoordNumDataNodes records the num of data nodes managed by DataCoord.
+	// DataCoordNumDataNodes records the num of data nodes managed by DataCoord.
 	DataCoordNumDataNodes = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: milvusNamespace,
@@ -60,7 +61,7 @@ var (
 			segmentStateLabelName,
 		})
 
-	//DataCoordCollectionNum records the num of collections managed by DataCoord.
+	// DataCoordCollectionNum records the num of collections managed by DataCoord.
 	DataCoordNumCollections = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: milvusNamespace,
@@ -147,6 +148,26 @@ var (
 			Help:      "the num of files for flushed segment",
 			Buckets:   buckets,
 		}, []string{segmentFileTypeLabelName})
+
+	/* garbage collector related metrics */
+
+	// GarbageCollectorListLatency metrics for gc scan storage files.
+	GarbageCollectorListLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.DataCoordRole,
+			Name:      "gc_list_latency",
+			Help:      "latency of list objects in storage while garbage collecting (in milliseconds)",
+			Buckets:   longTaskBuckets,
+		}, []string{nodeIDLabelName, segmentFileTypeLabelName})
+
+	GarbageCollectorRunCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.DataCoordRole,
+			Name:      "gc_run_count",
+			Help:      "garbage collection running count",
+		}, []string{nodeIDLabelName})
 
 	/* hard to implement, commented now
 	DataCoordSegmentSizeRatio = prometheus.NewHistogramVec(

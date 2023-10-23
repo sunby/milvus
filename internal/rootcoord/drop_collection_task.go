@@ -20,9 +20,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/cockroachdb/errors"
 	"go.uber.org/zap"
 
-	"github.com/cockroachdb/errors"
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	pb "github.com/milvus-io/milvus/internal/proto/etcdpb"
@@ -100,6 +100,7 @@ func (t *dropCollectionTask) Execute(ctx context.Context) error {
 	redoTask.AddAsyncStep(&deleteCollectionDataStep{
 		baseStep: baseStep{core: t.core},
 		coll:     collMeta,
+		isSkip:   t.Req.GetBase().GetReplicateInfo().GetIsReplicate(),
 	})
 	redoTask.AddAsyncStep(&removeDmlChannelsStep{
 		baseStep:  baseStep{core: t.core},

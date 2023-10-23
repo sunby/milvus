@@ -22,8 +22,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
-	"github.com/milvus-io/milvus/pkg/util/tsoutil"
-	"github.com/milvus-io/milvus/pkg/util/typeutil"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 
@@ -35,6 +33,8 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/merr"
+	"github.com/milvus-io/milvus/pkg/util/tsoutil"
+	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 type Executor struct {
@@ -59,7 +59,8 @@ func NewExecutor(meta *meta.Meta,
 	broker meta.Broker,
 	targetMgr *meta.TargetManager,
 	cluster session.Cluster,
-	nodeMgr *session.NodeManager) *Executor {
+	nodeMgr *session.NodeManager,
+) *Executor {
 	return &Executor{
 		doneCh:    make(chan struct{}),
 		meta:      meta,
@@ -223,7 +224,8 @@ func (ex *Executor) executeSegmentAction(task *SegmentTask, step int) {
 func (ex *Executor) loadSegment(task *SegmentTask, step int) error {
 	action := task.Actions()[step].(*SegmentAction)
 	defer action.rpcReturned.Store(true)
-	log := log.With(
+	ctx := task.Context()
+	log := log.Ctx(ctx).With(
 		zap.Int64("taskID", task.ID()),
 		zap.Int64("collectionID", task.CollectionID()),
 		zap.Int64("replicaID", task.ReplicaID()),
@@ -240,7 +242,6 @@ func (ex *Executor) loadSegment(task *SegmentTask, step int) error {
 		}
 	}()
 
-	ctx := task.Context()
 	schema, err := ex.broker.GetCollectionSchema(ctx, task.CollectionID())
 	if err != nil {
 		log.Warn("failed to get schema of collection", zap.Error(err))
@@ -285,7 +286,7 @@ func (ex *Executor) loadSegment(task *SegmentTask, step int) error {
 	}
 	log = log.With(zap.Int64("shardLeader", leader))
 
-	//Get collection index info
+	// Get collection index info
 	indexInfo, err := ex.broker.DescribeIndex(ctx, task.CollectionID())
 	if err != nil {
 		log.Warn("fail to get index meta of collection")
@@ -355,7 +356,7 @@ func (ex *Executor) releaseSegment(task *SegmentTask, step int) {
 		log.Warn("failed to release segment, it may be a false failure", zap.Error(err))
 		return
 	}
-	if status.ErrorCode != commonpb.ErrorCode_Success {
+	if status.GetErrorCode() != commonpb.ErrorCode_Success {
 		log.Warn("failed to release segment", zap.String("reason", status.GetReason()))
 		return
 	}

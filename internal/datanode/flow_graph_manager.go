@@ -17,6 +17,7 @@
 package datanode
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"sync"
@@ -48,7 +49,8 @@ func newFlowgraphManager() *flowgraphManager {
 	}
 }
 
-func (fm *flowgraphManager) start() {
+func (fm *flowgraphManager) start(waiter *sync.WaitGroup) {
+	defer waiter.Done()
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -108,32 +110,39 @@ func (fm *flowgraphManager) execute(totalMemory uint64) {
 		return channels[i].bufferSize > channels[j].bufferSize
 	})
 	if fg, ok := fm.flowgraphs.Get(channels[0].channel); ok { // sync the first channel with the largest memory usage
-		fg.channel.forceToSync()
+		fg.channel.setIsHighMemory(true)
 		log.Info("notify flowgraph to sync",
 			zap.String("channel", channels[0].channel), zap.Int64("bufferSize", channels[0].bufferSize))
 	}
 }
 
-func (fm *flowgraphManager) addAndStart(dn *DataNode, vchan *datapb.VchannelInfo, schema *schemapb.CollectionSchema, tickler *tickler) error {
+func (fm *flowgraphManager) Add(ds *dataSyncService) {
+	fm.flowgraphs.Insert(ds.vchannelName, ds)
+	metrics.DataNodeNumFlowGraphs.WithLabelValues(fmt.Sprint(paramtable.GetNodeID())).Inc()
+}
+
+func (fm *flowgraphManager) addAndStartWithEtcdTickler(dn *DataNode, vchan *datapb.VchannelInfo, schema *schemapb.CollectionSchema, tickler *etcdTickler) error {
 	log := log.With(zap.String("channel", vchan.GetChannelName()))
 	if fm.flowgraphs.Contain(vchan.GetChannelName()) {
 		log.Warn("try to add an existed DataSyncService")
 		return nil
 	}
 
-	channel := newChannel(vchan.GetChannelName(), vchan.GetCollectionID(), schema, dn.rootCoord, dn.chunkManager)
-
 	var dataSyncService *dataSyncService
 	var err error
 	if Params.CommonCfg.EnableStorageV2.GetAsBool() {
-		dataSyncService, err = newDataSyncServiceV2(dn.ctx, make(chan flushMsg, 100), make(chan resendTTMsg, 100), channel,
-			dn.allocator, dn.dispClient, dn.factory, vchan, dn.clearSignal, dn.dataCoord, dn.segmentCache, dn.chunkManager, dn.compactionExecutor, tickler, dn.GetSession().ServerID, dn.timeTickSender, dn.etcdCli)
+		dataSyncService, err := newServiceWithEtcdTicklerV2(context.TODO(), dn, &datapb.ChannelWatchInfo{
+			Schema: schema,
+			Vchan:  vchan,
+		}, tickler)
 	} else {
-		dataSyncService, err = newDataSyncService(dn.ctx, make(chan flushMsg, 100), make(chan resendTTMsg, 100), channel,
-			dn.allocator, dn.dispClient, dn.factory, vchan, dn.clearSignal, dn.dataCoord, dn.segmentCache, dn.chunkManager, dn.compactionExecutor, tickler, dn.GetSession().ServerID, dn.timeTickSender)
+		dataSyncService, err := newServiceWithEtcdTickler(context.TODO(), dn, &datapb.ChannelWatchInfo{
+			Schema: schema,
+			Vchan:  vchan,
+		}, tickler)
 	}
 	if err != nil {
-		log.Warn("fail to create new datasyncservice", zap.Error(err))
+		log.Warn("fail to create new DataSyncService", zap.Error(err))
 		return err
 	}
 	dataSyncService.start()
@@ -144,11 +153,13 @@ func (fm *flowgraphManager) addAndStart(dn *DataNode, vchan *datapb.VchannelInfo
 }
 
 func (fm *flowgraphManager) release(vchanName string) {
-	if fg, loaded := fm.flowgraphs.GetAndRemove(vchanName); loaded {
+	if fg, loaded := fm.flowgraphs.Get(vchanName); loaded {
 		fg.close()
+		fm.flowgraphs.Remove(vchanName)
+
 		metrics.DataNodeNumFlowGraphs.WithLabelValues(fmt.Sprint(paramtable.GetNodeID())).Dec()
+		rateCol.removeFlowGraphChannel(vchanName)
 	}
-	rateCol.removeFlowGraphChannel(vchanName)
 }
 
 func (fm *flowgraphManager) getFlushCh(segID UniqueID) (chan<- flushMsg, error) {
@@ -190,26 +201,6 @@ func (fm *flowgraphManager) getChannel(segID UniqueID) (Channel, error) {
 	return nil, fmt.Errorf("cannot find segment %d in all flowgraphs", segID)
 }
 
-// resendTT loops through flow graphs, looks for segments that are not flushed,
-// and sends them to that flow graph's `resendTTCh` channel so stats of
-// these segments will be resent.
-func (fm *flowgraphManager) resendTT() []UniqueID {
-	var unFlushedSegments []UniqueID
-	fm.flowgraphs.Range(func(key string, fg *dataSyncService) bool {
-		segIDs := fg.channel.listNotFlushedSegmentIDs()
-		if len(segIDs) > 0 {
-			log.Info("un-flushed segments found, stats will be resend",
-				zap.Int64s("segment IDs", segIDs))
-			unFlushedSegments = append(unFlushedSegments, segIDs...)
-			fg.resendTTCh <- resendTTMsg{
-				segmentIDs: segIDs,
-			}
-		}
-		return true
-	})
-	return unFlushedSegments
-}
-
 func (fm *flowgraphManager) getFlowgraphService(vchan string) (*dataSyncService, bool) {
 	return fm.flowgraphs.Get(vchan)
 }
@@ -217,6 +208,11 @@ func (fm *flowgraphManager) getFlowgraphService(vchan string) (*dataSyncService,
 func (fm *flowgraphManager) exist(vchan string) bool {
 	_, exist := fm.getFlowgraphService(vchan)
 	return exist
+}
+
+func (fm *flowgraphManager) existWithOpID(vchan string, opID UniqueID) bool {
+	ds, exist := fm.getFlowgraphService(vchan)
+	return exist && ds.opID == opID
 }
 
 // getFlowGraphNum returns number of flow graphs.
@@ -233,4 +229,14 @@ func (fm *flowgraphManager) dropAll() {
 		log.Info("successfully dropped flowgraph", zap.String("vChannelName", key))
 		return true
 	})
+}
+
+func (fm *flowgraphManager) collections() []int64 {
+	collectionSet := typeutil.UniqueSet{}
+	fm.flowgraphs.Range(func(key string, value *dataSyncService) bool {
+		collectionSet.Insert(value.channel.getCollectionID())
+		return true
+	})
+
+	return collectionSet.Collect()
 }

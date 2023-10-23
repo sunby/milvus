@@ -47,6 +47,9 @@ class SegmentInterface {
     virtual void
     FillTargetEntry(const query::Plan* plan, SearchResult& results) const = 0;
 
+    virtual bool
+    Contain(const PkType& pk) const = 0;
+
     virtual std::unique_ptr<SearchResult>
     Search(const query::Plan* Plan,
            const query::PlaceholderGroup* placeholder_group) const = 0;
@@ -83,7 +86,7 @@ class SegmentInterface {
     //  virtual int64_t
     //  PreDelete(int64_t size) = 0;
 
-    virtual Status
+    virtual SegcoreError
     Delete(int64_t reserved_offset,
            int64_t size,
            const IdArray* pks,

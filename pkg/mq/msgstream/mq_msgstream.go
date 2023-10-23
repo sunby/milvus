@@ -20,19 +20,22 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/errors"
 	"github.com/golang/protobuf/proto"
-	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
-	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/samber/lo"
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
+	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
+	"github.com/milvus-io/milvus/pkg/config"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/retry"
 	"github.com/milvus-io/milvus/pkg/util/tsoutil"
@@ -49,16 +52,17 @@ type mqMsgStream struct {
 	consumers        map[string]mqwrapper.Consumer
 	consumerChannels []string
 
-	repackFunc   RepackFunc
-	unmarshal    UnmarshalDispatcher
-	receiveBuf   chan *MsgPack
-	closeRWMutex *sync.RWMutex
-	streamCancel func()
-	bufSize      int64
-	producerLock *sync.Mutex
-	consumerLock *sync.Mutex
-	closed       int32
-	onceChan     sync.Once
+	repackFunc    RepackFunc
+	unmarshal     UnmarshalDispatcher
+	receiveBuf    chan *MsgPack
+	closeRWMutex  *sync.RWMutex
+	streamCancel  func()
+	bufSize       int64
+	producerLock  *sync.RWMutex
+	consumerLock  *sync.Mutex
+	closed        int32
+	onceChan      sync.Once
+	enableProduce atomic.Value
 }
 
 // NewMqMsgStream is used to generate a new mqMsgStream object
@@ -66,8 +70,8 @@ func NewMqMsgStream(ctx context.Context,
 	receiveBufSize int64,
 	bufSize int64,
 	client mqwrapper.Client,
-	unmarshal UnmarshalDispatcher) (*mqMsgStream, error) {
-
+	unmarshal UnmarshalDispatcher,
+) (*mqMsgStream, error) {
 	streamCtx, streamCancel := context.WithCancel(ctx)
 	producers := make(map[string]mqwrapper.Producer)
 	consumers := make(map[string]mqwrapper.Consumer)
@@ -87,11 +91,23 @@ func NewMqMsgStream(ctx context.Context,
 		bufSize:      bufSize,
 		receiveBuf:   receiveBuf,
 		streamCancel: streamCancel,
-		producerLock: &sync.Mutex{},
+		producerLock: &sync.RWMutex{},
 		consumerLock: &sync.Mutex{},
 		closeRWMutex: &sync.RWMutex{},
 		closed:       0,
 	}
+	ctxLog := log.Ctx(ctx)
+	stream.enableProduce.Store(paramtable.Get().CommonCfg.TTMsgEnabled.GetAsBool())
+	paramtable.Get().Watch(paramtable.Get().CommonCfg.TTMsgEnabled.Key, config.NewHandler("enable send tt msg", func(event *config.Event) {
+		value, err := strconv.ParseBool(event.Value)
+		if err != nil {
+			ctxLog.Warn("Failed to parse bool value", zap.String("v", event.Value), zap.Error(err))
+			return
+		}
+		stream.enableProduce.Store(value)
+		ctxLog.Info("Msg Stream state updated", zap.Bool("can_produce", stream.isEnabledProduce()))
+	}))
+	ctxLog.Info("Msg Stream state", zap.Bool("can_produce", stream.isEnabledProduce()))
 
 	return stream, nil
 }
@@ -146,7 +162,7 @@ func (ms *mqMsgStream) CheckTopicValid(channel string) error {
 
 // AsConsumerWithPosition Create consumer to receive message from channels, with initial position
 // if initial position is set to latest, last message in the channel is exclusive
-func (ms *mqMsgStream) AsConsumer(channels []string, subName string, position mqwrapper.SubscriptionInitialPosition) {
+func (ms *mqMsgStream) AsConsumer(ctx context.Context, channels []string, subName string, position mqwrapper.SubscriptionInitialPosition) error {
 	for _, channel := range channels {
 		if _, ok := ms.consumers[channel]; ok {
 			continue
@@ -171,14 +187,19 @@ func (ms *mqMsgStream) AsConsumer(channels []string, subName string, position mq
 			ms.consumerChannels = append(ms.consumerChannels, channel)
 			return nil
 		}
-		// TODO if know the former subscribe is invalid, should we use pulsarctl to accelerate recovery speed
-		err := retry.Do(context.TODO(), fn, retry.Attempts(50), retry.Sleep(time.Millisecond*200), retry.MaxSleepTime(5*time.Second))
+
+		err := retry.Do(ctx, fn, retry.Attempts(20), retry.Sleep(time.Millisecond*200), retry.MaxSleepTime(5*time.Second))
 		if err != nil {
-			errMsg := "Failed to create consumer " + channel + ", error = " + err.Error()
-			panic(errMsg)
+			errMsg := fmt.Sprintf("Failed to create consumer %s", channel)
+			if merr.IsCanceledOrTimeout(err) {
+				return errors.Wrapf(err, errMsg)
+			}
+
+			panic(fmt.Sprintf("%s, errors = %s", errMsg, err.Error()))
 		}
 		log.Info("Successfully create consumer", zap.String("channel", channel), zap.String("subname", subName))
 	}
+	return nil
 }
 
 func (ms *mqMsgStream) SetRepackFunc(repackFunc RepackFunc) {
@@ -208,7 +229,6 @@ func (ms *mqMsgStream) Close() {
 
 	ms.client.Close()
 	close(ms.receiveBuf)
-
 }
 
 func (ms *mqMsgStream) ComputeProduceChannelIndexes(tsMsgs []TsMsg) [][]int32 {
@@ -236,7 +256,19 @@ func (ms *mqMsgStream) GetProduceChannels() []string {
 	return ms.producerChannels
 }
 
+func (ms *mqMsgStream) EnableProduce(can bool) {
+	ms.enableProduce.Store(can)
+}
+
+func (ms *mqMsgStream) isEnabledProduce() bool {
+	return ms.enableProduce.Load().(bool)
+}
+
 func (ms *mqMsgStream) Produce(msgPack *MsgPack) error {
+	if !ms.isEnabledProduce() {
+		log.Warn("can't produce the msg in the backup instance", zap.Stack("stack"))
+		return merr.ErrDenyProduceMsg
+	}
 	if msgPack == nil || len(msgPack.Msgs) <= 0 {
 		log.Debug("Warning: Receive empty msgPack")
 		return nil
@@ -283,13 +315,13 @@ func (ms *mqMsgStream) Produce(msgPack *MsgPack) error {
 			msg := &mqwrapper.ProducerMessage{Payload: m, Properties: map[string]string{}}
 			InjectCtx(spanCtx, msg.Properties)
 
-			ms.producerLock.Lock()
+			ms.producerLock.RLock()
 			if _, err := ms.producers[channel].Send(spanCtx, msg); err != nil {
-				ms.producerLock.Unlock()
+				ms.producerLock.RUnlock()
 				sp.RecordError(err)
 				return err
 			}
-			ms.producerLock.Unlock()
+			ms.producerLock.RUnlock()
 		}
 	}
 	return nil
@@ -301,6 +333,14 @@ func (ms *mqMsgStream) Broadcast(msgPack *MsgPack) (map[string][]MessageID, erro
 	ids := make(map[string][]MessageID)
 	if msgPack == nil || len(msgPack.Msgs) <= 0 {
 		return ids, errors.New("empty msgs")
+	}
+	// Only allow to create collection msg in backup instance
+	// However, there may be a problem of ts disorder here, but because the start position of the collection only uses offsets, not time, there is no problem for the time being
+	isCreateCollectionMsg := len(msgPack.Msgs) == 1 && msgPack.Msgs[0].Type() == commonpb.MsgType_CreateCollection
+
+	if !ms.isEnabledProduce() && !isCreateCollectionMsg {
+		log.Warn("can't broadcast the msg in the backup instance", zap.Stack("stack"))
+		return ids, merr.ErrDenyProduceMsg
 	}
 	for _, v := range msgPack.Msgs {
 		spanCtx, sp := MsgSpanFromCtx(v.TraceCtx(), v)
@@ -352,7 +392,6 @@ func (ms *mqMsgStream) getTsMsgFromConsumerMsg(msg mqwrapper.Message) (TsMsg, er
 		return nil, fmt.Errorf("failed to unmarshal tsMsg, err %s", err.Error())
 	}
 
-	// set msg info to tsMsg
 	tsMsg.SetPosition(&MsgPosition{
 		ChannelName: filepath.Base(msg.Topic()),
 		MsgID:       msg.ID().Serialize(),
@@ -381,9 +420,11 @@ func (ms *mqMsgStream) receiveMsg(consumer mqwrapper.Consumer) {
 				log.Warn("MqMsgStream get msg whose payload is nil")
 				continue
 			}
+			// not need to check the preCreatedTopic is empty, related issue: https://github.com/milvus-io/milvus/issues/27295
+			// if the message not belong to the topic, will skip it
 			tsMsg, err := ms.getTsMsgFromConsumerMsg(msg)
 			if err != nil {
-				log.Error("Failed to getTsMsgFromConsumerMsg", zap.Error(err))
+				log.Warn("Failed to getTsMsgFromConsumerMsg", zap.Error(err))
 				continue
 			}
 			pos := tsMsg.Position()
@@ -425,7 +466,7 @@ func (ms *mqMsgStream) Chan() <-chan *MsgPack {
 
 // Seek reset the subscription associated with this consumer to a specific position, the seek position is exclusive
 // User has to ensure mq_msgstream is not closed before seek, and the seek position is already written.
-func (ms *mqMsgStream) Seek(msgPositions []*msgpb.MsgPosition) error {
+func (ms *mqMsgStream) Seek(ctx context.Context, msgPositions []*msgpb.MsgPosition) error {
 	for _, mp := range msgPositions {
 		consumer, ok := ms.consumers[mp.ChannelName]
 		if !ok {
@@ -468,7 +509,8 @@ func NewMqTtMsgStream(ctx context.Context,
 	receiveBufSize int64,
 	bufSize int64,
 	client mqwrapper.Client,
-	unmarshal UnmarshalDispatcher) (*MqTtMsgStream, error) {
+	unmarshal UnmarshalDispatcher,
+) (*MqTtMsgStream, error) {
 	msgStream, err := NewMqMsgStream(ctx, receiveBufSize, bufSize, client, unmarshal)
 	if err != nil {
 		return nil, err
@@ -509,7 +551,7 @@ func (ms *MqTtMsgStream) addConsumer(consumer mqwrapper.Consumer, channel string
 }
 
 // AsConsumerWithPosition subscribes channels as consumer for a MsgStream and seeks to a certain position.
-func (ms *MqTtMsgStream) AsConsumer(channels []string, subName string, position mqwrapper.SubscriptionInitialPosition) {
+func (ms *MqTtMsgStream) AsConsumer(ctx context.Context, channels []string, subName string, position mqwrapper.SubscriptionInitialPosition) error {
 	for _, channel := range channels {
 		if _, ok := ms.consumers[channel]; ok {
 			continue
@@ -533,12 +575,19 @@ func (ms *MqTtMsgStream) AsConsumer(channels []string, subName string, position 
 			ms.addConsumer(pc, channel)
 			return nil
 		}
-		err := retry.Do(context.TODO(), fn, retry.Attempts(20), retry.Sleep(time.Millisecond*200), retry.MaxSleepTime(5*time.Second))
+
+		err := retry.Do(ctx, fn, retry.Attempts(20), retry.Sleep(time.Millisecond*200), retry.MaxSleepTime(5*time.Second))
 		if err != nil {
-			errMsg := "Failed to create consumer " + channel + ", error = " + err.Error()
-			panic(errMsg)
+			errMsg := fmt.Sprintf("Failed to create consumer %s", channel)
+			if merr.IsCanceledOrTimeout(err) {
+				return errors.Wrapf(err, errMsg)
+			}
+
+			panic(fmt.Sprintf("%s, errors = %s", errMsg, err.Error()))
 		}
 	}
+
+	return nil
 }
 
 // Close will stop goroutine and free internal producers and consumers
@@ -726,9 +775,11 @@ func (ms *MqTtMsgStream) consumeToTtMsg(consumer mqwrapper.Consumer) {
 				log.Warn("MqTtMsgStream get msg whose payload is nil")
 				continue
 			}
+			// not need to check the preCreatedTopic is empty, related issue: https://github.com/milvus-io/milvus/issues/27295
+			// if the message not belong to the topic, will skip it
 			tsMsg, err := ms.getTsMsgFromConsumerMsg(msg)
 			if err != nil {
-				log.Error("Failed to getTsMsgFromConsumerMsg", zap.Error(err))
+				log.Warn("Failed to getTsMsgFromConsumerMsg", zap.Error(err))
 				continue
 			}
 
@@ -773,7 +824,7 @@ func (ms *MqTtMsgStream) allChanReachSameTtMsg(chanTtMsgSync map[mqwrapper.Consu
 }
 
 // Seek to the specified position
-func (ms *MqTtMsgStream) Seek(msgPositions []*msgpb.MsgPosition) error {
+func (ms *MqTtMsgStream) Seek(ctx context.Context, msgPositions []*msgpb.MsgPosition) error {
 	var consumer mqwrapper.Consumer
 	var mp *MsgPosition
 	var err error
@@ -797,7 +848,7 @@ func (ms *MqTtMsgStream) Seek(msgPositions []*msgpb.MsgPosition) error {
 		if err != nil {
 			log.Warn("Failed to seek", zap.String("channel", mp.ChannelName), zap.Error(err))
 			// stop retry if consumer topic not exist
-			if errors.Is(err, mqwrapper.ErrTopicNotExist) {
+			if errors.Is(err, merr.ErrMqTopicNotFound) {
 				return retry.Unrecoverable(err)
 			}
 			return err
@@ -815,7 +866,7 @@ func (ms *MqTtMsgStream) Seek(msgPositions []*msgpb.MsgPosition) error {
 		if len(mp.MsgID) == 0 {
 			return fmt.Errorf("when msgID's length equal to 0, please use AsConsumer interface")
 		}
-		err = retry.Do(context.TODO(), fn, retry.Attempts(20), retry.Sleep(time.Millisecond*200), retry.MaxSleepTime(5*time.Second))
+		err = retry.Do(ctx, fn, retry.Attempts(20), retry.Sleep(time.Millisecond*200), retry.MaxSleepTime(5*time.Second))
 		if err != nil {
 			return fmt.Errorf("failed to seek, error %s", err.Error())
 		}
@@ -828,6 +879,8 @@ func (ms *MqTtMsgStream) Seek(msgPositions []*msgpb.MsgPosition) error {
 			select {
 			case <-ms.ctx.Done():
 				return ms.ctx.Err()
+			case <-ctx.Done():
+				return ctx.Err()
 			case msg, ok := <-consumer.Chan():
 				if !ok {
 					return fmt.Errorf("consumer closed")
@@ -845,7 +898,6 @@ func (ms *MqTtMsgStream) Seek(msgPositions []*msgpb.MsgPosition) error {
 				}
 				if tsMsg.Type() == commonpb.MsgType_TimeTick && tsMsg.BeginTs() >= mp.Timestamp {
 					runLoop = false
-					break
 				} else if tsMsg.BeginTs() > mp.Timestamp {
 					ctx, _ := ExtractCtx(tsMsg, msg.Properties())
 					tsMsg.SetTraceCtx(ctx)
@@ -855,6 +907,8 @@ func (ms *MqTtMsgStream) Seek(msgPositions []*msgpb.MsgPosition) error {
 						MsgID:       msg.ID().Serialize(),
 					})
 					ms.chanMsgBuf[consumer] = append(ms.chanMsgBuf[consumer], tsMsg)
+				} else {
+					log.Info("skip msg", zap.Any("msg", tsMsg))
 				}
 			}
 		}

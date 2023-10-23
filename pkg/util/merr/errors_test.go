@@ -21,9 +21,9 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/errors"
-	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
 
@@ -70,14 +70,15 @@ func (s *ErrSuite) TestStatusWithCode() {
 
 func (s *ErrSuite) TestWrap() {
 	// Service related
-	s.ErrorIs(WrapErrServiceNotReady("init", "test init..."), ErrServiceNotReady)
+	s.ErrorIs(WrapErrServiceNotReady("test", 0, "test init..."), ErrServiceNotReady)
 	s.ErrorIs(WrapErrServiceUnavailable("test", "test init"), ErrServiceUnavailable)
 	s.ErrorIs(WrapErrServiceMemoryLimitExceeded(110, 100, "MLE"), ErrServiceMemoryLimitExceeded)
 	s.ErrorIs(WrapErrServiceRequestLimitExceeded(100, "too many requests"), ErrServiceRequestLimitExceeded)
 	s.ErrorIs(WrapErrServiceInternal("never throw out"), ErrServiceInternal)
-	s.ErrorIs(WrapErrCrossClusterRouting("ins-0", "ins-1"), ErrCrossClusterRouting)
+	s.ErrorIs(WrapErrServiceCrossClusterRouting("ins-0", "ins-1"), ErrServiceCrossClusterRouting)
 	s.ErrorIs(WrapErrServiceDiskLimitExceeded(110, 100, "DLE"), ErrServiceDiskLimitExceeded)
 	s.ErrorIs(WrapErrNodeNotMatch(0, 1, "SIM"), ErrNodeNotMatch)
+	s.ErrorIs(WrapErrServiceUnimplemented(errors.New("mock grpc err")), ErrServiceUnimplemented)
 
 	// Collection related
 	s.ErrorIs(WrapErrCollectionNotFound("test_collection", "failed to get collection"), ErrCollectionNotFound)
@@ -109,6 +110,9 @@ func (s *ErrSuite) TestWrap() {
 
 	// Index related
 	s.ErrorIs(WrapErrIndexNotFound("failed to get Index"), ErrIndexNotFound)
+	s.ErrorIs(WrapErrIndexNotFoundForCollection("milvus_hello", "failed to get collection index"), ErrIndexNotFound)
+	s.ErrorIs(WrapErrIndexNotFoundForSegment(100, "failed to get collection index"), ErrIndexNotFound)
+	s.ErrorIs(WrapErrIndexNotSupported("wsnh", "failed to create index"), ErrIndexNotSupported)
 
 	// Node related
 	s.ErrorIs(WrapErrNodeNotFound(1, "failed to get node"), ErrNodeNotFound)
@@ -126,12 +130,26 @@ func (s *ErrSuite) TestWrap() {
 	// Metrics related
 	s.ErrorIs(WrapErrMetricNotFound("unknown", "failed to get metric"), ErrMetricNotFound)
 
-	// Topic related
-	s.ErrorIs(WrapErrTopicNotFound("unknown", "failed to get topic"), ErrTopicNotFound)
-	s.ErrorIs(WrapErrTopicNotEmpty("unknown", "topic is not empty"), ErrTopicNotEmpty)
+	// Message queue related
+	s.ErrorIs(WrapErrMqTopicNotFound("unknown", "failed to get topic"), ErrMqTopicNotFound)
+	s.ErrorIs(WrapErrMqTopicNotEmpty("unknown", "topic is not empty"), ErrMqTopicNotEmpty)
+	s.ErrorIs(WrapErrMqInternal(errors.New("unknown"), "failed to consume"), ErrMqInternal)
 
 	// field related
 	s.ErrorIs(WrapErrFieldNotFound("meta", "failed to get field"), ErrFieldNotFound)
+}
+
+func (s *ErrSuite) TestOldCode() {
+	s.ErrorIs(OldCodeToMerr(commonpb.ErrorCode_NotReadyServe), ErrServiceNotReady)
+	s.ErrorIs(OldCodeToMerr(commonpb.ErrorCode_CollectionNotExists), ErrCollectionNotFound)
+	s.ErrorIs(OldCodeToMerr(commonpb.ErrorCode_IllegalArgument), ErrParameterInvalid)
+	s.ErrorIs(OldCodeToMerr(commonpb.ErrorCode_NodeIDNotMatch), ErrNodeNotMatch)
+	s.ErrorIs(OldCodeToMerr(commonpb.ErrorCode_InsufficientMemoryToLoad), ErrServiceMemoryLimitExceeded)
+	s.ErrorIs(OldCodeToMerr(commonpb.ErrorCode_MemoryQuotaExhausted), ErrServiceMemoryLimitExceeded)
+	s.ErrorIs(OldCodeToMerr(commonpb.ErrorCode_DiskQuotaExhausted), ErrServiceDiskLimitExceeded)
+	s.ErrorIs(OldCodeToMerr(commonpb.ErrorCode_RateLimit), ErrServiceRateLimit)
+	s.ErrorIs(OldCodeToMerr(commonpb.ErrorCode_ForceDeny), ErrServiceForceDeny)
+	s.ErrorIs(OldCodeToMerr(commonpb.ErrorCode_UnexpectedError), errUnexpected)
 }
 
 func (s *ErrSuite) TestCombine() {
@@ -164,6 +182,46 @@ func (s *ErrSuite) TestCombineOnlyNil() {
 func (s *ErrSuite) TestCombineCode() {
 	err := Combine(WrapErrIoFailed("test"), WrapErrCollectionNotFound(1))
 	s.Equal(Code(ErrCollectionNotFound), Code(err))
+}
+
+func (s *ErrSuite) TestIsHealthy() {
+	type testCase struct {
+		code   commonpb.StateCode
+		expect bool
+	}
+
+	cases := []testCase{
+		{commonpb.StateCode_Healthy, true},
+		{commonpb.StateCode_Initializing, false},
+		{commonpb.StateCode_Abnormal, false},
+		{commonpb.StateCode_StandBy, false},
+		{commonpb.StateCode_Stopping, false},
+	}
+	for _, tc := range cases {
+		s.Run(tc.code.String(), func() {
+			s.Equal(tc.expect, IsHealthy(tc.code) == nil)
+		})
+	}
+}
+
+func (s *ErrSuite) TestIsHealthyOrStopping() {
+	type testCase struct {
+		code   commonpb.StateCode
+		expect bool
+	}
+
+	cases := []testCase{
+		{commonpb.StateCode_Healthy, true},
+		{commonpb.StateCode_Initializing, false},
+		{commonpb.StateCode_Abnormal, false},
+		{commonpb.StateCode_StandBy, false},
+		{commonpb.StateCode_Stopping, true},
+	}
+	for _, tc := range cases {
+		s.Run(tc.code.String(), func() {
+			s.Equal(tc.expect, IsHealthyOrStopping(tc.code) == nil)
+		})
+	}
 }
 
 func TestErrors(t *testing.T) {

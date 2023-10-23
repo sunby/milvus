@@ -51,6 +51,40 @@ func Test_createCollectionTask_validate(t *testing.T) {
 		assert.Error(t, err)
 	})
 
+	t.Run("create ts", func(t *testing.T) {
+		task := createCollectionTask{
+			Req: nil,
+		}
+		{
+			task.SetTs(1000)
+			ts, err := task.getCreateTs()
+			assert.NoError(t, err)
+			assert.EqualValues(t, 1000, ts)
+		}
+
+		task.Req = &milvuspb.CreateCollectionRequest{
+			Base: &commonpb.MsgBase{
+				MsgType: commonpb.MsgType_CreateCollection,
+				ReplicateInfo: &commonpb.ReplicateInfo{
+					IsReplicate: true,
+				},
+			},
+		}
+		{
+			task.SetTs(1000)
+			_, err := task.getCreateTs()
+			assert.Error(t, err)
+			err = task.Execute(context.Background())
+			assert.Error(t, err)
+		}
+		{
+			task.Req.Base.ReplicateInfo.MsgTimestamp = 2000
+			ts, err := task.getCreateTs()
+			assert.NoError(t, err)
+			assert.EqualValues(t, 2000, ts)
+		}
+	})
+
 	t.Run("invalid msg type", func(t *testing.T) {
 		task := createCollectionTask{
 			Req: &milvuspb.CreateCollectionRequest{
@@ -708,11 +742,11 @@ func Test_createCollectionTask_Execute(t *testing.T) {
 					StateCode: commonpb.StateCode_Healthy,
 				},
 				SubcomponentStates: nil,
-				Status:             succStatus(),
+				Status:             merr.Success(),
 			}, nil
 		}
 		dc.WatchChannelsFunc = func(ctx context.Context, req *datapb.WatchChannelsRequest) (*datapb.WatchChannelsResponse, error) {
-			return &datapb.WatchChannelsResponse{Status: succStatus()}, nil
+			return &datapb.WatchChannelsResponse{Status: merr.Success()}, nil
 		}
 
 		core := newTestCore(withValidIDAllocator(),

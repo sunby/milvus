@@ -31,22 +31,11 @@
 #include "storage/MinioChunkManager.h"
 #include "storage/AliyunSTSClient.h"
 #include "storage/AliyunCredentialsProvider.h"
-#include "exceptions/EasyAssert.h"
+#include "common/EasyAssert.h"
 #include "log/Log.h"
 #include "signal.h"
+#include "common/Consts.h"
 
-#define THROWS3ERROR(FUNCTION)                                 \
-    do {                                                       \
-        auto& err = outcome.GetError();                        \
-        std::stringstream err_msg;                             \
-        err_msg << "Error:" << #FUNCTION                       \
-                << "[errcode:" << int(err.GetResponseCode())   \
-                << ", exception:" << err.GetExceptionName()    \
-                << ", errmessage:" << err.GetMessage() << "]"; \
-        throw S3ErrorException(err_msg.str());                 \
-    } while (0)
-
-#define S3NoSuchBucket "NoSuchBucket"
 namespace milvus::storage {
 
 std::atomic<size_t> MinioChunkManager::init_count_(0);
@@ -122,6 +111,49 @@ MinioChunkManager::InitSDKAPI(RemoteStorageType type,
                     GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, credentials);
             };
         }
+        LOG_SEGCORE_INFO_ << "init aws with log level:" << log_level_str;
+        auto get_aws_log_level = [](const std::string& level_str) {
+            Aws::Utils::Logging::LogLevel level =
+                Aws::Utils::Logging::LogLevel::Off;
+            if (level_str == "fatal") {
+                level = Aws::Utils::Logging::LogLevel::Fatal;
+            } else if (level_str == "error") {
+                level = Aws::Utils::Logging::LogLevel::Error;
+            } else if (level_str == "warn") {
+                level = Aws::Utils::Logging::LogLevel::Warn;
+            } else if (level_str == "info") {
+                level = Aws::Utils::Logging::LogLevel::Info;
+            } else if (level_str == "debug") {
+                level = Aws::Utils::Logging::LogLevel::Debug;
+            } else if (level_str == "trace") {
+                level = Aws::Utils::Logging::LogLevel::Trace;
+            }
+            return level;
+        };
+        auto log_level = get_aws_log_level(log_level_str);
+        sdk_options_.loggingOptions.logLevel = log_level;
+        sdk_options_.loggingOptions.logger_create_fn = [log_level]() {
+            return std::make_shared<AwsLogger>(log_level);
+        };
+        Aws::InitAPI(sdk_options_);
+    }
+}
+
+void
+MinioChunkManager::InitSDKAPIDefault(const std::string& log_level_str) {
+    std::scoped_lock lock{client_mutex_};
+    const size_t initCount = init_count_++;
+    if (initCount == 0) {
+        // sdk_options_.httpOptions.installSigPipeHandler = true;
+        struct sigaction psa;
+        memset(&psa, 0, sizeof psa);
+        psa.sa_handler = SwallowHandler;
+        psa.sa_flags = psa.sa_flags | SA_ONSTACK;
+        sigaction(SIGPIPE, &psa, 0);
+        // block multiple SIGPIPE concurrently processing
+        sigemptyset(&psa.sa_mask);
+        sigaddset(&psa.sa_mask, SIGPIPE);
+        sigaction(SIGPIPE, &psa, 0);
         LOG_SEGCORE_INFO_ << "init aws with log level:" << log_level_str;
         auto get_aws_log_level = [](const std::string& level_str) {
             Aws::Utils::Logging::LogLevel level =
@@ -270,6 +302,10 @@ MinioChunkManager::MinioChunkManager(const StorageConfig& storage_config)
         config.verifySSL = false;
     }
 
+    config.requestTimeoutMs = storage_config.requestTimeoutMs == 0
+                                  ? DEFAULT_CHUNK_MANAGER_REQUEST_TIMEOUT_MS
+                                  : storage_config.requestTimeoutMs;
+
     if (!storage_config.region.empty()) {
         config.region = ConvertToAwsString(storage_config.region);
     }
@@ -284,7 +320,8 @@ MinioChunkManager::MinioChunkManager(const StorageConfig& storage_config)
 
     LOG_SEGCORE_INFO_ << "init MinioChunkManager with parameter[endpoint: '"
                       << storage_config.address << "', default_bucket_name:'"
-                      << storage_config.bucket_name << "', use_secure:'"
+                      << storage_config.bucket_name << "', root_path:'"
+                      << storage_config.root_path << "', use_secure:'"
                       << std::boolalpha << storage_config.useSSL << "']";
 }
 
@@ -315,12 +352,6 @@ MinioChunkManager::ListWithPrefix(const std::string& filepath) {
 
 uint64_t
 MinioChunkManager::Read(const std::string& filepath, void* buf, uint64_t size) {
-    if (!ObjectExists(default_bucket_name_, filepath)) {
-        std::stringstream err_msg;
-        err_msg << "object('" << default_bucket_name_ << "', " << filepath
-                << "') not exists";
-        throw ObjectNotExistException(err_msg.str());
-    }
     return GetObjectBuffer(default_bucket_name_, filepath, buf, size);
 }
 
@@ -333,28 +364,19 @@ MinioChunkManager::Write(const std::string& filepath,
 
 bool
 MinioChunkManager::BucketExists(const std::string& bucket_name) {
-    // auto outcome = client_->ListBuckets();
-
-    // if (!outcome.IsSuccess()) {
-    //     THROWS3ERROR(BucketExists);
-    // }
-    // for (auto&& b : outcome.GetResult().GetBuckets()) {
-    //     if (ConvertFromAwsString(b.GetName()) == bucket_name) {
-    //         return true;
-    //     }
-    // }
     Aws::S3::Model::HeadBucketRequest request;
     request.SetBucket(bucket_name.c_str());
 
     auto outcome = client_->HeadBucket(request);
 
     if (!outcome.IsSuccess()) {
-        auto error = outcome.GetError();
-        if (!error.GetExceptionName().empty()) {
-            std::stringstream err_msg;
-            err_msg << "Error: BucketExists: "
-                    << error.GetExceptionName() + " - " + error.GetMessage();
-            throw S3ErrorException(err_msg.str());
+        const auto& err = outcome.GetError();
+        auto error_type = err.GetErrorType();
+        // only throw if the error is not nosuchbucket
+        // if bucket not exist, HeadBucket return errorType RESOURCE_NOT_FOUND
+        if (error_type != Aws::S3::S3Errors::NO_SUCH_BUCKET &&
+            error_type != Aws::S3::S3Errors::RESOURCE_NOT_FOUND) {
+            ThrowS3Error("BucketExists", err, "params, bucket={}", bucket_name);
         }
         return false;
     }
@@ -367,7 +389,8 @@ MinioChunkManager::ListBuckets() {
     auto outcome = client_->ListBuckets();
 
     if (!outcome.IsSuccess()) {
-        THROWS3ERROR(CreateBucket);
+        const auto& err = outcome.GetError();
+        ThrowS3Error("ListBuckets", err, "params");
     }
     for (auto&& b : outcome.GetResult().GetBuckets()) {
         buckets.emplace_back(b.GetName().c_str());
@@ -382,10 +405,13 @@ MinioChunkManager::CreateBucket(const std::string& bucket_name) {
 
     auto outcome = client_->CreateBucket(request);
 
-    if (!outcome.IsSuccess() &&
-        Aws::S3::S3Errors(outcome.GetError().GetErrorType()) !=
+    if (!outcome.IsSuccess()) {
+        const auto& err = outcome.GetError();
+        if (err.GetErrorType() !=
             Aws::S3::S3Errors::BUCKET_ALREADY_OWNED_BY_YOU) {
-        THROWS3ERROR(CreateBucket);
+            ThrowS3Error("CreateBucket", err, "params, bucket={}", bucket_name);
+        }
+        return false;
     }
     return true;
 }
@@ -398,9 +424,11 @@ MinioChunkManager::DeleteBucket(const std::string& bucket_name) {
     auto outcome = client_->DeleteBucket(request);
 
     if (!outcome.IsSuccess()) {
-        auto err = outcome.GetError();
-        if (err.GetExceptionName() != S3NoSuchBucket) {
-            THROWS3ERROR(DeleteBucket);
+        const auto& err = outcome.GetError();
+        auto error_type = err.GetErrorType();
+        if (error_type != Aws::S3::S3Errors::NO_SUCH_BUCKET &&
+            error_type != Aws::S3::S3Errors::RESOURCE_NOT_FOUND) {
+            ThrowS3Error("DeleteBucket", err, "params, bucket={}", bucket_name);
         }
         return false;
     }
@@ -417,11 +445,13 @@ MinioChunkManager::ObjectExists(const std::string& bucket_name,
     auto outcome = client_->HeadObject(request);
 
     if (!outcome.IsSuccess()) {
-        auto& err = outcome.GetError();
-        if (!err.GetExceptionName().empty()) {
-            std::stringstream err_msg;
-            err_msg << "Error: ObjectExists: " << err.GetMessage();
-            throw S3ErrorException(err_msg.str());
+        const auto& err = outcome.GetError();
+        if (!IsNotFound(err.GetErrorType())) {
+            ThrowS3Error("ObjectExists",
+                         err,
+                         "params, bucket={}, object={}",
+                         bucket_name,
+                         object_name);
         }
         return false;
     }
@@ -437,7 +467,12 @@ MinioChunkManager::GetObjectSize(const std::string& bucket_name,
 
     auto outcome = client_->HeadObject(request);
     if (!outcome.IsSuccess()) {
-        THROWS3ERROR(GetObjectSize);
+        const auto& err = outcome.GetError();
+        ThrowS3Error("GetObjectSize",
+                     err,
+                     "params, bucket={}, object={}",
+                     bucket_name,
+                     object_name);
     }
     return outcome.GetResult().GetContentLength();
 }
@@ -452,11 +487,15 @@ MinioChunkManager::DeleteObject(const std::string& bucket_name,
     auto outcome = client_->DeleteObject(request);
 
     if (!outcome.IsSuccess()) {
-        // auto err = outcome.GetError();
-        // std::stringstream err_msg;
-        // err_msg << "Error: DeleteObject:" << err.GetMessage();
-        // throw S3ErrorException(err_msg.str());
-        THROWS3ERROR(DeleteObject);
+        const auto& err = outcome.GetError();
+        if (!IsNotFound(err.GetErrorType())) {
+            ThrowS3Error("DeleteObject",
+                         err,
+                         "params, bucket={}, object={}",
+                         bucket_name,
+                         object_name);
+        }
+        return false;
     }
     return true;
 }
@@ -479,7 +518,12 @@ MinioChunkManager::PutObjectBuffer(const std::string& bucket_name,
     auto outcome = client_->PutObject(request);
 
     if (!outcome.IsSuccess()) {
-        THROWS3ERROR(PutObjectBuffer);
+        const auto& err = outcome.GetError();
+        ThrowS3Error("PutObjectBuffer",
+                     err,
+                     "params, bucket={}, object={}",
+                     bucket_name,
+                     object_name);
     }
     return true;
 }
@@ -547,24 +591,35 @@ MinioChunkManager::GetObjectBuffer(const std::string& bucket_name,
     auto outcome = client_->GetObject(request);
 
     if (!outcome.IsSuccess()) {
-        THROWS3ERROR(GetObjectBuffer);
+        const auto& err = outcome.GetError();
+        ThrowS3Error("GetObjectBuffer",
+                     err,
+                     "params, bucket={}, object={}",
+                     bucket_name,
+                     object_name);
     }
     return size;
 }
 
 std::vector<std::string>
-MinioChunkManager::ListObjects(const char* bucket_name, const char* prefix) {
+MinioChunkManager::ListObjects(const std::string& bucket_name,
+                               const std::string& prefix) {
     std::vector<std::string> objects_vec;
     Aws::S3::Model::ListObjectsRequest request;
     request.WithBucket(bucket_name);
-    if (prefix != nullptr) {
+    if (prefix != "") {
         request.SetPrefix(prefix);
     }
 
     auto outcome = client_->ListObjects(request);
 
     if (!outcome.IsSuccess()) {
-        THROWS3ERROR(ListObjects);
+        const auto& err = outcome.GetError();
+        ThrowS3Error("ListObjects",
+                     err,
+                     "params, bucket={}, prefix={}",
+                     bucket_name,
+                     prefix);
     }
     auto objects = outcome.GetResult().GetContents();
     for (auto& obj : objects) {

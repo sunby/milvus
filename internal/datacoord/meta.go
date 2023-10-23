@@ -24,8 +24,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cockroachdb/errors"
 	"github.com/golang/protobuf/proto"
-	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 	"github.com/samber/lo"
 	"go.uber.org/zap"
 	"golang.org/x/exp/maps"
@@ -43,6 +43,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/util/metautil"
 	"github.com/milvus-io/milvus/pkg/util/timerecord"
+	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -297,8 +298,9 @@ func (m *meta) GetCollectionBinlogSize() (int64, map[UniqueID]int64) {
 }
 
 // AddSegment records segment info, persisting info into kv store
-func (m *meta) AddSegment(segment *SegmentInfo) error {
-	log.Debug("meta update: adding segment", zap.Int64("segmentID", segment.GetID()))
+func (m *meta) AddSegment(ctx context.Context, segment *SegmentInfo) error {
+	log := log.Ctx(ctx)
+	log.Info("meta update: adding segment - Start", zap.Int64("segmentID", segment.GetID()))
 	m.Lock()
 	defer m.Unlock()
 	if err := m.catalog.AddSegment(m.ctx, segment.SegmentInfo); err != nil {
@@ -627,7 +629,7 @@ func (m *meta) UpdateFlushSegmentsInfo(
 	}
 	// TODO add diff encoding and compression
 	currBinlogs := clonedSegment.GetBinlogs()
-	var getFieldBinlogs = func(id UniqueID, binlogs []*datapb.FieldBinlog) *datapb.FieldBinlog {
+	getFieldBinlogs := func(id UniqueID, binlogs []*datapb.FieldBinlog) *datapb.FieldBinlog {
 		for _, binlog := range binlogs {
 			if id == binlog.GetFieldID() {
 				return binlog
@@ -668,7 +670,7 @@ func (m *meta) UpdateFlushSegmentsInfo(
 	}
 	clonedSegment.Deltalogs = currDeltaLogs
 	modSegments[segmentID] = clonedSegment
-	var getClonedSegment = func(segmentID UniqueID) *SegmentInfo {
+	getClonedSegment := func(segmentID UniqueID) *SegmentInfo {
 		if s, ok := modSegments[segmentID]; ok {
 			return s
 		}
@@ -822,7 +824,7 @@ func (m *meta) mergeDropSegment(seg2Drop *SegmentInfo) (*SegmentInfo, *segMetric
 
 	currBinlogs := clonedSegment.GetBinlogs()
 
-	var getFieldBinlogs = func(id UniqueID, binlogs []*datapb.FieldBinlog) *datapb.FieldBinlog {
+	getFieldBinlogs := func(id UniqueID, binlogs []*datapb.FieldBinlog) *datapb.FieldBinlog {
 		for _, binlog := range binlogs {
 			if id == binlog.GetFieldID() {
 				return binlog
@@ -1061,8 +1063,8 @@ func (m *meta) AddAllocation(segmentID UniqueID, allocation *Allocation) error {
 	curSegInfo := m.segments.GetSegment(segmentID)
 	if curSegInfo == nil {
 		// TODO: Error handling.
-		log.Warn("meta update: add allocation failed - segment not found", zap.Int64("segmentID", segmentID))
-		return nil
+		log.Error("meta update: add allocation failed - segment not found", zap.Int64("segmentID", segmentID))
+		return errors.New("meta update: add allocation failed - segment not found")
 	}
 	// As we use global segment lastExpire to guarantee data correctness after restart
 	// there is no need to persist allocation to meta store, only update allocation in-memory meta.
@@ -1119,7 +1121,8 @@ func (m *meta) SetSegmentCompacting(segmentID UniqueID, compacting bool) {
 // - the segment info of compactedTo segment after compaction to add
 // The compactedTo segment could contain 0 numRows
 func (m *meta) PrepareCompleteCompactionMutation(plan *datapb.CompactionPlan,
-	result *datapb.CompactionResult) ([]*SegmentInfo, []*SegmentInfo, *SegmentInfo, *segMetricMutation, error) {
+	result *datapb.CompactionResult,
+) ([]*SegmentInfo, []*SegmentInfo, *SegmentInfo, *segMetricMutation, error) {
 	log.Info("meta update: prepare for complete compaction mutation")
 	compactionLogs := plan.GetSegmentBinlogs()
 	m.Lock()

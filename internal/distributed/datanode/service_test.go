@@ -22,16 +22,18 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/errors"
+	"github.com/stretchr/testify/assert"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"google.golang.org/grpc"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
-	"github.com/stretchr/testify/assert"
-	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 // /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -89,19 +91,19 @@ func (m *MockDataNode) GetAddress() string {
 	return ""
 }
 
-func (m *MockDataNode) SetRootCoord(rc types.RootCoord) error {
+func (m *MockDataNode) SetRootCoordClient(rc types.RootCoordClient) error {
 	return m.err
 }
 
-func (m *MockDataNode) SetDataCoord(dc types.DataCoord) error {
+func (m *MockDataNode) SetDataCoordClient(dc types.DataCoordClient) error {
 	return m.err
 }
 
-func (m *MockDataNode) GetComponentStates(ctx context.Context) (*milvuspb.ComponentStates, error) {
+func (m *MockDataNode) GetComponentStates(ctx context.Context, req *milvuspb.GetComponentStatesRequest) (*milvuspb.ComponentStates, error) {
 	return m.states, m.err
 }
 
-func (m *MockDataNode) GetStatisticsChannel(ctx context.Context) (*milvuspb.StringResponse, error) {
+func (m *MockDataNode) GetStatisticsChannel(ctx context.Context, req *internalpb.GetStatisticsChannelRequest) (*milvuspb.StringResponse, error) {
 	return m.strResp, m.err
 }
 
@@ -148,25 +150,29 @@ func (m *MockDataNode) SyncSegments(ctx context.Context, req *datapb.SyncSegment
 	return m.status, m.err
 }
 
-// /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-type mockDataCoord struct {
-	types.DataCoord
+func (m *MockDataNode) FlushChannels(ctx context.Context, req *datapb.FlushChannelsRequest) (*commonpb.Status, error) {
+	return m.status, m.err
 }
 
-func (m *mockDataCoord) Init() error {
-	return nil
+func (m *MockDataNode) NotifyChannelOperation(ctx context.Context, req *datapb.ChannelOperationsRequest) (*commonpb.Status, error) {
+	return m.status, m.err
 }
-func (m *mockDataCoord) Start() error {
-	return nil
+
+func (m *MockDataNode) CheckChannelOperationProgress(ctx context.Context, req *datapb.ChannelWatchInfo) (*datapb.ChannelOperationProgressResponse, error) {
+	return &datapb.ChannelOperationProgressResponse{}, m.err
 }
-func (m *mockDataCoord) GetComponentStates(ctx context.Context) (*milvuspb.ComponentStates, error) {
+
+// /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+type mockDataCoord struct {
+	types.DataCoordClient
+}
+
+func (m *mockDataCoord) GetComponentStates(ctx context.Context, req *milvuspb.GetComponentStatesRequest, opts ...grpc.CallOption) (*milvuspb.ComponentStates, error) {
 	return &milvuspb.ComponentStates{
 		State: &milvuspb.ComponentInfo{
 			StateCode: commonpb.StateCode_Healthy,
 		},
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status: merr.Success(),
 		SubcomponentStates: []*milvuspb.ComponentInfo{
 			{
 				StateCode: commonpb.StateCode_Healthy,
@@ -174,29 +180,22 @@ func (m *mockDataCoord) GetComponentStates(ctx context.Context) (*milvuspb.Compo
 		},
 	}, nil
 }
+
 func (m *mockDataCoord) Stop() error {
 	return fmt.Errorf("stop error")
 }
 
 // /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 type mockRootCoord struct {
-	types.RootCoord
+	types.RootCoordClient
 }
 
-func (m *mockRootCoord) Init() error {
-	return nil
-}
-func (m *mockRootCoord) Start() error {
-	return nil
-}
-func (m *mockRootCoord) GetComponentStates(ctx context.Context) (*milvuspb.ComponentStates, error) {
+func (m *mockRootCoord) GetComponentStates(ctx context.Context, req *milvuspb.GetComponentStatesRequest, opts ...grpc.CallOption) (*milvuspb.ComponentStates, error) {
 	return &milvuspb.ComponentStates{
 		State: &milvuspb.ComponentInfo{
 			StateCode: commonpb.StateCode_Healthy,
 		},
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status: merr.Success(),
 		SubcomponentStates: []*milvuspb.ComponentInfo{
 			{
 				StateCode: commonpb.StateCode_Healthy,
@@ -204,6 +203,7 @@ func (m *mockRootCoord) GetComponentStates(ctx context.Context) (*milvuspb.Compo
 		},
 	}, nil
 }
+
 func (m *mockRootCoord) Stop() error {
 	return fmt.Errorf("stop error")
 }
@@ -216,11 +216,11 @@ func Test_NewServer(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, server)
 
-	server.newRootCoordClient = func(string, *clientv3.Client) (types.RootCoord, error) {
+	server.newRootCoordClient = func(string, *clientv3.Client) (types.RootCoordClient, error) {
 		return &mockRootCoord{}, nil
 	}
 
-	server.newDataCoordClient = func(string, *clientv3.Client) (types.DataCoord, error) {
+	server.newDataCoordClient = func(string, *clientv3.Client) (types.DataCoordClient, error) {
 		return &mockDataCoord{}, nil
 	}
 
@@ -262,7 +262,7 @@ func Test_NewServer(t *testing.T) {
 			status: &commonpb.Status{},
 		}
 		states, err := server.FlushSegments(ctx, nil)
-		assert.Error(t, err)
+		assert.NoError(t, err)
 		assert.NotNil(t, states)
 	})
 
@@ -315,12 +315,28 @@ func Test_NewServer(t *testing.T) {
 		server.datanode = &MockDataNode{
 			status: &commonpb.Status{},
 			addImportSegmentResp: &datapb.AddImportSegmentResponse{
-				Status: &commonpb.Status{
-					ErrorCode: commonpb.ErrorCode_Success,
-				},
+				Status: merr.Success(),
 			},
 		}
 		resp, err := server.AddImportSegment(ctx, nil)
+		assert.NoError(t, err)
+		assert.NotNil(t, resp)
+	})
+
+	t.Run("NotifyChannelOperation", func(t *testing.T) {
+		server.datanode = &MockDataNode{
+			status: &commonpb.Status{},
+		}
+		resp, err := server.NotifyChannelOperation(ctx, nil)
+		assert.NoError(t, err)
+		assert.NotNil(t, resp)
+	})
+
+	t.Run("CheckChannelOperationProgress", func(t *testing.T) {
+		server.datanode = &MockDataNode{
+			status: &commonpb.Status{},
+		}
+		resp, err := server.CheckChannelOperationProgress(ctx, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, resp)
 	})
@@ -339,11 +355,11 @@ func Test_Run(t *testing.T) {
 		regErr: errors.New("error"),
 	}
 
-	server.newRootCoordClient = func(string, *clientv3.Client) (types.RootCoord, error) {
+	server.newRootCoordClient = func(string, *clientv3.Client) (types.RootCoordClient, error) {
 		return &mockRootCoord{}, nil
 	}
 
-	server.newDataCoordClient = func(string, *clientv3.Client) (types.DataCoord, error) {
+	server.newDataCoordClient = func(string, *clientv3.Client) (types.DataCoordClient, error) {
 		return &mockDataCoord{}, nil
 	}
 

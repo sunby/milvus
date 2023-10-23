@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/cockroachdb/errors"
+	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
@@ -32,9 +32,8 @@ import (
 	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
-
-	"go.uber.org/zap"
 )
 
 // channelsMgr manages the pchans, vchans and related message stream of collections.
@@ -88,7 +87,7 @@ type getChannelsFuncType = func(collectionID UniqueID) (channelInfos, error)
 type repackFuncType = func(tsMsgs []msgstream.TsMsg, hashKeys [][]int32) (map[int32]*msgstream.MsgPack, error)
 
 // getDmlChannelsFunc returns a function about how to get dml channels of a collection.
-func getDmlChannelsFunc(ctx context.Context, rc types.RootCoord) getChannelsFuncType {
+func getDmlChannelsFunc(ctx context.Context, rc types.RootCoordClient) getChannelsFuncType {
 	return func(collectionID UniqueID) (channelInfos, error) {
 		req := &milvuspb.DescribeCollectionRequest{
 			Base:         commonpbutil.NewMsgBase(commonpbutil.WithMsgType(commonpb.MsgType_DescribeCollection)),
@@ -105,7 +104,7 @@ func getDmlChannelsFunc(ctx context.Context, rc types.RootCoord) getChannelsFunc
 			log.Error("failed to describe collection",
 				zap.String("error_code", resp.GetStatus().GetErrorCode().String()),
 				zap.String("reason", resp.GetStatus().GetReason()))
-			return channelInfos{}, errors.New(resp.GetStatus().GetReason())
+			return channelInfos{}, merr.Error(resp.GetStatus())
 		}
 
 		return newChannels(resp.GetVirtualChannelNames(), resp.GetPhysicalChannelNames())
@@ -257,7 +256,7 @@ func (mgr *singleTypeChannelsMgr) lockGetStream(collectionID UniqueID) (msgstrea
 }
 
 // getOrCreateStream get message stream of specified collection.
-// If stream don't exists, call createMsgStream to create for it.
+// If stream doesn't exist, call createMsgStream to create for it.
 func (mgr *singleTypeChannelsMgr) getOrCreateStream(collectionID UniqueID) (msgstream.MsgStream, error) {
 	if stream, err := mgr.lockGetStream(collectionID); err == nil {
 		return stream, nil

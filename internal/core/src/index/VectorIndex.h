@@ -22,12 +22,14 @@
 #include <vector>
 #include <boost/dynamic_bitset.hpp>
 
+#include "Utils.h"
 #include "knowhere/factory.h"
 #include "index/Index.h"
 #include "common/Types.h"
 #include "common/BitsetView.h"
 #include "common/QueryResult.h"
 #include "common/QueryInfo.h"
+#include "knowhere/version.h"
 
 namespace milvus::index {
 
@@ -43,12 +45,13 @@ class VectorIndex : public IndexBase {
     BuildWithRawData(size_t n,
                      const void* values,
                      const Config& config = {}) override {
-        PanicInfo("vector index don't support build index with raw data");
+        PanicInfo(Unsupported,
+                  "vector index don't support build index with raw data");
     };
 
     virtual void
     AddWithDataset(const DatasetPtr& dataset, const Config& config) {
-        PanicInfo("vector index don't support add with dataset");
+        PanicInfo(Unsupported, "vector index don't support add with dataset");
     }
 
     virtual std::unique_ptr<SearchResult>
@@ -84,6 +87,18 @@ class VectorIndex : public IndexBase {
 
     virtual void
     CleanLocalData() {
+    }
+
+    void
+    CheckCompatible(const IndexVersion& version) {
+        std::string err_msg =
+            "version not support : " + std::to_string(version) +
+            " , knowhere current version " +
+            std::to_string(
+                knowhere::Version::GetCurrentVersion().VersionNumber());
+        AssertInfo(
+            knowhere::Version::VersionSupport(knowhere::Version(version)),
+            err_msg);
     }
 
  private:

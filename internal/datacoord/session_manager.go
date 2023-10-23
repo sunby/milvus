@@ -22,6 +22,8 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	grpcdatanodeclient "github.com/milvus-io/milvus/internal/distributed/datanode/client"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
@@ -31,15 +33,14 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/retry"
+	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
-	"go.uber.org/zap"
 )
 
 const (
 	flushTimeout = 15 * time.Second
 	// TODO: evaluate and update import timeout.
-	importTimeout    = 3 * time.Hour
-	reCollectTimeout = 5 * time.Second
+	importTimeout = 3 * time.Hour
 )
 
 // SessionManager provides the grpc interfaces of cluster
@@ -59,7 +60,7 @@ func withSessionCreator(creator dataNodeCreatorFunc) SessionOpt {
 }
 
 func defaultSessionCreator() dataNodeCreatorFunc {
-	return func(ctx context.Context, addr string, nodeID int64) (types.DataNode, error) {
+	return func(ctx context.Context, addr string, nodeID int64) (types.DataNodeClient, error) {
 		return grpcdatanodeclient.NewClient(ctx, addr, nodeID)
 	}
 }
@@ -225,32 +226,6 @@ func (c *SessionManager) execImport(ctx context.Context, nodeID int64, itr *data
 	log.Info("success to import", zap.Int64("node", nodeID), zap.Any("import task", itr))
 }
 
-// ReCollectSegmentStats collects segment stats info from DataNodes, after DataCoord reboots.
-func (c *SessionManager) ReCollectSegmentStats(ctx context.Context, nodeID int64) error {
-	cli, err := c.getClient(ctx, nodeID)
-	if err != nil {
-		log.Warn("failed to get dataNode client", zap.Int64("DataNode ID", nodeID), zap.Error(err))
-		return err
-	}
-	ctx, cancel := context.WithTimeout(ctx, reCollectTimeout)
-	defer cancel()
-	resp, err := cli.ResendSegmentStats(ctx, &datapb.ResendSegmentStatsRequest{
-		Base: commonpbutil.NewMsgBase(
-			commonpbutil.WithMsgType(commonpb.MsgType_ResendSegmentStats),
-			commonpbutil.WithSourceID(paramtable.GetNodeID()),
-		),
-	})
-	if err := VerifyResponse(resp, err); err != nil {
-		log.Warn("re-collect segment stats call failed",
-			zap.Int64("DataNode ID", nodeID), zap.Error(err))
-		return err
-	}
-	log.Info("re-collect segment stats call succeeded",
-		zap.Int64("DataNode ID", nodeID),
-		zap.Int64s("segment stat collected", resp.GetSegResent()))
-	return nil
-}
-
 func (c *SessionManager) GetCompactionState() map[int64]*datapb.CompactionStateResult {
 	wg := sync.WaitGroup{}
 	ctx := context.Background()
@@ -300,7 +275,28 @@ func (c *SessionManager) GetCompactionState() map[int64]*datapb.CompactionStateR
 	return rst
 }
 
-func (c *SessionManager) getClient(ctx context.Context, nodeID int64) (types.DataNode, error) {
+func (c *SessionManager) FlushChannels(ctx context.Context, nodeID int64, req *datapb.FlushChannelsRequest) error {
+	log := log.Ctx(ctx).With(zap.Int64("nodeID", nodeID),
+		zap.Time("flushTs", tsoutil.PhysicalTime(req.GetFlushTs())),
+		zap.Strings("channels", req.GetChannels()))
+	cli, err := c.getClient(ctx, nodeID)
+	if err != nil {
+		log.Warn("failed to get client", zap.Error(err))
+		return err
+	}
+
+	log.Info("SessionManager.FlushChannels start")
+	resp, err := cli.FlushChannels(ctx, req)
+	err = VerifyResponse(resp, err)
+	if err != nil {
+		log.Warn("SessionManager.FlushChannels failed", zap.Error(err))
+		return err
+	}
+	log.Info("SessionManager.FlushChannels successfully")
+	return nil
+}
+
+func (c *SessionManager) getClient(ctx context.Context, nodeID int64) (types.DataNodeClient, error) {
 	c.sessions.RLock()
 	session, ok := c.sessions.data[nodeID]
 	c.sessions.RUnlock()

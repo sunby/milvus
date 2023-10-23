@@ -20,13 +20,14 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/samber/lo"
+	"go.uber.org/zap"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
-	"github.com/samber/lo"
-	"go.uber.org/zap"
 )
 
 // Cluster provides interfaces to interact with datanode cluster
@@ -70,14 +71,15 @@ func (c *Cluster) UnRegister(node *NodeInfo) error {
 }
 
 // Watch tries to add a channel in datanode cluster
-func (c *Cluster) Watch(ch string, collectionID UniqueID) error {
-	return c.channelManager.Watch(&channel{Name: ch, CollectionID: collectionID})
+func (c *Cluster) Watch(ctx context.Context, ch string, collectionID UniqueID) error {
+	return c.channelManager.Watch(ctx, &channel{Name: ch, CollectionID: collectionID})
 }
 
 // Flush sends flush requests to dataNodes specified
 // which also according to channels where segments are assigned to.
 func (c *Cluster) Flush(ctx context.Context, nodeID int64, channel string,
-	segments []*datapb.SegmentInfo) error {
+	segments []*datapb.SegmentInfo,
+) error {
 	if !c.channelManager.Match(nodeID, channel) {
 		log.Warn("node is not matched with channel",
 			zap.String("channel", channel),
@@ -100,26 +102,39 @@ func (c *Cluster) Flush(ctx context.Context, nodeID int64, channel string,
 		),
 		CollectionID: ch.CollectionID,
 		SegmentIDs:   lo.Map(segments, getSegmentID),
+		ChannelName:  channel,
 	}
 
 	c.sessionManager.Flush(ctx, nodeID, req)
 	return nil
 }
 
+func (c *Cluster) FlushChannels(ctx context.Context, nodeID int64, flushTs Timestamp, channels []string) error {
+	if len(channels) == 0 {
+		return nil
+	}
+
+	for _, channel := range channels {
+		if !c.channelManager.Match(nodeID, channel) {
+			return fmt.Errorf("channel %s is not watched on node %d", channel, nodeID)
+		}
+	}
+
+	req := &datapb.FlushChannelsRequest{
+		Base: commonpbutil.NewMsgBase(
+			commonpbutil.WithSourceID(paramtable.GetNodeID()),
+			commonpbutil.WithTargetID(nodeID),
+		),
+		FlushTs:  flushTs,
+		Channels: channels,
+	}
+
+	return c.sessionManager.FlushChannels(ctx, nodeID, req)
+}
+
 // Import sends import requests to DataNodes whose ID==nodeID.
 func (c *Cluster) Import(ctx context.Context, nodeID int64, it *datapb.ImportTaskRequest) {
 	c.sessionManager.Import(ctx, nodeID, it)
-}
-
-// ReCollectSegmentStats triggers a ReCollectSegmentStats call from session manager.
-func (c *Cluster) ReCollectSegmentStats(ctx context.Context) error {
-	for _, node := range c.sessionManager.getLiveNodeIDs() {
-		err := c.sessionManager.ReCollectSegmentStats(ctx, node)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // GetSessions returns all sessions

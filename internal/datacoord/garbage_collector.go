@@ -18,6 +18,7 @@ package datacoord
 
 import (
 	"context"
+	"fmt"
 	"path"
 	"sort"
 	"strings"
@@ -33,15 +34,10 @@ import (
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/util/metautil"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
-)
-
-const (
-	//TODO silverxia change to configuration
-	insertLogPrefix = `insert_log`
-	statsLogPrefix  = `stats_log`
-	deltaLogPrefix  = `delta_log`
 )
 
 // GcOption garbage collection options
@@ -129,35 +125,43 @@ func (gc *garbageCollector) scan() {
 		total   = 0
 		valid   = 0
 		missing = 0
-
-		segmentMap = typeutil.NewUniqueSet()
-		filesMap   = typeutil.NewSet[string]()
 	)
-	segments := gc.meta.GetAllSegmentsUnsafe()
-	for _, segment := range segments {
-		segmentMap.Insert(segment.GetID())
-		for _, log := range getLogs(segment) {
-			filesMap.Insert(log.GetLogPath())
+	getMetaMap := func() (typeutil.UniqueSet, typeutil.Set[string]) {
+		segmentMap := typeutil.NewUniqueSet()
+		filesMap := typeutil.NewSet[string]()
+		segments := gc.meta.GetAllSegmentsUnsafe()
+		for _, segment := range segments {
+			segmentMap.Insert(segment.GetID())
+			for _, log := range getLogs(segment) {
+				filesMap.Insert(log.GetLogPath())
+			}
 		}
+		return segmentMap, filesMap
 	}
 
 	// walk only data cluster related prefixes
 	prefixes := make([]string, 0, 3)
-	prefixes = append(prefixes, path.Join(gc.option.cli.RootPath(), insertLogPrefix))
-	prefixes = append(prefixes, path.Join(gc.option.cli.RootPath(), statsLogPrefix))
-	prefixes = append(prefixes, path.Join(gc.option.cli.RootPath(), deltaLogPrefix))
+	prefixes = append(prefixes, path.Join(gc.option.cli.RootPath(), common.SegmentInsertLogPath))
+	prefixes = append(prefixes, path.Join(gc.option.cli.RootPath(), common.SegmentStatslogPath))
+	prefixes = append(prefixes, path.Join(gc.option.cli.RootPath(), common.SegmentDeltaLogPath))
+	labels := []string{metrics.InsertFileLabel, metrics.StatFileLabel, metrics.DeleteFileLabel}
 	var removedKeys []string
 
-	for _, prefix := range prefixes {
+	for idx, prefix := range prefixes {
 		startTs := time.Now()
 		infoKeys, modTimes, err := gc.option.cli.ListWithPrefix(ctx, prefix, true)
 		if err != nil {
 			log.Error("failed to list files with prefix",
 				zap.String("prefix", prefix),
-				zap.String("error", err.Error()),
+				zap.Error(err),
 			)
 		}
-		log.Info("gc scan finish list object", zap.String("prefix", prefix), zap.Duration("time spent", time.Since(startTs)), zap.Int("keys", len(infoKeys)))
+		cost := time.Since(startTs)
+		segmentMap, filesMap := getMetaMap()
+		metrics.GarbageCollectorListLatency.
+			WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), labels[idx]).
+			Observe(float64(cost.Milliseconds()))
+		log.Info("gc scan finish list object", zap.String("prefix", prefix), zap.Duration("time spent", cost), zap.Int("keys", len(infoKeys)))
 		for i, infoKey := range infoKeys {
 			total++
 			_, has := filesMap[infoKey]
@@ -175,7 +179,7 @@ func (gc *garbageCollector) scan() {
 				continue
 			}
 
-			if strings.Contains(prefix, statsLogPrefix) &&
+			if strings.Contains(prefix, common.SegmentInsertLogPath) &&
 				segmentMap.Contain(segmentID) {
 				valid++
 				continue
@@ -195,6 +199,7 @@ func (gc *garbageCollector) scan() {
 			}
 		}
 	}
+	metrics.GarbageCollectorRunCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID())).Add(1)
 	log.Info("scan file to do garbage collection",
 		zap.Int("total", total),
 		zap.Int("valid", valid),
@@ -205,7 +210,8 @@ func (gc *garbageCollector) scan() {
 func (gc *garbageCollector) checkDroppedSegmentGC(segment *SegmentInfo,
 	childSegment *SegmentInfo,
 	indexSet typeutil.UniqueSet,
-	cpTimestamp Timestamp) bool {
+	cpTimestamp Timestamp,
+) bool {
 	log := log.With(zap.Int64("segmentID", segment.ID))
 
 	isCompacted := childSegment != nil || segment.GetCompacted()
@@ -250,7 +256,7 @@ func (gc *garbageCollector) clearEtcd() {
 		if segment.GetState() == commonpb.SegmentState_Dropped {
 			drops[segment.GetID()] = segment
 			channels.Insert(segment.GetInsertChannel())
-			//continue
+			// continue
 			// A(indexed), B(indexed) -> C(no indexed), D(no indexed) -> E(no indexed), A, B can not be GC
 		}
 		for _, from := range segment.GetCompactionFrom() {

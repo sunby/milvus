@@ -24,13 +24,13 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/errors"
+	"go.uber.org/zap"
+	"golang.org/x/exp/maps"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
-	"go.uber.org/zap"
-	"golang.org/x/exp/maps"
 )
 
 const (
@@ -322,6 +322,7 @@ func (p *JSONParser) ParseRows(reader *IOReader, handler JSONRowHandler) error {
 			return errors.New("import task was canceled")
 		}
 
+		// nolint
 		// this break means we require the first node must be RowRootNode
 		// once the RowRootNode is parsed, just finish
 		break

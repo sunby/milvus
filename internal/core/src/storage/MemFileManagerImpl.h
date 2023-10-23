@@ -31,12 +31,9 @@ namespace milvus::storage {
 
 class MemFileManagerImpl : public FileManagerImpl {
  public:
-    explicit MemFileManagerImpl(const FieldDataMeta& field_mata,
-                                IndexMeta index_meta,
-                                ChunkManagerPtr remote_chunk_manager);
+    explicit MemFileManagerImpl(const FileManagerContext& fileManagerContext);
 
-    MemFileManagerImpl(const FieldDataMeta& field_mata,
-                       IndexMeta index_meta,
+    MemFileManagerImpl(const FileManagerContext& fileManagerContext,
                        std::shared_ptr<milvus_storage::Space> space);
 
     virtual bool

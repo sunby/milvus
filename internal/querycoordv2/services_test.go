@@ -19,6 +19,7 @@ package querycoordv2
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"testing"
 	"time"
 
@@ -118,8 +119,10 @@ func (suite *ServiceSuite) SetupSuite() {
 		1000: 1,
 		1001: 3,
 	}
-	suite.nodes = []int64{1, 2, 3, 4, 5,
-		101, 102, 103, 104, 105}
+	suite.nodes = []int64{
+		1, 2, 3, 4, 5,
+		101, 102, 103, 104, 105,
+	}
 }
 
 func (suite *ServiceSuite) SetupTest() {
@@ -147,7 +150,7 @@ func (suite *ServiceSuite) SetupTest() {
 		suite.dist,
 		suite.broker,
 	)
-	suite.targetObserver.Start(context.Background())
+	suite.targetObserver.Start()
 	for _, node := range suite.nodes {
 		suite.nodeMgr.Add(session.NewNodeInfo(node, "localhost"))
 		err := suite.meta.ResourceManager.AssignNode(meta.DefaultResourceGroupName, node)
@@ -156,7 +159,7 @@ func (suite *ServiceSuite) SetupTest() {
 	suite.cluster = session.NewMockCluster(suite.T())
 	suite.jobScheduler = job.NewScheduler()
 	suite.taskScheduler = task.NewMockScheduler(suite.T())
-	suite.jobScheduler.Start(context.Background())
+	suite.jobScheduler.Start()
 	suite.balancer = balance.NewRowCountBasedBalancer(
 		suite.taskScheduler,
 		suite.nodeMgr,
@@ -389,14 +392,16 @@ func (suite *ServiceSuite) TestResourceGroup() {
 		ID:            1,
 		CollectionID:  1,
 		Nodes:         []int64{1011, 1013},
-		ResourceGroup: "rg11"},
+		ResourceGroup: "rg11",
+	},
 		typeutil.NewUniqueSet(1011, 1013)),
 	)
 	server.meta.ReplicaManager.Put(meta.NewReplica(&querypb.Replica{
 		ID:            2,
 		CollectionID:  2,
 		Nodes:         []int64{1012, 1014},
-		ResourceGroup: "rg12"},
+		ResourceGroup: "rg12",
+	},
 		typeutil.NewUniqueSet(1012, 1014)),
 	)
 
@@ -871,7 +876,7 @@ func (suite *ServiceSuite) TestReleaseCollection() {
 	server := suite.server
 
 	suite.cluster.EXPECT().ReleasePartitions(mock.Anything, mock.Anything, mock.Anything).
-		Return(merr.Status(nil), nil)
+		Return(merr.Success(), nil)
 
 	// Test release all collections
 	for _, collection := range suite.collections {
@@ -911,7 +916,7 @@ func (suite *ServiceSuite) TestReleasePartition() {
 
 	// Test release all partitions
 	suite.cluster.EXPECT().ReleasePartitions(mock.Anything, mock.Anything, mock.Anything).
-		Return(merr.Status(nil), nil)
+		Return(merr.Success(), nil)
 	for _, collection := range suite.collections {
 		req := &querypb.ReleasePartitionsRequest{
 			CollectionID: collection,
@@ -949,7 +954,7 @@ func (suite *ServiceSuite) TestReleasePartition() {
 func (suite *ServiceSuite) TestRefreshCollection() {
 	server := suite.server
 
-	server.collectionObserver.Start(context.Background())
+	server.collectionObserver.Start()
 
 	// Test refresh all collections.
 	for _, collection := range suite.collections {
@@ -1236,7 +1241,7 @@ func (suite *ServiceSuite) TestLoadBalanceFailed() {
 		}
 		resp, err := server.LoadBalance(ctx, req)
 		suite.NoError(err)
-		suite.ErrorIs(merr.Error(resp), merr.ErrParameterInvalid)
+		suite.ErrorIs(merr.Error(resp), merr.ErrNodeNotFound)
 	}
 
 	// Test balance task failed
@@ -1314,7 +1319,7 @@ func (suite *ServiceSuite) TestGetMetrics() {
 
 	for _, node := range suite.nodes {
 		suite.cluster.EXPECT().GetMetrics(ctx, node, mock.Anything).Return(&milvuspb.GetMetricsResponse{
-			Status:        merr.Status(nil),
+			Status:        merr.Success(),
 			ComponentName: "QueryNode",
 		}, nil)
 	}
@@ -1735,7 +1740,7 @@ func (suite *ServiceSuite) expectLoadPartitions() {
 	suite.broker.EXPECT().DescribeIndex(mock.Anything, mock.Anything).
 		Return(nil, nil)
 	suite.cluster.EXPECT().LoadPartitions(mock.Anything, mock.Anything, mock.Anything).
-		Return(merr.Status(nil), nil)
+		Return(merr.Success(), nil)
 }
 
 func (suite *ServiceSuite) getAllSegments(collection int64) []int64 {
@@ -1764,7 +1769,7 @@ func (suite *ServiceSuite) updateChannelDist(collection int64) {
 	replicas := suite.meta.ReplicaManager.GetByCollection(collection)
 	for _, replica := range replicas {
 		i := 0
-		for _, node := range replica.GetNodes() {
+		for _, node := range suite.sortInt64(replica.GetNodes()) {
 			suite.dist.ChannelDistManager.Update(node, meta.DmChannelFromVChannel(&datapb.VchannelInfo{
 				CollectionID: collection,
 				ChannelName:  channels[i],
@@ -1788,13 +1793,20 @@ func (suite *ServiceSuite) updateChannelDist(collection int64) {
 	}
 }
 
+func (suite *ServiceSuite) sortInt64(ints []int64) []int64 {
+	sort.Slice(ints, func(i int, j int) bool {
+		return ints[i] < ints[j]
+	})
+	return ints
+}
+
 func (suite *ServiceSuite) updateChannelDistWithoutSegment(collection int64) {
 	channels := suite.channels[collection]
 
 	replicas := suite.meta.ReplicaManager.GetByCollection(collection)
 	for _, replica := range replicas {
 		i := 0
-		for _, node := range replica.GetNodes() {
+		for _, node := range suite.sortInt64(replica.GetNodes()) {
 			suite.dist.ChannelDistManager.Update(node, meta.DmChannelFromVChannel(&datapb.VchannelInfo{
 				CollectionID: collection,
 				ChannelName:  channels[i],

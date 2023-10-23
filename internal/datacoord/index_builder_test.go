@@ -22,12 +22,11 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"google.golang.org/grpc"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
-	"github.com/milvus-io/milvus/internal/indexnode"
 	"github.com/milvus-io/milvus/internal/metastore"
 	catalogmocks "github.com/milvus-io/milvus/internal/metastore/mocks"
 	"github.com/milvus-io/milvus/internal/metastore/model"
@@ -35,7 +34,9 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/types"
+	mclient "github.com/milvus-io/milvus/internal/util/mock"
 	"github.com/milvus-io/milvus/pkg/common"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
 
@@ -615,17 +616,57 @@ func TestIndexBuilder(t *testing.T) {
 		mock.Anything,
 	).Return(nil)
 
+	ic := mocks.NewMockIndexNodeClient(t)
+	ic.EXPECT().GetJobStats(mock.Anything, mock.Anything, mock.Anything).
+		Return(&indexpb.GetJobStatsResponse{
+			Status:           merr.Success(),
+			TotalJobNum:      1,
+			EnqueueJobNum:    0,
+			InProgressJobNum: 1,
+			TaskSlots:        1,
+			JobInfos: []*indexpb.JobInfo{
+				{
+					NumRows:   1024,
+					Dim:       128,
+					StartTime: 1,
+					EndTime:   10,
+					PodID:     1,
+				},
+			},
+		}, nil)
+	ic.EXPECT().QueryJobs(mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(ctx context.Context, in *indexpb.QueryJobsRequest, option ...grpc.CallOption) (*indexpb.QueryJobsResponse, error) {
+			indexInfos := make([]*indexpb.IndexTaskInfo, 0)
+			for _, buildID := range in.BuildIDs {
+				indexInfos = append(indexInfos, &indexpb.IndexTaskInfo{
+					BuildID:       buildID,
+					State:         commonpb.IndexState_Finished,
+					IndexFileKeys: []string{"file1", "file2"},
+				})
+			}
+			return &indexpb.QueryJobsResponse{
+				Status:     merr.Success(),
+				ClusterID:  in.ClusterID,
+				IndexInfos: indexInfos,
+			}, nil
+		})
+
+	ic.EXPECT().CreateJob(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(merr.Success(), nil)
+
+	ic.EXPECT().DropJobs(mock.Anything, mock.Anything, mock.Anything).
+		Return(merr.Success(), nil)
 	mt := createMetaTable(catalog)
 	nodeManager := &IndexNodeManager{
 		ctx: ctx,
-		nodeClients: map[UniqueID]types.IndexNode{
-			4: indexnode.NewIndexNodeMock(),
+		nodeClients: map[UniqueID]types.IndexNodeClient{
+			4: ic,
 		},
 	}
 	chunkManager := &mocks.ChunkManager{}
 	chunkManager.EXPECT().RootPath().Return("root")
 
-	ib := newIndexBuilder(ctx, mt, nodeManager, chunkManager)
+	ib := newIndexBuilder(ctx, mt, nodeManager, chunkManager, newIndexEngineVersionManager())
 
 	assert.Equal(t, 6, len(ib.tasks))
 	assert.Equal(t, indexTaskInit, ib.tasks[buildID])
@@ -696,8 +737,9 @@ func TestIndexBuilder_Error(t *testing.T) {
 		tasks: map[int64]indexTaskState{
 			buildID: indexTaskInit,
 		},
-		meta:         createMetaTable(ec),
-		chunkManager: chunkManager,
+		meta:                      createMetaTable(ec),
+		chunkManager:              chunkManager,
+		indexEngineVersionManager: newIndexEngineVersionManager(),
 	}
 
 	t.Run("meta not exist", func(t *testing.T) {
@@ -719,7 +761,7 @@ func TestIndexBuilder_Error(t *testing.T) {
 
 	t.Run("peek client fail", func(t *testing.T) {
 		ib.tasks[buildID] = indexTaskInit
-		ib.nodeManager = &IndexNodeManager{nodeClients: map[UniqueID]types.IndexNode{}}
+		ib.nodeManager = &IndexNodeManager{nodeClients: map[UniqueID]types.IndexNodeClient{}}
 		ib.process(buildID)
 
 		state, ok := ib.tasks[buildID]
@@ -730,7 +772,7 @@ func TestIndexBuilder_Error(t *testing.T) {
 	t.Run("update version fail", func(t *testing.T) {
 		ib.nodeManager = &IndexNodeManager{
 			ctx:         context.Background(),
-			nodeClients: map[UniqueID]types.IndexNode{1: indexnode.NewIndexNodeMock()},
+			nodeClients: map[UniqueID]types.IndexNodeClient{1: &mclient.GrpcIndexNodeClient{Err: nil}},
 		}
 		ib.process(buildID)
 
@@ -765,23 +807,18 @@ func TestIndexBuilder_Error(t *testing.T) {
 		paramtable.Get().Save(Params.CommonCfg.StorageType.Key, "local")
 		ib.tasks[buildID] = indexTaskInit
 		ib.meta.catalog = sc
+
+		ic := mocks.NewMockIndexNodeClient(t)
+		ic.EXPECT().CreateJob(mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.New("error"))
+		ic.EXPECT().GetJobStats(mock.Anything, mock.Anything, mock.Anything).Return(&indexpb.GetJobStatsResponse{
+			Status:    merr.Success(),
+			TaskSlots: 1,
+		}, nil)
+
 		ib.nodeManager = &IndexNodeManager{
 			ctx: context.Background(),
-			nodeClients: map[UniqueID]types.IndexNode{
-				1: &indexnode.Mock{
-					CallCreateJob: func(ctx context.Context, req *indexpb.CreateJobRequest) (*commonpb.Status, error) {
-						return nil, errors.New("error")
-					},
-					CallGetJobStats: func(ctx context.Context, in *indexpb.GetJobStatsRequest) (*indexpb.GetJobStatsResponse, error) {
-						return &indexpb.GetJobStatsResponse{
-							Status: &commonpb.Status{
-								ErrorCode: commonpb.ErrorCode_Success,
-								Reason:    "",
-							},
-							TaskSlots: 1,
-						}, nil
-					},
-				},
+			nodeClients: map[UniqueID]types.IndexNodeClient{
+				1: ic,
 			},
 		}
 		ib.process(buildID)
@@ -793,26 +830,20 @@ func TestIndexBuilder_Error(t *testing.T) {
 	t.Run("assign task fail", func(t *testing.T) {
 		paramtable.Get().Save(Params.CommonCfg.StorageType.Key, "local")
 		ib.meta.catalog = sc
+		ic := mocks.NewMockIndexNodeClient(t)
+		ic.EXPECT().CreateJob(mock.Anything, mock.Anything, mock.Anything).Return(&commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_UnexpectedError,
+			Reason:    "mock fail",
+		}, nil)
+		ic.EXPECT().GetJobStats(mock.Anything, mock.Anything, mock.Anything).Return(&indexpb.GetJobStatsResponse{
+			Status:    merr.Success(),
+			TaskSlots: 1,
+		}, nil)
+
 		ib.nodeManager = &IndexNodeManager{
 			ctx: context.Background(),
-			nodeClients: map[UniqueID]types.IndexNode{
-				1: &indexnode.Mock{
-					CallCreateJob: func(ctx context.Context, req *indexpb.CreateJobRequest) (*commonpb.Status, error) {
-						return &commonpb.Status{
-							ErrorCode: commonpb.ErrorCode_UnexpectedError,
-							Reason:    "mock fail",
-						}, nil
-					},
-					CallGetJobStats: func(ctx context.Context, in *indexpb.GetJobStatsRequest) (*indexpb.GetJobStatsResponse, error) {
-						return &indexpb.GetJobStatsResponse{
-							Status: &commonpb.Status{
-								ErrorCode: commonpb.ErrorCode_Success,
-								Reason:    "",
-							},
-							TaskSlots: 1,
-						}, nil
-					},
-				},
+			nodeClients: map[UniqueID]types.IndexNodeClient{
+				1: ic,
 			},
 		}
 		ib.tasks[buildID] = indexTaskInit
@@ -826,16 +857,15 @@ func TestIndexBuilder_Error(t *testing.T) {
 	t.Run("drop job error", func(t *testing.T) {
 		ib.meta.buildID2SegmentIndex[buildID].NodeID = nodeID
 		ib.meta.catalog = sc
+		ic := mocks.NewMockIndexNodeClient(t)
+		ic.EXPECT().DropJobs(mock.Anything, mock.Anything, mock.Anything).Return(&commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_UnexpectedError,
+		}, errors.New("error"))
+
 		ib.nodeManager = &IndexNodeManager{
 			ctx: context.Background(),
-			nodeClients: map[UniqueID]types.IndexNode{
-				nodeID: &indexnode.Mock{
-					CallDropJobs: func(ctx context.Context, in *indexpb.DropJobsRequest) (*commonpb.Status, error) {
-						return &commonpb.Status{
-							ErrorCode: commonpb.ErrorCode_UnexpectedError,
-						}, errors.New("error")
-					},
-				},
+			nodeClients: map[UniqueID]types.IndexNodeClient{
+				nodeID: ic,
 			},
 		}
 		ib.tasks[buildID] = indexTaskDone
@@ -856,17 +886,16 @@ func TestIndexBuilder_Error(t *testing.T) {
 	t.Run("drop job fail", func(t *testing.T) {
 		ib.meta.buildID2SegmentIndex[buildID].NodeID = nodeID
 		ib.meta.catalog = sc
+		ic := mocks.NewMockIndexNodeClient(t)
+		ic.EXPECT().DropJobs(mock.Anything, mock.Anything, mock.Anything).Return(&commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_UnexpectedError,
+			Reason:    "mock fail",
+		}, nil)
+
 		ib.nodeManager = &IndexNodeManager{
 			ctx: context.Background(),
-			nodeClients: map[UniqueID]types.IndexNode{
-				nodeID: &indexnode.Mock{
-					CallDropJobs: func(ctx context.Context, in *indexpb.DropJobsRequest) (*commonpb.Status, error) {
-						return &commonpb.Status{
-							ErrorCode: commonpb.ErrorCode_UnexpectedError,
-							Reason:    "mock fail",
-						}, nil
-					},
-				},
+			nodeClients: map[UniqueID]types.IndexNodeClient{
+				nodeID: ic,
 			},
 		}
 		ib.tasks[buildID] = indexTaskDone
@@ -887,14 +916,12 @@ func TestIndexBuilder_Error(t *testing.T) {
 	t.Run("get state error", func(t *testing.T) {
 		ib.meta.buildID2SegmentIndex[buildID].NodeID = nodeID
 		ib.meta.catalog = sc
+		ic := mocks.NewMockIndexNodeClient(t)
+		ic.EXPECT().QueryJobs(mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.New("error"))
 		ib.nodeManager = &IndexNodeManager{
 			ctx: context.Background(),
-			nodeClients: map[UniqueID]types.IndexNode{
-				nodeID: &indexnode.Mock{
-					CallQueryJobs: func(ctx context.Context, in *indexpb.QueryJobsRequest) (*indexpb.QueryJobsResponse, error) {
-						return nil, errors.New("error")
-					},
-				},
+			nodeClients: map[UniqueID]types.IndexNodeClient{
+				nodeID: ic,
 			},
 		}
 
@@ -909,19 +936,17 @@ func TestIndexBuilder_Error(t *testing.T) {
 	t.Run("get state fail", func(t *testing.T) {
 		ib.meta.buildID2SegmentIndex[buildID].NodeID = nodeID
 		ib.meta.catalog = sc
+		ic := mocks.NewMockIndexNodeClient(t)
+		ic.EXPECT().QueryJobs(mock.Anything, mock.Anything, mock.Anything).Return(&indexpb.QueryJobsResponse{
+			Status: &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_BuildIndexError,
+				Reason:    "mock fail",
+			},
+		}, nil)
 		ib.nodeManager = &IndexNodeManager{
 			ctx: context.Background(),
-			nodeClients: map[UniqueID]types.IndexNode{
-				nodeID: &indexnode.Mock{
-					CallQueryJobs: func(ctx context.Context, in *indexpb.QueryJobsRequest) (*indexpb.QueryJobsResponse, error) {
-						return &indexpb.QueryJobsResponse{
-							Status: &commonpb.Status{
-								ErrorCode: commonpb.ErrorCode_BuildIndexError,
-								Reason:    "mock fail",
-							},
-						}, nil
-					},
-				},
+			nodeClients: map[UniqueID]types.IndexNodeClient{
+				nodeID: ic,
 			},
 		}
 
@@ -936,28 +961,24 @@ func TestIndexBuilder_Error(t *testing.T) {
 	t.Run("finish task fail", func(t *testing.T) {
 		ib.meta.buildID2SegmentIndex[buildID].NodeID = nodeID
 		ib.meta.catalog = ec
+		ic := mocks.NewMockIndexNodeClient(t)
+		ic.EXPECT().QueryJobs(mock.Anything, mock.Anything, mock.Anything).Return(&indexpb.QueryJobsResponse{
+			Status: merr.Success(),
+			IndexInfos: []*indexpb.IndexTaskInfo{
+				{
+					BuildID:        buildID,
+					State:          commonpb.IndexState_Finished,
+					IndexFileKeys:  []string{"file1", "file2"},
+					SerializedSize: 1024,
+					FailReason:     "",
+				},
+			},
+		}, nil)
+
 		ib.nodeManager = &IndexNodeManager{
 			ctx: context.Background(),
-			nodeClients: map[UniqueID]types.IndexNode{
-				nodeID: &indexnode.Mock{
-					CallQueryJobs: func(ctx context.Context, in *indexpb.QueryJobsRequest) (*indexpb.QueryJobsResponse, error) {
-						return &indexpb.QueryJobsResponse{
-							Status: &commonpb.Status{
-								ErrorCode: commonpb.ErrorCode_Success,
-								Reason:    "",
-							},
-							IndexInfos: []*indexpb.IndexTaskInfo{
-								{
-									BuildID:        buildID,
-									State:          commonpb.IndexState_Finished,
-									IndexFileKeys:  []string{"file1", "file2"},
-									SerializedSize: 1024,
-									FailReason:     "",
-								},
-							},
-						}, nil
-					},
-				},
+			nodeClients: map[UniqueID]types.IndexNodeClient{
+				nodeID: ic,
 			},
 		}
 
@@ -972,28 +993,24 @@ func TestIndexBuilder_Error(t *testing.T) {
 	t.Run("task still in progress", func(t *testing.T) {
 		ib.meta.buildID2SegmentIndex[buildID].NodeID = nodeID
 		ib.meta.catalog = ec
+		ic := mocks.NewMockIndexNodeClient(t)
+		ic.EXPECT().QueryJobs(mock.Anything, mock.Anything, mock.Anything).Return(&indexpb.QueryJobsResponse{
+			Status: merr.Success(),
+			IndexInfos: []*indexpb.IndexTaskInfo{
+				{
+					BuildID:        buildID,
+					State:          commonpb.IndexState_InProgress,
+					IndexFileKeys:  nil,
+					SerializedSize: 0,
+					FailReason:     "",
+				},
+			},
+		}, nil)
+
 		ib.nodeManager = &IndexNodeManager{
 			ctx: context.Background(),
-			nodeClients: map[UniqueID]types.IndexNode{
-				nodeID: &indexnode.Mock{
-					CallQueryJobs: func(ctx context.Context, in *indexpb.QueryJobsRequest) (*indexpb.QueryJobsResponse, error) {
-						return &indexpb.QueryJobsResponse{
-							Status: &commonpb.Status{
-								ErrorCode: commonpb.ErrorCode_Success,
-								Reason:    "",
-							},
-							IndexInfos: []*indexpb.IndexTaskInfo{
-								{
-									BuildID:        buildID,
-									State:          commonpb.IndexState_InProgress,
-									IndexFileKeys:  nil,
-									SerializedSize: 0,
-									FailReason:     "",
-								},
-							},
-						}, nil
-					},
-				},
+			nodeClients: map[UniqueID]types.IndexNodeClient{
+				nodeID: ic,
 			},
 		}
 
@@ -1008,20 +1025,15 @@ func TestIndexBuilder_Error(t *testing.T) {
 	t.Run("indexNode has no task", func(t *testing.T) {
 		ib.meta.buildID2SegmentIndex[buildID].NodeID = nodeID
 		ib.meta.catalog = sc
+		ic := mocks.NewMockIndexNodeClient(t)
+		ic.EXPECT().QueryJobs(mock.Anything, mock.Anything, mock.Anything).Return(&indexpb.QueryJobsResponse{
+			Status:     merr.Success(),
+			IndexInfos: nil,
+		}, nil)
 		ib.nodeManager = &IndexNodeManager{
 			ctx: context.Background(),
-			nodeClients: map[UniqueID]types.IndexNode{
-				nodeID: &indexnode.Mock{
-					CallQueryJobs: func(ctx context.Context, in *indexpb.QueryJobsRequest) (*indexpb.QueryJobsResponse, error) {
-						return &indexpb.QueryJobsResponse{
-							Status: &commonpb.Status{
-								ErrorCode: commonpb.ErrorCode_Success,
-								Reason:    "",
-							},
-							IndexInfos: nil,
-						}, nil
-					},
-				},
+			nodeClients: map[UniqueID]types.IndexNodeClient{
+				nodeID: ic,
 			},
 		}
 
@@ -1038,7 +1050,7 @@ func TestIndexBuilder_Error(t *testing.T) {
 		ib.meta.catalog = sc
 		ib.nodeManager = &IndexNodeManager{
 			ctx:         context.Background(),
-			nodeClients: map[UniqueID]types.IndexNode{},
+			nodeClients: map[UniqueID]types.IndexNodeClient{},
 		}
 
 		ib.tasks[buildID] = indexTaskInProgress

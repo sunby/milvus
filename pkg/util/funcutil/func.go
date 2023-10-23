@@ -29,12 +29,13 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"google.golang.org/grpc/codes"
+	grpcStatus "google.golang.org/grpc/status"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
-	"google.golang.org/grpc/codes"
-	grpcStatus "google.golang.org/grpc/status"
 )
 
 // CheckGrpcReady wait for context timeout, or wait 100ms then send nil to targetCh
@@ -47,6 +48,14 @@ func CheckGrpcReady(ctx context.Context, targetCh chan error) {
 	case <-ctx.Done():
 		return
 	}
+}
+
+// GetIP return the ip address
+func GetIP(ip string) string {
+	if len(ip) == 0 {
+		return GetLocalIP()
+	}
+	return ip
 }
 
 // GetLocalIP return the local ip address
@@ -108,7 +117,7 @@ func CheckCtxValid(ctx context.Context) bool {
 func GetVecFieldIDs(schema *schemapb.CollectionSchema) []int64 {
 	var vecFieldIDs []int64
 	for _, field := range schema.Fields {
-		if field.DataType == schemapb.DataType_BinaryVector || field.DataType == schemapb.DataType_FloatVector {
+		if field.DataType == schemapb.DataType_BinaryVector || field.DataType == schemapb.DataType_FloatVector || field.DataType == schemapb.DataType_Float16Vector {
 			vecFieldIDs = append(vecFieldIDs, field.FieldID)
 		}
 	}
@@ -222,7 +231,17 @@ func GetNumRowsOfBinaryVectorField(bDatas []byte, dim int64) (uint64, error) {
 	return uint64((8 * int64(l)) / dim), nil
 }
 
-// GetNumRowOfFieldData return num rows of the field data
+func GetNumRowsOfFloat16VectorField(f16Datas []byte, dim int64) (uint64, error) {
+	if dim <= 0 {
+		return 0, fmt.Errorf("dim(%d) should be greater than 0", dim)
+	}
+	l := len(f16Datas)
+	if int64(l)%dim != 0 {
+		return 0, fmt.Errorf("the length(%d) of float data should divide the dim(%d)", l, dim)
+	}
+	return uint64((int64(l)) / dim / 2), nil
+}
+
 func GetNumRowOfFieldData(fieldData *schemapb.FieldData) (uint64, error) {
 	var fieldNumRows uint64
 	var err error
@@ -261,6 +280,12 @@ func GetNumRowOfFieldData(fieldData *schemapb.FieldData) (uint64, error) {
 		case *schemapb.VectorField_BinaryVector:
 			dim := vectorField.GetDim()
 			fieldNumRows, err = GetNumRowsOfBinaryVectorField(vectorField.GetBinaryVector(), dim)
+			if err != nil {
+				return 0, err
+			}
+		case *schemapb.VectorField_Float16Vector:
+			dim := vectorField.GetDim()
+			fieldNumRows, err = GetNumRowsOfFloat16VectorField(vectorField.GetFloat16Vector(), dim)
 			if err != nil {
 				return 0, err
 			}

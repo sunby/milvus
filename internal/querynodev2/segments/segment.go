@@ -33,8 +33,6 @@ import (
 
 	"github.com/apache/arrow/go/v12/arrow/array"
 	"github.com/milvus-io/milvus/pkg/common"
-	"github.com/milvus-io/milvus/pkg/util/funcutil"
-	"github.com/milvus-io/milvus/pkg/util/merr"
 
 	"github.com/cockroachdb/errors"
 	"github.com/golang/protobuf/proto"
@@ -50,10 +48,11 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/segcorepb"
-	pkoracle "github.com/milvus-io/milvus/internal/querynodev2/pkoracle"
+	"github.com/milvus-io/milvus/internal/querynodev2/pkoracle"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/timerecord"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
@@ -66,9 +65,7 @@ const (
 	SegmentTypeSealed  = commonpb.SegmentState_Sealed
 )
 
-var (
-	ErrSegmentUnhealthy = errors.New("segment unhealthy")
-)
+var ErrSegmentUnhealthy = errors.New("segment unhealthy")
 
 // IndexedFieldInfo contains binlog info of vector field
 type IndexedFieldInfo struct {
@@ -190,10 +187,10 @@ func NewSegment(collection *Collection,
 		zap.Int64("segmentID", segmentID),
 		zap.String("segmentType", segmentType.String()))
 
-	var segment = &LocalSegment{
+	segment := &LocalSegment{
 		baseSegment:        newBaseSegment(segmentID, partitionID, collectionID, shard, segmentType, version, startPosition),
 		ptr:                segmentPtr,
-		lastDeltaTimestamp: atomic.NewUint64(deltaPosition.GetTimestamp()),
+		lastDeltaTimestamp: atomic.NewUint64(0),
 		fieldIndexes:       typeutil.NewConcurrentMap[int64, *IndexedFieldInfo](),
 	}
 
@@ -360,31 +357,6 @@ func (s *LocalSegment) Type() SegmentType {
 	return s.typ
 }
 
-func DeleteSegment(segment *LocalSegment) {
-	/*
-		void
-		deleteSegment(CSegmentInterface segment);
-	*/
-	// wait all read ops finished
-	var ptr C.CSegmentInterface
-
-	segment.ptrLock.Lock()
-	ptr = segment.ptr
-	segment.ptr = nil
-	segment.ptrLock.Unlock()
-
-	if ptr == nil {
-		return
-	}
-
-	C.DeleteSegment(ptr)
-	log.Info("delete segment from memory",
-		zap.Int64("collectionID", segment.collectionID),
-		zap.Int64("partitionID", segment.partitionID),
-		zap.Int64("segmentID", segment.ID()),
-		zap.String("segmentType", segment.typ.String()))
-}
-
 func (s *LocalSegment) Search(ctx context.Context, searchReq *SearchRequest) (*SearchResult, error) {
 	/*
 		CStatus
@@ -449,7 +421,7 @@ func (s *LocalSegment) Retrieve(ctx context.Context, plan *RetrievePlan) (*segco
 		return nil, merr.WrapErrSegmentNotLoaded(s.segmentID, "segment released")
 	}
 
-	log := log.With(
+	log := log.Ctx(ctx).With(
 		zap.Int64("collectionID", s.Collection()),
 		zap.Int64("partitionID", s.Partition()),
 		zap.Int64("segmentID", s.ID()),
@@ -517,35 +489,6 @@ func (s *LocalSegment) GetFieldDataPath(index *IndexedFieldInfo, offset int64) (
 	return dataPath, offsetInBinlog
 }
 
-func (s *LocalSegment) ValidateIndexedFieldsData(ctx context.Context, result *segcorepb.RetrieveResults) error {
-	log := log.Ctx(ctx).With(
-		zap.Int64("collectionID", s.Collection()),
-		zap.Int64("partitionID", s.Partition()),
-		zap.Int64("segmentID", s.ID()),
-	)
-
-	for _, fieldData := range result.FieldsData {
-		if !typeutil.IsVectorType(fieldData.GetType()) {
-			continue
-		}
-		if !s.ExistIndex(fieldData.FieldId) {
-			continue
-		}
-		if !s.HasRawData(fieldData.FieldId) {
-			index := s.GetIndex(fieldData.FieldId)
-			indexType, err := funcutil.GetAttrByKeyFromRepeatedKV(common.IndexTypeKey, index.IndexInfo.GetIndexParams())
-			if err != nil {
-				return err
-			}
-			err = fmt.Errorf("vector output fields for %s index is not allowed", indexType)
-			log.Warn("validate fields failed", zap.Error(err))
-			return err
-		}
-	}
-
-	return nil
-}
-
 // -------------------------------------------------------------------------------------- interfaces for growing segment
 func (s *LocalSegment) preInsert(numOfRecords int) (int64, error) {
 	/*
@@ -588,11 +531,11 @@ func (s *LocalSegment) Insert(rowIDs []int64, timestamps []typeutil.Timestamp, r
 		return fmt.Errorf("failed to marshal insert record: %s", err)
 	}
 
-	var numOfRow = len(rowIDs)
-	var cOffset = C.int64_t(offset)
-	var cNumOfRows = C.int64_t(numOfRow)
-	var cEntityIdsPtr = (*C.int64_t)(&(rowIDs)[0])
-	var cTimestampsPtr = (*C.uint64_t)(&(timestamps)[0])
+	numOfRow := len(rowIDs)
+	cOffset := C.int64_t(offset)
+	cNumOfRows := C.int64_t(numOfRow)
+	cEntityIdsPtr := (*C.int64_t)(&(rowIDs)[0])
+	cTimestampsPtr := (*C.uint64_t)(&(timestamps)[0])
 
 	var status C.CStatus
 
@@ -637,9 +580,9 @@ func (s *LocalSegment) Delete(primaryKeys []storage.PrimaryKey, timestamps []typ
 		return merr.WrapErrSegmentNotLoaded(s.segmentID, "segment released")
 	}
 
-	var cOffset = C.int64_t(0) // depre
-	var cSize = C.int64_t(len(primaryKeys))
-	var cTimestampsPtr = (*C.uint64_t)(&(timestamps)[0])
+	cOffset := C.int64_t(0) // depre
+	cSize := C.int64_t(len(primaryKeys))
+	cTimestampsPtr := (*C.uint64_t)(&(timestamps)[0])
 
 	ids := &schemapb.IDs{}
 	pkType := primaryKeys[0].Type()
@@ -722,7 +665,7 @@ func (s *LocalSegment) LoadMultiFieldData(rowCount int64, fields []*datapb.Field
 		}
 
 		for _, binlog := range field.Binlogs {
-			err = loadFieldDataInfo.appendLoadFieldDataPath(fieldID, binlog.GetLogPath())
+			err = loadFieldDataInfo.appendLoadFieldDataPath(fieldID, binlog)
 			if err != nil {
 				return err
 			}
@@ -783,7 +726,7 @@ func (s *LocalSegment) LoadFieldData(fieldID int64, rowCount int64, field *datap
 	}
 
 	for _, binlog := range field.Binlogs {
-		err = loadFieldDataInfo.appendLoadFieldDataPath(fieldID, binlog.GetLogPath())
+		err = loadFieldDataInfo.appendLoadFieldDataPath(fieldID, binlog)
 		if err != nil {
 			return err
 		}
@@ -824,7 +767,6 @@ func (s *LocalSegment) LoadDeltaData2(schema *schemapb.CollectionSchema) error {
 	if err != nil {
 		return err
 	}
-
 	ids := &schemapb.IDs{}
 	var pkint64s []int64
 	var pkstrings []string
@@ -897,6 +839,54 @@ func (s *LocalSegment) LoadDeltaData2(schema *schemapb.CollectionSchema) error {
 		zap.String("segmentType", s.Type().String()))
 	return nil
 }
+func (s *LocalSegment) AddFieldDataInfo(rowCount int64, fields []*datapb.FieldBinlog) error {
+	s.ptrLock.RLock()
+	defer s.ptrLock.RUnlock()
+
+	if s.ptr == nil {
+		return merr.WrapErrSegmentNotLoaded(s.segmentID, "segment released")
+	}
+
+	log := log.With(
+		zap.Int64("collectionID", s.Collection()),
+		zap.Int64("partitionID", s.Partition()),
+		zap.Int64("segmentID", s.ID()),
+		zap.Int64("row count", rowCount),
+	)
+
+	loadFieldDataInfo, err := newLoadFieldDataInfo()
+	defer deleteFieldDataInfo(loadFieldDataInfo)
+	if err != nil {
+		return err
+	}
+
+	for _, field := range fields {
+		fieldID := field.FieldID
+		err = loadFieldDataInfo.appendLoadFieldInfo(fieldID, rowCount)
+		if err != nil {
+			return err
+		}
+
+		for _, binlog := range field.Binlogs {
+			err = loadFieldDataInfo.appendLoadFieldDataPath(fieldID, binlog)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	var status C.CStatus
+	GetDynamicPool().Submit(func() (any, error) {
+		status = C.AddFieldDataInfoForSealed(s.ptr, loadFieldDataInfo.cLoadFieldDataInfo)
+		return nil, nil
+	}).Await()
+	if err := HandleCStatus(&status, "AddFieldDataInfo failed"); err != nil {
+		return err
+	}
+
+	log.Info("add field data info done")
+	return nil
+}
 
 func (s *LocalSegment) LoadDeltaData(deltaData *storage.DeleteData) error {
 	pks, tss := deltaData.Pks, deltaData.Tss
@@ -966,6 +956,8 @@ func (s *LocalSegment) LoadDeltaData(deltaData *storage.DeleteData) error {
 	if err := HandleCStatus(&status, "LoadDeletedRecord failed"); err != nil {
 		return err
 	}
+
+	s.lastDeltaTimestamp.Store(tss[len(tss)-1])
 
 	log.Info("load deleted record done",
 		zap.Int64("rowNum", rowNum),
@@ -1048,4 +1040,30 @@ func (s *LocalSegment) UpdateFieldRawDataSize(numRows int64, fieldBinlog *datapb
 	log.Info("updateFieldRawDataSize done", zap.Int64("segmentID", s.ID()))
 
 	return nil
+}
+
+func (s *LocalSegment) Release() {
+	/*
+		void
+		deleteSegment(CSegmentInterface segment);
+	*/
+	// wait all read ops finished
+	var ptr C.CSegmentInterface
+
+	s.ptrLock.Lock()
+	ptr = s.ptr
+	s.ptr = nil
+	s.ptrLock.Unlock()
+
+	if ptr == nil {
+		return
+	}
+
+	C.DeleteSegment(ptr)
+	log.Info("delete segment from memory",
+		zap.Int64("collectionID", s.collectionID),
+		zap.Int64("partitionID", s.partitionID),
+		zap.Int64("segmentID", s.ID()),
+		zap.String("segmentType", s.typ.String()),
+	)
 }

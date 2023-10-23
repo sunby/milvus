@@ -20,15 +20,14 @@ import (
 	"context"
 
 	"github.com/cockroachdb/errors"
-
-	"github.com/milvus-io/milvus/internal/types"
-
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
+	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/hardware"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
@@ -90,20 +89,16 @@ func (s *Server) getSystemInfoMetrics(
 	}
 
 	resp := &milvuspb.GetMetricsResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_UnexpectedError,
-		},
-		Response:      "",
+		Status:        merr.Success(),
 		ComponentName: metricsinfo.ConstructComponentName(typeutil.DataCoordRole, paramtable.GetNodeID()),
 	}
 	var err error
 	resp.Response, err = metricsinfo.MarshalTopology(coordTopology)
 	if err != nil {
-		resp.Status.Reason = err.Error()
+		resp.Status = merr.Status(err)
 		return resp, nil
 	}
 
-	resp.Status.ErrorCode = commonpb.ErrorCode_Success
 	return resp, nil
 }
 
@@ -168,8 +163,8 @@ func (s *Server) getDataNodeMetrics(ctx context.Context, req *milvuspb.GetMetric
 
 	if metrics.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
 		log.Warn("invalid metrics of DataNode was found",
-			zap.Any("error_code", metrics.Status.ErrorCode),
-			zap.Any("error_reason", metrics.Status.Reason))
+			zap.Any("error_code", metrics.GetStatus().GetErrorCode()),
+			zap.Any("error_reason", metrics.GetStatus().GetReason()))
 		infos.BaseComponentInfos.ErrorReason = metrics.GetStatus().GetReason()
 		return infos, nil
 	}
@@ -185,7 +180,7 @@ func (s *Server) getDataNodeMetrics(ctx context.Context, req *milvuspb.GetMetric
 	return infos, nil
 }
 
-func (s *Server) getIndexNodeMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest, node types.IndexNode) (metricsinfo.IndexNodeInfos, error) {
+func (s *Server) getIndexNodeMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest, node types.IndexNodeClient) (metricsinfo.IndexNodeInfos, error) {
 	infos := metricsinfo.IndexNodeInfos{
 		BaseComponentInfos: metricsinfo.BaseComponentInfos{
 			HasError: true,
@@ -208,8 +203,8 @@ func (s *Server) getIndexNodeMetrics(ctx context.Context, req *milvuspb.GetMetri
 
 	if metrics.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
 		log.Warn("invalid metrics of DataNode was found",
-			zap.Any("error_code", metrics.Status.ErrorCode),
-			zap.Any("error_reason", metrics.Status.Reason))
+			zap.Any("error_code", metrics.GetStatus().GetErrorCode()),
+			zap.Any("error_reason", metrics.GetStatus().GetReason()))
 		infos.BaseComponentInfos.ErrorReason = metrics.GetStatus().GetReason()
 		return infos, nil
 	}

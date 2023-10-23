@@ -23,6 +23,8 @@ import (
 	"github.com/tecbot/gorocksdb"
 
 	"github.com/milvus-io/milvus/internal/kv"
+	"github.com/milvus-io/milvus/internal/kv/predicates"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -389,7 +391,10 @@ func (kv *RocksdbKV) MultiRemove(keys []string) error {
 }
 
 // MultiSaveAndRemove provides a transaction to execute a batch of operations
-func (kv *RocksdbKV) MultiSaveAndRemove(saves map[string]string, removals []string) error {
+func (kv *RocksdbKV) MultiSaveAndRemove(saves map[string]string, removals []string, preds ...predicates.Predicate) error {
+	if len(preds) > 0 {
+		return merr.WrapErrServiceUnavailable("predicates not supported")
+	}
 	if kv.DB == nil {
 		return errors.New("Rocksdb instance is nil when do MultiSaveAndRemove")
 	}
@@ -420,20 +425,11 @@ func (kv *RocksdbKV) DeleteRange(startKey, endKey string) error {
 	return err
 }
 
-// MultiRemoveWithPrefix is used to remove a batch of key-values with the same prefix
-func (kv *RocksdbKV) MultiRemoveWithPrefix(prefixes []string) error {
-	if kv.DB == nil {
-		return errors.New("rocksdb instance is nil when do RemoveWithPrefix")
-	}
-	writeBatch := gorocksdb.NewWriteBatch()
-	defer writeBatch.Destroy()
-	kv.prepareRemovePrefix(prefixes, writeBatch)
-	err := kv.DB.Write(kv.WriteOptions, writeBatch)
-	return err
-}
-
 // MultiSaveAndRemoveWithPrefix is used to execute a batch operators with the same prefix
-func (kv *RocksdbKV) MultiSaveAndRemoveWithPrefix(saves map[string]string, removals []string) error {
+func (kv *RocksdbKV) MultiSaveAndRemoveWithPrefix(saves map[string]string, removals []string, preds ...predicates.Predicate) error {
+	if len(preds) > 0 {
+		return merr.WrapErrServiceUnavailable("predicates not supported")
+	}
 	if kv.DB == nil {
 		return errors.New("Rocksdb instance is nil when do MultiSaveAndRemove")
 	}

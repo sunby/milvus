@@ -431,7 +431,8 @@ func (c *ChannelManager) unsubAttempt(ncInfo *NodeChannelInfo) {
 }
 
 // Watch tries to add the channel to cluster. Watch is a no op if the channel already exists.
-func (c *ChannelManager) Watch(ch *channel) error {
+func (c *ChannelManager) Watch(ctx context.Context, ch *channel) error {
+	log := log.Ctx(ctx)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -467,7 +468,7 @@ func (c *ChannelManager) fillChannelWatchInfo(op *ChannelOp) {
 
 // fillChannelWatchInfoWithState updates the channel op by filling in channel watch info.
 func (c *ChannelManager) fillChannelWatchInfoWithState(op *ChannelOp, state datapb.ChannelWatchState) []string {
-	var channelsWithTimer = []string{}
+	channelsWithTimer := []string{}
 	startTs := time.Now().Unix()
 	checkInterval := Params.DataCoordCfg.WatchTimeoutInterval.GetAsDuration(time.Second)
 	for _, ch := range op.Channels {
@@ -490,12 +491,25 @@ func (c *ChannelManager) fillChannelWatchInfoWithState(op *ChannelOp, state data
 	return channelsWithTimer
 }
 
-// GetChannels gets channels info of registered nodes.
-func (c *ChannelManager) GetChannels() []*NodeChannelInfo {
+// GetAssignedChannels gets channels info of registered nodes.
+func (c *ChannelManager) GetAssignedChannels() []*NodeChannelInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	return c.store.GetNodesChannels()
+}
+
+func (c *ChannelManager) GetChannelsByCollectionID(collectionID UniqueID) []*channel {
+	channels := make([]*channel, 0)
+	for _, nodeChannels := range c.store.GetChannels() {
+		for _, channelInfo := range nodeChannels.Channels {
+			if collectionID == channelInfo.CollectionID {
+				channels = append(channels, channelInfo)
+			}
+		}
+	}
+	log.Info("get channel", zap.Any("collection", collectionID), zap.Any("channel", channels))
+	return channels
 }
 
 // GetBufferChannels gets buffer channels.
@@ -607,7 +621,7 @@ type ackEvent struct {
 }
 
 func (c *ChannelManager) updateWithTimer(updates ChannelOpSet, state datapb.ChannelWatchState) error {
-	var channelsWithTimer = []string{}
+	channelsWithTimer := []string{}
 	for _, op := range updates {
 		if op.Type == Add {
 			channelsWithTimer = append(channelsWithTimer, c.fillChannelWatchInfoWithState(op, state)...)
@@ -765,17 +779,25 @@ func (c *ChannelManager) Release(nodeID UniqueID, channelName string) error {
 
 // Reassign reassigns a channel to another DataNode.
 func (c *ChannelManager) Reassign(originNodeID UniqueID, channelName string) error {
+	c.mu.RLock()
+	ch := c.getChannelByNodeAndName(originNodeID, channelName)
+	if ch == nil {
+		c.mu.RUnlock()
+		return fmt.Errorf("fail to find matching nodeID: %d with channelName: %s", originNodeID, channelName)
+	}
+	c.mu.RUnlock()
+
+	reallocates := &NodeChannelInfo{originNodeID, []*channel{ch}}
+	isDropped := c.isMarkedDrop(channelName, ch.CollectionID)
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	ch := c.getChannelByNodeAndName(originNodeID, channelName)
+	ch = c.getChannelByNodeAndName(originNodeID, channelName)
 	if ch == nil {
 		return fmt.Errorf("fail to find matching nodeID: %d with channelName: %s", originNodeID, channelName)
 	}
 
-	reallocates := &NodeChannelInfo{originNodeID, []*channel{ch}}
-
-	if c.isMarkedDrop(channelName, ch.CollectionID) {
+	if isDropped {
 		if err := c.remove(originNodeID, ch); err != nil {
 			return fmt.Errorf("failed to remove watch info: %v,%s", ch, err.Error())
 		}
@@ -804,13 +826,13 @@ func (c *ChannelManager) Reassign(originNodeID UniqueID, channelName string) err
 
 // CleanupAndReassign tries to clean up datanode's subscription, and then reassigns the channel to another DataNode.
 func (c *ChannelManager) CleanupAndReassign(nodeID UniqueID, channelName string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+	c.mu.RLock()
 	chToCleanUp := c.getChannelByNodeAndName(nodeID, channelName)
 	if chToCleanUp == nil {
+		c.mu.RUnlock()
 		return fmt.Errorf("failed to find matching channel: %s and node: %d", channelName, nodeID)
 	}
+	c.mu.RUnlock()
 
 	if c.msgstreamFactory == nil {
 		log.Warn("msgstream factory is not set, unable to clean up topics")
@@ -821,8 +843,16 @@ func (c *ChannelManager) CleanupAndReassign(nodeID UniqueID, channelName string)
 	}
 
 	reallocates := &NodeChannelInfo{nodeID, []*channel{chToCleanUp}}
+	isDropped := c.isMarkedDrop(channelName, chToCleanUp.CollectionID)
 
-	if c.isMarkedDrop(channelName, chToCleanUp.CollectionID) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	chToCleanUp = c.getChannelByNodeAndName(nodeID, channelName)
+	if chToCleanUp == nil {
+		return fmt.Errorf("failed to find matching channel: %s and node: %d", channelName, nodeID)
+	}
+
+	if isDropped {
 		if err := c.remove(nodeID, chToCleanUp); err != nil {
 			return fmt.Errorf("failed to remove watch info: %v,%s", chToCleanUp, err.Error())
 		}
@@ -870,7 +900,7 @@ func (c *ChannelManager) getChannelByNodeAndName(nodeID UniqueID, channelName st
 }
 
 func (c *ChannelManager) getNodeIDByChannelName(chName string) (bool, UniqueID) {
-	for _, nodeChannel := range c.GetChannels() {
+	for _, nodeChannel := range c.GetAssignedChannels() {
 		for _, ch := range nodeChannel.Channels {
 			if ch.Name == chName {
 				return true, nodeChannel.NodeID

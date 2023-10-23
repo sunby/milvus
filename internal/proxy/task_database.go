@@ -6,6 +6,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
@@ -14,8 +15,10 @@ type createDatabaseTask struct {
 	Condition
 	*milvuspb.CreateDatabaseRequest
 	ctx       context.Context
-	rootCoord types.RootCoord
+	rootCoord types.RootCoordClient
 	result    *commonpb.Status
+
+	replicateMsgStream msgstream.MsgStream
 }
 
 func (cdt *createDatabaseTask) TraceCtx() context.Context {
@@ -51,7 +54,9 @@ func (cdt *createDatabaseTask) SetTs(ts Timestamp) {
 }
 
 func (cdt *createDatabaseTask) OnEnqueue() error {
-	cdt.Base = commonpbutil.NewMsgBase()
+	if cdt.Base == nil {
+		cdt.Base = commonpbutil.NewMsgBase()
+	}
 	cdt.Base.MsgType = commonpb.MsgType_CreateDatabase
 	cdt.Base.SourceID = paramtable.GetNodeID()
 	return nil
@@ -63,8 +68,10 @@ func (cdt *createDatabaseTask) PreExecute(ctx context.Context) error {
 
 func (cdt *createDatabaseTask) Execute(ctx context.Context) error {
 	var err error
-	cdt.result = &commonpb.Status{ErrorCode: commonpb.ErrorCode_UnexpectedError}
 	cdt.result, err = cdt.rootCoord.CreateDatabase(ctx, cdt.CreateDatabaseRequest)
+	if cdt.result != nil && cdt.result.ErrorCode == commonpb.ErrorCode_Success {
+		SendReplicateMessagePack(ctx, cdt.replicateMsgStream, cdt.CreateDatabaseRequest)
+	}
 	return err
 }
 
@@ -76,8 +83,10 @@ type dropDatabaseTask struct {
 	Condition
 	*milvuspb.DropDatabaseRequest
 	ctx       context.Context
-	rootCoord types.RootCoord
+	rootCoord types.RootCoordClient
 	result    *commonpb.Status
+
+	replicateMsgStream msgstream.MsgStream
 }
 
 func (ddt *dropDatabaseTask) TraceCtx() context.Context {
@@ -113,7 +122,9 @@ func (ddt *dropDatabaseTask) SetTs(ts Timestamp) {
 }
 
 func (ddt *dropDatabaseTask) OnEnqueue() error {
-	ddt.Base = commonpbutil.NewMsgBase()
+	if ddt.Base == nil {
+		ddt.Base = commonpbutil.NewMsgBase()
+	}
 	ddt.Base.MsgType = commonpb.MsgType_DropDatabase
 	ddt.Base.SourceID = paramtable.GetNodeID()
 	return nil
@@ -125,11 +136,11 @@ func (ddt *dropDatabaseTask) PreExecute(ctx context.Context) error {
 
 func (ddt *dropDatabaseTask) Execute(ctx context.Context) error {
 	var err error
-	ddt.result = &commonpb.Status{ErrorCode: commonpb.ErrorCode_UnexpectedError}
 	ddt.result, err = ddt.rootCoord.DropDatabase(ctx, ddt.DropDatabaseRequest)
 
 	if ddt.result != nil && ddt.result.ErrorCode == commonpb.ErrorCode_Success {
 		globalMetaCache.RemoveDatabase(ctx, ddt.DbName)
+		SendReplicateMessagePack(ctx, ddt.replicateMsgStream, ddt.DropDatabaseRequest)
 	}
 	return err
 }
@@ -142,7 +153,7 @@ type listDatabaseTask struct {
 	Condition
 	*milvuspb.ListDatabasesRequest
 	ctx       context.Context
-	rootCoord types.RootCoord
+	rootCoord types.RootCoordClient
 	result    *milvuspb.ListDatabasesResponse
 }
 
@@ -191,11 +202,6 @@ func (ldt *listDatabaseTask) PreExecute(ctx context.Context) error {
 
 func (ldt *listDatabaseTask) Execute(ctx context.Context) error {
 	var err error
-	ldt.result = &milvuspb.ListDatabasesResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_UnexpectedError,
-		},
-	}
 	ldt.result, err = ldt.rootCoord.ListDatabases(ctx, ldt.ListDatabasesRequest)
 	return err
 }

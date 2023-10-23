@@ -23,8 +23,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cockroachdb/errors"
-
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
@@ -34,6 +32,7 @@ import (
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
 type indexTaskState int32
@@ -80,24 +79,31 @@ type indexBuilder struct {
 
 	meta *meta
 
-	policy       buildIndexPolicy
-	nodeManager  *IndexNodeManager
-	chunkManager storage.ChunkManager
+	policy                    buildIndexPolicy
+	nodeManager               *IndexNodeManager
+	chunkManager              storage.ChunkManager
+	indexEngineVersionManager *IndexEngineVersionManager
 }
 
-func newIndexBuilder(ctx context.Context, metaTable *meta, nodeManager *IndexNodeManager, chunkManager storage.ChunkManager) *indexBuilder {
+func newIndexBuilder(
+	ctx context.Context,
+	metaTable *meta, nodeManager *IndexNodeManager,
+	chunkManager storage.ChunkManager,
+	indexEngineVersionManager *IndexEngineVersionManager,
+) *indexBuilder {
 	ctx, cancel := context.WithCancel(ctx)
 
 	ib := &indexBuilder{
-		ctx:              ctx,
-		cancel:           cancel,
-		meta:             metaTable,
-		tasks:            make(map[int64]indexTaskState),
-		notifyChan:       make(chan struct{}, 1),
-		scheduleDuration: Params.DataCoordCfg.IndexTaskSchedulerInterval.GetAsDuration(time.Millisecond),
-		policy:           defaultBuildIndexPolicy,
-		nodeManager:      nodeManager,
-		chunkManager:     chunkManager,
+		ctx:                       ctx,
+		cancel:                    cancel,
+		meta:                      metaTable,
+		tasks:                     make(map[int64]indexTaskState),
+		notifyChan:                make(chan struct{}, 1),
+		scheduleDuration:          Params.DataCoordCfg.IndexTaskSchedulerInterval.GetAsDuration(time.Millisecond),
+		policy:                    defaultBuildIndexPolicy,
+		nodeManager:               nodeManager,
+		chunkManager:              chunkManager,
+		indexEngineVersionManager: indexEngineVersionManager,
 	}
 	ib.reloadFromKV()
 	return ib
@@ -231,7 +237,7 @@ func (ib *indexBuilder) process(buildID UniqueID) bool {
 		}
 		indexParams := ib.meta.GetIndexParams(meta.CollectionID, meta.IndexID)
 		if isFlatIndex(getIndexType(indexParams)) || meta.NumRows < Params.DataCoordCfg.MinSegmentNumRowsToEnableIndex.GetAsInt64() {
-			log.Ctx(ib.ctx).Debug("segment does not need index really", zap.Int64("buildID", buildID),
+			log.Ctx(ib.ctx).Info("segment does not need index really", zap.Int64("buildID", buildID),
 				zap.Int64("segmentID", meta.SegmentID), zap.Int64("num rows", meta.NumRows))
 			if err := ib.meta.FinishTask(&indexpb.IndexTaskInfo{
 				BuildID:        buildID,
@@ -280,17 +286,19 @@ func (ib *indexBuilder) process(buildID UniqueID) bool {
 			}
 		} else {
 			storageConfig = &indexpb.StorageConfig{
-				Address:         Params.MinioCfg.Address.GetValue(),
-				AccessKeyID:     Params.MinioCfg.AccessKeyID.GetValue(),
-				SecretAccessKey: Params.MinioCfg.SecretAccessKey.GetValue(),
-				UseSSL:          Params.MinioCfg.UseSSL.GetAsBool(),
-				BucketName:      Params.MinioCfg.BucketName.GetValue(),
-				RootPath:        Params.MinioCfg.RootPath.GetValue(),
-				UseIAM:          Params.MinioCfg.UseIAM.GetAsBool(),
-				IAMEndpoint:     Params.MinioCfg.IAMEndpoint.GetValue(),
-				StorageType:     Params.CommonCfg.StorageType.GetValue(),
-				Region:          Params.MinioCfg.Region.GetValue(),
-				UseVirtualHost:  Params.MinioCfg.UseVirtualHost.GetAsBool(),
+				Address:          Params.MinioCfg.Address.GetValue(),
+				AccessKeyID:      Params.MinioCfg.AccessKeyID.GetValue(),
+				SecretAccessKey:  Params.MinioCfg.SecretAccessKey.GetValue(),
+				UseSSL:           Params.MinioCfg.UseSSL.GetAsBool(),
+				BucketName:       Params.MinioCfg.BucketName.GetValue(),
+				RootPath:         Params.MinioCfg.RootPath.GetValue(),
+				UseIAM:           Params.MinioCfg.UseIAM.GetAsBool(),
+				IAMEndpoint:      Params.MinioCfg.IAMEndpoint.GetValue(),
+				StorageType:      Params.CommonCfg.StorageType.GetValue(),
+				Region:           Params.MinioCfg.Region.GetValue(),
+				UseVirtualHost:   Params.MinioCfg.UseVirtualHost.GetAsBool(),
+				CloudProvider:    Params.MinioCfg.CloudProvider.GetValue(),
+				RequestTimeoutMs: Params.MinioCfg.RequestTimeoutMs.GetAsInt64(),
 			}
 		}
 
@@ -313,25 +321,26 @@ func (ib *indexBuilder) process(buildID UniqueID) bool {
 		}
 
 		req := &indexpb.CreateJobRequest{
-			ClusterID:       Params.CommonCfg.ClusterPrefix.GetValue(),
-			IndexFilePrefix: path.Join(ib.chunkManager.RootPath(), common.SegmentIndexPath),
-			BuildID:         buildID,
-			DataPaths:       binLogs,
-			IndexVersion:    meta.IndexVersion + 1,
-			StorageConfig:   storageConfig,
-			IndexParams:     indexParams,
-			TypeParams:      typeParams,
-			NumRows:         meta.NumRows,
-			CollectionID:    segment.GetCollectionID(),
-			PartitionID:     segment.GetPartitionID(),
-			SegmentID:       segment.GetID(),
-			FieldID:         fieldID,
-			FieldName:       field.Name,
-			FieldType:       field.DataType,
-			StorePath:       fmt.Sprintf("s3://%s:%s@%s/%d?scheme=%s&endpoint_override=%s&allow_bucket_creation=true", Params.MinioCfg.AccessKeyID.GetValue(), Params.MinioCfg.SecretAccessKey.GetValue(), Params.MinioCfg.BucketName.GetValue(), segment.GetID(), scheme, Params.MinioCfg.Address.GetValue()),
-			StoreVersion:    segment.GetStorageVersion(),
-			IndexStorePath:  fmt.Sprintf("s3://%s:%s@%s/index/%d?scheme=%s&endpoint_override=%s&allow_bucket_creation=true", Params.MinioCfg.AccessKeyID.GetValue(), Params.MinioCfg.SecretAccessKey.GetValue(), Params.MinioCfg.BucketName.GetValue(), segment.GetID(), scheme, Params.MinioCfg.Address.GetValue()),
-			Dim:             int64(dim),
+			ClusterID:           Params.CommonCfg.ClusterPrefix.GetValue(),
+			IndexFilePrefix:     path.Join(ib.chunkManager.RootPath(), common.SegmentIndexPath),
+			BuildID:             buildID,
+			DataPaths:           binLogs,
+			IndexVersion:        meta.IndexVersion + 1,
+			StorageConfig:       storageConfig,
+			IndexParams:         indexParams,
+			TypeParams:          typeParams,
+			NumRows:             meta.NumRows,
+			CollectionID:        segment.GetCollectionID(),
+			PartitionID:         segment.GetPartitionID(),
+			SegmentID:           segment.GetID(),
+			FieldID:             fieldID,
+			FieldName:           field.Name,
+			FieldType:           field.DataType,
+			StorePath:           fmt.Sprintf("s3://%s:%s@%s/%d?scheme=%s&endpoint_override=%s&allow_bucket_creation=true", Params.MinioCfg.AccessKeyID.GetValue(), Params.MinioCfg.SecretAccessKey.GetValue(), Params.MinioCfg.BucketName.GetValue(), segment.GetID(), scheme, Params.MinioCfg.Address.GetValue()),
+			StoreVersion:        segment.GetStorageVersion(),
+			IndexStorePath:      fmt.Sprintf("s3://%s:%s@%s/index/%d?scheme=%s&endpoint_override=%s&allow_bucket_creation=true", Params.MinioCfg.AccessKeyID.GetValue(), Params.MinioCfg.SecretAccessKey.GetValue(), Params.MinioCfg.BucketName.GetValue(), segment.GetID(), scheme, Params.MinioCfg.Address.GetValue()),
+			Dim:                 int64(dim),
+			CurrentIndexVersion: ib.indexEngineVersionManager.GetCurrentIndexEngineVersion(),
 		}
 
 		if err := ib.assignTask(client, req); err != nil {
@@ -385,26 +394,26 @@ func (ib *indexBuilder) getTaskState(buildID, nodeID UniqueID) indexTaskState {
 				zap.Error(err))
 			return indexTaskInProgress
 		}
-		if response.Status.ErrorCode != commonpb.ErrorCode_Success {
+		if response.GetStatus().GetErrorCode() != commonpb.ErrorCode_Success {
 			log.Ctx(ib.ctx).Warn("IndexCoord get jobs info from IndexNode fail", zap.Int64("nodeID", nodeID),
-				zap.Int64("buildID", buildID), zap.String("fail reason", response.Status.Reason))
+				zap.Int64("buildID", buildID), zap.String("fail reason", response.GetStatus().GetReason()))
 			return indexTaskInProgress
 		}
 
 		// indexInfos length is always one.
-		for _, info := range response.IndexInfos {
-			if info.BuildID == buildID {
-				if info.State == commonpb.IndexState_Failed || info.State == commonpb.IndexState_Finished {
-					log.Ctx(ib.ctx).Info("this task has been finished", zap.Int64("buildID", info.BuildID),
-						zap.String("index state", info.State.String()))
+		for _, info := range response.GetIndexInfos() {
+			if info.GetBuildID() == buildID {
+				if info.GetState() == commonpb.IndexState_Failed || info.GetState() == commonpb.IndexState_Finished {
+					log.Ctx(ib.ctx).Info("this task has been finished", zap.Int64("buildID", info.GetBuildID()),
+						zap.String("index state", info.GetState().String()))
 					if err := ib.meta.FinishTask(info); err != nil {
-						log.Ctx(ib.ctx).Warn("IndexCoord update index state fail", zap.Int64("buildID", info.BuildID),
-							zap.String("index state", info.State.String()), zap.Error(err))
+						log.Ctx(ib.ctx).Warn("IndexCoord update index state fail", zap.Int64("buildID", info.GetBuildID()),
+							zap.String("index state", info.GetState().String()), zap.Error(err))
 						return indexTaskInProgress
 					}
 					return indexTaskDone
-				} else if info.State == commonpb.IndexState_Retry || info.State == commonpb.IndexState_IndexStateNone {
-					log.Ctx(ib.ctx).Info("this task should be retry", zap.Int64("buildID", buildID), zap.String("fail reason", info.FailReason))
+				} else if info.GetState() == commonpb.IndexState_Retry || info.GetState() == commonpb.IndexState_IndexStateNone {
+					log.Ctx(ib.ctx).Info("this task should be retry", zap.Int64("buildID", buildID), zap.String("fail reason", info.GetFailReason()))
 					return indexTaskRetry
 				}
 				return indexTaskInProgress
@@ -434,9 +443,9 @@ func (ib *indexBuilder) dropIndexTask(buildID, nodeID UniqueID) bool {
 				zap.Int64("nodeID", nodeID), zap.Error(err))
 			return false
 		}
-		if status.ErrorCode != commonpb.ErrorCode_Success {
+		if status.GetErrorCode() != commonpb.ErrorCode_Success {
 			log.Ctx(ib.ctx).Warn("IndexCoord notify IndexNode drop the index task fail", zap.Int64("buildID", buildID),
-				zap.Int64("nodeID", nodeID), zap.String("fail reason", status.Reason))
+				zap.Int64("nodeID", nodeID), zap.String("fail reason", status.GetReason()))
 			return false
 		}
 		log.Ctx(ib.ctx).Info("IndexCoord notify IndexNode drop the index task success",
@@ -450,19 +459,18 @@ func (ib *indexBuilder) dropIndexTask(buildID, nodeID UniqueID) bool {
 
 // assignTask sends the index task to the IndexNode, it has a timeout interval, if the IndexNode doesn't respond within
 // the interval, it is considered that the task sending failed.
-func (ib *indexBuilder) assignTask(builderClient types.IndexNode, req *indexpb.CreateJobRequest) error {
+func (ib *indexBuilder) assignTask(builderClient types.IndexNodeClient, req *indexpb.CreateJobRequest) error {
 	ctx, cancel := context.WithTimeout(context.Background(), reqTimeoutInterval)
 	defer cancel()
 	resp, err := builderClient.CreateJob(ctx, req)
+	if err == nil {
+		err = merr.Error(resp)
+	}
 	if err != nil {
 		log.Error("IndexCoord assignmentTasksLoop builderClient.CreateIndex failed", zap.Error(err))
 		return err
 	}
 
-	if resp.ErrorCode != commonpb.ErrorCode_Success {
-		log.Error("IndexCoord assignmentTasksLoop builderClient.CreateIndex failed", zap.String("Reason", resp.Reason))
-		return errors.New(resp.Reason)
-	}
 	return nil
 }
 

@@ -23,12 +23,13 @@
 
 #include "common/FieldMeta.h"
 #include "common/Span.h"
-#include "exceptions/EasyAssert.h"
+#include "common/EasyAssert.h"
+#include "common/File.h"
 #include "fmt/format.h"
 #include "log/Log.h"
 #include "mmap/Utils.h"
 #include "storage/FieldData.h"
-#include "utils/File.h"
+#include "common/Array.h"
 
 namespace milvus {
 
@@ -79,6 +80,32 @@ class ColumnBase {
                                         mmap_flags,
                                         file.Descriptor(),
                                         0));
+        AssertInfo(data_ != MAP_FAILED,
+                   fmt::format("failed to create file-backed map, err: {}",
+                               strerror(errno)));
+        madvise(data_, cap_size_ + padding_, MADV_WILLNEED);
+    }
+
+    // mmap mode ctor
+    ColumnBase(const File& file,
+               size_t size,
+               int dim,
+               const DataType& data_type)
+        : type_size_(datatype_sizeof(data_type, dim)),
+          num_rows_(size / datatype_sizeof(data_type, dim)),
+          size_(size),
+          cap_size_(size) {
+        padding_ = data_type == DataType::JSON ? simdjson::SIMDJSON_PADDING : 0;
+
+        data_ = static_cast<char*>(mmap(nullptr,
+                                        cap_size_ + padding_,
+                                        PROT_READ,
+                                        mmap_flags,
+                                        file.Descriptor(),
+                                        0));
+        AssertInfo(data_ != MAP_FAILED,
+                   fmt::format("failed to create file-backed map, err: {}",
+                               strerror(errno)));
     }
 
     virtual ~ColumnBase() {
@@ -114,6 +141,11 @@ class ColumnBase {
     NumRows() const {
         return num_rows_;
     };
+
+    const size_t
+    ByteSize() const {
+        return cap_size_ + padding_;
+    }
 
     // The capacity of the column,
     // DO NOT call this for variable length column.
@@ -201,6 +233,11 @@ class Column : public ColumnBase {
     // mmap mode ctor
     Column(const File& file, size_t size, const FieldMeta& field_meta)
         : ColumnBase(file, size, field_meta) {
+    }
+
+    // mmap mode ctor
+    Column(const File& file, size_t size, int dim, DataType data_type)
+        : ColumnBase(file, size, dim, data_type) {
     }
 
     Column(Column&& column) noexcept : ColumnBase(std::move(column)) {
@@ -291,5 +328,91 @@ class VariableColumn : public ColumnBase {
 
     // Compatible with current Span type
     std::vector<ViewType> views_{};
+};
+
+class ArrayColumn : public ColumnBase {
+ public:
+    // memory mode ctor
+    ArrayColumn(size_t num_rows, const FieldMeta& field_meta)
+        : ColumnBase(num_rows, field_meta),
+          element_type_(field_meta.get_element_type()) {
+    }
+
+    // mmap mode ctor
+    ArrayColumn(const File& file, size_t size, const FieldMeta& field_meta)
+        : ColumnBase(file, size, field_meta),
+          element_type_(field_meta.get_element_type()) {
+    }
+
+    ArrayColumn(ArrayColumn&& column) noexcept
+        : ColumnBase(std::move(column)),
+          indices_(std::move(column.indices_)),
+          views_(std::move(column.views_)),
+          element_type_(column.element_type_) {
+    }
+
+    ~ArrayColumn() override = default;
+
+    SpanBase
+    Span() const override {
+        return SpanBase(views_.data(), views_.size(), sizeof(ArrayView));
+    }
+
+    [[nodiscard]] const std::vector<ArrayView>&
+    Views() const {
+        return views_;
+    }
+
+    ArrayView
+    operator[](const int i) const {
+        return views_[i];
+    }
+
+    ScalarArray
+    RawAt(const int i) const {
+        return views_[i].output_data();
+    }
+
+    void
+    Append(const Array& array) {
+        indices_.emplace_back(size_);
+        element_indices_.emplace_back(array.get_offsets());
+        ColumnBase::Append(static_cast<const char*>(array.data()),
+                           array.byte_size());
+    }
+
+    void
+    Seal(std::vector<uint64_t>&& indices = {},
+         std::vector<std::vector<uint64_t>>&& element_indices = {}) {
+        if (!indices.empty()) {
+            indices_ = std::move(indices);
+            element_indices_ = std::move(element_indices);
+        }
+        ConstructViews();
+    }
+
+ protected:
+    void
+    ConstructViews() {
+        views_.reserve(indices_.size());
+        for (size_t i = 0; i < indices_.size() - 1; i++) {
+            views_.emplace_back(data_ + indices_[i],
+                                indices_[i + 1] - indices_[i],
+                                element_type_,
+                                std::move(element_indices_[i]));
+        }
+        views_.emplace_back(data_ + indices_.back(),
+                            size_ - indices_.back(),
+                            element_type_,
+                            std::move(element_indices_[indices_.size() - 1]));
+        element_indices_.clear();
+    }
+
+ private:
+    std::vector<uint64_t> indices_{};
+    std::vector<std::vector<uint64_t>> element_indices_{};
+    // Compatible with current Span type
+    std::vector<ArrayView> views_{};
+    DataType element_type_;
 };
 }  // namespace milvus

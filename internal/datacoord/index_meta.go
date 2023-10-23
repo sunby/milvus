@@ -22,6 +22,7 @@ import (
 	"strconv"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
@@ -30,7 +31,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 func (m *meta) updateCollectionIndex(index *model.Index) {
@@ -117,12 +117,12 @@ func checkParams(fieldIndex *model.Index, req *indexpb.CreateIndexRequest) bool 
 	if notEq {
 		return false
 	}
-	if len(fieldIndex.IndexParams) != len(req.IndexParams) {
+	if len(fieldIndex.UserIndexParams) != len(req.GetUserIndexParams()) {
 		return false
 	}
-	for _, param1 := range fieldIndex.IndexParams {
+	for _, param1 := range fieldIndex.UserIndexParams {
 		exist := false
-		for _, param2 := range req.IndexParams {
+		for _, param2 := range req.GetUserIndexParams() {
 			if param2.Key == param1.Key && param2.Value == param1.Value {
 				exist = true
 			}
@@ -521,16 +521,17 @@ func (m *meta) FinishTask(taskInfo *indexpb.IndexTaskInfo) error {
 	m.Lock()
 	defer m.Unlock()
 
-	segIdx, ok := m.buildID2SegmentIndex[taskInfo.BuildID]
+	segIdx, ok := m.buildID2SegmentIndex[taskInfo.GetBuildID()]
 	if !ok {
-		log.Warn("there is no index with buildID", zap.Int64("buildID", taskInfo.BuildID))
+		log.Warn("there is no index with buildID", zap.Int64("buildID", taskInfo.GetBuildID()))
 		return nil
 	}
 	updateFunc := func(segIdx *model.SegmentIndex) error {
-		segIdx.IndexState = taskInfo.State
-		segIdx.IndexFileKeys = common.CloneStringList(taskInfo.IndexFileKeys)
-		segIdx.FailReason = taskInfo.FailReason
-		segIdx.IndexSize = taskInfo.SerializedSize
+		segIdx.IndexState = taskInfo.GetState()
+		segIdx.IndexFileKeys = common.CloneStringList(taskInfo.GetIndexFileKeys())
+		segIdx.FailReason = taskInfo.GetFailReason()
+		segIdx.IndexSize = taskInfo.GetSerializedSize()
+		segIdx.CurrentIndexVersion = taskInfo.GetCurrentIndexVersion()
 		return m.alterSegmentIndexes([]*model.SegmentIndex{segIdx})
 	}
 
@@ -538,10 +539,12 @@ func (m *meta) FinishTask(taskInfo *indexpb.IndexTaskInfo) error {
 		return err
 	}
 
-	log.Info("finish index task success", zap.Int64("buildID", taskInfo.BuildID),
-		zap.String("state", taskInfo.GetState().String()), zap.String("fail reason", taskInfo.GetFailReason()))
+	log.Info("finish index task success", zap.Int64("buildID", taskInfo.GetBuildID()),
+		zap.String("state", taskInfo.GetState().String()), zap.String("fail reason", taskInfo.GetFailReason()),
+		zap.Int32("current_index_version", taskInfo.GetCurrentIndexVersion()),
+	)
 	m.updateIndexTasksMetrics()
-	metrics.FlushedSegmentFileNum.WithLabelValues(metrics.IndexFileLabel).Observe(float64(len(taskInfo.IndexFileKeys)))
+	metrics.FlushedSegmentFileNum.WithLabelValues(metrics.IndexFileLabel).Observe(float64(len(taskInfo.GetIndexFileKeys())))
 	return nil
 }
 

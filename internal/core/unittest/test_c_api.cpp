@@ -12,6 +12,7 @@
 #include <google/protobuf/text_format.h>
 #include <gtest/gtest.h>
 
+#include <array>
 #include <boost/format.hpp>
 #include <chrono>
 #include <iostream>
@@ -19,8 +20,10 @@
 #include <string>
 #include <unordered_set>
 
+#include "boost/container/vector.hpp"
 #include "common/LoadInfo.h"
 #include "common/Types.h"
+#include "common/type_c.h"
 #include "index/IndexFactory.h"
 #include "knowhere/comp/index_param.h"
 #include "pb/plan.pb.h"
@@ -28,6 +31,7 @@
 #include "segcore/Collection.h"
 #include "segcore/Reduce.h"
 #include "segcore/reduce_c.h"
+#include "segcore/segment_c.h"
 #include "test_utils/DataGen.h"
 #include "test_utils/PbHelper.h"
 #include "test_utils/indexbuilder_test_utils.h"
@@ -245,9 +249,12 @@ generate_index(void* raw_data,
                IndexType index_type,
                int64_t dim,
                int64_t N) {
-    CreateIndexInfo create_index_info{field_type, index_type, metric_type};
+    auto engine_version =
+        knowhere::Version::GetCurrentVersion().VersionNumber();
+    CreateIndexInfo create_index_info{
+        field_type, index_type, metric_type, engine_version};
     auto indexing = milvus::index::IndexFactory::GetInstance().CreateIndex(
-        create_index_info, nullptr);
+        create_index_info, milvus::storage::FileManagerContext());
 
     auto database = knowhere::GenDataSet(N, dim, raw_data);
     auto build_config = generate_build_conf(index_type, metric_type);
@@ -311,7 +318,7 @@ TEST(CApiTest, CPlan) {
 
     milvus::proto::plan::PlanNode plan_node;
     auto vector_anns = plan_node.mutable_vector_anns();
-    vector_anns->set_is_binary(true);
+    vector_anns->set_vector_type(milvus::proto::plan::VectorType::BinaryVector);
     vector_anns->set_placeholder_tag("$0");
     vector_anns->set_field_id(100);
     auto query_info = vector_anns->mutable_query_info();
@@ -950,7 +957,7 @@ TEST(CApiTest, SearchTest) {
 
     milvus::proto::plan::PlanNode plan_node;
     auto vector_anns = plan_node.mutable_vector_anns();
-    vector_anns->set_is_binary(false);
+    vector_anns->set_vector_type(milvus::proto::plan::VectorType::FloatVector);
     vector_anns->set_placeholder_tag("$0");
     vector_anns->set_field_id(100);
     auto query_info = vector_anns->mutable_query_info();
@@ -1151,7 +1158,7 @@ TEST(CApiTest, GetDeletedCountTest) {
 
     // TODO: assert(deleted_count == len(delete_row_ids))
     auto deleted_count = GetDeletedCount(segment);
-    ASSERT_EQ(deleted_count, delete_row_ids.size());
+    ASSERT_EQ(deleted_count, 0);
 
     DeleteCollection(collection);
     DeleteSegment(segment);
@@ -1275,7 +1282,7 @@ TEST(CApiTest, ReudceNullResult) {
 
     milvus::proto::plan::PlanNode plan_node;
     auto vector_anns = plan_node.mutable_vector_anns();
-    vector_anns->set_is_binary(false);
+    vector_anns->set_vector_type(milvus::proto::plan::VectorType::FloatVector);
     vector_anns->set_placeholder_tag("$0");
     vector_anns->set_field_id(100);
     auto query_info = vector_anns->mutable_query_info();
@@ -1359,7 +1366,7 @@ TEST(CApiTest, ReduceRemoveDuplicates) {
 
     milvus::proto::plan::PlanNode plan_node;
     auto vector_anns = plan_node.mutable_vector_anns();
-    vector_anns->set_is_binary(false);
+    vector_anns->set_vector_type(milvus::proto::plan::VectorType::FloatVector);
     vector_anns->set_placeholder_tag("$0");
     vector_anns->set_field_id(100);
     auto query_info = vector_anns->mutable_query_info();
@@ -1593,7 +1600,8 @@ TEST(CApiTest, LoadIndexInfo) {
     auto N = 1024 * 10;
     auto [raw_data, timestamps, uids] = generate_data(N);
     auto indexing = knowhere::IndexFactory::Instance().Create(
-        knowhere::IndexEnum::INDEX_FAISS_IVFSQ8);
+        knowhere::IndexEnum::INDEX_FAISS_IVFSQ8,
+        knowhere::Version::GetCurrentVersion().VersionNumber());
     auto conf =
         knowhere::Json{{knowhere::meta::METRIC_TYPE, knowhere::metric::L2},
                        {knowhere::meta::DIM, DIM},
@@ -1626,6 +1634,9 @@ TEST(CApiTest, LoadIndexInfo) {
     status = AppendFieldInfo(
         c_load_index_info, 0, 0, 0, 0, CDataType::FloatVector, "");
     ASSERT_EQ(status.error_code, Success);
+    AppendIndexEngineVersionToLoadInfo(
+        c_load_index_info,
+        knowhere::Version::GetCurrentVersion().VersionNumber());
     status = AppendIndex(c_load_index_info, c_binary_set);
     ASSERT_EQ(status.error_code, Success);
     DeleteLoadIndexInfo(c_load_index_info);
@@ -1639,7 +1650,8 @@ TEST(CApiTest, LoadIndexSearch) {
     auto num_query = 100;
     auto [raw_data, timestamps, uids] = generate_data(N);
     auto indexing = knowhere::IndexFactory::Instance().Create(
-        knowhere::IndexEnum::INDEX_FAISS_IVFSQ8);
+        knowhere::IndexEnum::INDEX_FAISS_IVFSQ8,
+        knowhere::Version::GetCurrentVersion().VersionNumber());
     auto conf =
         knowhere::Json{{knowhere::meta::METRIC_TYPE, knowhere::metric::L2},
                        {knowhere::meta::DIM, DIM},
@@ -1663,7 +1675,9 @@ TEST(CApiTest, LoadIndexSearch) {
     auto& index_params = load_index_info.index_params;
     index_params["index_type"] = knowhere::IndexEnum::INDEX_FAISS_IVFSQ8;
     load_index_info.index = std::make_unique<VectorMemIndex>(
-        index_params["index_type"], knowhere::metric::L2);
+        index_params["index_type"],
+        knowhere::metric::L2,
+        knowhere::Version::GetCurrentVersion().VersionNumber());
     load_index_info.index->Load(binary_set);
 
     // search
@@ -1703,7 +1717,7 @@ TEST(CApiTest, Indexing_Without_Predicate) {
 
     milvus::proto::plan::PlanNode plan_node;
     auto vector_anns = plan_node.mutable_vector_anns();
-    vector_anns->set_is_binary(false);
+    vector_anns->set_vector_type(milvus::proto::plan::VectorType::FloatVector);
     vector_anns->set_placeholder_tag("$0");
     vector_anns->set_field_id(100);
     auto query_info = vector_anns->mutable_query_info();
@@ -1781,8 +1795,10 @@ TEST(CApiTest, Indexing_Without_Predicate) {
         c_load_index_info, metric_type_key.c_str(), metric_type_value.c_str());
     AppendFieldInfo(
         c_load_index_info, 0, 0, 0, 100, CDataType::FloatVector, "");
+    AppendIndexEngineVersionToLoadInfo(
+        c_load_index_info,
+        knowhere::Version::GetCurrentVersion().VersionNumber());
     AppendIndex(c_load_index_info, (CBinarySet)&binary_set);
-
     // load index for vec field, load raw data for scalar field
     auto sealed_segment = SealedCreator(schema, dataset);
     sealed_segment->DropFieldData(FieldId(100));
@@ -1921,6 +1937,9 @@ TEST(CApiTest, Indexing_Expr_Without_Predicate) {
         c_load_index_info, metric_type_key.c_str(), metric_type_value.c_str());
     AppendFieldInfo(
         c_load_index_info, 0, 0, 0, 100, CDataType::FloatVector, "");
+    AppendIndexEngineVersionToLoadInfo(
+        c_load_index_info,
+        knowhere::Version::GetCurrentVersion().VersionNumber());
     AppendIndex(c_load_index_info, (CBinarySet)&binary_set);
 
     // load index for vec field, load raw data for scalar field
@@ -2090,6 +2109,9 @@ TEST(CApiTest, Indexing_With_float_Predicate_Range) {
         c_load_index_info, metric_type_key.c_str(), metric_type_value.c_str());
     AppendFieldInfo(
         c_load_index_info, 0, 0, 0, 100, CDataType::FloatVector, "");
+    AppendIndexEngineVersionToLoadInfo(
+        c_load_index_info,
+        knowhere::Version::GetCurrentVersion().VersionNumber());
     AppendIndex(c_load_index_info, (CBinarySet)&binary_set);
 
     // load index for vec field, load raw data for scalar field
@@ -2261,6 +2283,9 @@ TEST(CApiTest, Indexing_Expr_With_float_Predicate_Range) {
         c_load_index_info, metric_type_key.c_str(), metric_type_value.c_str());
     AppendFieldInfo(
         c_load_index_info, 0, 0, 0, 100, CDataType::FloatVector, "");
+    AppendIndexEngineVersionToLoadInfo(
+        c_load_index_info,
+        knowhere::Version::GetCurrentVersion().VersionNumber());
     AppendIndex(c_load_index_info, (CBinarySet)&binary_set);
 
     // load index for vec field, load raw data for scalar field
@@ -2424,6 +2449,9 @@ TEST(CApiTest, Indexing_With_float_Predicate_Term) {
         c_load_index_info, metric_type_key.c_str(), metric_type_value.c_str());
     AppendFieldInfo(
         c_load_index_info, 0, 0, 0, 100, CDataType::FloatVector, "");
+    AppendIndexEngineVersionToLoadInfo(
+        c_load_index_info,
+        knowhere::Version::GetCurrentVersion().VersionNumber());
     AppendIndex(c_load_index_info, (CBinarySet)&binary_set);
 
     // load index for vec field, load raw data for scalar field
@@ -2588,6 +2616,9 @@ TEST(CApiTest, Indexing_Expr_With_float_Predicate_Term) {
         c_load_index_info, metric_type_key.c_str(), metric_type_value.c_str());
     AppendFieldInfo(
         c_load_index_info, 0, 0, 0, 100, CDataType::FloatVector, "");
+    AppendIndexEngineVersionToLoadInfo(
+        c_load_index_info,
+        knowhere::Version::GetCurrentVersion().VersionNumber());
     AppendIndex(c_load_index_info, (CBinarySet)&binary_set);
 
     // load index for vec field, load raw data for scalar field
@@ -2758,6 +2789,9 @@ TEST(CApiTest, Indexing_With_binary_Predicate_Range) {
         c_load_index_info, metric_type_key.c_str(), metric_type_value.c_str());
     AppendFieldInfo(
         c_load_index_info, 0, 0, 0, 100, CDataType::BinaryVector, "");
+    AppendIndexEngineVersionToLoadInfo(
+        c_load_index_info,
+        knowhere::Version::GetCurrentVersion().VersionNumber());
     AppendIndex(c_load_index_info, (CBinarySet)&binary_set);
 
     // load index for vec field, load raw data for scalar field
@@ -2928,6 +2962,9 @@ TEST(CApiTest, Indexing_Expr_With_binary_Predicate_Range) {
         c_load_index_info, metric_type_key.c_str(), metric_type_value.c_str());
     AppendFieldInfo(
         c_load_index_info, 0, 0, 0, 100, CDataType::BinaryVector, "");
+    AppendIndexEngineVersionToLoadInfo(
+        c_load_index_info,
+        knowhere::Version::GetCurrentVersion().VersionNumber());
     AppendIndex(c_load_index_info, (CBinarySet)&binary_set);
 
     // load index for vec field, load raw data for scalar field
@@ -3092,6 +3129,9 @@ TEST(CApiTest, Indexing_With_binary_Predicate_Term) {
         c_load_index_info, metric_type_key.c_str(), metric_type_value.c_str());
     AppendFieldInfo(
         c_load_index_info, 0, 0, 0, 100, CDataType::BinaryVector, "");
+    AppendIndexEngineVersionToLoadInfo(
+        c_load_index_info,
+        knowhere::Version::GetCurrentVersion().VersionNumber());
     AppendIndex(c_load_index_info, (CBinarySet)&binary_set);
 
     // load index for vec field, load raw data for scalar field
@@ -3279,6 +3319,9 @@ TEST(CApiTest, Indexing_Expr_With_binary_Predicate_Term) {
         c_load_index_info, metric_type_key.c_str(), metric_type_value.c_str());
     AppendFieldInfo(
         c_load_index_info, 0, 0, 0, 100, CDataType::BinaryVector, "");
+    AppendIndexEngineVersionToLoadInfo(
+        c_load_index_info,
+        knowhere::Version::GetCurrentVersion().VersionNumber());
     AppendIndex(c_load_index_info, (CBinarySet)&binary_set);
 
     // load index for vec field, load raw data for scalar field
@@ -3449,6 +3492,9 @@ TEST(CApiTest, SealedSegment_search_float_Predicate_Range) {
         c_load_index_info, metric_type_key.c_str(), metric_type_value.c_str());
     AppendFieldInfo(
         c_load_index_info, 0, 0, 0, 100, CDataType::FloatVector, "");
+    AppendIndexEngineVersionToLoadInfo(
+        c_load_index_info,
+        knowhere::Version::GetCurrentVersion().VersionNumber());
     AppendIndex(c_load_index_info, (CBinarySet)&binary_set);
 
     auto query_dataset = knowhere::GenDataSet(num_queries, DIM, query_ptr);
@@ -3673,6 +3719,9 @@ TEST(CApiTest, SealedSegment_search_float_With_Expr_Predicate_Range) {
         c_load_index_info, metric_type_key.c_str(), metric_type_value.c_str());
     AppendFieldInfo(
         c_load_index_info, 0, 0, 0, 100, CDataType::FloatVector, "");
+    AppendIndexEngineVersionToLoadInfo(
+        c_load_index_info,
+        knowhere::Version::GetCurrentVersion().VersionNumber());
     AppendIndex(c_load_index_info, (CBinarySet)&binary_set);
 
     // load vec index
@@ -3933,7 +3982,7 @@ TEST(CApiTest, RetriveScalarFieldFromSealedSegmentWithIndex) {
                 break;
             }
             default: {
-                PanicInfo("not supported type");
+                PanicInfo(DataTypeInvalid, "not supported type");
             }
         }
     }

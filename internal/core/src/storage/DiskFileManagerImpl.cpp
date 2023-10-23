@@ -26,7 +26,6 @@
 #include "storage/DiskFileManagerImpl.h"
 #include "storage/FileManager.h"
 #include "storage/LocalChunkManagerSingleton.h"
-#include "storage/Exception.h"
 #include "storage/IndexData.h"
 #include "storage/Util.h"
 #include "storage/ThreadPools.h"
@@ -34,17 +33,17 @@
 namespace milvus::storage {
 
 DiskFileManagerImpl::DiskFileManagerImpl(
-    const FieldDataMeta& field_mata,
-    IndexMeta index_meta,
+    const FileManagerContext& fileManagerContext,
     std::shared_ptr<milvus_storage::Space> space)
-    : FileManagerImpl(field_mata, index_meta), space_(space) {
+    : FileManagerImpl(fileManagerContext.fieldDataMeta, fileManagerContext.indexMeta), space_(space) {
+    rcm_ = fileManagerContext.chunkManagerPtr;
 }
 
-DiskFileManagerImpl::DiskFileManagerImpl(const FieldDataMeta& field_mata,
-                                         IndexMeta index_meta,
-                                         ChunkManagerPtr remote_chunk_manager)
-    : FileManagerImpl(field_mata, index_meta) {
-    rcm_ = remote_chunk_manager;
+DiskFileManagerImpl::DiskFileManagerImpl(
+    const FileManagerContext& fileManagerContext)
+    : FileManagerImpl(fileManagerContext.fieldDataMeta,
+                      fileManagerContext.indexMeta) {
+    rcm_ = fileManagerContext.chunkManagerPtr;
 }
 
 DiskFileManagerImpl::~DiskFileManagerImpl() {
@@ -447,10 +446,6 @@ DiskFileManagerImpl::IsExisted(const std::string& file) noexcept {
         LocalChunkManagerSingleton::GetInstance().GetChunkManager();
     try {
         isExist = local_chunk_manager->Exist(file);
-    } catch (LocalChunkManagerException& e) {
-        // LOG_SEGCORE_DEBUG_ << "LocalChunkManagerException:"
-        //                   << e.what();
-        return std::nullopt;
     } catch (std::exception& e) {
         // LOG_SEGCORE_DEBUG_ << "Exception:" << e.what();
         return std::nullopt;

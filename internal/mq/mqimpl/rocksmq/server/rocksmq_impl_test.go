@@ -12,7 +12,6 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path"
@@ -31,7 +30,6 @@ import (
 	"github.com/milvus-io/milvus/internal/allocator"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	rocksdbkv "github.com/milvus-io/milvus/internal/kv/rocksdb"
-	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/merr"
@@ -102,7 +100,6 @@ func (rmq *rocksmq) produceBefore2(topicName string, messages []producerMessageB
 
 	msgLen := len(messages)
 	idStart, idEnd, err := rmq.idAllocator.Alloc(uint32(msgLen))
-
 	if err != nil {
 		return []UniqueID{}, err
 	}
@@ -150,7 +147,6 @@ func (rmq *rocksmq) produceBefore2(topicName string, messages []producerMessageB
 
 	getProduceTime := time.Since(start).Milliseconds()
 	if getProduceTime > 200 {
-
 		log.Warn("rocksmq produce too slowly", zap.String("topic", topicName),
 			zap.Int64("get lock elapse", getLockTime),
 			zap.Int64("alloc elapse", allocTime-getLockTime),
@@ -159,99 +155,6 @@ func (rmq *rocksmq) produceBefore2(topicName string, messages []producerMessageB
 			zap.Int64("produce total elapse", getProduceTime),
 		)
 	}
-	return msgIDs, nil
-}
-
-// to test compatibility concern
-func (rmq *rocksmq) produceIn2(topicName string, messages []ProducerMessage) ([]UniqueID, error) {
-	if rmq.isClosed() {
-		return nil, errors.New(RmqNotServingErrMsg)
-	}
-	start := time.Now()
-	ll, ok := topicMu.Load(topicName)
-	if !ok {
-		return []UniqueID{}, fmt.Errorf("topic name = %s not exist", topicName)
-	}
-	lock, ok := ll.(*sync.Mutex)
-	if !ok {
-		return []UniqueID{}, fmt.Errorf("get mutex failed, topic name = %s", topicName)
-	}
-	lock.Lock()
-	defer lock.Unlock()
-
-	getLockTime := time.Since(start).Milliseconds()
-
-	msgLen := len(messages)
-	idStart, idEnd, err := rmq.idAllocator.Alloc(uint32(msgLen))
-
-	if err != nil {
-		return []UniqueID{}, err
-	}
-	allocTime := time.Since(start).Milliseconds()
-	if UniqueID(msgLen) != idEnd-idStart {
-		return []UniqueID{}, errors.New("Obtained id length is not equal that of message")
-	}
-
-	// Insert data to store system
-	batch := gorocksdb.NewWriteBatch()
-	defer batch.Destroy()
-	msgSizes := make(map[UniqueID]int64)
-	msgIDs := make([]UniqueID, msgLen)
-	for i := 0; i < msgLen && idStart+UniqueID(i) < idEnd; i++ {
-		msgID := idStart + UniqueID(i)
-		key := path.Join(topicName, strconv.FormatInt(msgID, 10))
-		batch.Put([]byte(key), messages[i].Payload)
-		properties, err := json.Marshal(messages[i].Properties)
-		if err != nil {
-			log.Warn("properties marshal failed",
-				zap.Int64("msgID", msgID),
-				zap.String("topicName", topicName),
-				zap.Error(err))
-			return nil, err
-		}
-		pKey := path.Join(common.PropertiesKey, topicName, strconv.FormatInt(msgID, 10))
-		batch.Put([]byte(pKey), properties)
-		msgIDs[i] = msgID
-		msgSizes[msgID] = int64(len(messages[i].Payload))
-	}
-
-	opts := gorocksdb.NewDefaultWriteOptions()
-	defer opts.Destroy()
-	err = rmq.store.Write(opts, batch)
-	if err != nil {
-		return []UniqueID{}, err
-	}
-	writeTime := time.Since(start).Milliseconds()
-	if vals, ok := rmq.consumers.Load(topicName); ok {
-		for _, v := range vals.([]*Consumer) {
-			select {
-			case v.MsgMutex <- struct{}{}:
-				continue
-			default:
-				continue
-			}
-		}
-	}
-
-	// Update message page info
-	err = rmq.updatePageInfo(topicName, msgIDs, msgSizes)
-	if err != nil {
-		return []UniqueID{}, err
-	}
-
-	// TODO add this to monitor metrics
-	getProduceTime := time.Since(start).Milliseconds()
-	if getProduceTime > 200 {
-		log.Warn("rocksmq produce too slowly", zap.String("topic", topicName),
-			zap.Int64("get lock elapse", getLockTime),
-			zap.Int64("alloc elapse", allocTime-getLockTime),
-			zap.Int64("write elapse", writeTime-allocTime),
-			zap.Int64("updatePage elapse", getProduceTime-writeTime),
-			zap.Int64("produce total elapse", getProduceTime),
-		)
-	}
-
-	rmq.topicLastID.Store(topicName, msgIDs[len(msgIDs)-1])
 	return msgIDs, nil
 }
 
@@ -266,6 +169,7 @@ func TestRocksmq_RegisterConsumer(t *testing.T) {
 	defer os.RemoveAll(rocksdbPath)
 
 	paramtable.Init()
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(rocksdbPath, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
@@ -330,6 +234,7 @@ func TestRocksmq_Basic(t *testing.T) {
 	defer os.RemoveAll(rocksdbPath + kvSuffix)
 	defer os.RemoveAll(rocksdbPath)
 	paramtable.Init()
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(rocksdbPath, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
@@ -341,14 +246,14 @@ func TestRocksmq_Basic(t *testing.T) {
 
 	msgA := "a_message"
 	pMsgs := make([]ProducerMessage, 1)
-	pMsgA := ProducerMessage{Payload: []byte(msgA), Properties: map[string]string{common.TraceIDKey: "a"}}
+	pMsgA := ProducerMessage{Payload: []byte(msgA)}
 	pMsgs[0] = pMsgA
 
 	_, err = rmq.Produce(channelName, pMsgs)
 	assert.NoError(t, err)
 
-	pMsgB := ProducerMessage{Payload: []byte("b_message"), Properties: map[string]string{common.TraceIDKey: "b"}}
-	pMsgC := ProducerMessage{Payload: []byte("c_message"), Properties: map[string]string{common.TraceIDKey: "c"}}
+	pMsgB := ProducerMessage{Payload: []byte("b_message")}
+	pMsgC := ProducerMessage{Payload: []byte("c_message")}
 
 	pMsgs[0] = pMsgB
 	pMsgs = append(pMsgs, pMsgC)
@@ -366,121 +271,12 @@ func TestRocksmq_Basic(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, len(cMsgs), 1)
 	assert.Equal(t, string(cMsgs[0].Payload), "a_message")
-	_, ok := cMsgs[0].Properties[common.TraceIDKey]
-	assert.True(t, ok)
-	assert.Equal(t, cMsgs[0].Properties[common.TraceIDKey], "a")
 
 	cMsgs, err = rmq.Consume(channelName, groupName, 2)
 	assert.NoError(t, err)
 	assert.Equal(t, len(cMsgs), 2)
 	assert.Equal(t, string(cMsgs[0].Payload), "b_message")
-	_, ok = cMsgs[0].Properties[common.TraceIDKey]
-	assert.True(t, ok)
-	assert.Equal(t, cMsgs[0].Properties[common.TraceIDKey], "b")
 	assert.Equal(t, string(cMsgs[1].Payload), "c_message")
-	_, ok = cMsgs[1].Properties[common.TraceIDKey]
-	assert.True(t, ok)
-	assert.Equal(t, cMsgs[1].Properties[common.TraceIDKey], "c")
-}
-
-func TestRocksmq_Compatibility(t *testing.T) {
-	suffix := "rmq_compatibility"
-
-	kvPath := rmqPath + kvPathSuffix + suffix
-	defer os.RemoveAll(kvPath)
-	idAllocator := InitIDAllocator(kvPath)
-
-	rocksdbPath := rmqPath + suffix
-	defer os.RemoveAll(rocksdbPath + kvSuffix)
-	defer os.RemoveAll(rocksdbPath)
-	paramtable.Init()
-	rmq, err := NewRocksMQ(rocksdbPath, idAllocator)
-	assert.NoError(t, err)
-	defer rmq.Close()
-
-	channelName := "channel_rocks"
-	err = rmq.CreateTopic(channelName)
-	assert.NoError(t, err)
-	defer rmq.DestroyTopic(channelName)
-
-	// before 2.2.0, there have no properties in ProducerMessage and ConsumerMessage in rocksmq
-	// it aims to test if produce before 2.2.0, will consume after 2.2.0 successfully
-	msgD := "d_message"
-	tMsgs := make([]producerMessageBefore2, 1)
-	tMsgD := producerMessageBefore2{Payload: []byte(msgD)}
-	tMsgs[0] = tMsgD
-	_, err = rmq.produceBefore2(channelName, tMsgs)
-	assert.NoError(t, err)
-
-	groupName := "test_group"
-	_ = rmq.DestroyConsumerGroup(channelName, groupName)
-	err = rmq.CreateConsumerGroup(channelName, groupName)
-	assert.NoError(t, err)
-
-	cMsgs, err := rmq.Consume(channelName, groupName, 1)
-	if err != nil {
-		log.Info("test", zap.Any("err", err))
-	}
-	assert.NoError(t, err)
-	assert.Equal(t, len(cMsgs), 1)
-	assert.Equal(t, string(cMsgs[0].Payload), "d_message")
-	_, ok := cMsgs[0].Properties[common.TraceIDKey]
-	assert.False(t, ok)
-	// it will be set empty map if produce message has no properties field
-	expect := make(map[string]string)
-	assert.Equal(t, cMsgs[0].Properties, expect)
-
-	// between 2.2.0 and 2.3.0, the key of Payload is topic/properties/msgid/Payload
-	// will ingnore the property before 2.3.0, just make sure property empty is ok for 2.3
-	// after 2.3, the properties will be stored in column families
-	// it aims to test if produce in 2.2.0, but consume in 2.3.0, will get properties successfully
-	msg1 := "1_message"
-	tMsgs1 := make([]ProducerMessage, 1)
-	properties := make(map[string]string)
-	properties[common.TraceIDKey] = "1"
-	tMsg1 := ProducerMessage{Payload: []byte(msg1), Properties: properties}
-	tMsgs1[0] = tMsg1
-	_, err = rmq.produceIn2(channelName, tMsgs1)
-	assert.NoError(t, err)
-
-	msg2, err := rmq.Consume(channelName, groupName, 1)
-	assert.NoError(t, err)
-	assert.Equal(t, len(msg2), 1)
-	assert.Equal(t, string(msg2[0].Payload), "1_message")
-	_, ok = msg2[0].Properties[common.TraceIDKey]
-	assert.False(t, ok)
-	// will ingnore the property before 2.3.0, just make sure property empty is ok for 2.3
-	expect = make(map[string]string)
-	assert.Equal(t, cMsgs[0].Properties, expect)
-
-	// between 2.2.0 and 2.3.0, the key of Payload is topic/properties/msgid/Payload
-	// after 2.3, the properties will be stored in column families
-	// it aims to test the mixed message before 2.3.0 and after 2.3.0, will get properties successfully
-	msg3 := "3_message"
-	tMsgs3 := make([]ProducerMessage, 2)
-	properties3 := make(map[string]string)
-	properties3[common.TraceIDKey] = "3"
-	tMsg3 := ProducerMessage{Payload: []byte(msg3), Properties: properties3}
-	tMsgs3[0] = tMsg3
-	msg4 := "4_message"
-	tMsg4 := ProducerMessage{Payload: []byte(msg4)}
-	tMsgs3[1] = tMsg4
-	_, err = rmq.Produce(channelName, tMsgs3)
-	assert.NoError(t, err)
-
-	msg5, err := rmq.Consume(channelName, groupName, 2)
-	assert.NoError(t, err)
-	assert.Equal(t, len(msg5), 2)
-	assert.Equal(t, string(msg5[0].Payload), "3_message")
-	_, ok = msg5[0].Properties[common.TraceIDKey]
-	assert.True(t, ok)
-	assert.Equal(t, msg5[0].Properties, properties3)
-	assert.Equal(t, string(msg5[1].Payload), "4_message")
-	_, ok = msg5[1].Properties[common.TraceIDKey]
-	assert.False(t, ok)
-	// it will be set empty map if produce message has no properties field
-	expect = make(map[string]string)
-	assert.Equal(t, msg5[1].Properties, expect)
 }
 
 func TestRocksmq_MultiConsumer(t *testing.T) {
@@ -495,6 +291,7 @@ func TestRocksmq_MultiConsumer(t *testing.T) {
 
 	params := paramtable.Get()
 	params.Save(params.RocksmqCfg.PageSize.Key, "10")
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(rocksdbPath, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
@@ -547,6 +344,7 @@ func TestRocksmq_Dummy(t *testing.T) {
 	defer os.RemoveAll(rocksdbPath + kvSuffix)
 	defer os.RemoveAll(rocksdbPath)
 	paramtable.Init()
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(rocksdbPath, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
@@ -617,10 +415,12 @@ func TestRocksmq_Seek(t *testing.T) {
 	defer os.RemoveAll(rocksdbPath)
 
 	paramtable.Init()
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(rocksdbPath, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
 
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	_, err = NewRocksMQ("", idAllocator)
 	assert.Error(t, err)
 	defer os.RemoveAll("_meta_kv")
@@ -663,7 +463,6 @@ func TestRocksmq_Seek(t *testing.T) {
 	assert.Equal(t, messages[0].MsgID, seekID2)
 
 	_ = rmq.DestroyConsumerGroup(channelName, groupName1)
-
 }
 
 func TestRocksmq_Loop(t *testing.T) {
@@ -685,6 +484,7 @@ func TestRocksmq_Loop(t *testing.T) {
 	defer os.RemoveAll(kvName)
 
 	paramtable.Init()
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(name, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
@@ -757,6 +557,7 @@ func TestRocksmq_Goroutines(t *testing.T) {
 	defer os.RemoveAll(kvName)
 
 	paramtable.Init()
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(name, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
@@ -836,6 +637,7 @@ func TestRocksmq_Throughout(t *testing.T) {
 	defer os.RemoveAll(kvName)
 
 	paramtable.Init()
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(name, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
@@ -901,6 +703,7 @@ func TestRocksmq_MultiChan(t *testing.T) {
 	defer os.RemoveAll(kvName)
 
 	paramtable.Init()
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(name, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
@@ -955,6 +758,7 @@ func TestRocksmq_CopyData(t *testing.T) {
 	defer os.RemoveAll(kvName)
 
 	paramtable.Init()
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(name, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
@@ -1023,6 +827,7 @@ func TestRocksmq_SeekToLatest(t *testing.T) {
 	defer os.RemoveAll(kvName)
 
 	paramtable.Init()
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(name, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
@@ -1114,6 +919,7 @@ func TestRocksmq_GetLatestMsg(t *testing.T) {
 	kvName := name + "_meta_kv"
 	_ = os.RemoveAll(kvName)
 	defer os.RemoveAll(kvName)
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(name, idAllocator)
 	assert.NoError(t, err)
 
@@ -1182,6 +988,7 @@ func TestRocksmq_CheckPreTopicValid(t *testing.T) {
 	defer os.RemoveAll(rocksdbPath + kvSuffix)
 	defer os.RemoveAll(rocksdbPath)
 	paramtable.Init()
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(rocksdbPath, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
@@ -1189,10 +996,10 @@ func TestRocksmq_CheckPreTopicValid(t *testing.T) {
 	channelName1 := "topic1"
 	// topic not exist
 	err = rmq.CheckTopicValid(channelName1)
-	assert.Equal(t, true, errors.Is(err, merr.ErrTopicNotFound))
+	assert.Equal(t, true, errors.Is(err, merr.ErrMqTopicNotFound))
 
 	channelName2 := "topic2"
-	// topic is not empty
+	// allow topic is not empty
 	err = rmq.CreateTopic(channelName2)
 	defer rmq.DestroyTopic(channelName2)
 	assert.NoError(t, err)
@@ -1208,7 +1015,7 @@ func TestRocksmq_CheckPreTopicValid(t *testing.T) {
 	assert.NoError(t, err)
 
 	err = rmq.CheckTopicValid(channelName2)
-	assert.Equal(t, true, errors.Is(err, merr.ErrTopicNotEmpty))
+	assert.NoError(t, err)
 
 	channelName3 := "topic3"
 	// pass
@@ -1237,6 +1044,7 @@ func TestRocksmq_Close(t *testing.T) {
 	kvName := name + "_meta_kv"
 	_ = os.RemoveAll(kvName)
 	defer os.RemoveAll(kvName)
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(name, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
@@ -1269,6 +1077,7 @@ func TestRocksmq_SeekWithNoConsumerError(t *testing.T) {
 	kvName := name + "_meta_kv"
 	_ = os.RemoveAll(kvName)
 	defer os.RemoveAll(kvName)
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(name, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
@@ -1294,6 +1103,7 @@ func TestRocksmq_SeekTopicNotExistError(t *testing.T) {
 	kvName := name + "_meta_kv"
 	_ = os.RemoveAll(kvName)
 	defer os.RemoveAll(kvName)
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(name, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
@@ -1316,6 +1126,7 @@ func TestRocksmq_SeekTopicMutexError(t *testing.T) {
 	kvName := name + "_meta_kv"
 	_ = os.RemoveAll(kvName)
 	defer os.RemoveAll(kvName)
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(name, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
@@ -1339,6 +1150,7 @@ func TestRocksmq_moveConsumePosError(t *testing.T) {
 	kvName := name + "_meta_kv"
 	_ = os.RemoveAll(kvName)
 	defer os.RemoveAll(kvName)
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(name, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
@@ -1363,6 +1175,7 @@ func TestRocksmq_updateAckedInfoErr(t *testing.T) {
 	defer os.RemoveAll(kvName)
 	params := paramtable.Get()
 	params.Save(params.RocksmqCfg.PageSize.Key, "10")
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(name, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
@@ -1371,7 +1184,7 @@ func TestRocksmq_updateAckedInfoErr(t *testing.T) {
 	rmq.CreateTopic(topicName)
 	defer rmq.DestroyTopic(topicName)
 
-	//add message, make sure rmq has more than one page
+	// add message, make sure rmq has more than one page
 	msgNum := 100
 	pMsgs := make([]ProducerMessage, msgNum)
 	for i := 0; i < msgNum; i++ {
@@ -1390,9 +1203,9 @@ func TestRocksmq_updateAckedInfoErr(t *testing.T) {
 			GroupName: groupName + strconv.Itoa(i),
 			MsgMutex:  make(chan struct{}),
 		}
-		//make sure consumer not in rmq.consumersID
+		// make sure consumer not in rmq.consumersID
 		rmq.DestroyConsumerGroup(topicName, groupName+strconv.Itoa(i))
-		//add consumer to rmq.consumers
+		// add consumer to rmq.consumers
 		rmq.RegisterConsumer(consumer)
 	}
 
@@ -1422,6 +1235,7 @@ func TestRocksmq_Info(t *testing.T) {
 	defer os.RemoveAll(kvName)
 	params := paramtable.Get()
 	params.Save(params.RocksmqCfg.PageSize.Key, "10")
+	paramtable.Get().Save("rocksmq.compressionTypes", "0,0,0,0,0")
 	rmq, err := NewRocksMQ(name, idAllocator)
 	assert.NoError(t, err)
 	defer rmq.Close()
@@ -1445,7 +1259,7 @@ func TestRocksmq_Info(t *testing.T) {
 
 	assert.True(t, rmq.Info())
 
-	//test error
+	// test error
 	rmq.kv = &rocksdbkv.RocksdbKV{}
 	assert.False(t, rmq.Info())
 }

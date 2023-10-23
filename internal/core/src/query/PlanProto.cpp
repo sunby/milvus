@@ -18,7 +18,7 @@
 
 #include "ExprImpl.h"
 #include "common/VectorTrait.h"
-#include "exceptions/EasyAssert.h"
+#include "common/EasyAssert.h"
 #include "generated/ExtractInfoExprVisitor.h"
 #include "generated/ExtractInfoPlanNodeVisitor.h"
 #include "pb/plan.pb.h"
@@ -87,6 +87,9 @@ ExtractUnaryRangeExprImpl(FieldId field_id,
         } else if constexpr (std::is_same_v<T, std::string>) {
             Assert(value_proto.val_case() == planpb::GenericValue::kStringVal);
             return static_cast<T>(value_proto.string_val());
+        } else if constexpr (std::is_same_v<T, proto::plan::Array>) {
+            Assert(value_proto.val_case() == planpb::GenericValue::kArrayVal);
+            return static_cast<proto::plan::Array>(value_proto.array_val());
         } else {
             static_assert(always_false<T>);
         }
@@ -151,6 +154,15 @@ ExtractBinaryArithOpEvalRangeExprImpl(
             static_assert(always_false<T>);
         }
     };
+    if (expr_proto.arith_op() == proto::plan::ArrayLength) {
+        return std::make_unique<BinaryArithOpEvalRangeExprImpl<T>>(
+            expr_proto.column_info(),
+            expr_proto.value().val_case(),
+            expr_proto.arith_op(),
+            0,
+            expr_proto.op(),
+            getValue(expr_proto.value()));
+    }
     return std::make_unique<BinaryArithOpEvalRangeExprImpl<T>>(
         expr_proto.column_info(),
         expr_proto.value().val_case(),
@@ -182,11 +194,16 @@ ProtoParser::PlanNodeFromProto(const planpb::PlanNode& plan_node_proto) {
     search_info.metric_type_ = query_info_proto.metric_type();
     search_info.topk_ = query_info_proto.topk();
     search_info.round_decimal_ = query_info_proto.round_decimal();
-    search_info.search_params_ = json::parse(query_info_proto.search_params());
+    search_info.search_params_ =
+        nlohmann::json::parse(query_info_proto.search_params());
 
     auto plan_node = [&]() -> std::unique_ptr<VectorPlanNode> {
-        if (anns_proto.is_binary()) {
+        if (anns_proto.vector_type() ==
+            milvus::proto::plan::VectorType::BinaryVector) {
             return std::make_unique<BinaryVectorANNS>();
+        } else if (anns_proto.vector_type() ==
+                   milvus::proto::plan::VectorType::Float16Vector) {
+            return std::make_unique<Float16VectorANNS>();
         } else {
             return std::make_unique<FloatVectorANNS>();
         }
@@ -302,7 +319,8 @@ ProtoParser::ParseUnaryRangeExpr(const proto::plan::UnaryRangeExpr& expr_pb) {
                 return ExtractUnaryRangeExprImpl<std::string>(
                     field_id, data_type, expr_pb);
             }
-            case DataType::JSON: {
+            case DataType::JSON:
+            case DataType::ARRAY: {
                 switch (expr_pb.value().val_case()) {
                     case proto::plan::GenericValue::ValCase::kBoolVal:
                         return ExtractUnaryRangeExprImpl<bool>(
@@ -316,14 +334,18 @@ ProtoParser::ParseUnaryRangeExpr(const proto::plan::UnaryRangeExpr& expr_pb) {
                     case proto::plan::GenericValue::ValCase::kStringVal:
                         return ExtractUnaryRangeExprImpl<std::string>(
                             field_id, data_type, expr_pb);
+                    case proto::plan::GenericValue::ValCase::kArrayVal:
+                        return ExtractUnaryRangeExprImpl<proto::plan::Array>(
+                            field_id, data_type, expr_pb);
                     default:
                         PanicInfo(
+                            DataTypeInvalid,
                             fmt::format("unknown data type: {} in expression",
                                         expr_pb.value().val_case()));
                 }
             }
             default: {
-                PanicInfo("unsupported data type");
+                PanicInfo(DataTypeInvalid, "unsupported data type");
             }
         }
     }();
@@ -380,12 +402,34 @@ ProtoParser::ParseBinaryRangeExpr(const proto::plan::BinaryRangeExpr& expr_pb) {
                         return ExtractBinaryRangeExprImpl<std::string>(
                             field_id, data_type, expr_pb);
                     default:
-                        PanicInfo("unknown data type in expression");
+                        PanicInfo(
+                            DataTypeInvalid,
+                            fmt::format("unknown data type in expression {}",
+                                        data_type));
+                }
+            }
+            case DataType::ARRAY: {
+                switch (expr_pb.lower_value().val_case()) {
+                    case proto::plan::GenericValue::ValCase::kInt64Val:
+                        return ExtractBinaryRangeExprImpl<int64_t>(
+                            field_id, data_type, expr_pb);
+                    case proto::plan::GenericValue::ValCase::kFloatVal:
+                        return ExtractBinaryRangeExprImpl<double>(
+                            field_id, data_type, expr_pb);
+                    case proto::plan::GenericValue::ValCase::kStringVal:
+                        return ExtractBinaryRangeExprImpl<std::string>(
+                            field_id, data_type, expr_pb);
+                    default:
+                        PanicInfo(
+                            DataTypeInvalid,
+                            fmt::format("unknown data type in expression {}",
+                                        data_type));
                 }
             }
 
             default: {
-                PanicInfo("unsupported data type");
+                PanicInfo(DataTypeInvalid,
+                          fmt::format("unsupported data type {}", data_type));
             }
         }
     }();
@@ -477,12 +521,39 @@ ProtoParser::ParseTermExpr(const proto::plan::TermExpr& expr_pb) {
                             field_id, data_type, expr_pb);
                     default:
                         PanicInfo(
+                            DataTypeInvalid,
+                            fmt::format("unknown data type: {} in expression",
+                                        expr_pb.values()[0].val_case()));
+                }
+            }
+            case DataType::ARRAY: {
+                if (expr_pb.values().size() == 0) {
+                    return ExtractTermExprImpl<bool>(
+                        field_id, data_type, expr_pb);
+                }
+                switch (expr_pb.values()[0].val_case()) {
+                    case proto::plan::GenericValue::ValCase::kBoolVal:
+                        return ExtractTermExprImpl<bool>(
+                            field_id, data_type, expr_pb);
+                    case proto::plan::GenericValue::ValCase::kFloatVal:
+                        return ExtractTermExprImpl<double>(
+                            field_id, data_type, expr_pb);
+                    case proto::plan::GenericValue::ValCase::kInt64Val:
+                        return ExtractTermExprImpl<int64_t>(
+                            field_id, data_type, expr_pb);
+                    case proto::plan::GenericValue::ValCase::kStringVal:
+                        return ExtractTermExprImpl<std::string>(
+                            field_id, data_type, expr_pb);
+                    default:
+                        PanicInfo(
+                            DataTypeInvalid,
                             fmt::format("unknown data type: {} in expression",
                                         expr_pb.values()[0].val_case()));
                 }
             }
             default: {
-                PanicInfo("unsupported data type");
+                PanicInfo(DataTypeInvalid,
+                          fmt::format("unsupported data type {}", data_type));
             }
         }
     }();
@@ -541,13 +612,30 @@ ProtoParser::ParseBinaryArithOpEvalRangeExpr(
                         return ExtractBinaryArithOpEvalRangeExprImpl<double>(
                             field_id, data_type, expr_pb);
                     default:
-                        PanicInfo(fmt::format(
-                            "unsupported data type {} in expression",
-                            expr_pb.value().val_case()));
+                        PanicInfo(DataTypeInvalid,
+                                  fmt::format(
+                                      "unsupported data type {} in expression",
+                                      expr_pb.value().val_case()));
+                }
+            }
+            case DataType::ARRAY: {
+                switch (expr_pb.value().val_case()) {
+                    case proto::plan::GenericValue::ValCase::kInt64Val:
+                        return ExtractBinaryArithOpEvalRangeExprImpl<int64_t>(
+                            field_id, data_type, expr_pb);
+                    case proto::plan::GenericValue::ValCase::kFloatVal:
+                        return ExtractBinaryArithOpEvalRangeExprImpl<double>(
+                            field_id, data_type, expr_pb);
+                    default:
+                        PanicInfo(DataTypeInvalid,
+                                  fmt::format(
+                                      "unsupported data type {} in expression",
+                                      expr_pb.value().val_case()));
                 }
             }
             default: {
-                PanicInfo("unsupported data type");
+                PanicInfo(DataTypeInvalid,
+                          fmt::format("unsupported data type {}", data_type));
             }
         }
     }();
@@ -572,7 +660,8 @@ ProtoParser::ParseExistExpr(const proto::plan::ExistsExpr& expr_pb) {
                 return ExtractExistsExprImpl(expr_pb);
             }
             default: {
-                PanicInfo("unsupported data type");
+                PanicInfo(DataTypeInvalid,
+                          fmt::format("unsupported data type {}", data_type));
             }
         }
     }();
@@ -640,7 +729,7 @@ ProtoParser::ParseJsonContainsExpr(
     // auto& field_meta = schema[field_offset];
     auto result = [&]() -> ExprPtr {
         if (expr_pb.elements_size() == 0) {
-            PanicInfo("no elements in expression");
+            PanicInfo(DataIsEmpty, "no elements in expression");
         }
         if (expr_pb.elements_same_type()) {
             switch (expr_pb.elements(0).val_case()) {
@@ -656,7 +745,9 @@ ProtoParser::ParseJsonContainsExpr(
                     return ExtractJsonContainsExprImpl<proto::plan::Array>(
                         expr_pb);
                 default:
-                    PanicInfo("unsupported data type");
+                    PanicInfo(
+                        DataTypeInvalid,
+                        fmt::format("unsupported data type {}", data_type));
             }
         }
         return ExtractJsonContainsExprImpl<proto::plan::GenericValue>(expr_pb);
@@ -702,7 +793,8 @@ ProtoParser::ParseExpr(const proto::plan::Expr& expr_pb) {
         default: {
             std::string s;
             google::protobuf::TextFormat::PrintToString(expr_pb, &s);
-            PanicInfo(std::string("unsupported expr proto node: ") + s);
+            PanicInfo(ExprInvalid,
+                      fmt::format("unsupported expr proto node: {}", s));
         }
     }
 }

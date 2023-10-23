@@ -11,6 +11,7 @@
 
 #pragma once
 #include <string>
+#include "common/EasyAssert.h"
 
 namespace milvus::segcore {
 
@@ -18,7 +19,7 @@ struct Int64PKVisitor {
     template <typename T>
     int64_t
     operator()(T t) const {
-        PanicInfo("invalid int64 pk value");
+        PanicInfo(Unsupported, "invalid int64 pk value");
     }
 };
 
@@ -32,7 +33,7 @@ struct StrPKVisitor {
     template <typename T>
     std::string
     operator()(T t) const {
-        PanicInfo("invalid string pk value");
+        PanicInfo(Unsupported, "invalid string pk value");
     }
 };
 

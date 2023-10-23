@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
-
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/exp/mmap"
 
@@ -40,6 +39,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/common"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/timerecord"
 )
@@ -170,7 +170,8 @@ func createMockCallbackFunctions(t *testing.T, rowCounter *rowCounterTest) (Assi
 	}
 
 	saveSegmentFunc := func(fieldsInsert []*datapb.FieldBinlog, fieldsStats []*datapb.FieldBinlog,
-		segmentID int64, targetChName string, rowCount int64, partID int64) error {
+		segmentID int64, targetChName string, rowCount int64, partID int64,
+	) error {
 		return nil
 	}
 
@@ -214,7 +215,8 @@ func Test_ImportWrapperNew(t *testing.T) {
 		return nil, nil, nil
 	}
 	saveBinFunc := func(fieldsInsert []*datapb.FieldBinlog, fieldsStats []*datapb.FieldBinlog,
-		segmentID int64, targetChName string, rowCount int64, partID int64) error {
+		segmentID int64, targetChName string, rowCount int64, partID int64,
+	) error {
 		return nil
 	}
 
@@ -265,9 +267,7 @@ func Test_ImportWrapperRowBased(t *testing.T) {
 	assignSegmentFunc, flushFunc, saveSegmentFunc := createMockCallbackFunctions(t, rowCounter)
 
 	importResult := &rootcoordpb.ImportResult{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:     merr.Success(),
 		TaskId:     1,
 		DatanodeId: 1,
 		State:      commonpb.ImportState_ImportStarted,
@@ -345,9 +345,7 @@ func Test_ImportWrapperColumnBased_numpy(t *testing.T) {
 	assignSegmentFunc, flushFunc, saveSegmentFunc := createMockCallbackFunctions(t, rowCounter)
 
 	importResult := &rootcoordpb.ImportResult{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:     merr.Success(),
 		TaskId:     1,
 		DatanodeId: 1,
 		State:      commonpb.ImportState_ImportStarted,
@@ -500,9 +498,7 @@ func Test_ImportWrapperRowBased_perf(t *testing.T) {
 	schema := perfSchema(dim)
 
 	importResult := &rootcoordpb.ImportResult{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:     merr.Success(),
 		TaskId:     1,
 		DatanodeId: 1,
 		State:      commonpb.ImportState_ImportStarted,
@@ -676,9 +672,7 @@ func Test_ImportWrapperReportFailRowBased(t *testing.T) {
 
 	// success case
 	importResult := &rootcoordpb.ImportResult{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:     merr.Success(),
 		TaskId:     1,
 		DatanodeId: 1,
 		State:      commonpb.ImportState_ImportStarted,
@@ -725,9 +719,7 @@ func Test_ImportWrapperReportFailColumnBased_numpy(t *testing.T) {
 
 	// success case
 	importResult := &rootcoordpb.ImportResult{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:     merr.Success(),
 		TaskId:     1,
 		DatanodeId: 1,
 		State:      commonpb.ImportState_ImportStarted,
@@ -870,9 +862,7 @@ func Test_ImportWrapperDoBinlogImport(t *testing.T) {
 		return nil
 	}
 	wrapper.importResult = &rootcoordpb.ImportResult{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:     merr.Success(),
 		TaskId:     1,
 		DatanodeId: 1,
 		State:      commonpb.ImportState_ImportStarted,
@@ -891,9 +881,7 @@ func Test_ImportWrapperReportPersisted(t *testing.T) {
 	tr := timerecord.NewTimeRecorder("test")
 
 	importResult := &rootcoordpb.ImportResult{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:     merr.Success(),
 		TaskId:     1,
 		DatanodeId: 1,
 		State:      commonpb.ImportState_ImportStarted,
@@ -921,7 +909,8 @@ func Test_ImportWrapperReportPersisted(t *testing.T) {
 
 	// error when closing segments
 	wrapper.saveSegmentFunc = func(fieldsInsert []*datapb.FieldBinlog, fieldsStats []*datapb.FieldBinlog,
-		segmentID int64, targetChName string, rowCount int64, partID int64) error {
+		segmentID int64, targetChName string, rowCount int64, partID int64,
+	) error {
 		return errors.New("error")
 	}
 	wrapper.workingSegments[0] = map[int64]*WorkingSegment{
@@ -932,7 +921,8 @@ func Test_ImportWrapperReportPersisted(t *testing.T) {
 
 	// failed to report
 	wrapper.saveSegmentFunc = func(fieldsInsert []*datapb.FieldBinlog, fieldsStats []*datapb.FieldBinlog,
-		segmentID int64, targetChName string, rowCount int64, partID int64) error {
+		segmentID int64, targetChName string, rowCount int64, partID int64,
+	) error {
 		return nil
 	}
 	wrapper.reportFunc = func(res *rootcoordpb.ImportResult) error {
@@ -971,9 +961,7 @@ func Test_ImportWrapperFlushFunc(t *testing.T) {
 	assignSegmentFunc, flushFunc, saveSegmentFunc := createMockCallbackFunctions(t, rowCounter)
 
 	importResult := &rootcoordpb.ImportResult{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
+		Status:     merr.Success(),
 		TaskId:     1,
 		DatanodeId: 1,
 		State:      commonpb.ImportState_ImportStarted,
@@ -1010,7 +998,8 @@ func Test_ImportWrapperFlushFunc(t *testing.T) {
 
 	t.Run("close segment, saveSegmentFunc returns error", func(t *testing.T) {
 		wrapper.saveSegmentFunc = func(fieldsInsert []*datapb.FieldBinlog, fieldsStats []*datapb.FieldBinlog,
-			segmentID int64, targetChName string, rowCount int64, partID int64) error {
+			segmentID int64, targetChName string, rowCount int64, partID int64,
+		) error {
 			return errors.New("error")
 		}
 		wrapper.segmentSize = 1
@@ -1035,7 +1024,8 @@ func Test_ImportWrapperFlushFunc(t *testing.T) {
 
 	t.Run("createBinlogsFunc returns error", func(t *testing.T) {
 		wrapper.saveSegmentFunc = func(fieldsInsert []*datapb.FieldBinlog, fieldsStats []*datapb.FieldBinlog,
-			segmentID int64, targetChName string, rowCount int64, partID int64) error {
+			segmentID int64, targetChName string, rowCount int64, partID int64,
+		) error {
 			return nil
 		}
 		wrapper.assignSegmentFunc = func(shardID int, partID int64) (int64, string, error) {

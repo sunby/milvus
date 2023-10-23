@@ -24,9 +24,7 @@ import (
 	"time"
 
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
-	"github.com/milvus-io/milvus/internal/util/dependency"
-	"github.com/milvus-io/milvus/pkg/tracer"
-	"github.com/milvus-io/milvus/pkg/util/interceptor"
+	"github.com/tikv/client-go/v2/txnkv"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.uber.org/atomic"
@@ -36,19 +34,24 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
+	dcc "github.com/milvus-io/milvus/internal/distributed/datacoord/client"
+	qcc "github.com/milvus-io/milvus/internal/distributed/querycoord/client"
+	"github.com/milvus-io/milvus/internal/distributed/utils"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/proxypb"
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
 	"github.com/milvus-io/milvus/internal/rootcoord"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util/dependency"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/tracer"
+	"github.com/milvus-io/milvus/pkg/util"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/util/interceptor"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
-
-	dcc "github.com/milvus-io/milvus/internal/distributed/datacoord/client"
-	qcc "github.com/milvus-io/milvus/internal/distributed/querycoord/client"
+	"github.com/milvus-io/milvus/pkg/util/tikv"
 )
 
 // Server grpc wrapper
@@ -65,11 +68,12 @@ type Server struct {
 	serverID atomic.Int64
 
 	etcdCli    *clientv3.Client
-	dataCoord  types.DataCoord
-	queryCoord types.QueryCoord
+	tikvCli    *txnkv.Client
+	dataCoord  types.DataCoordClient
+	queryCoord types.QueryCoordClient
 
-	newDataCoordClient  func(string, *clientv3.Client) types.DataCoord
-	newQueryCoordClient func(string, *clientv3.Client) types.QueryCoord
+	newDataCoordClient  func(string, *clientv3.Client) types.DataCoordClient
+	newQueryCoordClient func(string, *clientv3.Client) types.QueryCoordClient
 }
 
 func (s *Server) CreateDatabase(ctx context.Context, request *milvuspb.CreateDatabaseRequest) (*commonpb.Status, error) {
@@ -121,7 +125,7 @@ func NewServer(ctx context.Context, factory dependency.Factory) (*Server, error)
 }
 
 func (s *Server) setClient() {
-	s.newDataCoordClient = func(etcdMetaRoot string, etcdCli *clientv3.Client) types.DataCoord {
+	s.newDataCoordClient = func(etcdMetaRoot string, etcdCli *clientv3.Client) types.DataCoordClient {
 		dsClient, err := dcc.NewClient(s.ctx, etcdMetaRoot, etcdCli)
 		if err != nil {
 			panic(err)
@@ -129,7 +133,7 @@ func (s *Server) setClient() {
 		return dsClient
 	}
 
-	s.newQueryCoordClient = func(metaRootPath string, etcdCli *clientv3.Client) types.QueryCoord {
+	s.newQueryCoordClient = func(metaRootPath string, etcdCli *clientv3.Client) types.QueryCoordClient {
 		qsClient, err := qcc.NewClient(s.ctx, metaRootPath, etcdCli)
 		if err != nil {
 			panic(err)
@@ -152,9 +156,12 @@ func (s *Server) Run() error {
 	return nil
 }
 
+var getTiKVClient = tikv.GetTiKVClient
+
 func (s *Server) init() error {
-	etcdConfig := &paramtable.Get().EtcdCfg
-	Params := &paramtable.Get().RootCoordGrpcServerCfg
+	params := paramtable.Get()
+	etcdConfig := &params.EtcdCfg
+	rpcParams := &params.RootCoordGrpcServerCfg
 	log.Debug("init params done..")
 
 	etcdCli, err := etcd.GetEtcdClient(
@@ -171,10 +178,21 @@ func (s *Server) init() error {
 	}
 	s.etcdCli = etcdCli
 	s.rootCoord.SetEtcdClient(s.etcdCli)
-	s.rootCoord.SetAddress(Params.GetAddress())
+	s.rootCoord.SetAddress(rpcParams.GetAddress())
 	log.Debug("etcd connect done ...")
 
-	err = s.startGrpc(Params.Port.GetAsInt())
+	if params.MetaStoreCfg.MetaStoreType.GetValue() == util.MetaStoreTypeTiKV {
+		log.Info("Connecting to tikv metadata storage.")
+		s.tikvCli, err = getTiKVClient(&paramtable.Get().TiKVCfg)
+		if err != nil {
+			log.Debug("RootCoord failed to connect to tikv", zap.Error(err))
+			return err
+		}
+		s.rootCoord.SetTiKVClient(s.tikvCli)
+		log.Info("Connected to tikv. Using tikv as metadata storage.")
+	}
+
+	err = s.startGrpc(rpcParams.Port.GetAsInt())
 	if err != nil {
 		return err
 	}
@@ -184,15 +202,7 @@ func (s *Server) init() error {
 		log.Debug("RootCoord start to create DataCoord client")
 		dataCoord := s.newDataCoordClient(rootcoord.Params.EtcdCfg.MetaRootPath.GetValue(), s.etcdCli)
 		s.dataCoord = dataCoord
-		if err = s.dataCoord.Init(); err != nil {
-			log.Error("RootCoord DataCoordClient Init failed", zap.Error(err))
-			panic(err)
-		}
-		if err = s.dataCoord.Start(); err != nil {
-			log.Error("RootCoord DataCoordClient Start failed", zap.Error(err))
-			panic(err)
-		}
-		if err := s.rootCoord.SetDataCoord(dataCoord); err != nil {
+		if err := s.rootCoord.SetDataCoordClient(dataCoord); err != nil {
 			panic(err)
 		}
 	}
@@ -201,15 +211,7 @@ func (s *Server) init() error {
 		log.Debug("RootCoord start to create QueryCoord client")
 		queryCoord := s.newQueryCoordClient(rootcoord.Params.EtcdCfg.MetaRootPath.GetValue(), s.etcdCli)
 		s.queryCoord = queryCoord
-		if err := s.queryCoord.Init(); err != nil {
-			log.Error("RootCoord QueryCoordClient Init failed", zap.Error(err))
-			panic(err)
-		}
-		if err := s.queryCoord.Start(); err != nil {
-			log.Error("RootCoord QueryCoordClient Start failed", zap.Error(err))
-			panic(err)
-		}
-		if err := s.rootCoord.SetQueryCoord(queryCoord); err != nil {
+		if err := s.rootCoord.SetQueryCoordClient(queryCoord); err != nil {
 			panic(err)
 		}
 	}
@@ -228,19 +230,19 @@ func (s *Server) startGrpc(port int) error {
 func (s *Server) startGrpcLoop(port int) {
 	defer s.wg.Done()
 	Params := &paramtable.Get().RootCoordGrpcServerCfg
-	var kaep = keepalive.EnforcementPolicy{
+	kaep := keepalive.EnforcementPolicy{
 		MinTime:             5 * time.Second, // If a client pings more than once every 5 seconds, terminate the connection
 		PermitWithoutStream: true,            // Allow pings even when there are no active streams
 	}
 
-	var kasp = keepalive.ServerParameters{
+	kasp := keepalive.ServerParameters{
 		Time:    60 * time.Second, // Ping the client if it is idle for 60 seconds to ensure the connection is still active
 		Timeout: 10 * time.Second, // Wait 10 second for the ping ack before assuming the connection is dead
 	}
 	log.Debug("start grpc ", zap.Int("port", port))
 	lis, err := net.Listen("tcp", ":"+strconv.Itoa(port))
 	if err != nil {
-		log.Error("GrpcServer:failed to listen", zap.String("error", err.Error()))
+		log.Error("GrpcServer:failed to listen", zap.Error(err))
 		s.grpcErrChan <- err
 		return
 	}
@@ -305,13 +307,16 @@ func (s *Server) Stop() error {
 	if s.etcdCli != nil {
 		defer s.etcdCli.Close()
 	}
+	if s.tikvCli != nil {
+		defer s.tikvCli.Close()
+	}
 	if s.dataCoord != nil {
-		if err := s.dataCoord.Stop(); err != nil {
+		if err := s.dataCoord.Close(); err != nil {
 			log.Error("Failed to close dataCoord client", zap.Error(err))
 		}
 	}
 	if s.queryCoord != nil {
-		if err := s.queryCoord.Stop(); err != nil {
+		if err := s.queryCoord.Close(); err != nil {
 			log.Error("Failed to close queryCoord client", zap.Error(err))
 		}
 	}
@@ -323,8 +328,7 @@ func (s *Server) Stop() error {
 	log.Debug("Rootcoord begin to stop grpc server")
 	s.cancel()
 	if s.grpcServer != nil {
-		log.Debug("Graceful stop grpc server...")
-		s.grpcServer.GracefulStop()
+		utils.GracefulStopGRPCServer(s.grpcServer)
 	}
 	s.wg.Wait()
 	return nil
@@ -332,17 +336,17 @@ func (s *Server) Stop() error {
 
 // GetComponentStates gets the component states of RootCoord.
 func (s *Server) GetComponentStates(ctx context.Context, req *milvuspb.GetComponentStatesRequest) (*milvuspb.ComponentStates, error) {
-	return s.rootCoord.GetComponentStates(ctx)
+	return s.rootCoord.GetComponentStates(ctx, req)
 }
 
 // GetTimeTickChannel receiver time tick from proxy service, and put it into this channel
 func (s *Server) GetTimeTickChannel(ctx context.Context, req *internalpb.GetTimeTickChannelRequest) (*milvuspb.StringResponse, error) {
-	return s.rootCoord.GetTimeTickChannel(ctx)
+	return s.rootCoord.GetTimeTickChannel(ctx, req)
 }
 
 // GetStatisticsChannel just define a channel, not used currently
 func (s *Server) GetStatisticsChannel(ctx context.Context, req *internalpb.GetStatisticsChannelRequest) (*milvuspb.StringResponse, error) {
-	return s.rootCoord.GetStatisticsChannel(ctx)
+	return s.rootCoord.GetStatisticsChannel(ctx, req)
 }
 
 // CreateCollection creates a collection

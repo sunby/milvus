@@ -34,9 +34,10 @@ template <typename T>
 class ScalarIndexSort : public ScalarIndex<T> {
  public:
     explicit ScalarIndexSort(
-        storage::FileManagerImplPtr file_manager = nullptr);
+        const storage::FileManagerContext& file_manager_context =
+            storage::FileManagerContext());
 
-    explicit ScalarIndexSort(storage::FileManagerImplPtr file_manager,
+    explicit ScalarIndexSort(const storage::FileManagerContext& file_manager_context,
                              std::shared_ptr<milvus_storage::Space> space);
 
     BinarySet
@@ -126,13 +127,14 @@ using ScalarIndexSortPtr = std::unique_ptr<ScalarIndexSort<T>>;
 namespace milvus::index {
 template <typename T>
 inline ScalarIndexSortPtr<T>
-CreateScalarIndexSort(storage::FileManagerImplPtr file_manager = nullptr) {
-    return std::make_unique<ScalarIndexSort<T>>(file_manager);
+CreateScalarIndexSort(const storage::FileManagerContext& file_manager_context =
+                          storage::FileManagerContext()) {
+    return std::make_unique<ScalarIndexSort<T>>(file_manager_context);
 }
 template <typename T>
 inline ScalarIndexSortPtr<T>
-CreateScalarIndexSort(storage::FileManagerImplPtr file_manager,
+CreateScalarIndexSort(const storage::FileManagerContext& file_manager_context,
                       std::shared_ptr<milvus_storage::Space> space) {
-    return std::make_unique<ScalarIndexSort<T>>(file_manager, space);
+    return std::make_unique<ScalarIndexSort<T>>(file_manager_context, space);
 }
 }  // namespace milvus::index

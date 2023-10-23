@@ -51,11 +51,12 @@ const (
 	DefaultKnowhereThreadPoolNumRatioInBuild = 1
 	DefaultMinioRegion                       = ""
 	DefaultMinioUseVirtualHost               = "false"
+	DefaultMinioRequestTimeout               = "3000"
 )
 
 // Const of Global Config List
 func globalConfigPrefixs() []string {
-	return []string{"metastore", "localStorage", "etcd", "minio", "pulsar", "kafka", "rocksmq", "log", "grpc", "common", "quotaAndLimits"}
+	return []string{"metastore", "localStorage", "etcd", "tikv", "minio", "pulsar", "kafka", "rocksmq", "log", "grpc", "common", "quotaAndLimits"}
 }
 
 var defaultYaml = []string{"milvus.yaml"}
@@ -146,7 +147,6 @@ func (bt *BaseTable) init() {
 	if !bt.config.skipRemote {
 		bt.initConfigsFromRemote()
 	}
-	log.Info("Got Config", zap.Any("configs", bt.mgr.GetConfigs()))
 }
 
 func (bt *BaseTable) initConfigsFromLocal() {

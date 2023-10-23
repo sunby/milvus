@@ -12,7 +12,7 @@
 #pragma once
 // Generated File
 // DO NOT EDIT
-#include "utils/Json.h"
+#include "common/Json.h"
 #include "query/PlanImpl.h"
 #include "segcore/SegmentGrowing.h"
 #include <utility>
@@ -26,6 +26,9 @@ class VerifyPlanNodeVisitor : public PlanNodeVisitor {
 
     void
     visit(BinaryVectorANNS& node) override;
+
+    void
+    visit(Float16VectorANNS& node) override;
 
     void
     visit(RetrievePlanNode& node) override;

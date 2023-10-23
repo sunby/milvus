@@ -26,9 +26,10 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 
-	"github.com/milvus-io/milvus/pkg/common"
+	"github.com/milvus-io/milvus/internal/kv/predicates"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/timerecord"
 )
 
@@ -205,7 +206,7 @@ func (kv *etcdKV) Load(key string) (string, error) {
 		return "", err
 	}
 	if resp.Count <= 0 {
-		return "", common.NewKeyNotExistError(key)
+		return "", merr.WrapErrIoKeyNotFound(key)
 	}
 	CheckElapseAndWarn(start, "Slow etcd operation load", zap.String("key", key))
 	return string(resp.Kvs[0].Value), nil
@@ -219,10 +220,10 @@ func (kv *etcdKV) LoadBytes(key string) ([]byte, error) {
 	defer cancel()
 	resp, err := kv.getEtcdMeta(ctx, key)
 	if err != nil {
-		return []byte{}, err
+		return nil, err
 	}
 	if resp.Count <= 0 {
-		return []byte{}, common.NewKeyNotExistError(key)
+		return nil, merr.WrapErrIoKeyNotFound(key)
 	}
 	CheckElapseAndWarn(start, "Slow etcd operation load", zap.String("key", key))
 	return resp.Kvs[0].Value, nil
@@ -443,7 +444,12 @@ func (kv *etcdKV) MultiRemove(keys []string) error {
 }
 
 // MultiSaveAndRemove saves the key-value pairs and removes the keys in a transaction.
-func (kv *etcdKV) MultiSaveAndRemove(saves map[string]string, removals []string) error {
+func (kv *etcdKV) MultiSaveAndRemove(saves map[string]string, removals []string, preds ...predicates.Predicate) error {
+	cmps, err := parsePredicates(kv.rootPath, preds...)
+	if err != nil {
+		return err
+	}
+
 	start := time.Now()
 	ops := make([]clientv3.Op, 0, len(saves)+len(removals))
 	var keys []string
@@ -459,7 +465,7 @@ func (kv *etcdKV) MultiSaveAndRemove(saves map[string]string, removals []string)
 	ctx, cancel := context.WithTimeout(context.TODO(), RequestTimeout)
 	defer cancel()
 
-	_, err := kv.executeTxn(kv.getTxnWithCmp(ctx), ops...)
+	resp, err := kv.executeTxn(kv.getTxnWithCmp(ctx, cmps...), ops...)
 	if err != nil {
 		log.Warn("Etcd MultiSaveAndRemove error",
 			zap.Any("saves", saves),
@@ -467,9 +473,14 @@ func (kv *etcdKV) MultiSaveAndRemove(saves map[string]string, removals []string)
 			zap.Int("saveLength", len(saves)),
 			zap.Int("removeLength", len(removals)),
 			zap.Error(err))
+		return err
 	}
 	CheckElapseAndWarn(start, "Slow etcd operation multi save and remove", zap.Strings("keys", keys))
-	return err
+	if !resp.Succeeded {
+		log.Warn("failed to executeTxn", zap.Any("resp", resp))
+		return merr.WrapErrIoFailedReason("failed to execute transaction")
+	}
+	return nil
 }
 
 // MultiSaveBytesAndRemove saves the key-value pairs and removes the keys in a transaction.
@@ -529,27 +540,13 @@ func (kv *etcdKV) WatchWithRevision(key string, revision int64) clientv3.WatchCh
 	return rch
 }
 
-// MultiRemoveWithPrefix removes the keys with given prefix.
-func (kv *etcdKV) MultiRemoveWithPrefix(keys []string) error {
-	start := time.Now()
-	ops := make([]clientv3.Op, 0, len(keys))
-	for _, k := range keys {
-		op := clientv3.OpDelete(path.Join(kv.rootPath, k), clientv3.WithPrefix())
-		ops = append(ops, op)
-	}
-	ctx, cancel := context.WithTimeout(context.TODO(), RequestTimeout)
-	defer cancel()
-
-	_, err := kv.executeTxn(kv.getTxnWithCmp(ctx), ops...)
-	if err != nil {
-		log.Warn("Etcd MultiRemoveWithPrefix error", zap.Strings("keys", keys), zap.Int("len", len(keys)), zap.Error(err))
-	}
-	CheckElapseAndWarn(start, "Slow etcd operation multi remove with prefix", zap.Strings("keys", keys))
-	return err
-}
-
 // MultiSaveAndRemoveWithPrefix saves kv in @saves and removes the keys with given prefix in @removals.
-func (kv *etcdKV) MultiSaveAndRemoveWithPrefix(saves map[string]string, removals []string) error {
+func (kv *etcdKV) MultiSaveAndRemoveWithPrefix(saves map[string]string, removals []string, preds ...predicates.Predicate) error {
+	cmps, err := parsePredicates(kv.rootPath, preds...)
+	if err != nil {
+		return err
+	}
+
 	start := time.Now()
 	ops := make([]clientv3.Op, 0, len(saves))
 	var keys []string
@@ -565,7 +562,7 @@ func (kv *etcdKV) MultiSaveAndRemoveWithPrefix(saves map[string]string, removals
 	ctx, cancel := context.WithTimeout(context.TODO(), RequestTimeout)
 	defer cancel()
 
-	_, err := kv.executeTxn(kv.getTxnWithCmp(ctx), ops...)
+	resp, err := kv.executeTxn(kv.getTxnWithCmp(ctx, cmps...), ops...)
 	if err != nil {
 		log.Warn("Etcd MultiSaveAndRemoveWithPrefix error",
 			zap.Any("saves", saves),
@@ -573,9 +570,13 @@ func (kv *etcdKV) MultiSaveAndRemoveWithPrefix(saves map[string]string, removals
 			zap.Int("saveLength", len(saves)),
 			zap.Int("removeLength", len(removals)),
 			zap.Error(err))
+		return err
 	}
 	CheckElapseAndWarn(start, "Slow etcd operation multi save and move with prefix", zap.Strings("keys", keys))
-	return err
+	if !resp.Succeeded {
+		return merr.WrapErrIoFailedReason("failed to execute transaction")
+	}
+	return nil
 }
 
 // MultiSaveBytesAndRemoveWithPrefix saves kv in @saves and removes the keys with given prefix in @removals.

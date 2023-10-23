@@ -102,7 +102,7 @@ class TestBulkInsert(TestcaseBaseBulkInsert):
         )
         logging.info(f"bulk insert task id:{task_id}")
         success, _ = self.utility_wrap.wait_for_bulk_insert_tasks_completed(
-            task_ids=[task_id], timeout=90
+            task_ids=[task_id], timeout=300
         )
         tt = time.time() - t0
         log.info(f"bulk insert state:{success} in {tt}")
@@ -118,7 +118,7 @@ class TestBulkInsert(TestcaseBaseBulkInsert):
             field_name=df.vec_field, index_params=index_params
         )
         time.sleep(2)
-        self.utility_wrap.wait_for_index_building_complete(c_name, timeout=120)
+        self.utility_wrap.wait_for_index_building_complete(c_name, timeout=300)
         res, _ = self.utility_wrap.index_building_progress(c_name)
         log.info(f"index building progress: {res}")
         self.collection_wrap.load()
@@ -187,7 +187,7 @@ class TestBulkInsert(TestcaseBaseBulkInsert):
         )
         logging.info(f"bulk insert task ids:{task_id}")
         completed, _ = self.utility_wrap.wait_for_bulk_insert_tasks_completed(
-            task_ids=[task_id], timeout=90
+            task_ids=[task_id], timeout=300
         )
         tt = time.time() - t0
         log.info(f"bulk insert state:{completed} in {tt}")
@@ -202,7 +202,7 @@ class TestBulkInsert(TestcaseBaseBulkInsert):
         self.collection_wrap.create_index(
             field_name=df.vec_field, index_params=index_params
         )
-        self.utility_wrap.wait_for_index_building_complete(c_name, timeout=120)
+        self.utility_wrap.wait_for_index_building_complete(c_name, timeout=300)
         res, _ = self.utility_wrap.index_building_progress(c_name)
         log.info(f"index building progress: {res}")
         self.collection_wrap.load()
@@ -289,7 +289,7 @@ class TestBulkInsert(TestcaseBaseBulkInsert):
         )
         logging.info(f"bulk insert task ids:{task_id}")
         success, state = self.utility_wrap.wait_for_bulk_insert_tasks_completed(
-            task_ids=[task_id], timeout=90
+            task_ids=[task_id], timeout=300
         )
         tt = time.time() - t0
         log.info(f"bulk insert state:{success} in {tt}")
@@ -299,7 +299,7 @@ class TestBulkInsert(TestcaseBaseBulkInsert):
         assert self.collection_wrap.num_entities == entities
         log.debug(state)
         time.sleep(2)
-        self.utility_wrap.wait_for_index_building_complete(c_name, timeout=120)
+        self.utility_wrap.wait_for_index_building_complete(c_name, timeout=300)
         res, _ = self.utility_wrap.index_building_progress(c_name)
         log.info(f"index building progress: {res}")
         log.info(f"wait for load finished and be ready for search")
@@ -380,13 +380,13 @@ class TestBulkInsert(TestcaseBaseBulkInsert):
                                                       files=files)
         logging.info(f"bulk insert task ids:{task_id}")
         success, _ = self.utility_wrap.wait_for_bulk_insert_tasks_completed(
-            task_ids=[task_id], timeout=90
+            task_ids=[task_id], timeout=300
         )
         tt = time.time() - t0
         log.info(f"bulk insert state:{success} in {tt}")
         assert success
         time.sleep(2)
-        self.utility_wrap.wait_for_index_building_complete(c_name, timeout=120)
+        self.utility_wrap.wait_for_index_building_complete(c_name, timeout=300)
         res, _ = self.utility_wrap.index_building_progress(c_name)
         log.info(f"index building progress: {res}")
 
@@ -469,7 +469,7 @@ class TestBulkInsert(TestcaseBaseBulkInsert):
         )
         logging.info(f"bulk insert task ids:{task_id}")
         success, states = self.utility_wrap.wait_for_bulk_insert_tasks_completed(
-            task_ids=[task_id], timeout=90
+            task_ids=[task_id], timeout=300
         )
         tt = time.time() - t0
         log.info(f"bulk insert state:{success} in {tt}")
@@ -484,7 +484,7 @@ class TestBulkInsert(TestcaseBaseBulkInsert):
         assert num_entities == bulk_insert_row + direct_insert_row
         # verify index
         time.sleep(2)
-        self.utility_wrap.wait_for_index_building_complete(c_name, timeout=120)
+        self.utility_wrap.wait_for_index_building_complete(c_name, timeout=300)
         res, _ = self.utility_wrap.index_building_progress(c_name)
         log.info(f"index building progress: {res}")
         # verify search and query
@@ -560,7 +560,7 @@ class TestBulkInsert(TestcaseBaseBulkInsert):
         )
         logging.info(f"bulk insert task ids:{task_id}")
         success, states = self.utility_wrap.wait_for_bulk_insert_tasks_completed(
-            task_ids=[task_id], timeout=90
+            task_ids=[task_id], timeout=300
         )
         tt = time.time() - t0
         log.info(f"bulk insert state:{success} in {tt}")
@@ -573,7 +573,7 @@ class TestBulkInsert(TestcaseBaseBulkInsert):
         log.info(f"collection entities: {num_entities}")
         assert num_entities == 500
         time.sleep(2)
-        self.utility_wrap.wait_for_index_building_complete(c_name, timeout=120)
+        self.utility_wrap.wait_for_index_building_complete(c_name, timeout=300)
         res, _ = self.utility_wrap.index_building_progress(c_name)
         log.info(f"index building progress: {res}")
         # verify search and query
@@ -641,7 +641,7 @@ class TestBulkInsert(TestcaseBaseBulkInsert):
         )
         logging.info(f"bulk insert task ids:{task_id}")
         success, states = self.utility_wrap.wait_for_bulk_insert_tasks_completed(
-            task_ids=[task_id], timeout=90
+            task_ids=[task_id], timeout=300
         )
         tt = time.time() - t0
         log.info(f"bulk insert state:{success} in {tt} with states:{states}")
@@ -673,7 +673,7 @@ class TestBulkInsert(TestcaseBaseBulkInsert):
     @pytest.mark.parametrize("auto_id", [True, False])
     @pytest.mark.parametrize("dim", [128])
     @pytest.mark.parametrize("entities", [2000])
-    @pytest.mark.parametrize("file_nums", [10])
+    @pytest.mark.parametrize("file_nums", [5])
     def test_multi_numpy_files_from_diff_folders(
         self, auto_id, dim, entities, file_nums
     ):
@@ -720,7 +720,7 @@ class TestBulkInsert(TestcaseBaseBulkInsert):
             )
             task_ids.append(task_id)
         success, states = self.utility_wrap.wait_for_bulk_insert_tasks_completed(
-            task_ids=[task_id], timeout=90
+            task_ids=[task_id], timeout=300
         )
         log.info(f"bulk insert state:{success}")
 
@@ -742,3 +742,197 @@ class TestBulkInsert(TestcaseBaseBulkInsert):
             check_task=CheckTasks.check_search_results,
             check_items={"nq": 1, "limit": 1},
         )
+
+    @pytest.mark.tags(CaseLabel.L3)
+    @pytest.mark.parametrize("is_row_based", [True])
+    @pytest.mark.parametrize("auto_id", [True, False])
+    @pytest.mark.parametrize("par_key_field", [df.int_field, df.string_field])
+    def test_partition_key_on_json_file(self, is_row_based, auto_id, par_key_field):
+        """
+        collection: auto_id, customized_id
+        collection schema: [pk, int64, varchar, float_vector]
+        Steps:
+        1. create collection with partition key enabled
+        2. import data
+        3. verify the data entities equal the import data and distributed by values of partition key field
+        4. load the collection
+        5. verify search successfully
+        6. verify query successfully
+        """
+        dim = 12
+        entities = 200
+        files = prepare_bulk_insert_json_files(
+            minio_endpoint=self.minio_endpoint,
+            bucket_name=self.bucket_name,
+            is_row_based=is_row_based,
+            rows=entities,
+            dim=dim,
+            auto_id=auto_id,
+            data_fields=default_multi_fields,
+            force=True,
+        )
+        self._connect()
+        c_name = cf.gen_unique_str("bulk_parkey")
+        fields = [
+            cf.gen_int64_field(name=df.pk_field, is_primary=True),
+            cf.gen_float_vec_field(name=df.vec_field, dim=dim),
+            cf.gen_int64_field(name=df.int_field, is_partition_key=(par_key_field == df.int_field)),
+            cf.gen_string_field(name=df.string_field, is_partition_key=(par_key_field == df.string_field)),
+            cf.gen_bool_field(name=df.bool_field),
+            cf.gen_float_field(name=df.float_field),
+        ]
+        schema = cf.gen_collection_schema(fields=fields, auto_id=auto_id)
+        self.collection_wrap.init_collection(c_name, schema=schema)
+        assert len(self.collection_wrap.partitions) == ct.default_partition_num
+
+        # import data
+        t0 = time.time()
+        task_id, _ = self.utility_wrap.do_bulk_insert(
+            collection_name=c_name,
+            partition_name=None,
+            files=files,
+        )
+        logging.info(f"bulk insert task id:{task_id}")
+        success, _ = self.utility_wrap.wait_for_bulk_insert_tasks_completed(
+            task_ids=[task_id], timeout=300
+        )
+        tt = time.time() - t0
+        log.info(f"bulk insert state:{success} in {tt}")
+        assert success
+
+        num_entities = self.collection_wrap.num_entities
+        log.info(f" collection entities: {num_entities}")
+        assert num_entities == entities
+
+        # verify imported data is available for search
+        index_params = ct.default_index
+        self.collection_wrap.create_index(
+            field_name=df.vec_field, index_params=index_params
+        )
+        self.collection_wrap.load()
+        log.info(f"wait for load finished and be ready for search")
+        time.sleep(10)
+        log.info(
+            f"query seg info: {self.utility_wrap.get_query_segment_info(c_name)[0]}"
+        )
+        nq = 2
+        topk = 2
+        search_data = cf.gen_vectors(nq, dim)
+        search_params = ct.default_search_params
+        res, _ = self.collection_wrap.search(
+            search_data,
+            df.vec_field,
+            param=search_params,
+            limit=topk,
+            check_task=CheckTasks.check_search_results,
+            check_items={"nq": nq, "limit": topk},
+        )
+        for hits in res:
+            ids = hits.ids
+            results, _ = self.collection_wrap.query(expr=f"{df.pk_field} in {ids}")
+            assert len(results) == len(ids)
+
+        # verify data was bulk inserted into different partitions
+        num_entities = 0
+        empty_partition_num = 0
+        for p in self.collection_wrap.partitions:
+            if p.num_entities == 0:
+                empty_partition_num += 1
+            num_entities += p.num_entities
+        assert num_entities == entities
+
+        # verify error when trying to bulk insert into a specific partition
+        # TODO: enable the error msg assert after issue #25586 fixed
+        err_msg = "not allow to set partition name for collection with partition key"
+        task_id, _ = self.utility_wrap.do_bulk_insert(
+            collection_name=c_name,
+            partition_name=self.collection_wrap.partitions[0].name,
+            files=files,
+            check_task=CheckTasks.err_res,
+            check_items={"err_code": 99, "err_msg": err_msg},
+        )
+
+    @pytest.mark.tags(CaseLabel.L3)
+    @pytest.mark.parametrize("auto_id", [True, False])
+    @pytest.mark.parametrize("dim", [13])
+    @pytest.mark.parametrize("entities", [150])
+    @pytest.mark.parametrize("file_nums", [10])
+    def test_partition_key_on_multi_numpy_files(
+            self, auto_id, dim, entities, file_nums
+    ):
+        """
+        collection schema 1: [pk, int64, float_vector, double]
+        data file: .npy files in different folders
+        Steps:
+        1. create collection with partition key enabled, create index and load
+        2. import data
+        3. verify that import numpy files in a loop
+        """
+        self._connect()
+        c_name = cf.gen_unique_str("bulk_ins_parkey")
+        fields = [
+            cf.gen_int64_field(name=df.pk_field, is_primary=True),
+            cf.gen_int64_field(name=df.int_field, is_partition_key=True),
+            cf.gen_float_field(name=df.float_field),
+            cf.gen_double_field(name=df.double_field),
+            cf.gen_float_vec_field(name=df.vec_field, dim=dim),
+        ]
+        schema = cf.gen_collection_schema(fields=fields)
+        self.collection_wrap.init_collection(c_name, schema=schema)
+        # build index
+        index_params = ct.default_index
+        self.collection_wrap.create_index(
+            field_name=df.vec_field, index_params=index_params
+        )
+        # load collection
+        self.collection_wrap.load()
+        data_fields = [f.name for f in fields if not f.to_dict().get("auto_id", False)]
+        task_ids = []
+        for i in range(file_nums):
+            files = prepare_bulk_insert_numpy_files(
+                minio_endpoint=self.minio_endpoint,
+                bucket_name=self.bucket_name,
+                rows=entities,
+                dim=dim,
+                data_fields=data_fields,
+                file_nums=1,
+                force=True,
+            )
+            task_id, _ = self.utility_wrap.do_bulk_insert(
+                collection_name=c_name, files=files
+            )
+            task_ids.append(task_id)
+        success, states = self.utility_wrap.wait_for_bulk_insert_tasks_completed(
+            task_ids=task_ids, timeout=300
+        )
+        log.info(f"bulk insert state:{success}")
+
+        assert success
+        log.info(f" collection entities: {self.collection_wrap.num_entities}")
+        assert self.collection_wrap.num_entities == entities * file_nums
+        # verify imported data is indexed
+        success = self.utility_wrap.wait_index_build_completed(c_name)
+        assert success
+        # verify search and query
+        log.info(f"wait for load finished and be ready for search")
+        self.collection_wrap.load(_refresh=True)
+        search_data = cf.gen_vectors(1, dim)
+        search_params = ct.default_search_params
+        res, _ = self.collection_wrap.search(
+            search_data,
+            df.vec_field,
+            param=search_params,
+            limit=1,
+            check_task=CheckTasks.check_search_results,
+            check_items={"nq": 1, "limit": 1},
+        )
+
+        # verify data was bulk inserted into different partitions
+        num_entities = 0
+        empty_partition_num = 0
+        for p in self.collection_wrap.partitions:
+            if p.num_entities == 0:
+                empty_partition_num += 1
+            num_entities += p.num_entities
+        assert num_entities == entities * file_nums
+

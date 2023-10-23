@@ -34,7 +34,8 @@ import (
 )
 
 type CollectionObserver struct {
-	stopCh chan struct{}
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 
 	dist                 *meta.DistributionManager
 	meta                 *meta.Meta
@@ -56,7 +57,6 @@ func NewCollectionObserver(
 	checherController *checkers.CheckerController,
 ) *CollectionObserver {
 	return &CollectionObserver{
-		stopCh:               make(chan struct{}),
 		dist:                 dist,
 		meta:                 meta,
 		targetMgr:            targetMgr,
@@ -67,23 +67,25 @@ func NewCollectionObserver(
 	}
 }
 
-func (ob *CollectionObserver) Start(ctx context.Context) {
+func (ob *CollectionObserver) Start() {
+	ctx, cancel := context.WithCancel(context.Background())
+	ob.cancel = cancel
+
 	const observePeriod = time.Second
+	ob.wg.Add(1)
 	go func() {
+		defer ob.wg.Done()
+
 		ticker := time.NewTicker(observePeriod)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
-				log.Info("CollectionObserver stopped due to context canceled")
-				return
-
-			case <-ob.stopCh:
 				log.Info("CollectionObserver stopped")
 				return
 
 			case <-ticker.C:
-				ob.Observe()
+				ob.Observe(ctx)
 			}
 		}
 	}()
@@ -91,13 +93,16 @@ func (ob *CollectionObserver) Start(ctx context.Context) {
 
 func (ob *CollectionObserver) Stop() {
 	ob.stopOnce.Do(func() {
-		close(ob.stopCh)
+		if ob.cancel != nil {
+			ob.cancel()
+		}
+		ob.wg.Wait()
 	})
 }
 
-func (ob *CollectionObserver) Observe() {
+func (ob *CollectionObserver) Observe(ctx context.Context) {
 	ob.observeTimeout()
-	ob.observeLoadStatus()
+	ob.observeLoadStatus(ctx)
 }
 
 func (ob *CollectionObserver) observeTimeout() {
@@ -116,11 +121,7 @@ func (ob *CollectionObserver) observeTimeout() {
 		ob.targetMgr.RemoveCollection(collection.GetCollectionID())
 	}
 
-	partitions := utils.GroupPartitionsByCollection(
-		ob.meta.CollectionManager.GetAllPartitions())
-	if len(partitions) > 0 {
-		log.Info("observes partitions timeout", zap.Int("partitionNum", len(partitions)))
-	}
+	partitions := utils.GroupPartitionsByCollection(ob.meta.CollectionManager.GetAllPartitions())
 	for collection, partitions := range partitions {
 		for _, partition := range partitions {
 			if partition.GetStatus() != querypb.LoadStatus_Loading ||
@@ -153,7 +154,7 @@ func (ob *CollectionObserver) readyToObserve(collectionID int64) bool {
 	return metaExist && targetExist
 }
 
-func (ob *CollectionObserver) observeLoadStatus() {
+func (ob *CollectionObserver) observeLoadStatus(ctx context.Context) {
 	partitions := ob.meta.CollectionManager.GetAllPartitions()
 	if len(partitions) > 0 {
 		log.Info("observe partitions status", zap.Int("partitionNum", len(partitions)))
@@ -165,7 +166,7 @@ func (ob *CollectionObserver) observeLoadStatus() {
 		}
 		if ob.readyToObserve(partition.CollectionID) {
 			replicaNum := ob.meta.GetReplicaNumber(partition.GetCollectionID())
-			ob.observePartitionLoadStatus(partition, replicaNum)
+			ob.observePartitionLoadStatus(ctx, partition, replicaNum)
 			loading = true
 		}
 	}
@@ -175,7 +176,7 @@ func (ob *CollectionObserver) observeLoadStatus() {
 	}
 }
 
-func (ob *CollectionObserver) observePartitionLoadStatus(partition *meta.Partition, replicaNum int32) {
+func (ob *CollectionObserver) observePartitionLoadStatus(ctx context.Context, partition *meta.Partition, replicaNum int32) {
 	log := log.With(
 		zap.Int64("collectionID", partition.GetCollectionID()),
 		zap.Int64("partitionID", partition.GetPartitionID()),
@@ -225,7 +226,7 @@ func (ob *CollectionObserver) observePartitionLoadStatus(partition *meta.Partiti
 	}
 
 	ob.partitionLoadedCount[partition.GetPartitionID()] = loadedCount
-	if loadPercentage == 100 && ob.targetObserver.Check(partition.GetCollectionID()) && ob.leaderObserver.CheckTargetVersion(partition.GetCollectionID()) {
+	if loadPercentage == 100 && ob.targetObserver.Check(ctx, partition.GetCollectionID()) && ob.leaderObserver.CheckTargetVersion(ctx, partition.GetCollectionID()) {
 		delete(ob.partitionLoadedCount, partition.GetPartitionID())
 	}
 	collectionPercentage, err := ob.meta.CollectionManager.UpdateLoadPercent(partition.PartitionID, loadPercentage)

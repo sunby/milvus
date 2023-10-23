@@ -26,10 +26,13 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 )
 
-func (s *MiniClusterSuite) WaitForFlush(ctx context.Context, segIDs []int64) {
+func (s *MiniClusterSuite) WaitForFlush(ctx context.Context, segIDs []int64, flushTs uint64, dbName, collectionName string) {
 	flushed := func() bool {
 		resp, err := s.Cluster.Proxy.GetFlushState(ctx, &milvuspb.GetFlushStateRequest{
-			SegmentIDs: segIDs,
+			SegmentIDs:     segIDs,
+			FlushTs:        flushTs,
+			DbName:         dbName,
+			CollectionName: collectionName,
 		})
 		if err != nil {
 			return false
@@ -116,6 +119,21 @@ func NewFloatVectorFieldData(fieldName string, numRows, dim int) *schemapb.Field
 	}
 }
 
+func NewFloat16VectorFieldData(fieldName string, numRows, dim int) *schemapb.FieldData {
+	return &schemapb.FieldData{
+		Type:      schemapb.DataType_Float16Vector,
+		FieldName: fieldName,
+		Field: &schemapb.FieldData_Vectors{
+			Vectors: &schemapb.VectorField{
+				Dim: int64(dim),
+				Data: &schemapb.VectorField_Float16Vector{
+					Float16Vector: GenerateFloat16Vectors(numRows, dim),
+				},
+			},
+		},
+	}
+}
+
 func NewBinaryVectorFieldData(fieldName string, numRows, dim int) *schemapb.FieldData {
 	return &schemapb.FieldData{
 		Type:      schemapb.DataType_BinaryVector,
@@ -158,6 +176,16 @@ func GenerateFloatVectors(numRows, dim int) []float32 {
 
 func GenerateBinaryVectors(numRows, dim int) []byte {
 	total := (numRows * dim) / 8
+	ret := make([]byte, total)
+	_, err := rand.Read(ret)
+	if err != nil {
+		panic(err)
+	}
+	return ret
+}
+
+func GenerateFloat16Vectors(numRows, dim int) []byte {
+	total := numRows * dim * 2
 	ret := make([]byte, total)
 	_, err := rand.Read(ret)
 	if err != nil {

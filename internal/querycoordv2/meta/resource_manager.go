@@ -29,7 +29,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
-	. "github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 var (
@@ -56,7 +55,7 @@ var DefaultResourceGroupName = "__default_resource_group"
 var DefaultResourceGroupCapacity = 1000000
 
 type ResourceGroup struct {
-	nodes    UniqueSet
+	nodes    typeutil.UniqueSet
 	capacity int
 }
 
@@ -481,7 +480,6 @@ func (rm *ResourceManager) HandleNodeDown(node int64) (string, error) {
 	rgName, err := rm.findResourceGroupByNode(node)
 	if err != nil {
 		return "", ErrNodeNotAssignToRG
-
 	}
 
 	newNodes := []int64{}
@@ -528,7 +526,7 @@ func (rm *ResourceManager) TransferNode(from string, to string, numNode int) ([]
 		return nil, ErrNodeNotEnough
 	}
 
-	//todo: a better way to choose a node with least balance cost
+	// todo: a better way to choose a node with least balance cost
 	movedNodes, err := rm.transferNodeInStore(from, to, numNode)
 	if err != nil {
 		return nil, err
@@ -627,7 +625,7 @@ func (rm *ResourceManager) AutoRecoverResourceGroup(rgName string) ([]int64, err
 	lackNodesNum := rm.groups[rgName].LackOfNodes()
 	nodesInDefault := rm.groups[DefaultResourceGroupName].GetNodes()
 	for i := 0; i < len(nodesInDefault) && i < lackNodesNum; i++ {
-		//todo: a better way to choose a node with least balance cost
+		// todo: a better way to choose a node with least balance cost
 		node := nodesInDefault[i]
 		err := rm.unassignNode(DefaultResourceGroupName, node)
 		if err != nil {

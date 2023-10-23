@@ -55,6 +55,15 @@ class FieldData<Json> : public FieldDataJsonImpl {
 };
 
 template <>
+class FieldData<Array> : public FieldDataArrayImpl {
+ public:
+    static_assert(IsScalar<Array> || std::is_same_v<std::string, PkType>);
+    explicit FieldData(DataType data_type, int64_t buffered_num_rows = 0)
+        : FieldDataArrayImpl(data_type, buffered_num_rows) {
+    }
+};
+
+template <>
 class FieldData<FloatVector> : public FieldDataImpl<float, false> {
  public:
     explicit FieldData(int64_t dim,
@@ -83,6 +92,17 @@ class FieldData<BinaryVector> : public FieldDataImpl<uint8_t, false> {
 
  private:
     int64_t binary_dim_;
+};
+
+template <>
+class FieldData<Float16Vector> : public FieldDataImpl<float16, false> {
+ public:
+    explicit FieldData(int64_t dim,
+                       DataType data_type,
+                       int64_t buffered_num_rows = 0)
+        : FieldDataImpl<float16, false>::FieldDataImpl(
+              dim, data_type, buffered_num_rows) {
+    }
 };
 
 using FieldDataPtr = std::shared_ptr<FieldDataBase>;

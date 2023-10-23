@@ -27,6 +27,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/meta"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 )
 
@@ -47,6 +48,7 @@ func MergeMetaSegmentIntoSegmentInfo(info *querypb.SegmentInfo, segments ...*met
 	first := segments[0]
 	if info.GetSegmentID() == 0 {
 		*info = querypb.SegmentInfo{
+			NodeID:       paramtable.GetNodeID(),
 			SegmentID:    first.GetID(),
 			CollectionID: first.GetCollectionID(),
 			PartitionID:  first.GetPartitionID(),
@@ -54,6 +56,12 @@ func MergeMetaSegmentIntoSegmentInfo(info *querypb.SegmentInfo, segments ...*met
 			DmChannel:    first.GetInsertChannel(),
 			NodeIds:      make([]int64, 0),
 			SegmentState: commonpb.SegmentState_Sealed,
+			IndexInfos:   make([]*querypb.FieldIndexInfo, 0),
+		}
+		for _, indexInfo := range first.IndexInfo {
+			info.IndexName = indexInfo.IndexName
+			info.IndexID = indexInfo.IndexID
+			info.IndexInfos = append(info.IndexInfos, indexInfo)
 		}
 	}
 

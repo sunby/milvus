@@ -13,6 +13,8 @@ FROM ubuntu:focal-20220426
 
 ARG TARGETARCH
 
+RUN if [ "$TARGETARCH" = "arm64" ]; then apt-get update && apt-get install -y ninja-build; fi
+
 RUN apt-get update && apt-get install -y --no-install-recommends wget curl ca-certificates gnupg2 \
     g++ gcc gdb gdbserver git make ccache libssl-dev zlib1g-dev zip unzip \
     clang-format-10 clang-tidy-10 lcov libtool m4 autoconf automake python3 python3-pip \
@@ -23,8 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends wget curl ca-ce
 RUN pip3 install conan==1.58.0
 
 RUN echo "target arch $TARGETARCH"
-RUN if [ "$TARGETARCH" = "amd64" ]; then CMAKE_SUFFIX=x86_64; else CMAKE_SUFFIX=aarch64; fi &&\
-    wget -qO- "https://cmake.org/files/v3.24/cmake-3.24.0-linux-$CMAKE_SUFFIX.tar.gz" | tar --strip-components=1 -xz -C /usr/local
+RUN wget -qO- "https://cmake.org/files/v3.24/cmake-3.24.4-linux-`uname -m`.tar.gz" | tar --strip-components=1 -xz -C /usr/local
 
 # Install Go
 ENV GOPATH /go

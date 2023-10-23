@@ -11,7 +11,7 @@
 
 #include <map>
 
-#include "exceptions/EasyAssert.h"
+#include "common/EasyAssert.h"
 #include "indexbuilder/VecIndexCreator.h"
 #include "index/Utils.h"
 #include "index/IndexFactory.h"
@@ -19,27 +19,30 @@
 
 namespace milvus::indexbuilder {
 
-VecIndexCreator::VecIndexCreator(DataType data_type,
-                                 Config& config,
-                                 storage::FileManagerImplPtr file_manager)
-    : VecIndexCreator(data_type, "", config, file_manager, nullptr) {
+VecIndexCreator::VecIndexCreator(
+    DataType data_type,
+    Config& config,
+    const storage::FileManagerContext& file_manager_context)
+    : VecIndexCreator(data_type, "", config, file_manager_context, nullptr) {
 }
 
-VecIndexCreator::VecIndexCreator(DataType data_type,
-                                 const std::string& field_name,
-                                 Config& config,
-                                 storage::FileManagerImplPtr file_manager,
-                                 std::shared_ptr<milvus_storage::Space> space)
+VecIndexCreator::VecIndexCreator(
+    DataType data_type,
+    std::string field_name,
+    Config& config,
+    const storage::FileManagerContext& file_manager_context,
+    std::shared_ptr<milvus_storage::Space> space)
     : data_type_(data_type), config_(config), space_(space) {
     index::CreateIndexInfo index_info;
     index_info.field_type = data_type_;
     index_info.index_type = index::GetIndexTypeFromConfig(config_);
     index_info.metric_type = index::GetMetricTypeFromConfig(config_);
     index_info.field_name = field_name;
-    index_info.dim = index::GetDimFromConfig(config);
+    index_info.index_engine_version =
+        index::GetIndexEngineVersionFromConfig(config_);
 
     index_ = index::IndexFactory::GetInstance().CreateIndex(
-        index_info, file_manager, space_);
+        index_info, file_manager_context, space_);
     AssertInfo(index_ != nullptr,
                "[VecIndexCreator]Index is null after create index");
 }

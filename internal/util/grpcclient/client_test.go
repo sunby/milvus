@@ -23,25 +23,23 @@ import (
 	"net"
 	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/errors"
-
+	"github.com/stretchr/testify/assert"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/examples/helloworld/helloworld"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/reflection"
-
-	"github.com/stretchr/testify/assert"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 func TestMain(m *testing.M) {
@@ -104,13 +102,23 @@ func TestClientBase_CompressCall(t *testing.T) {
 
 func testCall(t *testing.T, compressed bool) {
 	// mock client with nothing
-	base := ClientBase[*mockClient]{}
+	base := ClientBase[*mockClient]{
+		maxCancelError: 10,
+		MaxAttempts:    3,
+	}
 	base.CompressionEnabled = compressed
-	base.grpcClientMtx.Lock()
-	base.grpcClient = &mockClient{}
-	base.grpcClientMtx.Unlock()
+	initClient := func() {
+		base.grpcClientMtx.Lock()
+		base.grpcClient = &mockClient{}
+		base.grpcClientMtx.Unlock()
+	}
+	base.MaxAttempts = 1
+	base.SetGetAddrFunc(func() (string, error) {
+		return "", errors.New("mocked address error")
+	})
 
 	t.Run("Call normal return", func(t *testing.T) {
+		initClient()
 		_, err := base.Call(context.Background(), func(client *mockClient) (any, error) {
 			return struct{}{}, nil
 		})
@@ -118,6 +126,7 @@ func testCall(t *testing.T, compressed bool) {
 	})
 
 	t.Run("Call with canceled context", func(t *testing.T) {
+		initClient()
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		_, err := base.Call(ctx, func(client *mockClient) (any, error) {
@@ -128,22 +137,7 @@ func testCall(t *testing.T, compressed bool) {
 	})
 
 	t.Run("Call canceled in caller func", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		errMock := errors.New("mocked")
-		_, err := base.Call(ctx, func(client *mockClient) (any, error) {
-			cancel()
-			return nil, errMock
-		})
-
-		assert.Error(t, err)
-		assert.True(t, errors.Is(err, errMock))
-		base.grpcClientMtx.RLock()
-		// client shall not be reset
-		assert.NotNil(t, base.grpcClient)
-		base.grpcClientMtx.RUnlock()
-	})
-
-	t.Run("Call canceled in caller func", func(t *testing.T) {
+		initClient()
 		ctx, cancel := context.WithCancel(context.Background())
 		errMock := errors.New("mocked")
 		_, err := base.Call(ctx, func(client *mockClient) (any, error) {
@@ -160,8 +154,10 @@ func testCall(t *testing.T, compressed bool) {
 	})
 
 	t.Run("Call returns non-grpc error", func(t *testing.T) {
+		initClient()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+
 		errMock := errors.New("mocked")
 		_, err := base.Call(ctx, func(client *mockClient) (any, error) {
 			return nil, errMock
@@ -175,10 +171,11 @@ func testCall(t *testing.T, compressed bool) {
 		base.grpcClientMtx.RUnlock()
 	})
 
-	t.Run("Call returns grpc error", func(t *testing.T) {
+	t.Run("Call returns Unavailable grpc error", func(t *testing.T) {
+		initClient()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		errGrpc := status.Error(codes.Unknown, "mocked")
+		errGrpc := status.Error(codes.Unavailable, "mocked")
 		_, err := base.Call(ctx, func(client *mockClient) (any, error) {
 			return nil, errGrpc
 		})
@@ -189,7 +186,46 @@ func testCall(t *testing.T, compressed bool) {
 		// client shall not be reset
 		assert.Nil(t, base.grpcClient)
 		base.grpcClientMtx.RUnlock()
+	})
 
+	t.Run("Call returns canceled grpc error within limit", func(t *testing.T) {
+		initClient()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		defer func() {
+			base.ctxCounter.Store(0)
+		}()
+		errGrpc := status.Error(codes.Canceled, "mocked")
+		_, err := base.Call(ctx, func(client *mockClient) (any, error) {
+			return nil, errGrpc
+		})
+
+		assert.Error(t, err)
+		assert.True(t, errors.Is(err, errGrpc))
+		base.grpcClientMtx.RLock()
+		// client shall not be reset
+		assert.NotNil(t, base.grpcClient)
+		base.grpcClientMtx.RUnlock()
+	})
+	t.Run("Call returns canceled grpc error exceed limit", func(t *testing.T) {
+		initClient()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		base.ctxCounter.Store(10)
+		defer func() {
+			base.ctxCounter.Store(0)
+		}()
+		errGrpc := status.Error(codes.Canceled, "mocked")
+		_, err := base.Call(ctx, func(client *mockClient) (any, error) {
+			return nil, errGrpc
+		})
+
+		assert.Error(t, err)
+		assert.True(t, errors.Is(err, errGrpc))
+		base.grpcClientMtx.RLock()
+		// client shall not be reset
+		assert.Nil(t, base.grpcClient)
+		base.grpcClientMtx.RUnlock()
 	})
 
 	base.grpcClientMtx.Lock()
@@ -211,11 +247,18 @@ func testCall(t *testing.T, compressed bool) {
 func TestClientBase_Recall(t *testing.T) {
 	// mock client with nothing
 	base := ClientBase[*mockClient]{}
-	base.grpcClientMtx.Lock()
-	base.grpcClient = &mockClient{}
-	base.grpcClientMtx.Unlock()
+	initClient := func() {
+		base.grpcClientMtx.Lock()
+		base.grpcClient = &mockClient{}
+		base.grpcClientMtx.Unlock()
+	}
+	base.MaxAttempts = 1
+	base.SetGetAddrFunc(func() (string, error) {
+		return "", errors.New("mocked address error")
+	})
 
 	t.Run("Recall normal return", func(t *testing.T) {
+		initClient()
 		_, err := base.ReCall(context.Background(), func(client *mockClient) (any, error) {
 			return struct{}{}, nil
 		})
@@ -223,6 +266,7 @@ func TestClientBase_Recall(t *testing.T) {
 	})
 
 	t.Run("ReCall with canceled context", func(t *testing.T) {
+		initClient()
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		_, err := base.ReCall(ctx, func(client *mockClient) (any, error) {
@@ -232,24 +276,8 @@ func TestClientBase_Recall(t *testing.T) {
 		assert.True(t, errors.Is(err, context.Canceled))
 	})
 
-	t.Run("ReCall fails first and success second", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		flag := false
-		var mut sync.Mutex
-		_, err := base.ReCall(ctx, func(client *mockClient) (any, error) {
-			mut.Lock()
-			defer mut.Unlock()
-			if flag {
-				return struct{}{}, nil
-			}
-			flag = true
-			return nil, errors.New("mock first")
-		})
-		assert.NoError(t, err)
-	})
-
 	t.Run("ReCall canceled in caller func", func(t *testing.T) {
+		initClient()
 		ctx, cancel := context.WithCancel(context.Background())
 		errMock := errors.New("mocked")
 		_, err := base.ReCall(ctx, func(client *mockClient) (any, error) {
@@ -258,7 +286,7 @@ func TestClientBase_Recall(t *testing.T) {
 		})
 
 		assert.Error(t, err)
-		assert.True(t, errors.Is(err, context.Canceled))
+		assert.True(t, errors.Is(err, errMock))
 		base.grpcClientMtx.RLock()
 		// client shall not be reset
 		assert.NotNil(t, base.grpcClient)
@@ -279,7 +307,21 @@ func TestClientBase_Recall(t *testing.T) {
 		assert.Error(t, err)
 		assert.True(t, errors.Is(err, ErrConnect))
 	})
+}
 
+func TestClientBase_CheckError(t *testing.T) {
+	base := ClientBase[*mockClient]{}
+	base.grpcClient = &mockClient{}
+	base.MaxAttempts = 1
+
+	ctx := context.Background()
+	retry, reset, _ := base.checkErr(ctx, status.Errorf(codes.Canceled, "fake context canceled"))
+	assert.True(t, retry)
+	assert.True(t, reset)
+
+	retry, reset, _ = base.checkErr(ctx, status.Errorf(codes.Unimplemented, "fake context canceled"))
+	assert.False(t, retry)
+	assert.False(t, reset)
 }
 
 type server struct {
@@ -305,16 +347,16 @@ func TestClientBase_RetryPolicy(t *testing.T) {
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
-	var kaep = keepalive.EnforcementPolicy{
+	kaep := keepalive.EnforcementPolicy{
 		MinTime:             5 * time.Second,
 		PermitWithoutStream: true,
 	}
-	var kasp = keepalive.ServerParameters{
+	kasp := keepalive.ServerParameters{
 		Time:    60 * time.Second,
 		Timeout: 60 * time.Second,
 	}
 
-	maxAttempts := 5
+	maxAttempts := 1
 	s := grpc.NewServer(
 		grpc.KeepaliveEnforcementPolicy(kaep),
 		grpc.KeepaliveParams(kasp),
@@ -338,7 +380,6 @@ func TestClientBase_RetryPolicy(t *testing.T) {
 		MaxAttempts:            maxAttempts,
 		InitialBackoff:         10.0,
 		MaxBackoff:             60.0,
-		BackoffMultiplier:      2.0,
 	}
 	clientBase.SetRole(typeutil.DataCoordRole)
 	clientBase.SetGetAddrFunc(func() (string, error) {
@@ -352,9 +393,11 @@ func TestClientBase_RetryPolicy(t *testing.T) {
 	ctx := context.Background()
 	randID := rand.Int63()
 	res, err := clientBase.Call(ctx, func(client rootcoordpb.RootCoordClient) (any, error) {
-		return &milvuspb.ComponentStates{State: &milvuspb.ComponentInfo{
-			NodeID: randID,
-		}}, nil
+		return &milvuspb.ComponentStates{
+			State: &milvuspb.ComponentInfo{
+				NodeID: randID,
+			},
+		}, nil
 	})
 	assert.NoError(t, err)
 	assert.Equal(t, res.(*milvuspb.ComponentStates).GetState().GetNodeID(), randID)
@@ -366,16 +409,16 @@ func TestClientBase_Compression(t *testing.T) {
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
-	var kaep = keepalive.EnforcementPolicy{
+	kaep := keepalive.EnforcementPolicy{
 		MinTime:             5 * time.Second,
 		PermitWithoutStream: true,
 	}
-	var kasp = keepalive.ServerParameters{
+	kasp := keepalive.ServerParameters{
 		Time:    60 * time.Second,
 		Timeout: 60 * time.Second,
 	}
 
-	maxAttempts := 5
+	maxAttempts := 1
 	s := grpc.NewServer(
 		grpc.KeepaliveEnforcementPolicy(kaep),
 		grpc.KeepaliveParams(kasp),
@@ -399,7 +442,6 @@ func TestClientBase_Compression(t *testing.T) {
 		MaxAttempts:            maxAttempts,
 		InitialBackoff:         10.0,
 		MaxBackoff:             60.0,
-		BackoffMultiplier:      2.0,
 		CompressionEnabled:     true,
 	}
 	clientBase.SetRole(typeutil.DataCoordRole)
@@ -414,9 +456,12 @@ func TestClientBase_Compression(t *testing.T) {
 	ctx := context.Background()
 	randID := rand.Int63()
 	res, err := clientBase.Call(ctx, func(client rootcoordpb.RootCoordClient) (any, error) {
-		return &milvuspb.ComponentStates{State: &milvuspb.ComponentInfo{
-			NodeID: randID,
-		}}, nil
+		return &milvuspb.ComponentStates{
+			State: &milvuspb.ComponentInfo{
+				NodeID: randID,
+			},
+			Status: merr.Success(),
+		}, nil
 	})
 	assert.NoError(t, err)
 	assert.Equal(t, res.(*milvuspb.ComponentStates).GetState().GetNodeID(), randID)

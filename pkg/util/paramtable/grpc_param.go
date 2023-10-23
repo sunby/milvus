@@ -43,12 +43,10 @@ const (
 	DefaultKeepAliveTimeout = 20000
 
 	// Grpc retry policy
-	DefaultMaxAttempts               = 5
-	DefaultInitialBackoff    float64 = 1.0
-	DefaultMaxBackoff        float64 = 10.0
-	DefaultBackoffMultiplier float64 = 2.0
-
-	DefaultCompressionEnabled bool = false
+	DefaultMaxAttempts                = 10
+	DefaultInitialBackoff     float64 = 0.2
+	DefaultMaxBackoff         float64 = 10
+	DefaultCompressionEnabled bool    = true
 
 	ProxyInternalPort = 19529
 	ProxyExternalPort = 19530
@@ -69,7 +67,14 @@ type grpcConfig struct {
 
 func (p *grpcConfig) init(domain string, base *BaseTable) {
 	p.Domain = domain
-	p.IP = funcutil.GetLocalIP()
+	ipItem := ParamItem{
+		Key:          p.Domain + ".ip",
+		Version:      "2.3.3",
+		DefaultValue: "",
+		Export:       true,
+	}
+	ipItem.Init(base.mgr)
+	p.IP = funcutil.GetIP(ipItem.GetValue())
 
 	p.Port = ParamItem{
 		Key:          p.Domain + ".port",
@@ -131,6 +136,8 @@ type GrpcServerConfig struct {
 
 	ServerMaxSendSize ParamItem `refreshable:"false"`
 	ServerMaxRecvSize ParamItem `refreshable:"false"`
+
+	GracefulStopTimeout ParamItem `refreshable:"true"`
 }
 
 func (p *GrpcServerConfig) Init(domain string, base *BaseTable) {
@@ -179,6 +186,15 @@ func (p *GrpcServerConfig) Init(domain string, base *BaseTable) {
 		Export: true,
 	}
 	p.ServerMaxRecvSize.Init(base.mgr)
+
+	p.GracefulStopTimeout = ParamItem{
+		Key:          "grpc.gracefulStopTimeout",
+		Version:      "2.3.1",
+		DefaultValue: "10",
+		Doc:          "second, time to wait graceful stop finish",
+		Export:       true,
+	}
+	p.GracefulStopTimeout.Init(base.mgr)
 }
 
 // GrpcClientConfig is configuration for grpc client.
@@ -194,10 +210,12 @@ type GrpcClientConfig struct {
 	KeepAliveTime    ParamItem `refreshable:"false"`
 	KeepAliveTimeout ParamItem `refreshable:"false"`
 
-	MaxAttempts       ParamItem `refreshable:"false"`
-	InitialBackoff    ParamItem `refreshable:"false"`
-	MaxBackoff        ParamItem `refreshable:"false"`
-	BackoffMultiplier ParamItem `refreshable:"false"`
+	MaxAttempts             ParamItem `refreshable:"false"`
+	InitialBackoff          ParamItem `refreshable:"false"`
+	MaxBackoff              ParamItem `refreshable:"false"`
+	MinResetInterval        ParamItem `refreshable:"false"`
+	MaxCancelError          ParamItem `refreshable:"false"`
+	MinSessionCheckInterval ParamItem `refreshable:"false"`
 }
 
 func (p *GrpcClientConfig) Init(domain string, base *BaseTable) {
@@ -318,15 +336,9 @@ func (p *GrpcClientConfig) Init(domain string, base *BaseTable) {
 			if v == "" {
 				return maxAttempts
 			}
-			iv, err := strconv.Atoi(v)
+			_, err := strconv.Atoi(v)
 			if err != nil {
 				log.Warn("Failed to convert int when parsing grpc.client.maxMaxAttempts, set to default",
-					zap.String("role", p.Domain),
-					zap.String("grpc.client.maxMaxAttempts", v))
-				return maxAttempts
-			}
-			if iv < 2 || iv > 5 {
-				log.Warn("The value of %s should be greater than 1 and less than 6, set to default",
 					zap.String("role", p.Domain),
 					zap.String("grpc.client.maxMaxAttempts", v))
 				return maxAttempts
@@ -345,7 +357,7 @@ func (p *GrpcClientConfig) Init(domain string, base *BaseTable) {
 			if v == "" {
 				return initialBackoff
 			}
-			_, err := strconv.Atoi(v)
+			_, err := strconv.ParseFloat(v, 64)
 			if err != nil {
 				log.Warn("Failed to convert int when parsing grpc.client.initialBackoff, set to default",
 					zap.String("role", p.Domain),
@@ -379,27 +391,6 @@ func (p *GrpcClientConfig) Init(domain string, base *BaseTable) {
 	}
 	p.MaxBackoff.Init(base.mgr)
 
-	backoffMultiplier := fmt.Sprintf("%f", DefaultBackoffMultiplier)
-	p.BackoffMultiplier = ParamItem{
-		Key:     "grpc.client.backoffMultiplier",
-		Version: "2.0.0",
-		Formatter: func(v string) string {
-			if v == "" {
-				return backoffMultiplier
-			}
-			_, err := strconv.ParseFloat(v, 64)
-			if err != nil {
-				log.Warn("Failed to convert int when parsing grpc.client.backoffMultiplier, set to default",
-					zap.String("role", p.Domain),
-					zap.String("grpc.client.backoffMultiplier", v))
-				return backoffMultiplier
-			}
-			return v
-		},
-		Export: true,
-	}
-	p.BackoffMultiplier.Init(base.mgr)
-
 	compressionEnabled := fmt.Sprintf("%t", DefaultCompressionEnabled)
 	p.CompressionEnabled = ParamItem{
 		Key:     "grpc.client.compressionEnabled",
@@ -413,11 +404,71 @@ func (p *GrpcClientConfig) Init(domain string, base *BaseTable) {
 				log.Warn("Failed to convert int when parsing grpc.client.compressionEnabled, set to default",
 					zap.String("role", p.Domain),
 					zap.String("grpc.client.compressionEnabled", v))
-				return backoffMultiplier
+				return compressionEnabled
 			}
 			return v
 		},
 		Export: true,
 	}
 	p.CompressionEnabled.Init(base.mgr)
+
+	p.MinResetInterval = ParamItem{
+		Key:          "grpc.client.minResetInterval",
+		DefaultValue: "1000",
+		Formatter: func(v string) string {
+			if v == "" {
+				return "1000"
+			}
+			_, err := strconv.Atoi(v)
+			if err != nil {
+				log.Warn("Failed to parse grpc.client.minResetInterval, set to default",
+					zap.String("role", p.Domain), zap.String("grpc.client.minResetInterval", v),
+					zap.Error(err))
+				return "1000"
+			}
+			return v
+		},
+		Export: true,
+	}
+	p.MinResetInterval.Init(base.mgr)
+
+	p.MinSessionCheckInterval = ParamItem{
+		Key:          "grpc.client.minSessionCheckInterval",
+		DefaultValue: "200",
+		Formatter: func(v string) string {
+			if v == "" {
+				return "200"
+			}
+			_, err := strconv.Atoi(v)
+			if err != nil {
+				log.Warn("Failed to parse grpc.client.minSessionCheckInterval, set to default",
+					zap.String("role", p.Domain), zap.String("grpc.client.minSessionCheckInterval", v),
+					zap.Error(err))
+				return "200"
+			}
+			return v
+		},
+		Export: true,
+	}
+	p.MinSessionCheckInterval.Init(base.mgr)
+
+	p.MaxCancelError = ParamItem{
+		Key:          "grpc.client.maxCancelError",
+		DefaultValue: "32",
+		Formatter: func(v string) string {
+			if v == "" {
+				return "32"
+			}
+			_, err := strconv.Atoi(v)
+			if err != nil {
+				log.Warn("Failed to parse grpc.client.maxCancelError, set to default",
+					zap.String("role", p.Domain), zap.String("grpc.client.maxCancelError", v),
+					zap.Error(err))
+				return "32"
+			}
+			return v
+		},
+		Export: true,
+	}
+	p.MaxCancelError.Init(base.mgr)
 }

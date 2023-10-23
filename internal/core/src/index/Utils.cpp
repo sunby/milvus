@@ -26,16 +26,15 @@
 #include <iostream>
 
 #include "index/Utils.h"
-#include "index/Exception.h"
 #include "index/Meta.h"
 #include <google/protobuf/text_format.h>
 #include <unistd.h>
-#include "exceptions/EasyAssert.h"
+#include "common/EasyAssert.h"
 #include "knowhere/comp/index_param.h"
 #include "common/Slice.h"
 #include "storage/FieldData.h"
 #include "storage/Util.h"
-#include "utils/File.h"
+#include "common/File.h"
 
 namespace milvus::index {
 
@@ -119,6 +118,15 @@ GetIndexTypeFromConfig(const Config& config) {
     auto index_type = GetValueFromConfig<std::string>(config, "index_type");
     AssertInfo(index_type.has_value(), "index_type not exist in config");
     return index_type.value();
+}
+
+IndexVersion
+GetIndexEngineVersionFromConfig(const Config& config) {
+    auto index_engine_version =
+        GetValueFromConfig<std::string>(config, INDEX_ENGINE_VERSION);
+    AssertInfo(index_engine_version.has_value(),
+               "index_engine not exist in config");
+    return (std::stoi(index_engine_version.value()));
 }
 
 // TODO :: too ugly
@@ -286,9 +294,10 @@ ReadDataFromFD(int fd, void* buf, size_t size, size_t chunk_size) {
         const size_t count = (size < chunk_size) ? size : chunk_size;
         const ssize_t size_read = read(fd, buf, count);
         if (size_read != count) {
-            throw UnistdException(
+            throw SegcoreError(
+                ErrorCode::UnistdError,
                 "read data from fd error, returned read size is " +
-                std::to_string(size_read));
+                    std::to_string(size_read));
         }
 
         buf = static_cast<char*>(buf) + size_read;

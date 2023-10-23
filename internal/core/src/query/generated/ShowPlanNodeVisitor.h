@@ -12,8 +12,8 @@
 #pragma once
 // Generated File
 // DO NOT EDIT
-#include "exceptions/EasyAssert.h"
-#include "utils/Json.h"
+#include "common/EasyAssert.h"
+#include "common/Json.h"
 #include <optional>
 #include <utility>
 
@@ -27,6 +27,9 @@ class ShowPlanNodeVisitor : public PlanNodeVisitor {
 
     void
     visit(BinaryVectorANNS& node) override;
+
+    void
+    visit(Float16VectorANNS& node) override;
 
     void
     visit(RetrievePlanNode& node) override;

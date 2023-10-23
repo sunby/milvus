@@ -20,16 +20,17 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"io"
 
+	"github.com/cockroachdb/errors"
 	"go.uber.org/zap"
-	"google.golang.org/grpc/codes"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util/streamrpc"
 	"github.com/milvus-io/milvus/pkg/log"
-	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
@@ -40,6 +41,7 @@ type Worker interface {
 	Delete(ctx context.Context, req *querypb.DeleteRequest) error
 	SearchSegments(ctx context.Context, req *querypb.SearchRequest) (*internalpb.SearchResults, error)
 	QuerySegments(ctx context.Context, req *querypb.QueryRequest) (*internalpb.RetrieveResults, error)
+	QueryStreamSegments(ctx context.Context, req *querypb.QueryRequest, srv streamrpc.QueryStreamServer) error
 	GetStatistics(ctx context.Context, req *querypb.GetStatisticsRequest) (*internalpb.GetStatisticsResponse, error)
 
 	IsHealthy() bool
@@ -48,11 +50,11 @@ type Worker interface {
 
 // remoteWorker wraps grpc QueryNode client as Worker.
 type remoteWorker struct {
-	client types.QueryNode
+	client types.QueryNodeClient
 }
 
 // NewRemoteWorker creates a grpcWorker.
-func NewRemoteWorker(client types.QueryNode) Worker {
+func NewRemoteWorker(client types.QueryNodeClient) Worker {
 	return &remoteWorker{
 		client: client,
 	}
@@ -69,7 +71,7 @@ func (w *remoteWorker) LoadSegments(ctx context.Context, req *querypb.LoadSegmen
 			zap.Error(err),
 		)
 		return err
-	} else if status.ErrorCode != commonpb.ErrorCode_Success {
+	} else if status.GetErrorCode() != commonpb.ErrorCode_Success {
 		log.Warn("failed to call LoadSegments, worker return error",
 			zap.String("errorCode", status.GetErrorCode().String()),
 			zap.String("reason", status.GetReason()),
@@ -89,7 +91,7 @@ func (w *remoteWorker) ReleaseSegments(ctx context.Context, req *querypb.Release
 			zap.Error(err),
 		)
 		return err
-	} else if status.ErrorCode != commonpb.ErrorCode_Success {
+	} else if status.GetErrorCode() != commonpb.ErrorCode_Success {
 		log.Warn("failed to call ReleaseSegments, worker return error",
 			zap.String("errorCode", status.GetErrorCode().String()),
 			zap.String("reason", status.GetReason()),
@@ -104,24 +106,20 @@ func (w *remoteWorker) Delete(ctx context.Context, req *querypb.DeleteRequest) e
 		zap.Int64("workerID", req.GetBase().GetTargetID()),
 	)
 	status, err := w.client.Delete(ctx, req)
-	if err != nil {
-		log.Warn("failed to call Delete via grpc worker",
-			zap.Error(err),
-		)
+	if err := merr.CheckRPCCall(status, err); err != nil {
+		if errors.Is(err, merr.ErrServiceUnimplemented) {
+			log.Warn("invoke legacy querynode Delete method, ignore error", zap.Error(err))
+			return nil
+		}
+		log.Warn("failed to call Delete, worker return error", zap.Error(err))
 		return err
-	} else if status.GetErrorCode() != commonpb.ErrorCode_Success {
-		log.Warn("failed to call Delete, worker return error",
-			zap.String("errorCode", status.GetErrorCode().String()),
-			zap.String("reason", status.GetReason()),
-		)
-		return merr.Error(status)
 	}
 	return nil
 }
 
 func (w *remoteWorker) SearchSegments(ctx context.Context, req *querypb.SearchRequest) (*internalpb.SearchResults, error) {
 	ret, err := w.client.SearchSegments(ctx, req)
-	if err != nil && funcutil.IsGrpcErr(err, codes.Unimplemented) {
+	if err != nil && errors.Is(err, merr.ErrServiceUnimplemented) {
 		// for compatible with rolling upgrade from version before v2.2.9
 		return w.client.Search(ctx, req)
 	}
@@ -131,12 +129,43 @@ func (w *remoteWorker) SearchSegments(ctx context.Context, req *querypb.SearchRe
 
 func (w *remoteWorker) QuerySegments(ctx context.Context, req *querypb.QueryRequest) (*internalpb.RetrieveResults, error) {
 	ret, err := w.client.QuerySegments(ctx, req)
-	if err != nil && funcutil.IsGrpcErr(err, codes.Unimplemented) {
+	if err != nil && errors.Is(err, merr.ErrServiceUnimplemented) {
 		// for compatible with rolling upgrade from version before v2.2.9
 		return w.client.Query(ctx, req)
 	}
 
 	return ret, err
+}
+
+func (w *remoteWorker) QueryStreamSegments(ctx context.Context, req *querypb.QueryRequest, srv streamrpc.QueryStreamServer) error {
+	client, err := w.client.QueryStreamSegments(ctx, req)
+	if err != nil {
+		return err
+	}
+
+	for {
+		result, err := client.Recv()
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+
+		err = merr.Error(result.GetStatus())
+		if err != nil {
+			return err
+		}
+
+		err = srv.Send(result)
+		if err != nil {
+			log.Warn("send stream pks from remote woker failed",
+				zap.Int64("collectionID", req.Req.GetCollectionID()),
+				zap.Int64s("segmentIDs", req.GetSegmentIDs()),
+			)
+			return err
+		}
+	}
 }
 
 func (w *remoteWorker) GetStatistics(ctx context.Context, req *querypb.GetStatisticsRequest) (*internalpb.GetStatisticsResponse, error) {
@@ -148,5 +177,7 @@ func (w *remoteWorker) IsHealthy() bool {
 }
 
 func (w *remoteWorker) Stop() {
-	w.client.Stop()
+	if err := w.client.Close(); err != nil {
+		log.Warn("failed to call Close via grpc worker", zap.Error(err))
+	}
 }

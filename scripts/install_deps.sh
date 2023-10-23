@@ -30,7 +30,7 @@ function install_linux_deps() {
     sudo yum install -y epel-release centos-release-scl-rh
     sudo yum install -y wget curl which \
       git make automake python3-devel \
-      devtoolset-11-gcc devtoolset-11-gcc-c++ devtoolset-11-gcc-gfortran \
+      devtoolset-11-gcc devtoolset-11-gcc-c++ devtoolset-11-gcc-gfortran devtoolset-11-libatomic-devel \
       llvm-toolset-11.0-clang llvm-toolset-11.0-clang-tools-extra \
       libaio libuuid-devel zip unzip \
       ccache lcov libtool m4 autoconf automake
@@ -56,7 +56,7 @@ function install_linux_deps() {
 
 function install_mac_deps() {
   sudo xcode-select --install > /dev/null 2>&1
-  brew install libomp ninja cmake llvm@15 ccache grep pkg-config
+  brew install libomp ninja cmake llvm@15 ccache grep pkg-config zip unzip
   export PATH="/usr/local/opt/grep/libexec/gnubin:$PATH"
   brew update && brew upgrade && brew cleanup
 
@@ -71,12 +71,6 @@ function install_mac_deps() {
 if ! command -v go &> /dev/null
 then
     echo "go could not be found, please install it"
-    exit
-fi
-
-if ! command -v cmake &> /dev/null
-then
-    echo "cmake could not be found, please install it"
     exit
 fi
 

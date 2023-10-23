@@ -24,16 +24,16 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/datanode/allocator"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
-	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
 )
 
 var binlogTestDir = "/tmp/milvus_test/test_binlog_io"
@@ -89,7 +89,7 @@ func TestBinlogIOInterfaceMethods(t *testing.T) {
 					ctx, cancel := context.WithCancel(test.inctx)
 					cancel()
 
-					_, err := b.download(ctx, nil)
+					_, err := b.download(ctx, []string{"test"})
 					assert.EqualError(t, err, errDownloadFromBlobStorage.Error())
 				}
 			})
@@ -97,7 +97,7 @@ func TestBinlogIOInterfaceMethods(t *testing.T) {
 	})
 
 	t.Run("Test download twice", func(t *testing.T) {
-		mkc := &mockCm{errMultiLoad: true}
+		mkc := &mockCm{errRead: true}
 		alloc := allocator.NewMockAllocator(t)
 		b := &binlogIO{mkc, alloc}
 
@@ -145,7 +145,7 @@ func TestBinlogIOInterfaceMethods(t *testing.T) {
 		})
 
 		t.Run("upload failed", func(t *testing.T) {
-			mkc := &mockCm{errMultiLoad: true, errMultiSave: true}
+			mkc := &mockCm{errRead: true, errSave: true}
 			alloc := allocator.NewMockAllocator(t)
 			b := binlogIO{mkc, alloc}
 
@@ -201,7 +201,6 @@ func TestBinlogIOInnerMethods(t *testing.T) {
 		for _, test := range tests {
 			t.Run(test.description, func(t *testing.T) {
 				if test.isvalid {
-
 					k, v, err := b.genDeltaBlobs(&DeleteData{
 						Pks: []primaryKey{test.deletepk},
 						Tss: []uint64{test.ts},
@@ -237,7 +236,6 @@ func TestBinlogIOInnerMethods(t *testing.T) {
 			assert.Error(t, err)
 			assert.Empty(t, k)
 			assert.Empty(t, v)
-
 		})
 	})
 
@@ -360,8 +358,8 @@ func TestBinlogIOInnerMethods(t *testing.T) {
 
 type mockCm struct {
 	storage.ChunkManager
-	errMultiLoad    bool
-	errMultiSave    bool
+	errRead         bool
+	errSave         bool
 	MultiReadReturn [][]byte
 	ReadReturn      []byte
 }
@@ -373,25 +371,24 @@ func (mk *mockCm) RootPath() string {
 }
 
 func (mk *mockCm) Write(ctx context.Context, filePath string, content []byte) error {
+	if mk.errSave {
+		return errors.New("mockKv save error")
+	}
 	return nil
 }
 
 func (mk *mockCm) MultiWrite(ctx context.Context, contents map[string][]byte) error {
-	if mk.errMultiSave {
-		return errors.New("mockKv multisave error")
-	}
 	return nil
 }
 
 func (mk *mockCm) Read(ctx context.Context, filePath string) ([]byte, error) {
+	if mk.errRead {
+		return nil, errors.New("mockKv read error")
+	}
 	return mk.ReadReturn, nil
 }
 
 func (mk *mockCm) MultiRead(ctx context.Context, filePaths []string) ([][]byte, error) {
-	if mk.errMultiLoad {
-		return nil, errors.New("mockKv multiload error")
-	}
-
 	if mk.MultiReadReturn != nil {
 		return mk.MultiReadReturn, nil
 	}

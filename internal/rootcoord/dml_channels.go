@@ -25,12 +25,10 @@ import (
 	"sync"
 
 	"github.com/cockroachdb/errors"
-
-	"github.com/milvus-io/milvus/pkg/metrics"
-
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
@@ -188,10 +186,11 @@ func newDmlChannels(ctx context.Context, factory msgstream.Factory, chanNamePref
 
 		if params.PreCreatedTopicEnabled.GetAsBool() {
 			subName := fmt.Sprintf("pre-created-topic-check-%s", name)
-			ms.AsConsumer([]string{name}, subName, mqwrapper.SubscriptionPositionUnknown)
-			// check topic exist and check the existed topic whether empty or not
+			ms.AsConsumer(ctx, []string{name}, subName, mqwrapper.SubscriptionPositionUnknown)
+			// check if topic is existed
 			// kafka and rmq will err if the topic does not yet exist, pulsar will not
-			// if one of the topics is not empty, panic
+			// allow topics is not empty, for the reason that when restart or upgrade, the topic is not empty
+			// if there are any message that not belong to milvus, will skip it
 			err := ms.CheckTopicValid(name)
 			if err != nil {
 				log.Error("created topic is invaild", zap.String("name", name), zap.Error(err))

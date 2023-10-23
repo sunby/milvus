@@ -23,10 +23,10 @@
 #include <fcntl.h>
 
 #include "common/Types.h"
+#include "common/EasyAssert.h"
 #include "index/StringIndexMarisa.h"
 #include "index/Utils.h"
 #include "index/Index.h"
-#include "index/Exception.h"
 #include "common/Utils.h"
 #include "common/Slice.h"
 #include "storage/Util.h"
@@ -34,22 +34,21 @@
 
 namespace milvus::index {
 
-#if defined(__linux__) || defined(__APPLE__)
-
-StringIndexMarisa::StringIndexMarisa(storage::FileManagerImplPtr file_manager) {
-    if (file_manager != nullptr) {
-        file_manager_ = std::dynamic_pointer_cast<storage::MemFileManagerImpl>(
-            file_manager);
+StringIndexMarisa::StringIndexMarisa(
+    const storage::FileManagerContext& file_manager_context) {
+    if (file_manager_context.Valid()) {
+        file_manager_ =
+            std::make_shared<storage::MemFileManagerImpl>(file_manager_context);
     }
 }
 
 StringIndexMarisa::StringIndexMarisa(
-    storage::FileManagerImplPtr file_manager,
+    const storage::FileManagerContext& file_manager_context,
     std::shared_ptr<milvus_storage::Space> space)
     : space_(space) {
-    if (file_manager != nullptr) {
-        file_manager_ = std::dynamic_pointer_cast<storage::MemFileManagerImpl>(
-            file_manager);
+    if (file_manager_context.Valid()) {
+        file_manager_ = std::make_shared<storage::MemFileManagerImpl>(
+            file_manager_context, space_);
     }
 }
 
@@ -72,13 +71,13 @@ StringIndexMarisa::BuildV2(const Config& config) {
     AssertInfo(field_name.has_value(), "field name can not be empty");
     auto res = space_->ScanData();
     if (!res.ok()) {
-        PanicInfo("failed to create scan iterator");
+        PanicInfo(S3Error, "failed to create scan iterator");
     }
     auto reader = res.value();
     std::vector<storage::FieldDataPtr> field_datas;
     for (auto rec = reader->Next(); rec != nullptr; rec = reader->Next()) {
         if (!rec.ok()) {
-            PanicInfo("failed to read data");
+            PanicInfo(DataFormatBroken, "failed to read data");
         }
         auto data = rec.ValueUnsafe();
         auto total_num_rows = data->num_rows();
@@ -122,7 +121,7 @@ StringIndexMarisa::BuildV2(const Config& config) {
 void
 StringIndexMarisa::Build(const Config& config) {
     if (built_) {
-        throw std::runtime_error("index has been built");
+        throw SegcoreError(IndexAlreadyBuild, "index has been built");
     }
 
     auto insert_files =
@@ -135,9 +134,9 @@ StringIndexMarisa::Build(const Config& config) {
 
     // fill key set.
     marisa::Keyset keyset;
-    for (auto data : field_datas) {
+    for (const auto& data : field_datas) {
         auto slice_num = data->get_num_rows();
-        for (size_t i = 0; i < slice_num; ++i) {
+        for (int64_t i = 0; i < slice_num; ++i) {
             keyset.push_back(
                 (*static_cast<const std::string*>(data->RawValue(i))).c_str());
         }
@@ -148,9 +147,9 @@ StringIndexMarisa::Build(const Config& config) {
     // fill str_ids_
     str_ids_.resize(total_num_rows);
     int64_t offset = 0;
-    for (auto data : field_datas) {
+    for (const auto& data : field_datas) {
         auto slice_num = data->get_num_rows();
-        for (size_t i = 0; i < slice_num; ++i) {
+        for (int64_t i = 0; i < slice_num; ++i) {
             auto str_id =
                 lookup(*static_cast<const std::string*>(data->RawValue(i)));
             AssertInfo(valid_str_id(str_id), "invalid marisa key");
@@ -167,7 +166,7 @@ StringIndexMarisa::Build(const Config& config) {
 void
 StringIndexMarisa::Build(size_t n, const std::string* values) {
     if (built_) {
-        throw std::runtime_error("index has been built");
+        throw SegcoreError(IndexAlreadyBuild, "index has been built");
     }
 
     marisa::Keyset keyset;
@@ -262,8 +261,9 @@ StringIndexMarisa::LoadWithoutAssemble(const BinarySet& set,
     if (status != len) {
         close(fd);
         remove(file.c_str());
-        throw UnistdException("write index to fd error, errorCode is " +
-                              std::to_string(status));
+        throw SegcoreError(
+            ErrorCode::UnistdError,
+            "write index to fd error, errorCode is " + std::to_string(status));
     }
 
     lseek(fd, 0, SEEK_SET);
@@ -315,15 +315,13 @@ StringIndexMarisa::LoadV2(const Config& config) {
     for (auto& file_name : index_files.value()) {
         auto res = space_->GetBlobByteSize(file_name);
         if (!res.ok()) {
-            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
-                          "unable to read index blob");
+            PanicInfo(DataFormatBroken, "unable to read index blob");
         }
         auto index_blob_data =
             std::shared_ptr<uint8_t[]>(new uint8_t[res.value()]);
         auto status = space_->ReadBlob(file_name, index_blob_data.get());
         if (!status.ok()) {
-            PanicCodeInfo(ErrorCodeEnum::UnexpectedError,
-                          "unable to read index blob");
+            PanicInfo(DataFormatBroken, "unable to read index blob");
         }
         auto raw_index_blob =
             storage::DeserializeFileData(index_blob_data, res.value());
@@ -398,9 +396,9 @@ StringIndexMarisa::Range(std::string value, OpType op) {
                 set = raw_data.compare(value) >= 0;
                 break;
             default:
-                throw std::invalid_argument(
-                    std::string("Invalid OperatorType: ") +
-                    std::to_string((int)op) + "!");
+                throw SegcoreError(OpTypeInvalid,
+                                   fmt::format("Invalid OperatorType: {}",
+                                               static_cast<int>(op)));
         }
         if (set) {
             bitset[offset] = true;
@@ -510,7 +508,5 @@ StringIndexMarisa::Reverse_Lookup(size_t offset) const {
     trie_.reverse_lookup(agent);
     return std::string(agent.key().ptr(), agent.key().length());
 }
-
-#endif
 
 }  // namespace milvus::index

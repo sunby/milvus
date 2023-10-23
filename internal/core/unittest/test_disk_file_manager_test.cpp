@@ -61,8 +61,8 @@ TEST_F(DiskAnnFileManagerTest, AddFilePositiveParallel) {
     IndexMeta index_meta = {3, 100, 1000, 1, "index"};
 
     int64_t slice_size = milvus::FILE_SLICE_SIZE;
-    auto diskAnnFileManager =
-        std::make_shared<DiskFileManagerImpl>(filed_data_meta, index_meta, cm_);
+    auto diskAnnFileManager = std::make_shared<DiskFileManagerImpl>(
+        storage::FileManagerContext(filed_data_meta, index_meta, cm_));
     auto ok = diskAnnFileManager->AddFile(indexFilePath);
     EXPECT_EQ(ok, true);
 
@@ -101,7 +101,7 @@ TEST_F(DiskAnnFileManagerTest, AddFilePositiveParallel) {
 int
 test_worker(string s) {
     std::cout << s << std::endl;
-    sleep(4);
+    std::this_thread::sleep_for(std::chrono::seconds(4));
     std::cout << s << std::endl;
     return 1;
 }
@@ -163,7 +163,7 @@ TEST_F(DiskAnnFileManagerTest, TestThreadPool) {
 int
 test_exception(string s) {
     if (s == "test_id60") {
-        throw std::runtime_error("run time error");
+        throw SegcoreError(ErrorCode::UnexpectedError, "run time error");
     }
     return 1;
 }

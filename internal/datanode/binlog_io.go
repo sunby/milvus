@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/datanode/allocator"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
@@ -30,9 +31,8 @@ import (
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util/conc"
 	"github.com/milvus-io/milvus/pkg/util/metautil"
-	"go.uber.org/zap"
-	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -64,70 +64,89 @@ type binlogIO struct {
 	allocator.Allocator
 }
 
-var _ downloader = (*binlogIO)(nil)
-var _ uploader = (*binlogIO)(nil)
+var (
+	_ downloader = (*binlogIO)(nil)
+	_ uploader   = (*binlogIO)(nil)
+)
 
 func (b *binlogIO) download(ctx context.Context, paths []string) ([]*Blob, error) {
-	var (
-		err = errStart
-		vs  [][]byte
-	)
-
 	log.Debug("down load", zap.Strings("path", paths))
-	g, gCtx := errgroup.WithContext(ctx)
-	g.Go(func() error {
-		for err != nil {
-			select {
-			case <-gCtx.Done():
-				log.Warn("ctx done when downloading kvs from blob storage", zap.Strings("paths", paths))
-				return errDownloadFromBlobStorage
-
-			default:
-				if err != errStart {
-					log.Warn("downloading failed, retry in 50ms", zap.Strings("paths", paths))
-					time.Sleep(50 * time.Millisecond)
+	resp := make([]*Blob, len(paths))
+	if len(paths) == 0 {
+		return resp, nil
+	}
+	futures := make([]*conc.Future[any], len(paths))
+	for i, path := range paths {
+		localPath := path
+		future := getMultiReadPool().Submit(func() (any, error) {
+			var vs []byte
+			err := errStart
+			for err != nil {
+				select {
+				case <-ctx.Done():
+					log.Warn("ctx done when downloading kvs from blob storage", zap.Strings("paths", paths))
+					return nil, errDownloadFromBlobStorage
+				default:
+					if err != errStart {
+						time.Sleep(50 * time.Millisecond)
+					}
+					vs, err = b.Read(ctx, localPath)
 				}
-				vs, err = b.MultiRead(ctx, paths)
 			}
+			return vs, nil
+		})
+		futures[i] = future
+	}
+
+	for i := range futures {
+		if !futures[i].OK() {
+			return nil, futures[i].Err()
 		}
-		return nil
-	})
-
-	if err := g.Wait(); err != nil {
-		return nil, err
+		resp[i] = &Blob{Value: futures[i].Value().([]byte)}
 	}
 
-	rst := make([]*Blob, len(vs))
-	for i := range rst {
-		rst[i] = &Blob{Value: vs[i]}
-	}
-
-	return rst, nil
+	return resp, nil
 }
 
 func (b *binlogIO) uploadSegmentFiles(
 	ctx context.Context,
 	CollectionID UniqueID,
 	segID UniqueID,
-	kvs map[string][]byte) error {
-	var err = errStart
-	for err != nil {
-		select {
-		case <-ctx.Done():
-			log.Warn("ctx done when saving kvs to blob storage",
-				zap.Int64("collectionID", CollectionID),
-				zap.Int64("segmentID", segID),
-				zap.Int("number of kvs", len(kvs)))
-			return errUploadToBlobStorage
-		default:
-			if err != errStart {
-				log.Warn("save binlog failed, retry in 50ms",
-					zap.Int64("collectionID", CollectionID),
-					zap.Int64("segmentID", segID))
-				time.Sleep(50 * time.Millisecond)
+	kvs map[string][]byte,
+) error {
+	log.Debug("update", zap.Int64("collectionID", CollectionID), zap.Int64("segmentID", segID))
+	if len(kvs) == 0 {
+		return nil
+	}
+	futures := make([]*conc.Future[any], 0)
+	for key, val := range kvs {
+		localPath := key
+		localVal := val
+		future := getMultiReadPool().Submit(func() (any, error) {
+			err := errStart
+			for err != nil {
+				select {
+				case <-ctx.Done():
+					log.Warn("ctx done when saving kvs to blob storage",
+						zap.Int64("collectionID", CollectionID),
+						zap.Int64("segmentID", segID),
+						zap.Int("number of kvs", len(kvs)))
+					return nil, errUploadToBlobStorage
+				default:
+					if err != errStart {
+						time.Sleep(50 * time.Millisecond)
+					}
+					err = b.Write(ctx, localPath, localVal)
+				}
 			}
-			err = b.MultiWrite(ctx, kvs)
-		}
+			return nil, nil
+		})
+		futures = append(futures, future)
+	}
+
+	err := conc.AwaitAll(futures...)
+	if err != nil {
+		return err
 	}
 	return nil
 }
@@ -225,7 +244,8 @@ func (b *binlogIO) uploadStatsLog(
 	iData *InsertData,
 	stats *storage.PrimaryKeyStats,
 	totRows int64,
-	meta *etcdpb.CollectionMeta) (map[UniqueID]*datapb.FieldBinlog, map[UniqueID]*datapb.FieldBinlog, error) {
+	meta *etcdpb.CollectionMeta,
+) (map[UniqueID]*datapb.FieldBinlog, map[UniqueID]*datapb.FieldBinlog, error) {
 	var inPaths map[int64]*datapb.FieldBinlog
 	var err error
 
@@ -261,8 +281,8 @@ func (b *binlogIO) uploadInsertLog(
 	segID UniqueID,
 	partID UniqueID,
 	iData *InsertData,
-	meta *etcdpb.CollectionMeta) (map[UniqueID]*datapb.FieldBinlog, error) {
-
+	meta *etcdpb.CollectionMeta,
+) (map[UniqueID]*datapb.FieldBinlog, error) {
 	iCodec := storage.NewInsertCodecWithSchema(meta)
 	kvs := make(map[string][]byte)
 
@@ -292,7 +312,8 @@ func (b *binlogIO) uploadDeltaLog(
 	segID UniqueID,
 	partID UniqueID,
 	dData *DeleteData,
-	meta *etcdpb.CollectionMeta) ([]*datapb.FieldBinlog, error) {
+	meta *etcdpb.CollectionMeta,
+) ([]*datapb.FieldBinlog, error) {
 	var (
 		deltaInfo = make([]*datapb.FieldBinlog, 0)
 		kvs       = make(map[string][]byte)

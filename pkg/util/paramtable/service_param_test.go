@@ -13,6 +13,7 @@ package paramtable
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -60,6 +61,22 @@ func TestServiceParam(t *testing.T) {
 
 		t.Setenv(metricsinfo.DeployModeEnvKey, metricsinfo.StandaloneDeployMode)
 		t.Setenv("etcd.use.embed", "false")
+		SParams.init(bt)
+	})
+
+	t.Run("test tikvConfig", func(t *testing.T) {
+		Params := &SParams.TiKVCfg
+
+		assert.NotZero(t, len(Params.Endpoints.GetAsStrings()))
+		t.Logf("tikv endpoints = %s", Params.Endpoints.GetAsStrings())
+
+		assert.NotEqual(t, Params.MetaRootPath, "")
+		t.Logf("meta root path = %s", Params.MetaRootPath.GetValue())
+
+		assert.NotEqual(t, Params.KvRootPath, "")
+		t.Logf("kv root path = %s", Params.KvRootPath.GetValue())
+
+		t.Setenv(metricsinfo.DeployModeEnvKey, metricsinfo.StandaloneDeployMode)
 		SParams.init(bt)
 	})
 
@@ -151,6 +168,7 @@ func TestServiceParam(t *testing.T) {
 			assert.Empty(t, kc.Address.GetValue())
 			assert.Equal(t, kc.SaslMechanisms.GetValue(), "PLAIN")
 			assert.Equal(t, kc.SecurityProtocol.GetValue(), "SASL_SSL")
+			assert.Equal(t, kc.ReadTimeout.GetAsDuration(time.Second), 10*time.Second)
 		}
 	})
 

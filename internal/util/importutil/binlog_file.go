@@ -21,11 +21,11 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/errors"
+	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/log"
-	"go.uber.org/zap"
 )
 
 // BinlogFile class is a wrapper of storage.BinlogReader, to read binlog file, block by block.
@@ -515,6 +515,49 @@ func (p *BinlogFile) ReadBinaryVector() ([]byte, int, error) {
 		if err != nil {
 			log.Warn("Binlog file: failed to read binary vector data", zap.Error(err))
 			return nil, 0, fmt.Errorf("failed to read binary vector data, error: %w", err)
+		}
+
+		dim = dimenson
+		result = append(result, data...)
+	}
+
+	return result, dim, nil
+}
+
+func (p *BinlogFile) ReadFloat16Vector() ([]byte, int, error) {
+	if p.reader == nil {
+		log.Warn("Binlog file: binlog reader not yet initialized")
+		return nil, 0, errors.New("binlog reader not yet initialized")
+	}
+
+	dim := 0
+	result := make([]byte, 0)
+	for {
+		event, err := p.reader.NextEventReader()
+		if err != nil {
+			log.Warn("Binlog file: failed to iterate events reader", zap.Error(err))
+			return nil, 0, fmt.Errorf("failed to iterate events reader, error: %w", err)
+		}
+
+		// end of the file
+		if event == nil {
+			break
+		}
+
+		if event.TypeCode != storage.InsertEventType {
+			log.Warn("Binlog file: binlog file is not insert log")
+			return nil, 0, errors.New("binlog file is not insert log")
+		}
+
+		if p.DataType() != schemapb.DataType_Float16Vector {
+			log.Warn("Binlog file: binlog data type is not float16 vector")
+			return nil, 0, errors.New("binlog data type is not float16 vector")
+		}
+
+		data, dimenson, err := event.PayloadReaderInterface.GetFloat16VectorFromPayload()
+		if err != nil {
+			log.Warn("Binlog file: failed to read float16 vector data", zap.Error(err))
+			return nil, 0, fmt.Errorf("failed to read float16 vector data, error: %w", err)
 		}
 
 		dim = dimenson

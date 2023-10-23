@@ -62,6 +62,7 @@ func InitRemoteChunkManager(params *paramtable.ComponentParam) error {
 	cAccessValue := C.CString(params.MinioCfg.SecretAccessKey.GetValue())
 	cRootPath := C.CString(params.MinioCfg.RootPath.GetValue())
 	cStorageType := C.CString(params.CommonCfg.StorageType.GetValue())
+	cCloudProvider := C.CString(params.MinioCfg.CloudProvider.GetValue())
 	cIamEndPoint := C.CString(params.MinioCfg.IAMEndpoint.GetValue())
 	cLogLevel := C.CString(params.MinioCfg.LogLevel.GetValue())
 	cRegion := C.CString(params.MinioCfg.Region.GetValue())
@@ -71,6 +72,7 @@ func InitRemoteChunkManager(params *paramtable.ComponentParam) error {
 	defer C.free(unsafe.Pointer(cAccessValue))
 	defer C.free(unsafe.Pointer(cRootPath))
 	defer C.free(unsafe.Pointer(cStorageType))
+	defer C.free(unsafe.Pointer(cCloudProvider))
 	defer C.free(unsafe.Pointer(cIamEndPoint))
 	defer C.free(unsafe.Pointer(cLogLevel))
 	defer C.free(unsafe.Pointer(cRegion))
@@ -81,16 +83,27 @@ func InitRemoteChunkManager(params *paramtable.ComponentParam) error {
 		access_key_value: cAccessValue,
 		root_path:        cRootPath,
 		storage_type:     cStorageType,
+		cloud_provider:   cCloudProvider,
 		iam_endpoint:     cIamEndPoint,
 		useSSL:           C.bool(params.MinioCfg.UseSSL.GetAsBool()),
 		useIAM:           C.bool(params.MinioCfg.UseIAM.GetAsBool()),
 		log_level:        cLogLevel,
 		region:           cRegion,
 		useVirtualHost:   C.bool(params.MinioCfg.UseVirtualHost.GetAsBool()),
+		requestTimeoutMs: C.int64_t(params.MinioCfg.RequestTimeoutMs.GetAsInt64()),
 	}
 
 	status := C.InitRemoteChunkManagerSingleton(storageConfig)
 	return HandleCStatus(&status, "InitRemoteChunkManagerSingleton failed")
+}
+
+func InitChunkCache(mmapDirPath string, readAheadPolicy string) error {
+	cMmapDirPath := C.CString(mmapDirPath)
+	defer C.free(unsafe.Pointer(cMmapDirPath))
+	cReadAheadPolicy := C.CString(readAheadPolicy)
+	defer C.free(unsafe.Pointer(cReadAheadPolicy))
+	status := C.InitChunkCacheSingleton(cMmapDirPath, cReadAheadPolicy)
+	return HandleCStatus(&status, "InitChunkCacheSingleton failed")
 }
 
 func CleanRemoteChunkManager() {

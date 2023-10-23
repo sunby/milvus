@@ -36,14 +36,36 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <fmt/core.h>
 
+#include "common/EasyAssert.h"
 #include "storage/ChunkManager.h"
-#include "storage/Exception.h"
 #include "storage/Types.h"
 
 namespace milvus::storage {
 
 enum class RemoteStorageType { S3 = 0, GOOGLE_CLOUD = 1, ALIYUN_CLOUD = 2 };
+
+template <typename... Args>
+
+static SegcoreError
+ThrowS3Error(const std::string& func,
+             const Aws::S3::S3Error& err,
+             const std::string& fmtString,
+             Args&&... args) {
+    std::ostringstream oss;
+    const auto& message = fmt::format(fmtString, std::forward<Args>(args)...);
+    oss << "Error in " << func << "[errcode:" << int(err.GetResponseCode())
+        << ", exception:" << err.GetExceptionName()
+        << ", errmessage:" << err.GetMessage() << ", params:" << message << "]";
+    throw SegcoreError(S3Error, oss.str());
+}
+
+static bool
+IsNotFound(const Aws::S3::S3Errors& s3err) {
+    return (s3err == Aws::S3::S3Errors::NO_SUCH_KEY ||
+            s3err == Aws::S3::S3Errors::RESOURCE_NOT_FOUND);
+}
 
 /**
  * @brief user defined aws logger, redirect aws log to segcore log
@@ -69,6 +91,8 @@ class AwsLogger : public Aws::Utils::Logging::FormattedLogSystem {
  */
 class MinioChunkManager : public ChunkManager {
  public:
+    MinioChunkManager() {
+    }
     explicit MinioChunkManager(const StorageConfig& storage_config);
 
     MinioChunkManager(const MinioChunkManager&);
@@ -89,8 +113,8 @@ class MinioChunkManager : public ChunkManager {
          uint64_t offset,
          void* buf,
          uint64_t len) {
-        throw NotImplementedException(GetName() +
-                                      "Read with offset not implement");
+        throw SegcoreError(NotImplemented,
+                           GetName() + "Read with offset not implement");
     }
 
     virtual void
@@ -98,8 +122,8 @@ class MinioChunkManager : public ChunkManager {
           uint64_t offset,
           void* buf,
           uint64_t len) {
-        throw NotImplementedException(GetName() +
-                                      "Write with offset not implement");
+        throw SegcoreError(NotImplemented,
+                           GetName() + "Write with offset not implement");
     }
 
     virtual uint64_t
@@ -166,8 +190,12 @@ class MinioChunkManager : public ChunkManager {
                     const std::string& object_name,
                     void* buf,
                     uint64_t size);
+
     std::vector<std::string>
-    ListObjects(const char* bucket_name, const char* prefix = nullptr);
+    ListObjects(const std::string& bucket_name, const std::string& prefix = "");
+
+    void
+    InitSDKAPIDefault(const std::string& log_level);
     void
     InitSDKAPI(RemoteStorageType type,
                bool useIAM,
@@ -184,7 +212,7 @@ class MinioChunkManager : public ChunkManager {
     BuildGoogleCloudClient(const StorageConfig& storage_config,
                            const Aws::Client::ClientConfiguration& config);
 
- private:
+ protected:
     void
     BuildAccessKeyClient(const StorageConfig& storage_config,
                          const Aws::Client::ClientConfiguration& config);
@@ -195,6 +223,33 @@ class MinioChunkManager : public ChunkManager {
     std::shared_ptr<Aws::S3::S3Client> client_;
     std::string default_bucket_name_;
     std::string remote_root_path_;
+};
+
+class AwsChunkManager : public MinioChunkManager {
+ public:
+    explicit AwsChunkManager(const StorageConfig& storage_config);
+    virtual std::string
+    GetName() const {
+        return "AwsChunkManager";
+    }
+};
+
+class GcpChunkManager : public MinioChunkManager {
+ public:
+    explicit GcpChunkManager(const StorageConfig& storage_config);
+    virtual std::string
+    GetName() const {
+        return "GcpChunkManager";
+    }
+};
+
+class AliyunChunkManager : public MinioChunkManager {
+ public:
+    explicit AliyunChunkManager(const StorageConfig& storage_config);
+    virtual std::string
+    GetName() const {
+        return "AliyunChunkManager";
+    }
 };
 
 using MinioChunkManagerPtr = std::unique_ptr<MinioChunkManager>;
@@ -242,9 +297,10 @@ class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
         request->SetResponseStreamFactory(streamFactory);
         auto auth_header = credentials_->AuthorizationHeader();
         if (!auth_header.ok()) {
-            throw std::runtime_error(
-                "get authorization failed, errcode:" +
-                StatusCodeToString(auth_header.status().code()));
+            throw SegcoreError(
+                S3Error,
+                fmt::format("get authorization failed, errcode: {}",
+                            StatusCodeToString(auth_header.status().code())));
         }
         request->SetHeaderValue(auth_header->first.c_str(),
                                 auth_header->second.c_str());

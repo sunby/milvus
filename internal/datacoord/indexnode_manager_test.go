@@ -22,13 +22,14 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/errors"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 
-	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
-	"github.com/milvus-io/milvus/internal/indexnode"
 	"github.com/milvus-io/milvus/internal/metastore/model"
+	"github.com/milvus-io/milvus/internal/mocks"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/types"
-	"github.com/stretchr/testify/assert"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
 func TestIndexNodeManager_AddNode(t *testing.T) {
@@ -49,98 +50,47 @@ func TestIndexNodeManager_AddNode(t *testing.T) {
 }
 
 func TestIndexNodeManager_PeekClient(t *testing.T) {
+	getMockedGetJobStatsClient := func(resp *indexpb.GetJobStatsResponse, err error) types.IndexNodeClient {
+		ic := mocks.NewMockIndexNodeClient(t)
+		ic.EXPECT().GetJobStats(mock.Anything, mock.Anything, mock.Anything).Return(resp, err)
+		return ic
+	}
+
+	err := errors.New("error")
+
 	t.Run("multiple unavailable IndexNode", func(t *testing.T) {
 		nm := &IndexNodeManager{
 			ctx: context.TODO(),
-			nodeClients: map[UniqueID]types.IndexNode{
-				1: &indexnode.Mock{
-					CallGetJobStats: func(ctx context.Context, req *indexpb.GetJobStatsRequest) (*indexpb.GetJobStatsResponse, error) {
-						return &indexpb.GetJobStatsResponse{
-							Status: &commonpb.Status{
-								ErrorCode: commonpb.ErrorCode_UnexpectedError,
-							},
-						}, errors.New("error")
-					},
-				},
-				2: &indexnode.Mock{
-					CallGetJobStats: func(ctx context.Context, req *indexpb.GetJobStatsRequest) (*indexpb.GetJobStatsResponse, error) {
-						return &indexpb.GetJobStatsResponse{
-							Status: &commonpb.Status{
-								ErrorCode: commonpb.ErrorCode_UnexpectedError,
-							},
-						}, errors.New("error")
-					},
-				},
-				3: &indexnode.Mock{
-					CallGetJobStats: func(ctx context.Context, req *indexpb.GetJobStatsRequest) (*indexpb.GetJobStatsResponse, error) {
-						return &indexpb.GetJobStatsResponse{
-							Status: &commonpb.Status{
-								ErrorCode: commonpb.ErrorCode_UnexpectedError,
-							},
-						}, errors.New("error")
-					},
-				},
-				4: &indexnode.Mock{
-					CallGetJobStats: func(ctx context.Context, req *indexpb.GetJobStatsRequest) (*indexpb.GetJobStatsResponse, error) {
-						return &indexpb.GetJobStatsResponse{
-							Status: &commonpb.Status{
-								ErrorCode: commonpb.ErrorCode_UnexpectedError,
-							},
-						}, errors.New("error")
-					},
-				},
-				5: &indexnode.Mock{
-					CallGetJobStats: func(ctx context.Context, req *indexpb.GetJobStatsRequest) (*indexpb.GetJobStatsResponse, error) {
-						return &indexpb.GetJobStatsResponse{
-							Status: &commonpb.Status{
-								ErrorCode: commonpb.ErrorCode_UnexpectedError,
-								Reason:    "fail reason",
-							},
-						}, nil
-					},
-				},
-				6: &indexnode.Mock{
-					CallGetJobStats: func(ctx context.Context, req *indexpb.GetJobStatsRequest) (*indexpb.GetJobStatsResponse, error) {
-						return &indexpb.GetJobStatsResponse{
-							Status: &commonpb.Status{
-								ErrorCode: commonpb.ErrorCode_UnexpectedError,
-								Reason:    "fail reason",
-							},
-						}, nil
-					},
-				},
-				7: &indexnode.Mock{
-					CallGetJobStats: func(ctx context.Context, req *indexpb.GetJobStatsRequest) (*indexpb.GetJobStatsResponse, error) {
-						return &indexpb.GetJobStatsResponse{
-							Status: &commonpb.Status{
-								ErrorCode: commonpb.ErrorCode_UnexpectedError,
-								Reason:    "fail reason",
-							},
-						}, nil
-					},
-				},
-				8: &indexnode.Mock{
-					CallGetJobStats: func(ctx context.Context, req *indexpb.GetJobStatsRequest) (*indexpb.GetJobStatsResponse, error) {
-						return &indexpb.GetJobStatsResponse{
-							TaskSlots: 1,
-							Status: &commonpb.Status{
-								ErrorCode: commonpb.ErrorCode_Success,
-								Reason:    "",
-							},
-						}, nil
-					},
-				},
-				9: &indexnode.Mock{
-					CallGetJobStats: func(ctx context.Context, req *indexpb.GetJobStatsRequest) (*indexpb.GetJobStatsResponse, error) {
-						return &indexpb.GetJobStatsResponse{
-							TaskSlots: 10,
-							Status: &commonpb.Status{
-								ErrorCode: commonpb.ErrorCode_Success,
-								Reason:    "",
-							},
-						}, nil
-					},
-				},
+			nodeClients: map[UniqueID]types.IndexNodeClient{
+				1: getMockedGetJobStatsClient(&indexpb.GetJobStatsResponse{
+					Status: merr.Status(err),
+				}, err),
+				2: getMockedGetJobStatsClient(&indexpb.GetJobStatsResponse{
+					Status: merr.Status(err),
+				}, err),
+				3: getMockedGetJobStatsClient(&indexpb.GetJobStatsResponse{
+					Status: merr.Status(err),
+				}, err),
+				4: getMockedGetJobStatsClient(&indexpb.GetJobStatsResponse{
+					Status: merr.Status(err),
+				}, err),
+				5: getMockedGetJobStatsClient(&indexpb.GetJobStatsResponse{
+					Status: merr.Status(err),
+				}, nil),
+				6: getMockedGetJobStatsClient(&indexpb.GetJobStatsResponse{
+					Status: merr.Status(err),
+				}, nil),
+				7: getMockedGetJobStatsClient(&indexpb.GetJobStatsResponse{
+					Status: merr.Status(err),
+				}, nil),
+				8: getMockedGetJobStatsClient(&indexpb.GetJobStatsResponse{
+					TaskSlots: 1,
+					Status:    merr.Success(),
+				}, nil),
+				9: getMockedGetJobStatsClient(&indexpb.GetJobStatsResponse{
+					TaskSlots: 10,
+					Status:    merr.Success(),
+				}, nil),
 			},
 		}
 
@@ -151,24 +101,25 @@ func TestIndexNodeManager_PeekClient(t *testing.T) {
 }
 
 func TestIndexNodeManager_ClientSupportDisk(t *testing.T) {
+	getMockedGetJobStatsClient := func(resp *indexpb.GetJobStatsResponse, err error) types.IndexNodeClient {
+		ic := mocks.NewMockIndexNodeClient(t)
+		ic.EXPECT().GetJobStats(mock.Anything, mock.Anything, mock.Anything).Return(resp, err)
+		return ic
+	}
+
+	err := errors.New("error")
+
 	t.Run("support", func(t *testing.T) {
 		nm := &IndexNodeManager{
 			ctx:  context.Background(),
 			lock: sync.RWMutex{},
-			nodeClients: map[UniqueID]types.IndexNode{
-				1: &indexnode.Mock{
-					CallGetJobStats: func(ctx context.Context, in *indexpb.GetJobStatsRequest) (*indexpb.GetJobStatsResponse, error) {
-						return &indexpb.GetJobStatsResponse{
-							Status: &commonpb.Status{
-								ErrorCode: commonpb.ErrorCode_Success,
-								Reason:    "",
-							},
-							TaskSlots:  1,
-							JobInfos:   nil,
-							EnableDisk: true,
-						}, nil
-					},
-				},
+			nodeClients: map[UniqueID]types.IndexNodeClient{
+				1: getMockedGetJobStatsClient(&indexpb.GetJobStatsResponse{
+					Status:     merr.Success(),
+					TaskSlots:  1,
+					JobInfos:   nil,
+					EnableDisk: true,
+				}, nil),
 			},
 		}
 
@@ -180,20 +131,13 @@ func TestIndexNodeManager_ClientSupportDisk(t *testing.T) {
 		nm := &IndexNodeManager{
 			ctx:  context.Background(),
 			lock: sync.RWMutex{},
-			nodeClients: map[UniqueID]types.IndexNode{
-				1: &indexnode.Mock{
-					CallGetJobStats: func(ctx context.Context, in *indexpb.GetJobStatsRequest) (*indexpb.GetJobStatsResponse, error) {
-						return &indexpb.GetJobStatsResponse{
-							Status: &commonpb.Status{
-								ErrorCode: commonpb.ErrorCode_Success,
-								Reason:    "",
-							},
-							TaskSlots:  1,
-							JobInfos:   nil,
-							EnableDisk: false,
-						}, nil
-					},
-				},
+			nodeClients: map[UniqueID]types.IndexNodeClient{
+				1: getMockedGetJobStatsClient(&indexpb.GetJobStatsResponse{
+					Status:     merr.Success(),
+					TaskSlots:  1,
+					JobInfos:   nil,
+					EnableDisk: false,
+				}, nil),
 			},
 		}
 
@@ -205,7 +149,7 @@ func TestIndexNodeManager_ClientSupportDisk(t *testing.T) {
 		nm := &IndexNodeManager{
 			ctx:         context.Background(),
 			lock:        sync.RWMutex{},
-			nodeClients: map[UniqueID]types.IndexNode{},
+			nodeClients: map[UniqueID]types.IndexNodeClient{},
 		}
 
 		support := nm.ClientSupportDisk()
@@ -216,12 +160,8 @@ func TestIndexNodeManager_ClientSupportDisk(t *testing.T) {
 		nm := &IndexNodeManager{
 			ctx:  context.Background(),
 			lock: sync.RWMutex{},
-			nodeClients: map[UniqueID]types.IndexNode{
-				1: &indexnode.Mock{
-					CallGetJobStats: func(ctx context.Context, in *indexpb.GetJobStatsRequest) (*indexpb.GetJobStatsResponse, error) {
-						return nil, errors.New("error")
-					},
-				},
+			nodeClients: map[UniqueID]types.IndexNodeClient{
+				1: getMockedGetJobStatsClient(nil, err),
 			},
 		}
 
@@ -233,20 +173,13 @@ func TestIndexNodeManager_ClientSupportDisk(t *testing.T) {
 		nm := &IndexNodeManager{
 			ctx:  context.Background(),
 			lock: sync.RWMutex{},
-			nodeClients: map[UniqueID]types.IndexNode{
-				1: &indexnode.Mock{
-					CallGetJobStats: func(ctx context.Context, in *indexpb.GetJobStatsRequest) (*indexpb.GetJobStatsResponse, error) {
-						return &indexpb.GetJobStatsResponse{
-							Status: &commonpb.Status{
-								ErrorCode: commonpb.ErrorCode_UnexpectedError,
-								Reason:    "fail reason",
-							},
-							TaskSlots:  0,
-							JobInfos:   nil,
-							EnableDisk: false,
-						}, nil
-					},
-				},
+			nodeClients: map[UniqueID]types.IndexNodeClient{
+				1: getMockedGetJobStatsClient(&indexpb.GetJobStatsResponse{
+					Status:     merr.Status(err),
+					TaskSlots:  0,
+					JobInfos:   nil,
+					EnableDisk: false,
+				}, nil),
 			},
 		}
 

@@ -111,7 +111,8 @@ class ScalarFieldIndexing : public FieldIndexing {
                        int64_t size,
                        const VectorBase* vec_base,
                        const void* data_source) override {
-        PanicInfo("scalar index don't support append segment index");
+        PanicInfo(Unsupported,
+                  "scalar index don't support append segment index");
     }
 
     void
@@ -119,7 +120,8 @@ class ScalarFieldIndexing : public FieldIndexing {
                      int64_t count,
                      int64_t element_size,
                      void* output) override {
-        PanicInfo("scalar index don't support get data from index");
+        PanicInfo(Unsupported,
+                  "scalar index don't support get data from index");
     }
     idx_t
     get_index_cursor() override {
@@ -249,12 +251,17 @@ class IndexingRecord {
                 //Small-Index disabled, create index for vector field only
                 if (index_meta_->GetIndexMaxRowCount() > 0 &&
                     index_meta_->HasFiled(field_id)) {
-                    field_indexings_.try_emplace(
-                        field_id,
-                        CreateIndex(field_meta,
-                                    index_meta_->GetFieldIndexMeta(field_id),
-                                    index_meta_->GetIndexMaxRowCount(),
-                                    segcore_config_));
+                    auto vec_filed_meta =
+                        index_meta_->GetFieldIndexMeta(field_id);
+                    //Disable growing index for flat
+                    if (!vec_filed_meta.IsFlatIndex()) {
+                        field_indexings_.try_emplace(
+                            field_id,
+                            CreateIndex(field_meta,
+                                        vec_filed_meta,
+                                        index_meta_->GetIndexMaxRowCount(),
+                                        segcore_config_));
+                    }
                 }
             }
         }
@@ -335,11 +342,11 @@ class IndexingRecord {
 
     bool
     HasRawData(FieldId fieldId) const {
-        if (is_in(fieldId)) {
+        if (is_in(fieldId) && SyncDataWithIndex(fieldId)) {
             const FieldIndexing& indexing = get_field_indexing(fieldId);
             return indexing.has_raw_data();
         }
-        return false;
+        return true;
     }
 
     // concurrent

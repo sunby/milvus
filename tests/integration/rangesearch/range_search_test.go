@@ -92,9 +92,11 @@ func (s *RangeSearchSuite) TestRangeSearchIP() {
 	})
 	s.NoError(err)
 	segmentIDs, has := flushResp.GetCollSegIDs()[collectionName]
-	s.True(has)
 	ids := segmentIDs.GetData()
-	s.NotEmpty(segmentIDs)
+	s.Require().NotEmpty(segmentIDs)
+	s.Require().True(has)
+	flushTs, has := flushResp.GetCollFlushTs()[collectionName]
+	s.True(has)
 
 	segments, err := c.MetaWatcher.ShowSegments()
 	s.NoError(err)
@@ -102,7 +104,7 @@ func (s *RangeSearchSuite) TestRangeSearchIP() {
 	for _, segment := range segments {
 		log.Info("ShowSegments result", zap.String("segment", segment.String()))
 	}
-	s.WaitForFlush(ctx, ids)
+	s.WaitForFlush(ctx, ids, flushTs, dbName, collectionName)
 
 	// create index
 	createIndexStatus, err := c.Proxy.CreateIndex(ctx, &milvuspb.CreateIndexRequest{
@@ -184,7 +186,6 @@ func (s *RangeSearchSuite) TestRangeSearchIP() {
 	log.Info("TestRangeSearchIP succeed")
 	log.Info("=========================")
 	log.Info("=========================")
-
 }
 
 func (s *RangeSearchSuite) TestRangeSearchL2() {
@@ -240,9 +241,11 @@ func (s *RangeSearchSuite) TestRangeSearchL2() {
 	})
 	s.NoError(err)
 	segmentIDs, has := flushResp.GetCollSegIDs()[collectionName]
-	s.True(has)
 	ids := segmentIDs.GetData()
-	s.NotEmpty(segmentIDs)
+	s.Require().NotEmpty(segmentIDs)
+	s.Require().True(has)
+	flushTs, has := flushResp.GetCollFlushTs()[collectionName]
+	s.True(has)
 
 	segments, err := c.MetaWatcher.ShowSegments()
 	s.NoError(err)
@@ -250,7 +253,7 @@ func (s *RangeSearchSuite) TestRangeSearchL2() {
 	for _, segment := range segments {
 		log.Info("ShowSegments result", zap.String("segment", segment.String()))
 	}
-	s.WaitForFlush(ctx, ids)
+	s.WaitForFlush(ctx, ids, flushTs, dbName, collectionName)
 
 	// create index
 	createIndexStatus, err := c.Proxy.CreateIndex(ctx, &milvuspb.CreateIndexRequest{
@@ -331,9 +334,9 @@ func (s *RangeSearchSuite) TestRangeSearchL2() {
 	log.Info("TestRangeSearchL2 succeed")
 	log.Info("=========================")
 	log.Info("=========================")
-
 }
 
 func TestRangeSearch(t *testing.T) {
+	t.Skip("Skip integration test, need to refactor integration test framework")
 	suite.Run(t, new(RangeSearchSuite))
 }

@@ -16,7 +16,9 @@
 #include <string>
 #include <vector>
 
+#include "common/EasyAssert.h"
 #include "knowhere/comp/index_param.h"
+#include "nlohmann/json.hpp"
 #include "query/SearchBruteForce.h"
 #include "segcore/Reduce.h"
 #include "index/IndexFactory.h"
@@ -55,7 +57,7 @@ generate_data(int N) {
 }
 }  // namespace
 
-Status
+SegcoreError
 merge_into(int64_t queries,
            int64_t topk,
            float* distances,
@@ -90,7 +92,7 @@ merge_into(int64_t queries,
         std::copy_n(buf_dis.data(), topk, src2_dis);
         std::copy_n(buf_uids.data(), topk, src2_uids);
     }
-    return Status::OK();
+    return SegcoreError::success();
 }
 
 /*
@@ -173,7 +175,7 @@ TEST(Indexing, BinaryBruteForce) {
     auto json = SearchResultToJson(sr);
     std::cout << json.dump(2);
 #ifdef __linux__
-    auto ref = json::parse(R"(
+    auto ref = nlohmann::json::parse(R"(
 [
   [
     [ "1024->0.000000", "48942->0.642000", "18494->0.644000", "68225->0.644000", "93557->0.644000" ],
@@ -190,7 +192,7 @@ TEST(Indexing, BinaryBruteForce) {
 ]
 )");
 #else  // for mac
-    auto ref = json::parse(R"(
+    auto ref = nlohmann::json::parse(R"(
 [
   [
     [ "1024->0.000000", "59169->0.645000", "98548->0.646000", "3356->0.646000", "90373->0.647000" ],
@@ -221,8 +223,10 @@ TEST(Indexing, Naive) {
     create_index_info.field_type = DataType::VECTOR_FLOAT;
     create_index_info.metric_type = knowhere::metric::L2;
     create_index_info.index_type = knowhere::IndexEnum::INDEX_FAISS_IVFPQ;
+    create_index_info.index_engine_version =
+        knowhere::Version::GetCurrentVersion().VersionNumber();
     auto index = milvus::index::IndexFactory::GetInstance().CreateIndex(
-        create_index_info, nullptr);
+        create_index_info, milvus::storage::FileManagerContext());
 
     auto build_conf = knowhere::Json{
         {knowhere::meta::METRIC_TYPE, knowhere::metric::L2},
@@ -292,8 +296,14 @@ class IndexTest : public ::testing::TestWithParam<Param> {
         auto param = GetParam();
         index_type = param.first;
         metric_type = param.second;
-        NB = 10000;
-        if (index_type == knowhere::IndexEnum::INDEX_HNSW) {
+        NB = 3000;
+
+        // try to reduce the test time,
+        // but the large dataset is needed for the case below.
+        auto test_name = std::string(
+            testing::UnitTest::GetInstance()->current_test_info()->name());
+        if (test_name == "Mmap" &&
+            index_type == knowhere::IndexEnum::INDEX_HNSW) {
             NB = 270000;
         }
         build_conf = generate_build_conf(index_type, metric_type);
@@ -350,7 +360,7 @@ class IndexTest : public ::testing::TestWithParam<Param> {
     std::vector<uint8_t> xb_bin_data;
     knowhere::DataSetPtr xq_dataset;
     int64_t query_offset = 100;
-    int64_t NB = 10000;
+    int64_t NB = 3000;
     StorageConfig storage_config_;
 };
 
@@ -378,15 +388,17 @@ TEST_P(IndexTest, BuildAndQuery) {
     create_index_info.index_type = index_type;
     create_index_info.metric_type = metric_type;
     create_index_info.field_type = vec_field_data_type;
+    create_index_info.index_engine_version =
+        knowhere::Version::GetCurrentVersion().VersionNumber();
     index::IndexBasePtr index;
 
     milvus::storage::FieldDataMeta field_data_meta{1, 2, 3, 100};
     milvus::storage::IndexMeta index_meta{3, 100, 1000, 1};
     auto chunk_manager = milvus::storage::CreateChunkManager(storage_config_);
-    auto file_manager = milvus::storage::CreateFileManager(
-        index_type, field_data_meta, index_meta, chunk_manager);
+    milvus::storage::FileManagerContext file_manager_context(
+        field_data_meta, index_meta, chunk_manager);
     index = milvus::index::IndexFactory::GetInstance().CreateIndex(
-        create_index_info, file_manager);
+        create_index_info, file_manager_context);
 
     ASSERT_NO_THROW(index->BuildWithDataset(xb_dataset, build_conf));
     milvus::index::IndexBasePtr new_index;
@@ -396,13 +408,14 @@ TEST_P(IndexTest, BuildAndQuery) {
     index.reset();
 
     new_index = milvus::index::IndexFactory::GetInstance().CreateIndex(
-        create_index_info, file_manager);
+        create_index_info, file_manager_context);
     vec_index = dynamic_cast<milvus::index::VectorIndex*>(new_index.get());
 
     std::vector<std::string> index_files;
     for (auto& binary : binary_set.binary_map_) {
         index_files.emplace_back(binary.first);
     }
+    load_conf = generate_load_conf(index_type, metric_type, 0);
     load_conf["index_files"] = index_files;
     ASSERT_NO_THROW(vec_index->Load(load_conf));
     EXPECT_EQ(vec_index->Count(), NB);
@@ -429,15 +442,17 @@ TEST_P(IndexTest, Mmap) {
     create_index_info.index_type = index_type;
     create_index_info.metric_type = metric_type;
     create_index_info.field_type = vec_field_data_type;
+    create_index_info.index_engine_version =
+        knowhere::Version::GetCurrentVersion().VersionNumber();
     index::IndexBasePtr index;
 
     milvus::storage::FieldDataMeta field_data_meta{1, 2, 3, 100};
     milvus::storage::IndexMeta index_meta{3, 100, 1000, 1};
     auto chunk_manager = milvus::storage::CreateChunkManager(storage_config_);
-    auto file_manager = milvus::storage::CreateFileManager(
-        index_type, field_data_meta, index_meta, chunk_manager);
+    milvus::storage::FileManagerContext file_manager_context(
+        field_data_meta, index_meta, chunk_manager);
     index = milvus::index::IndexFactory::GetInstance().CreateIndex(
-        create_index_info, file_manager);
+        create_index_info, file_manager_context);
 
     ASSERT_NO_THROW(index->BuildWithDataset(xb_dataset, build_conf));
     milvus::index::IndexBasePtr new_index;
@@ -447,7 +462,7 @@ TEST_P(IndexTest, Mmap) {
     index.reset();
 
     new_index = milvus::index::IndexFactory::GetInstance().CreateIndex(
-        create_index_info, file_manager);
+        create_index_info, file_manager_context);
     if (!new_index->IsMmapSupported()) {
         return;
     }
@@ -457,6 +472,7 @@ TEST_P(IndexTest, Mmap) {
     for (auto& binary : binary_set.binary_map_) {
         index_files.emplace_back(binary.first);
     }
+    load_conf = generate_load_conf(index_type, metric_type, 0);
     load_conf["index_files"] = index_files;
     load_conf["mmap_filepath"] = "mmap/test_index_mmap_" + index_type;
     vec_index->Load(load_conf);
@@ -484,39 +500,39 @@ TEST_P(IndexTest, GetVector) {
     create_index_info.index_type = index_type;
     create_index_info.metric_type = metric_type;
     create_index_info.field_type = vec_field_data_type;
+    create_index_info.index_engine_version =
+        knowhere::Version::GetCurrentVersion().VersionNumber();
     index::IndexBasePtr index;
 
     milvus::storage::FieldDataMeta field_data_meta{1, 2, 3, 100};
     milvus::storage::IndexMeta index_meta{3, 100, 1000, 1};
     auto chunk_manager = milvus::storage::CreateChunkManager(storage_config_);
-    auto file_manager = milvus::storage::CreateFileManager(
-        index_type, field_data_meta, index_meta, chunk_manager);
+    milvus::storage::FileManagerContext file_manager_context(
+        field_data_meta, index_meta, chunk_manager);
     index = milvus::index::IndexFactory::GetInstance().CreateIndex(
-        create_index_info, file_manager);
+        create_index_info, file_manager_context);
 
     ASSERT_NO_THROW(index->BuildWithDataset(xb_dataset, build_conf));
     milvus::index::IndexBasePtr new_index;
     milvus::index::VectorIndex* vec_index = nullptr;
 
+    auto binary_set = index->Upload();
+    index.reset();
+    std::vector<std::string> index_files;
+    for (auto& binary : binary_set.binary_map_) {
+        index_files.emplace_back(binary.first);
+    }
+    new_index = milvus::index::IndexFactory::GetInstance().CreateIndex(
+        create_index_info, file_manager_context);
+    load_conf = generate_load_conf(index_type, metric_type, 0);
+    load_conf["index_files"] = index_files;
+
+    vec_index = dynamic_cast<milvus::index::VectorIndex*>(new_index.get());
     if (index_type == knowhere::IndexEnum::INDEX_DISKANN) {
-        // TODO ::diskann.query need load first, ugly
-        auto binary_set = index->Serialize(milvus::Config{});
-        index.reset();
-
-        new_index = milvus::index::IndexFactory::GetInstance().CreateIndex(
-            create_index_info, file_manager);
-
-        vec_index = dynamic_cast<milvus::index::VectorIndex*>(new_index.get());
-
-        std::vector<std::string> index_files;
-        for (auto& binary : binary_set.binary_map_) {
-            index_files.emplace_back(binary.first);
-        }
-        load_conf["index_files"] = index_files;
         vec_index->Load(binary_set, load_conf);
         EXPECT_EQ(vec_index->Count(), NB);
     } else {
-        vec_index = dynamic_cast<milvus::index::VectorIndex*>(index.get());
+        vec_index->Load(load_conf);
     }
     EXPECT_EQ(vec_index->GetDim(), DIM);
     EXPECT_EQ(vec_index->Count(), NB);
@@ -561,6 +577,8 @@ TEST(Indexing, SearchDiskAnnWithInvalidParam) {
     create_index_info.index_type = index_type;
     create_index_info.metric_type = metric_type;
     create_index_info.field_type = milvus::DataType::VECTOR_FLOAT;
+    create_index_info.index_engine_version =
+        knowhere::Version::GetCurrentVersion().VersionNumber();
 
     int64_t collection_id = 1;
     int64_t partition_id = 2;
@@ -575,10 +593,10 @@ TEST(Indexing, SearchDiskAnnWithInvalidParam) {
     milvus::storage::IndexMeta index_meta{
         segment_id, field_id, build_id, index_version};
     auto chunk_manager = storage::CreateChunkManager(storage_config);
-    auto file_manager = milvus::storage::CreateFileManager(
-        index_type, field_data_meta, index_meta, chunk_manager);
+    milvus::storage::FileManagerContext file_manager_context(
+        field_data_meta, index_meta, chunk_manager);
     auto index = milvus::index::IndexFactory::GetInstance().CreateIndex(
-        create_index_info, file_manager);
+        create_index_info, file_manager_context);
 
     auto build_conf = Config{
         {knowhere::meta::METRIC_TYPE, metric_type},
@@ -603,7 +621,7 @@ TEST(Indexing, SearchDiskAnnWithInvalidParam) {
     index.reset();
 
     auto new_index = milvus::index::IndexFactory::GetInstance().CreateIndex(
-        create_index_info, file_manager);
+        create_index_info, file_manager_context);
     auto vec_index = dynamic_cast<milvus::index::VectorIndex*>(new_index.get());
     std::vector<std::string> index_files;
     for (auto& binary : binary_set.binary_map_) {

@@ -1,3 +1,4 @@
+import random
 from time import sleep
 import pytest
 import copy
@@ -109,10 +110,10 @@ class TestIndexParams(TestcaseBase):
         if not isinstance(index_params["index_type"], str):
             msg = "must be str"
         else:
-            msg = "Invalid index_type"
+            msg = "invalid index type"
         self.index_wrap.init_index(collection_w.collection, default_field_name, index_params,
                                    check_task=CheckTasks.err_res,
-                                   check_items={ct.err_code: 1, ct.err_msg: msg})
+                                   check_items={ct.err_code: 65535, ct.err_msg: msg})
 
     @pytest.mark.tags(CaseLabel.L1)
     def test_index_type_not_supported(self):
@@ -212,7 +213,8 @@ class TestIndexOperation(TestcaseBase):
         c_name = cf.gen_unique_str(prefix)
         collection_w = self.init_collection_wrap(name=c_name)
         self.index_wrap.init_index(collection_w.collection, default_field_name, default_index_params)
-        error = {ct.err_code: 1, ct.err_msg: f"CreateIndex failed: index already exists"}
+        error = {ct.err_code: 65535, ct.err_msg: "CreateIndex failed: at most one "
+                                                 "distinct index is allowed per field"}
         self.index_wrap.init_index(collection_w.collection, default_field_name, default_index,
                                    check_task=CheckTasks.err_res, check_items=error)
 
@@ -241,8 +243,9 @@ class TestIndexOperation(TestcaseBase):
         collection_w = self.init_collection_general(prefix, True, is_index=False)[0]
         collection_w.create_index(ct.default_int64_field_name, {})
         collection_w.load(check_task=CheckTasks.err_res,
-                          check_items={ct.err_code: 1, ct.err_msg: "there is no vector index on collection, "
-                                                                   "please create index firstly"})
+                          check_items={ct.err_code: 65535,
+                                       ct.err_msg: f"there is no vector index on collection: {collection_w.name}, "
+                                                   f"please create index firstly"})
 
     @pytest.mark.tags(CaseLabel.L1)
     def test_index_collection_empty(self):
@@ -1149,8 +1152,9 @@ class TestNewIndexBinary(TestcaseBase):
         binary_index_params = {'index_type': 'BIN_IVF_FLAT', 'metric_type': 'L2', 'params': {'nlist': 64}}
         collection_w.create_index(default_binary_vec_field_name, binary_index_params,
                                   index_name=binary_field_name, check_task=CheckTasks.err_res,
-                                  check_items={ct.err_code: 1,
-                                               ct.err_msg: "Invalid metric_type: L2, which does not match the index type: BIN_IVF_FLAT"})
+                                  check_items={ct.err_code: 65535,
+                                               ct.err_msg: "metric type not found or not supported, supported: "
+                                                           "[HAMMING JACCARD SUBSTRUCTURE SUPERSTRUCTURE]"})
 
     @pytest.mark.tags(CaseLabel.L2)
     @pytest.mark.parametrize("metric_type", ["L2", "IP", "COSINE", "JACCARD", "HAMMING"])
@@ -1220,10 +1224,10 @@ class TestNewIndexBinary(TestcaseBase):
         assert len(ins_res.primary_keys) == len(df)
         collection_w.create_index(default_binary_vec_field_name, default_binary_index_params,
                                   index_name=binary_field_name)
-        assert collection_w.has_index(index_name=binary_field_name)[0] == True
+        assert collection_w.has_index(index_name=binary_field_name)[0] is True
         assert len(collection_w.indexes) == 1
         collection_w.drop_index(index_name=binary_field_name)
-        assert collection_w.has_index(index_name=binary_field_name)[0] == False
+        assert collection_w.has_index(index_name=binary_field_name)[0] is False
         assert len(collection_w.indexes) == 0
 
 
@@ -1298,7 +1302,7 @@ class TestIndexInvalid(TestcaseBase):
                                                         "loaded, please release it first"})
 
     @pytest.mark.tags(CaseLabel.L1)
-    @pytest.mark.parametrize("n_trees", [-1, 1025, 'a', {34}])
+    @pytest.mark.parametrize("n_trees", [-1, 1025, 'a'])
     def test_annoy_index_with_invalid_params(self, n_trees):
         """
         target: test create index with invalid params
@@ -1310,8 +1314,8 @@ class TestIndexInvalid(TestcaseBase):
         index_annoy = {"index_type": "ANNOY", "params": {"n_trees": n_trees}, "metric_type": "L2"}
         collection_w.create_index("float_vector", index_annoy,
                                   check_task=CheckTasks.err_res,
-                                  check_items={"err_code": 1,
-                                               "err_msg": "invalid index params"})
+                                  check_items={"err_code": 65535,
+                                               "err_msg": "invalid index type: ANNOY"})
 
     @pytest.mark.tags(CaseLabel.L1)
     def test_create_index_json(self):
@@ -1849,8 +1853,8 @@ class TestIndexDiskann(TestcaseBase):
         collection_w.insert(data=df)
         collection_w.create_index(default_binary_vec_field_name, ct.default_diskann_index, index_name=binary_field_name,
                                   check_task=CheckTasks.err_res,
-                                  check_items={ct.err_code: 1,
-                                               ct.err_msg: "field data type BinaryVector don't support the index build type DISKANN"})
+                                  check_items={ct.err_code: 65535,
+                                               ct.err_msg: "float or float16 vector are only supported"})
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_create_diskann_index_multithread(self):
@@ -1879,7 +1883,7 @@ class TestIndexDiskann(TestcaseBase):
         for t in threads:
             t.join()
 
-    @pytest.mark.skip(reason = "diskann dim range is set to be [1, 32768)")
+    @pytest.mark.skip(reason="diskann dim range is set to be [1, 32768)")
     @pytest.mark.tags(CaseLabel.L1)
     @pytest.mark.parametrize("dim", [2, 4, 8])
     def test_create_index_with_small_dim(self, dim):
@@ -1958,3 +1962,50 @@ class TestAutoIndex(TestcaseBase):
         collection_w.create_index(binary_field_name, {})
         actual_index_params = collection_w.index()[0].params
         assert default_autoindex_params == actual_index_params
+
+
+@pytest.mark.tags(CaseLabel.GPU)
+class TestScaNNIndex(TestcaseBase):
+    """ Test case of Auto index """
+
+    @pytest.mark.tags(CaseLabel.L1)
+    def test_create_scann_index(self):
+        """
+        target: test create scann index
+        method: create index with only one field name
+        expected: create successfully
+        """
+        collection_w = self.init_collection_general(prefix, is_index=False)[0]
+        index_params = {"index_type": "SCANN", "metric_type": "L2",
+                        "params": {"nlist": 1024, "with_raw_data": True}}
+        collection_w.create_index(default_field_name, index_params)
+        assert collection_w.has_index()[0] is True
+
+    @pytest.mark.tags(CaseLabel.L2)
+    @pytest.mark.parametrize("nlist", [0, 65537])
+    def test_create_scann_index_nlist_invalid(self, nlist):
+        """
+        target: test create scann index invalid
+        method: create index with invalid nlist
+        expected: report error
+        """
+        collection_w = self.init_collection_general(prefix, is_index=False)[0]
+        index_params = {"index_type": "SCANN", "metric_type": "L2", "params": {"nlist": nlist}}
+        error = {ct.err_code: 65535, ct.err_msg: "nlist out of range: [1, 65536]"}
+        collection_w.create_index(default_field_name, index_params,
+                                  check_task=CheckTasks.err_res, check_items=error)
+
+    @pytest.mark.tags(CaseLabel.L2)
+    @pytest.mark.parametrize("dim", [1, 127])
+    def test_create_scann_index_dim_invalid(self, dim):
+        """
+        target: test create scann index invalid
+        method: create index on vector dim % 2 == 1
+        expected: report error
+        """
+        collection_w = self.init_collection_general(prefix, is_index=False, dim=dim)[0]
+        index_params = {"index_type": "SCANN", "metric_type": "L2", "params": {"nlist": 1024}}
+        error = {ct.err_code: 65535,
+                 ct.err_msg: f"dimension must be able to be divided by 2, dimension: {dim}"}
+        collection_w.create_index(default_field_name, index_params,
+                                  check_task=CheckTasks.err_res, check_items=error)

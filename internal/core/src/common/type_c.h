@@ -31,12 +31,6 @@ enum SegmentType {
 
 typedef enum SegmentType SegmentType;
 
-enum ErrorCode {
-    Success = 0,
-    UnexpectedError = 1,
-    IllegalArgument = 5,
-};
-
 // pure C don't support that we use schemapb.DataType directly.
 // Note: the value of all enumerations must match the corresponding schemapb.DataType.
 // TODO: what if there are increments in schemapb.DataType.
@@ -56,6 +50,7 @@ enum CDataType {
 
     BinaryVector = 100,
     FloatVector = 101,
+    Float16Vector = 102,
 };
 typedef enum CDataType CDataType;
 
@@ -83,12 +78,14 @@ typedef struct CStorageConfig {
     const char* access_key_value;
     const char* root_path;
     const char* storage_type;
+    const char* cloud_provider;
     const char* iam_endpoint;
     const char* log_level;
     const char* region;
     bool useSSL;
     bool useIAM;
     bool useVirtualHost;
+    int64_t requestTimeoutMs;
 } CStorageConfig;
 
 typedef struct CTraceConfig {
@@ -107,4 +104,5 @@ typedef struct CTraceContext {
 } CTraceContext;
 #ifdef __cplusplus
 }
+
 #endif

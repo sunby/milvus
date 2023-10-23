@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <fmt/core.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -26,7 +27,8 @@
 #include "Types.h"
 #include "common/Json.h"
 #include "common/LoadInfo.h"
-#include "exceptions/EasyAssert.h"
+#include "common/EasyAssert.h"
+#include "common/Array.h"
 #include "mmap/Column.h"
 #include "common/Consts.h"
 #include "common/FieldMeta.h"
@@ -39,7 +41,8 @@
 #include "storage/FieldData.h"
 #include "storage/Util.h"
 #include "storage/ThreadPools.h"
-#include "utils/File.h"
+#include "storage/ChunkCacheSingleton.h"
+#include "common/File.h"
 #include "common/Tracer.h"
 
 namespace milvus::segcore {
@@ -160,7 +163,9 @@ SegmentSealedImpl::LoadScalarIndex(const LoadIndexInfo& info) {
                 break;
             }
             default: {
-                PanicInfo("unsupported primary key type");
+                PanicInfo(DataTypeInvalid,
+                          fmt::format("unsupported primary key type {}",
+                                      field_meta.get_data_type()));
             }
         }
     }
@@ -352,7 +357,25 @@ SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
                     column = std::move(var_column);
                     break;
                 }
+                case milvus::DataType::ARRAY: {
+                    auto var_column =
+                        std::make_shared<ArrayColumn>(num_rows, field_meta);
+                    storage::FieldDataPtr field_data;
+                    while (data.channel->pop(field_data)) {
+                        for (auto i = 0; i < field_data->get_num_rows(); i++) {
+                            auto rawValue = field_data->RawValue(i);
+                            auto array =
+                                static_cast<const milvus::Array*>(rawValue);
+                            var_column->Append(*array);
+                        }
+                    }
+                    var_column->Seal();
+                    column = std::move(var_column);
+                    break;
+                }
                 default: {
+                    PanicInfo(DataTypeInvalid,
+                              fmt::format("unsupported data type", data_type));
                 }
             }
 
@@ -411,10 +434,12 @@ SegmentSealedImpl::MapFieldData(const FieldId field_id, FieldDataInfo& data) {
     size_t total_written{0};
     auto data_size = 0;
     std::vector<uint64_t> indices{};
+    std::vector<std::vector<uint64_t>> element_indices{};
     storage::FieldDataPtr field_data;
     while (data.channel->pop(field_data)) {
         data_size += field_data->Size();
-        auto written = WriteFieldData(file, data_type, field_data);
+        auto written =
+            WriteFieldData(file, data_type, field_data, element_indices);
         if (written != field_data->Size()) {
             break;
         }
@@ -454,7 +479,17 @@ SegmentSealedImpl::MapFieldData(const FieldId field_id, FieldDataInfo& data) {
                 column = std::move(var_column);
                 break;
             }
+            case milvus::DataType::ARRAY: {
+                auto arr_column = std::make_shared<ArrayColumn>(
+                    file, total_written, field_meta);
+                arr_column->Seal(std::move(indices),
+                                 std::move(element_indices));
+                column = std::move(arr_column);
+                break;
+            }
             default: {
+                PanicInfo(DataTypeInvalid,
+                          fmt::format("unsupported data type {}", data_type));
             }
         }
     } else {
@@ -500,6 +535,13 @@ SegmentSealedImpl::LoadDeletedRecord(const LoadDeletedRecordInfo& info) {
 
     // step 2: fill pks and timestamps
     deleted_record_.push(pks, timestamps);
+}
+
+void
+SegmentSealedImpl::AddFieldDataInfoForSealed(
+    const LoadFieldDataInfo& field_data_info) {
+    // copy assignment
+    field_data_info_ = field_data_info;
 }
 
 // internal API: support scalar index only
@@ -642,12 +684,34 @@ SegmentSealedImpl::vector_search(SearchInfo& search_info,
     }
 }
 
+std::tuple<std::string, int64_t>
+SegmentSealedImpl::GetFieldDataPath(FieldId field_id, int64_t offset) const {
+    auto offset_in_binlog = offset;
+    auto data_path = std::string();
+    auto it = field_data_info_.field_infos.find(field_id.get());
+    AssertInfo(it != field_data_info_.field_infos.end(),
+               fmt::format("cannot find binlog file for field: {}, seg: {}",
+                           field_id.get(),
+                           id_));
+    auto field_info = it->second;
+
+    for (auto i = 0; i < field_info.insert_files.size(); i++) {
+        if (offset_in_binlog < field_info.entries_nums[i]) {
+            data_path = field_info.insert_files[i];
+            break;
+        } else {
+            offset_in_binlog -= field_info.entries_nums[i];
+        }
+    }
+    return {data_path, offset_in_binlog};
+}
+
 std::unique_ptr<DataArray>
 SegmentSealedImpl::get_vector(FieldId field_id,
                               const int64_t* ids,
                               int64_t count) const {
-    auto& filed_meta = schema_->operator[](field_id);
-    AssertInfo(filed_meta.is_vector(), "vector field is not vector type");
+    auto& field_meta = schema_->operator[](field_id);
+    AssertInfo(field_meta.is_vector(), "vector field is not vector type");
 
     if (get_bit(index_ready_bitset_, field_id)) {
         AssertInfo(vector_indexings_.is_ready(field_id),
@@ -661,10 +725,57 @@ SegmentSealedImpl::get_vector(FieldId field_id,
         auto has_raw_data = vec_index->HasRawData();
 
         if (has_raw_data) {
+            // If index has raw data, get vector from memory.
             auto ids_ds = GenIdsDataset(count, ids);
             auto vector = vec_index->GetVector(ids_ds);
             return segcore::CreateVectorDataArrayFrom(
-                vector.data(), count, filed_meta);
+                vector.data(), count, field_meta);
+        } else {
+            // If index doesn't have raw data, get vector from chunk cache.
+            auto cc =
+                storage::ChunkCacheSingleton::GetInstance().GetChunkCache();
+
+            // group by data_path
+            auto id_to_data_path =
+                std::unordered_map<std::int64_t,
+                                   std::tuple<std::string, int64_t>>{};
+            auto path_to_column =
+                std::unordered_map<std::string, std::shared_ptr<ColumnBase>>{};
+            for (auto i = 0; i < count; i++) {
+                const auto& tuple = GetFieldDataPath(field_id, ids[i]);
+                id_to_data_path.emplace(ids[i], tuple);
+                path_to_column.emplace(std::get<0>(tuple), nullptr);
+            }
+
+            // read and prefetch
+            for (const auto& iter : path_to_column) {
+                auto data_path = iter.first;
+                const auto& column = cc->Read(data_path);
+                cc->Prefetch(data_path);
+                path_to_column[data_path] = column;
+            }
+
+            // assign to data array
+            auto dim = field_meta.get_dim();
+            auto row_bytes = field_meta.is_vector() ? dim * 4 : dim / 8;
+            auto buf = std::vector<char>(count * row_bytes);
+            for (auto i = 0; i < count; i++) {
+                AssertInfo(id_to_data_path.count(ids[i]) != 0, "id not found");
+                const auto& [data_path, offset_in_binlog] =
+                    id_to_data_path.at(ids[i]);
+                AssertInfo(path_to_column.count(data_path) != 0,
+                           "column not found");
+                const auto& column = path_to_column.at(data_path);
+                AssertInfo(
+                    offset_in_binlog * row_bytes < column->ByteSize(),
+                    fmt::format("column idx out of range, idx: {}, size: {}",
+                                offset_in_binlog * row_bytes,
+                                column->ByteSize()));
+                auto vector = &column->Data()[offset_in_binlog * row_bytes];
+                std::memcpy(buf.data() + i * row_bytes, vector, row_bytes);
+            }
+            return segcore::CreateVectorDataArrayFrom(
+                buf.data(), count, field_meta);
         }
     }
 
@@ -717,9 +828,10 @@ SegmentSealedImpl::check_search(const query::Plan* plan) const {
 
     if (!is_system_field_ready()) {
         PanicInfo(
+            FieldNotLoaded,
             "failed to load row ID or timestamp, potential missing bin logs or "
             "empty segments. Segment ID = " +
-            std::to_string(this->id_));
+                std::to_string(this->id_));
     }
 
     auto& request_fields = plan->extra_info_opt_.value().involved_fields_;
@@ -733,18 +845,32 @@ SegmentSealedImpl::check_search(const query::Plan* plan) const {
         auto field_id =
             FieldId(absent_fields.find_first() + START_USER_FIELDID);
         auto& field_meta = schema_->operator[](field_id);
-        PanicInfo("User Field(" + field_meta.get_name().get() +
-                  ") is not loaded");
+        PanicInfo(
+            FieldNotLoaded,
+            "User Field(" + field_meta.get_name().get() + ") is not loaded");
     }
 }
 
 SegmentSealedImpl::SegmentSealedImpl(SchemaPtr schema, int64_t segment_id)
-    : schema_(schema),
-      insert_record_(*schema, MAX_ROW_COUNT),
-      field_data_ready_bitset_(schema->size()),
+    : field_data_ready_bitset_(schema->size()),
       index_ready_bitset_(schema->size()),
       scalar_indexings_(schema->size()),
+      insert_record_(*schema, MAX_ROW_COUNT),
+      schema_(schema),
       id_(segment_id) {
+}
+
+SegmentSealedImpl::~SegmentSealedImpl() {
+    auto cc = storage::ChunkCacheSingleton::GetInstance().GetChunkCache();
+    if (cc == nullptr) {
+        return;
+    }
+    // munmap and remove binlog from chunk cache
+    for (const auto& iter : field_data_info_.field_infos) {
+        for (const auto& binlog : iter.second.insert_files) {
+            cc->Remove(binlog);
+        }
+    }
 }
 
 void
@@ -775,7 +901,8 @@ SegmentSealedImpl::bulk_subscript(SystemFieldType system_type,
                 output);
             break;
         default:
-            PanicInfo("unknown subscript fields");
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unknown subscript fields", system_type));
     }
 }
 
@@ -806,6 +933,21 @@ SegmentSealedImpl::bulk_subscript_impl(const ColumnBase* column,
     for (int64_t i = 0; i < count; ++i) {
         auto offset = seg_offsets[i];
         dst[i] = std::move(T(field->RawAt(offset)));
+    }
+}
+
+void
+SegmentSealedImpl::bulk_subscript_impl(const ColumnBase* column,
+                                       const int64_t* seg_offsets,
+                                       int64_t count,
+                                       void* dst_raw) {
+    auto field = reinterpret_cast<const ArrayColumn*>(column);
+    auto dst = reinterpret_cast<ScalarArray*>(dst_raw);
+    for (int64_t i = 0; i < count; ++i) {
+        auto offset = seg_offsets[i];
+        if (offset != INVALID_SEG_OFFSET) {
+            dst[i] = std::move(field->RawAt(offset));
+        }
     }
 }
 
@@ -883,8 +1025,17 @@ SegmentSealedImpl::bulk_subscript(FieldId field_id,
                     output.data(), count, field_meta);
             }
 
+            case DataType::ARRAY: {
+                FixedVector<ScalarArray> output(count);
+                bulk_subscript_impl(
+                    column.get(), seg_offsets, count, output.data());
+                return CreateScalarDataArrayFrom(
+                    output.data(), count, field_meta);
+            }
+
             default:
                 PanicInfo(
+                    DataTypeInvalid,
                     fmt::format("unsupported data type: {}",
                                 datatype_name(field_meta.get_data_type())));
         }
@@ -936,6 +1087,7 @@ SegmentSealedImpl::bulk_subscript(FieldId field_id,
         }
 
         case DataType::VECTOR_FLOAT:
+        case DataType::VECTOR_FLOAT16:
         case DataType::VECTOR_BINARY: {
             aligned_vector<char> output(field_meta.get_sizeof() * count);
             bulk_subscript_impl(field_meta.get_sizeof(),
@@ -947,7 +1099,9 @@ SegmentSealedImpl::bulk_subscript(FieldId field_id,
         }
 
         default: {
-            PanicInfo("unsupported");
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("unsupported data type {}",
+                                  field_meta.get_data_type()));
         }
     }
 }
@@ -999,7 +1153,8 @@ SegmentSealedImpl::search_ids(const IdArray& id_array,
 
     auto res_id_arr = std::make_unique<IdArray>();
     std::vector<SegOffset> res_offsets;
-    for (auto pk : pks) {
+    res_offsets.reserve(pks.size());
+    for (auto& pk : pks) {
         auto segOffsets = insert_record_.search_pk(pk, timestamp);
         for (auto offset : segOffsets) {
             switch (data_type) {
@@ -1010,11 +1165,12 @@ SegmentSealedImpl::search_ids(const IdArray& id_array,
                 }
                 case DataType::VARCHAR: {
                     res_id_arr->mutable_str_id()->add_data(
-                        std::get<std::string>(pk));
+                        std::get<std::string>(std::move(pk)));
                     break;
                 }
                 default: {
-                    PanicInfo("unsupported type");
+                    PanicInfo(DataTypeInvalid,
+                              fmt::format("unsupported type {}", data_type));
                 }
             }
             res_offsets.push_back(offset);
@@ -1023,7 +1179,7 @@ SegmentSealedImpl::search_ids(const IdArray& id_array,
     return {std::move(res_id_arr), std::move(res_offsets)};
 }
 
-Status
+SegcoreError
 SegmentSealedImpl::Delete(int64_t reserved_offset,  // deprecated
                           int64_t size,
                           const IdArray* ids,
@@ -1033,6 +1189,15 @@ SegmentSealedImpl::Delete(int64_t reserved_offset,  // deprecated
     auto& field_meta = schema_->operator[](field_id);
     std::vector<PkType> pks(size);
     ParsePksFromIDs(pks, field_meta.get_data_type(), *ids);
+
+    // filter out the deletions that the primary key not exists
+    auto end = std::remove_if(pks.begin(), pks.end(), [&](const PkType& pk) {
+        return !insert_record_.contain(pk);
+    });
+    size = end - pks.begin();
+    if (size == 0) {
+        return SegcoreError::success();
+    }
 
     // step 1: sort timestamp
     std::vector<std::tuple<Timestamp, PkType>> ordering(size);
@@ -1050,7 +1215,7 @@ SegmentSealedImpl::Delete(int64_t reserved_offset,  // deprecated
     }
 
     deleted_record_.push(sort_pks, sort_timestamps.data());
-    return Status::OK();
+    return SegcoreError::success();
 }
 
 std::string
@@ -1070,7 +1235,7 @@ SegmentSealedImpl::LoadSegmentMeta(
         slice_lengths.push_back(info.row_count());
     }
     insert_record_.timestamp_index_.set_length_meta(std::move(slice_lengths));
-    PanicInfo("unimplemented");
+    PanicInfo(NotImplemented, "unimplemented");
 }
 
 int64_t

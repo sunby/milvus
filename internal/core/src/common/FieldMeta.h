@@ -21,8 +21,7 @@
 #include <string>
 
 #include "common/Types.h"
-#include "exceptions/EasyAssert.h"
-#include "utils/Status.h"
+#include "common/EasyAssert.h"
 
 namespace milvus {
 
@@ -49,8 +48,12 @@ datatype_sizeof(DataType data_type, int dim = 1) {
             AssertInfo(dim % 8 == 0, "dim=" + std::to_string(dim));
             return dim / 8;
         }
+        case DataType::VECTOR_FLOAT16: {
+            return sizeof(float16) * dim;
+        }
         default: {
-            throw std::invalid_argument("unsupported data type");
+            throw SegcoreError(DataTypeInvalid,
+                               fmt::format("invalid type is {}", data_type));
         }
     }
 }
@@ -59,6 +62,8 @@ datatype_sizeof(DataType data_type, int dim = 1) {
 inline std::string
 datatype_name(DataType data_type) {
     switch (data_type) {
+        case DataType::NONE:
+            return "none";
         case DataType::BOOL:
             return "bool";
         case DataType::INT8:
@@ -73,6 +78,8 @@ datatype_name(DataType data_type) {
             return "float";
         case DataType::DOUBLE:
             return "double";
+        case DataType::STRING:
+            return "string";
         case DataType::VARCHAR:
             return "varChar";
         case DataType::ARRAY:
@@ -84,10 +91,12 @@ datatype_name(DataType data_type) {
         case DataType::VECTOR_BINARY: {
             return "vector_binary";
         }
+        case DataType::VECTOR_FLOAT16: {
+            return "vector_float16";
+        }
         default: {
-            auto err_msg =
-                "Unsupported DataType(" + std::to_string((int)data_type) + ")";
-            PanicInfo(err_msg);
+            PanicInfo(DataTypeInvalid,
+                      fmt::format("Unsupported DataType({})", data_type));
         }
     }
 }
@@ -95,7 +104,8 @@ datatype_name(DataType data_type) {
 inline bool
 datatype_is_vector(DataType datatype) {
     return datatype == DataType::VECTOR_BINARY ||
-           datatype == DataType::VECTOR_FLOAT;
+           datatype == DataType::VECTOR_FLOAT ||
+           datatype == DataType::VECTOR_FLOAT16;
 }
 
 inline bool
@@ -118,6 +128,16 @@ datatype_is_binary(DataType datatype) {
         default:
             return false;
     }
+}
+
+inline bool
+datatype_is_json(DataType datatype) {
+    return datatype == DataType::JSON;
+}
+
+inline bool
+datatype_is_array(DataType datatype) {
+    return datatype == DataType::ARRAY;
 }
 
 inline bool
@@ -186,6 +206,14 @@ class FieldMeta {
     FieldMeta(const FieldName& name,
               FieldId id,
               DataType type,
+              DataType element_type)
+        : name_(name), id_(id), type_(type), element_type_(element_type) {
+        Assert(datatype_is_array(type_));
+    }
+
+    FieldMeta(const FieldName& name,
+              FieldId id,
+              DataType type,
               int64_t dim,
               std::optional<knowhere::MetricType> metric_type)
         : name_(name),
@@ -231,6 +259,11 @@ class FieldMeta {
         return type_;
     }
 
+    DataType
+    get_element_type() const {
+        return element_type_;
+    }
+
     bool
     is_vector() const {
         return datatype_is_vector(type_);
@@ -267,6 +300,7 @@ class FieldMeta {
     FieldName name_;
     FieldId id_;
     DataType type_ = DataType::NONE;
+    DataType element_type_ = DataType::NONE;
     std::optional<VectorInfo> vector_info_;
     std::optional<StringInfo> string_info_;
 };

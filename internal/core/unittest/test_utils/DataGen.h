@@ -19,10 +19,11 @@
 #include <google/protobuf/text_format.h>
 
 #include "Constants.h"
+#include "common/EasyAssert.h"
 #include "common/Schema.h"
 #include "index/ScalarIndexSort.h"
 #include "index/StringIndexSort.h"
-#include "index/VectorMemNMIndex.h"
+#include "index/VectorMemIndex.h"
 #include "query/SearchOnIndex.h"
 #include "segcore/SegmentGrowingImpl.h"
 #include "segcore/SegmentSealedImpl.h"
@@ -105,65 +106,92 @@ struct GeneratedData {
                     auto src_data = reinterpret_cast<const T*>(
                         target_field_data.vectors().binary_vector().data());
                     std::copy_n(src_data, len, ret.data());
+                } else if (field_meta.get_data_type() ==
+                           DataType::VECTOR_FLOAT16) {
+                    // int len = raw_->num_rows() * field_meta.get_dim() * sizeof(float16);
+                    int len = raw_->num_rows() * field_meta.get_dim();
+                    ret.resize(len);
+                    auto src_data = reinterpret_cast<const T*>(
+                        target_field_data.vectors().float16_vector().data());
+                    std::copy_n(src_data, len, ret.data());
                 } else {
-                    PanicInfo("unsupported");
+                    PanicInfo(Unsupported, "unsupported");
                 }
 
                 return std::move(ret);
             }
-            switch (field_meta.get_data_type()) {
-                case DataType::BOOL: {
-                    auto src_data = reinterpret_cast<const T*>(
-                        target_field_data.scalars().bool_data().data().data());
-                    std::copy_n(src_data, raw_->num_rows(), ret.data());
-                    break;
-                }
-                case DataType::INT8:
-                case DataType::INT16:
-                case DataType::INT32: {
-                    auto src_data = reinterpret_cast<const int32_t*>(
-                        target_field_data.scalars().int_data().data().data());
-                    std::copy_n(src_data, raw_->num_rows(), ret.data());
-                    break;
-                }
-                case DataType::INT64: {
-                    auto src_data = reinterpret_cast<const T*>(
-                        target_field_data.scalars().long_data().data().data());
-                    std::copy_n(src_data, raw_->num_rows(), ret.data());
-                    break;
-                }
-                case DataType::FLOAT: {
-                    auto src_data = reinterpret_cast<const T*>(
-                        target_field_data.scalars().float_data().data().data());
-                    std::copy_n(src_data, raw_->num_rows(), ret.data());
-                    break;
-                }
-                case DataType::DOUBLE: {
-                    auto src_data =
-                        reinterpret_cast<const T*>(target_field_data.scalars()
-                                                       .double_data()
-                                                       .data()
-                                                       .data());
-                    std::copy_n(src_data, raw_->num_rows(), ret.data());
-                    break;
-                }
-                case DataType::VARCHAR: {
-                    auto ret_data = reinterpret_cast<std::string*>(ret.data());
-                    auto src_data =
-                        target_field_data.scalars().string_data().data();
-                    std::copy(src_data.begin(), src_data.end(), ret_data);
-
-                    break;
-                }
-                case DataType::JSON: {
-                    auto ret_data = reinterpret_cast<std::string*>(ret.data());
-                    auto src_data =
-                        target_field_data.scalars().json_data().data();
-                    std::copy(src_data.begin(), src_data.end(), ret_data);
-                    break;
-                }
-                default: {
-                    PanicInfo("unsupported");
+            if constexpr (std::is_same_v<T, ScalarArray>) {
+                auto ret_data = reinterpret_cast<ScalarArray*>(ret.data());
+                auto src_data = target_field_data.scalars().array_data().data();
+                std::copy(src_data.begin(), src_data.end(), ret_data);
+            } else {
+                switch (field_meta.get_data_type()) {
+                    case DataType::BOOL: {
+                        auto src_data = reinterpret_cast<const T*>(
+                            target_field_data.scalars()
+                                .bool_data()
+                                .data()
+                                .data());
+                        std::copy_n(src_data, raw_->num_rows(), ret.data());
+                        break;
+                    }
+                    case DataType::INT8:
+                    case DataType::INT16:
+                    case DataType::INT32: {
+                        auto src_data = reinterpret_cast<const int32_t*>(
+                            target_field_data.scalars()
+                                .int_data()
+                                .data()
+                                .data());
+                        std::copy_n(src_data, raw_->num_rows(), ret.data());
+                        break;
+                    }
+                    case DataType::INT64: {
+                        auto src_data = reinterpret_cast<const T*>(
+                            target_field_data.scalars()
+                                .long_data()
+                                .data()
+                                .data());
+                        std::copy_n(src_data, raw_->num_rows(), ret.data());
+                        break;
+                    }
+                    case DataType::FLOAT: {
+                        auto src_data = reinterpret_cast<const T*>(
+                            target_field_data.scalars()
+                                .float_data()
+                                .data()
+                                .data());
+                        std::copy_n(src_data, raw_->num_rows(), ret.data());
+                        break;
+                    }
+                    case DataType::DOUBLE: {
+                        auto src_data = reinterpret_cast<const T*>(
+                            target_field_data.scalars()
+                                .double_data()
+                                .data()
+                                .data());
+                        std::copy_n(src_data, raw_->num_rows(), ret.data());
+                        break;
+                    }
+                    case DataType::VARCHAR: {
+                        auto ret_data =
+                            reinterpret_cast<std::string*>(ret.data());
+                        auto src_data =
+                            target_field_data.scalars().string_data().data();
+                        std::copy(src_data.begin(), src_data.end(), ret_data);
+                        break;
+                    }
+                    case DataType::JSON: {
+                        auto ret_data =
+                            reinterpret_cast<std::string*>(ret.data());
+                        auto src_data =
+                            target_field_data.scalars().json_data().data();
+                        std::copy(src_data.begin(), src_data.end(), ret_data);
+                        break;
+                    }
+                    default: {
+                        PanicInfo(Unsupported, "unsupported");
+                    }
                 }
             }
         }
@@ -172,13 +200,13 @@ struct GeneratedData {
 
     std::unique_ptr<DataArray>
     get_col(FieldId field_id) const {
-        for (auto target_field_data : raw_->fields_data()) {
+        for (const auto& target_field_data : raw_->fields_data()) {
             if (field_id.get() == target_field_data.field_id()) {
                 return std::make_unique<DataArray>(target_field_data);
             }
         }
 
-        PanicInfo("field id not find");
+        PanicInfo(FieldIDInvalid, "field id not find");
     }
 
  private:
@@ -188,7 +216,8 @@ struct GeneratedData {
             int64_t N,
             uint64_t seed,
             uint64_t ts_offset,
-            int repeat_count);
+            int repeat_count,
+            int array_len);
     friend GeneratedData
     DataGenForJsonArray(SchemaPtr schema,
                         int64_t N,
@@ -203,7 +232,8 @@ DataGen(SchemaPtr schema,
         int64_t N,
         uint64_t seed = 42,
         uint64_t ts_offset = 0,
-        int repeat_count = 1) {
+        int repeat_count = 1,
+        int array_len = 10) {
     using std::vector;
     std::default_random_engine er(seed);
     std::normal_distribution<> distr(0, 1);
@@ -257,6 +287,15 @@ DataGen(SchemaPtr schema,
                     x = er();
                 }
                 insert_cols(data, N, field_meta);
+                break;
+            }
+            case DataType::VECTOR_FLOAT16: {
+                auto dim = field_meta.get_dim();
+                vector<float16> final(dim * N);
+                for (auto& x : final) {
+                    x = float16(distr(er) + offset);
+                }
+                insert_cols(final, N, field_meta);
                 break;
             }
             case DataType::BOOL: {
@@ -329,18 +368,102 @@ DataGen(SchemaPtr schema,
             case DataType::JSON: {
                 vector<std::string> data(N);
                 for (int i = 0; i < N / repeat_count; i++) {
-                    auto str = R"({"int":)" + std::to_string(er()) +
-                               R"(,"double":)" +
-                               std::to_string(static_cast<double>(er())) +
-                               R"(,"string":")" + std::to_string(er()) +
-                               R"(","bool": true)" + "}";
+                    auto str =
+                        R"({"int":)" + std::to_string(er()) + R"(,"double":)" +
+                        std::to_string(static_cast<double>(er())) +
+                        R"(,"string":")" + std::to_string(er()) +
+                        R"(","bool": true)" + R"(, "array": [1,2,3])" + "}";
                     data[i] = str;
                 }
                 insert_cols(data, N, field_meta);
                 break;
             }
+            case DataType::ARRAY: {
+                vector<ScalarArray> data(N);
+                switch (field_meta.get_element_type()) {
+                    case DataType::BOOL: {
+                        for (int i = 0; i < N / repeat_count; i++) {
+                            milvus::proto::schema::ScalarField field_data;
+
+                            for (int j = 0; j < array_len; j++) {
+                                field_data.mutable_bool_data()->add_data(
+                                    static_cast<bool>(er()));
+                            }
+                            data[i] = field_data;
+                        }
+                        break;
+                    }
+                    case DataType::INT8:
+                    case DataType::INT16:
+                    case DataType::INT32: {
+                        for (int i = 0; i < N / repeat_count; i++) {
+                            milvus::proto::schema::ScalarField field_data;
+
+                            for (int j = 0; j < array_len; j++) {
+                                field_data.mutable_int_data()->add_data(
+                                    static_cast<int>(er()));
+                            }
+                            data[i] = field_data;
+                        }
+                        break;
+                    }
+                    case DataType::INT64: {
+                        for (int i = 0; i < N / repeat_count; i++) {
+                            milvus::proto::schema::ScalarField field_data;
+                            for (int j = 0; j < array_len; j++) {
+                                field_data.mutable_long_data()->add_data(
+                                    static_cast<int64_t>(er()));
+                            }
+                            data[i] = field_data;
+                        }
+                        break;
+                    }
+                    case DataType::STRING:
+                    case DataType::VARCHAR: {
+                        for (int i = 0; i < N / repeat_count; i++) {
+                            milvus::proto::schema::ScalarField field_data;
+
+                            for (int j = 0; j < array_len; j++) {
+                                field_data.mutable_string_data()->add_data(
+                                    std::to_string(er()));
+                            }
+                            data[i] = field_data;
+                        }
+                        break;
+                    }
+                    case DataType::FLOAT: {
+                        for (int i = 0; i < N / repeat_count; i++) {
+                            milvus::proto::schema::ScalarField field_data;
+
+                            for (int j = 0; j < array_len; j++) {
+                                field_data.mutable_float_data()->add_data(
+                                    static_cast<float>(er()));
+                            }
+                            data[i] = field_data;
+                        }
+                        break;
+                    }
+                    case DataType::DOUBLE: {
+                        for (int i = 0; i < N / repeat_count; i++) {
+                            milvus::proto::schema::ScalarField field_data;
+
+                            for (int j = 0; j < array_len; j++) {
+                                field_data.mutable_double_data()->add_data(
+                                    static_cast<double>(er()));
+                            }
+                            data[i] = field_data;
+                        }
+                        break;
+                    }
+                    default: {
+                        throw std::runtime_error("unsupported data type");
+                    }
+                }
+                insert_cols(data, N, field_meta);
+                break;
+            }
             default: {
-                throw std::runtime_error("unimplemented");
+                throw SegcoreError(ErrorCode::NotImplemented, "unimplemented");
             }
         }
         ++offset;
@@ -414,22 +537,24 @@ DataGenForJsonArray(SchemaPtr schema,
                             std::to_string(static_cast<double>(er())));
                         stringVec.push_back("\"" + std::to_string(er()) + "\"");
                         boolVec.push_back(i % 2 == 0 ? "true" : "false");
-                        arrayVec.push_back(fmt::format("[{}, {}, {}]", i, i+1, i+2));
+                        arrayVec.push_back(
+                            fmt::format("[{}, {}, {}]", i, i + 1, i + 2));
                     }
-                    auto str = R"({"int":[)" + join(intVec, ",") +
-                               R"(],"double":[)" + join(doubleVec, ",") +
-                               R"(],"string":[)" + join(stringVec, ",") +
-                               R"(],"bool": [)" + join(boolVec, ",") +
-                               R"(],"array": [)" + join(arrayVec, ",") +
-                               R"(],"array2": [[1,2], [3,4]])" + "}";
-                    //std::cout << str << std::endl;
+                    auto str =
+                        R"({"int":[)" + join(intVec, ",") + R"(],"double":[)" +
+                        join(doubleVec, ",") + R"(],"string":[)" +
+                        join(stringVec, ",") + R"(],"bool": [)" +
+                        join(boolVec, ",") + R"(],"array": [)" +
+                        join(arrayVec, ",") + R"(],"array2": [[1,2], [3,4]])" +
+                        R"(,"array3": [[1,2.2,false,"abc"]])" +
+                        R"(,"diff_type_array": [1,2.2,true,"abc"])" + "}";
                     data[i] = str;
                 }
                 insert_cols(data, N, field_meta);
                 break;
             }
             default: {
-                throw std::runtime_error("unimplemented");
+                throw SegcoreError(ErrorCode::NotImplemented, "unimplemented");
             }
         }
     }
@@ -550,6 +675,27 @@ CreateBinaryPlaceholderGroupFromBlob(int64_t num_queries,
 }
 
 inline auto
+CreateFloat16PlaceholderGroup(int64_t num_queries,
+                              int64_t dim,
+                              int64_t seed = 42) {
+    namespace ser = milvus::proto::common;
+    ser::PlaceholderGroup raw_group;
+    auto value = raw_group.add_placeholders();
+    value->set_tag("$0");
+    value->set_type(ser::PlaceholderType::Float16Vector);
+    std::normal_distribution<double> dis(0, 1);
+    std::default_random_engine e(seed);
+    for (int i = 0; i < num_queries; ++i) {
+        std::vector<float16> vec;
+        for (int d = 0; d < dim; ++d) {
+            vec.push_back(float16(dis(e)));
+        }
+        value->add_values(vec.data(), vec.size() * sizeof(float16));
+    }
+    return raw_group;
+}
+
+inline auto
 SearchResultToVector(const SearchResult& sr) {
     int64_t num_queries = sr.total_nq_;
     int64_t topk = sr.unity_topK_;
@@ -564,7 +710,7 @@ SearchResultToVector(const SearchResult& sr) {
     return result;
 }
 
-inline json
+inline nlohmann::json
 SearchResultToJson(const SearchResult& sr) {
     int64_t num_queries = sr.total_nq_;
     int64_t topk = sr.unity_topK_;
@@ -578,7 +724,7 @@ SearchResultToJson(const SearchResult& sr) {
         }
         results.emplace_back(std::move(result));
     }
-    return json{results};
+    return nlohmann::json{results};
 };
 
 inline storage::FieldDataPtr
@@ -611,7 +757,7 @@ CreateFieldDataFromDataArray(ssize_t raw_count,
                 break;
             }
             default: {
-                PanicInfo("unsupported");
+                PanicInfo(Unsupported, "unsupported");
             }
         }
     } else {
@@ -672,8 +818,17 @@ CreateFieldDataFromDataArray(ssize_t raw_count,
                 createFieldData(data_raw.data(), DataType::JSON, dim);
                 break;
             }
+            case DataType::ARRAY: {
+                auto src_data = data->scalars().array_data().data();
+                std::vector<Array> data_raw(src_data.size());
+                for (int i = 0; i < src_data.size(); i++) {
+                    data_raw[i] = Array(src_data.at(i));
+                }
+                createFieldData(data_raw.data(), DataType::ARRAY, dim);
+                break;
+            }
             default: {
-                PanicInfo("unsupported");
+                PanicInfo(Unsupported, "unsupported");
             }
         }
     }
@@ -747,16 +902,36 @@ SealedCreator(SchemaPtr schema, const GeneratedData& dataset) {
 
 inline std::unique_ptr<milvus::index::VectorIndex>
 GenVecIndexing(int64_t N, int64_t dim, const float* vec) {
-    // {knowhere::IndexParams::nprobe, 10},
     auto conf =
         knowhere::Json{{knowhere::meta::METRIC_TYPE, knowhere::metric::L2},
                        {knowhere::meta::DIM, std::to_string(dim)},
                        {knowhere::indexparam::NLIST, "1024"},
                        {knowhere::meta::DEVICE_ID, 0}};
     auto database = knowhere::GenDataSet(N, dim, vec);
-    auto indexing = std::make_unique<index::VectorMemNMIndex>(
-        knowhere::IndexEnum::INDEX_FAISS_IVFFLAT, knowhere::metric::L2);
+    milvus::storage::FieldDataMeta field_data_meta{1, 2, 3, 100};
+    milvus::storage::IndexMeta index_meta{3, 100, 1000, 1};
+    milvus::storage::StorageConfig storage_config;
+    storage_config.storage_type = "local";
+    storage_config.root_path = TestRemotePath;
+    auto chunk_manager = milvus::storage::CreateChunkManager(storage_config);
+    milvus::storage::FileManagerContext file_manager_context(
+        field_data_meta, index_meta, chunk_manager);
+    auto indexing = std::make_unique<index::VectorMemIndex>(
+        knowhere::IndexEnum::INDEX_FAISS_IVFFLAT,
+        knowhere::metric::L2,
+        knowhere::Version::GetCurrentVersion().VersionNumber(),
+        file_manager_context);
     indexing->BuildWithDataset(database, conf);
+    auto binary_set = indexing->Upload();
+
+    std::vector<std::string> index_files;
+    for (auto& binary : binary_set.binary_map_) {
+        index_files.emplace_back(binary.first);
+    }
+    conf["index_files"] = index_files;
+    // we need a load stage to use index as the producation does
+    // knowhere would do some data preparation in this stage
+    indexing->Load(conf);
     return indexing;
 }
 

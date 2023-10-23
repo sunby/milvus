@@ -12,12 +12,13 @@
 #include "segcore/load_index_c.h"
 
 #include "common/FieldMeta.h"
-#include "exceptions/EasyAssert.h"
+#include "common/EasyAssert.h"
 #include "index/Index.h"
 #include "index/IndexFactory.h"
 #include "index/Meta.h"
 #include "index/Utils.h"
 #include "log/Log.h"
+#include "storage/FileManager.h"
 #include "segcore/Types.h"
 #include "storage/Util.h"
 #include "storage/RemoteChunkManagerSingleton.h"
@@ -31,12 +32,12 @@ NewLoadIndexInfo(CLoadIndexInfo* c_load_index_info) {
 
         *c_load_index_info = load_index_info.release();
         auto status = CStatus();
-        status.error_code = Success;
+        status.error_code = milvus::Success;
         status.error_msg = "";
         return status;
     } catch (std::exception& e) {
         auto status = CStatus();
-        status.error_code = UnexpectedError;
+        status.error_code = milvus::UnexpectedError;
         status.error_msg = strdup(e.what());
         return status;
     }
@@ -60,12 +61,12 @@ AppendIndexParam(CLoadIndexInfo c_load_index_info,
         load_index_info->index_params[index_key] = index_value;
 
         auto status = CStatus();
-        status.error_code = Success;
+        status.error_code = milvus::Success;
         status.error_msg = "";
         return status;
     } catch (std::exception& e) {
         auto status = CStatus();
-        status.error_code = UnexpectedError;
+        status.error_code = milvus::UnexpectedError;
         status.error_msg = strdup(e.what());
         return status;
     }
@@ -90,12 +91,12 @@ AppendFieldInfo(CLoadIndexInfo c_load_index_info,
         load_index_info->mmap_dir_path = std::string(mmap_dir_path);
 
         auto status = CStatus();
-        status.error_code = Success;
+        status.error_code = milvus::Success;
         status.error_msg = "";
         return status;
     } catch (std::exception& e) {
         auto status = CStatus();
-        status.error_code = UnexpectedError;
+        status.error_code = milvus::UnexpectedError;
         status.error_msg = strdup(e.what());
         return status;
     }
@@ -111,6 +112,7 @@ appendVecIndex(CLoadIndexInfo c_load_index_info, CBinarySet c_binary_set) {
 
         milvus::index::CreateIndexInfo index_info;
         index_info.field_type = load_index_info->field_type;
+        index_info.index_engine_version = load_index_info->index_engine_version;
 
         // get index type
         AssertInfo(index_params.find("index_type") != index_params.end(),
@@ -135,28 +137,24 @@ appendVecIndex(CLoadIndexInfo c_load_index_info, CBinarySet c_binary_set) {
         auto remote_chunk_manager =
             milvus::storage::RemoteChunkManagerSingleton::GetInstance()
                 .GetRemoteChunkManager();
-        auto file_manager =
-            milvus::storage::CreateFileManager(index_info.index_type,
-                                               field_meta,
-                                               index_meta,
-                                               remote_chunk_manager);
-        AssertInfo(file_manager != nullptr, "create file manager failed!");
 
         auto config = milvus::index::ParseConfigFromIndexParams(
             load_index_info->index_params);
         config["index_files"] = load_index_info->index_files;
 
+        milvus::storage::FileManagerContext fileManagerContext(
+            field_meta, index_meta, remote_chunk_manager);
         load_index_info->index =
             milvus::index::IndexFactory::GetInstance().CreateIndex(
-                index_info, file_manager);
+                index_info, fileManagerContext);
         load_index_info->index->Load(*binary_set, config);
         auto status = CStatus();
-        status.error_code = Success;
+        status.error_code = milvus::Success;
         status.error_msg = "";
         return status;
     } catch (std::exception& e) {
         auto status = CStatus();
-        status.error_code = UnexpectedError;
+        status.error_code = milvus::UnexpectedError;
         status.error_msg = strdup(e.what());
         return status;
     }
@@ -180,16 +178,16 @@ appendScalarIndex(CLoadIndexInfo c_load_index_info, CBinarySet c_binary_set) {
         index_info.index_type = index_params["index_type"];
 
         load_index_info->index =
-            milvus::index::IndexFactory::GetInstance().CreateIndex(index_info,
-                                                                   nullptr);
+            milvus::index::IndexFactory::GetInstance().CreateIndex(
+                index_info, milvus::storage::FileManagerContext());
         load_index_info->index->Load(*binary_set);
         auto status = CStatus();
-        status.error_code = Success;
+        status.error_code = milvus::Success;
         status.error_msg = "";
         return status;
     } catch (std::exception& e) {
         auto status = CStatus();
-        status.error_code = UnexpectedError;
+        status.error_code = milvus::UnexpectedError;
         status.error_msg = strdup(e.what());
         return status;
     }
@@ -213,8 +211,11 @@ AppendIndexV2(CLoadIndexInfo c_load_index_info) {
         auto& index_params = load_index_info->index_params;
         auto field_type = load_index_info->field_type;
 
+        auto engine_version = load_index_info->index_engine_version;
+
         milvus::index::CreateIndexInfo index_info;
         index_info.field_type = load_index_info->field_type;
+        index_info.index_engine_version = engine_version;
 
         // get index type
         AssertInfo(index_params.find("index_type") != index_params.end(),
@@ -241,20 +242,16 @@ AppendIndexV2(CLoadIndexInfo c_load_index_info) {
         auto remote_chunk_manager =
             milvus::storage::RemoteChunkManagerSingleton::GetInstance()
                 .GetRemoteChunkManager();
-        auto file_manager =
-            milvus::storage::CreateFileManager(index_info.index_type,
-                                               field_meta,
-                                               index_meta,
-                                               remote_chunk_manager);
-        AssertInfo(file_manager != nullptr, "create file manager failed!");
 
         auto config = milvus::index::ParseConfigFromIndexParams(
             load_index_info->index_params);
         config["index_files"] = load_index_info->index_files;
 
+        milvus::storage::FileManagerContext fileManagerContext(
+            field_meta, index_meta, remote_chunk_manager);
         load_index_info->index =
             milvus::index::IndexFactory::GetInstance().CreateIndex(
-                index_info, file_manager);
+                index_info, fileManagerContext);
 
         if (!load_index_info->mmap_dir_path.empty() &&
             load_index_info->index->IsMmapSupported()) {
@@ -269,12 +266,12 @@ AppendIndexV2(CLoadIndexInfo c_load_index_info) {
 
         load_index_info->index->Load(config);
         auto status = CStatus();
-        status.error_code = Success;
+        status.error_code = milvus::Success;
         status.error_msg = "";
         return status;
     } catch (std::exception& e) {
         auto status = CStatus();
-        status.error_code = UnexpectedError;
+        status.error_code = milvus::UnexpectedError;
         status.error_msg = strdup(e.what());
         return status;
     }
@@ -348,12 +345,12 @@ AppendIndexFilePath(CLoadIndexInfo c_load_index_info, const char* c_file_path) {
         load_index_info->index_files.emplace_back(index_file_path);
 
         auto status = CStatus();
-        status.error_code = Success;
+        status.error_code = milvus::Success;
         status.error_msg = "";
         return status;
     } catch (std::exception& e) {
         auto status = CStatus();
-        status.error_code = UnexpectedError;
+        status.error_code = milvus::UnexpectedError;
         status.error_msg = strdup(e.what());
         return status;
     }
@@ -372,12 +369,32 @@ AppendIndexInfo(CLoadIndexInfo c_load_index_info,
         load_index_info->index_version = version;
 
         auto status = CStatus();
-        status.error_code = Success;
+        status.error_code = milvus::Success;
         status.error_msg = "";
         return status;
     } catch (std::exception& e) {
         auto status = CStatus();
-        status.error_code = UnexpectedError;
+        status.error_code = milvus::UnexpectedError;
+        status.error_msg = strdup(e.what());
+        return status;
+    }
+}
+
+CStatus
+AppendIndexEngineVersionToLoadInfo(CLoadIndexInfo c_load_index_info,
+                                   int32_t index_engine_version) {
+    try {
+        auto load_index_info =
+            (milvus::segcore::LoadIndexInfo*)c_load_index_info;
+        load_index_info->index_engine_version = index_engine_version;
+
+        auto status = CStatus();
+        status.error_code = milvus::Success;
+        status.error_msg = "";
+        return status;
+    } catch (std::exception& e) {
+        auto status = CStatus();
+        status.error_code = milvus::UnexpectedError;
         status.error_msg = strdup(e.what());
         return status;
     }
@@ -397,12 +414,12 @@ CleanLoadedIndex(CLoadIndexInfo c_load_index_info) {
                                                 load_index_info->index_version);
         local_chunk_manager->RemoveDir(index_file_path_prefix);
         auto status = CStatus();
-        status.error_code = Success;
+        status.error_code = milvus::Success;
         status.error_msg = "";
         return status;
     } catch (std::exception& e) {
         auto status = CStatus();
-        status.error_code = UnexpectedError;
+        status.error_code = milvus::UnexpectedError;
         status.error_msg = strdup(e.what());
         return status;
     }

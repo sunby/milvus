@@ -10,44 +10,42 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/milvus-io/milvus/pkg/util/parameterutil.go"
-
-	"github.com/milvus-io/milvus/pkg/util/merr"
-
 	"github.com/cockroachdb/errors"
-
 	"github.com/gin-gonic/gin"
 	"github.com/golang/protobuf/proto"
 	"github.com/spf13/cast"
 	"github.com/tidwall/gjson"
+	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
-
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/util/merr"
+	"github.com/milvus-io/milvus/pkg/util/parameterutil.go"
 )
 
 func ParseUsernamePassword(c *gin.Context) (string, string, bool) {
 	username, password, ok := c.Request.BasicAuth()
 	if !ok {
-		auth := c.Request.Header.Get("Authorization")
-		if auth != "" {
-			token := strings.TrimPrefix(auth, "Bearer ")
-			if token != auth {
-				i := strings.IndexAny(token, ":")
-				if i != -1 {
-					username = token[:i]
-					password = token[i+1:]
-				}
-			}
+		token := GetAuthorization(c)
+		i := strings.IndexAny(token, util.CredentialSeperator)
+		if i != -1 {
+			username = token[:i]
+			password = token[i+1:]
 		}
 	} else {
 		c.Header("WWW-Authenticate", `Basic realm="restricted", charset="UTF-8"`)
 	}
 	return username, password, username != "" && password != ""
+}
+
+func GetAuthorization(c *gin.Context) string {
+	auth := c.Request.Header.Get("Authorization")
+	return strings.TrimPrefix(auth, "Bearer ")
 }
 
 // find the primary field of collection
@@ -174,12 +172,12 @@ func printIndexes(indexes []*milvuspb.IndexDescription) []gin.H {
 
 // --------------------- insert param --------------------- //
 
-func checkAndSetData(body string, collDescResp *milvuspb.DescribeCollectionResponse, req *InsertReq) error {
+func checkAndSetData(body string, collDescResp *milvuspb.DescribeCollectionResponse) (error, []map[string]interface{}) {
 	var reallyDataArray []map[string]interface{}
 	dataResult := gjson.Get(body, "data")
 	dataResultArray := dataResult.Array()
 	if len(dataResultArray) == 0 {
-		return errors.New("data is required")
+		return merr.ErrMissingRequiredParameters, reallyDataArray
 	}
 
 	var fieldNames []string
@@ -200,7 +198,7 @@ func checkAndSetData(body string, collDescResp *milvuspb.DescribeCollectionRespo
 
 				if field.IsPrimaryKey && collDescResp.Schema.AutoID {
 					if dataString != "" {
-						return fmt.Errorf("fieldName %s AutoId already open, not support insert data %s", fieldName, dataString)
+						return merr.WrapErrParameterInvalid("", "set primary key but autoID == true"), reallyDataArray
 					}
 					continue
 				}
@@ -219,31 +217,31 @@ func checkAndSetData(body string, collDescResp *milvuspb.DescribeCollectionRespo
 				case schemapb.DataType_Bool:
 					result, err := cast.ToBoolE(dataString)
 					if err != nil {
-						return fmt.Errorf("dataString %s cast to bool error: %s", dataString, err.Error())
+						return merr.WrapErrParameterInvalid(schemapb.DataType_name[int32(fieldType)], dataString, err.Error()), reallyDataArray
 					}
 					reallyData[fieldName] = result
 				case schemapb.DataType_Int8:
 					result, err := cast.ToInt8E(dataString)
 					if err != nil {
-						return fmt.Errorf("dataString %s cast to int8 error: %s", dataString, err.Error())
+						return merr.WrapErrParameterInvalid(schemapb.DataType_name[int32(fieldType)], dataString, err.Error()), reallyDataArray
 					}
 					reallyData[fieldName] = result
 				case schemapb.DataType_Int16:
 					result, err := cast.ToInt16E(dataString)
 					if err != nil {
-						return fmt.Errorf("dataString %s cast to int16 error: %s", dataString, err.Error())
+						return merr.WrapErrParameterInvalid(schemapb.DataType_name[int32(fieldType)], dataString, err.Error()), reallyDataArray
 					}
 					reallyData[fieldName] = result
 				case schemapb.DataType_Int32:
 					result, err := cast.ToInt32E(dataString)
 					if err != nil {
-						return fmt.Errorf("dataString %s cast to int32 error: %s", dataString, err.Error())
+						return merr.WrapErrParameterInvalid(schemapb.DataType_name[int32(fieldType)], dataString, err.Error()), reallyDataArray
 					}
 					reallyData[fieldName] = result
 				case schemapb.DataType_Int64:
 					result, err := cast.ToInt64E(dataString)
 					if err != nil {
-						return fmt.Errorf("dataString %s cast to int64 error: %s", dataString, err.Error())
+						return merr.WrapErrParameterInvalid(schemapb.DataType_name[int32(fieldType)], dataString, err.Error()), reallyDataArray
 					}
 					reallyData[fieldName] = result
 				case schemapb.DataType_JSON:
@@ -251,13 +249,13 @@ func checkAndSetData(body string, collDescResp *milvuspb.DescribeCollectionRespo
 				case schemapb.DataType_Float:
 					result, err := cast.ToFloat32E(dataString)
 					if err != nil {
-						return fmt.Errorf("dataString %s cast to float32 error: %s", dataString, err.Error())
+						return merr.WrapErrParameterInvalid(schemapb.DataType_name[int32(fieldType)], dataString, err.Error()), reallyDataArray
 					}
 					reallyData[fieldName] = result
 				case schemapb.DataType_Double:
 					result, err := cast.ToFloat64E(dataString)
 					if err != nil {
-						return fmt.Errorf("dataString %s cast to float64 error: %s", dataString, err.Error())
+						return merr.WrapErrParameterInvalid(schemapb.DataType_name[int32(fieldType)], dataString, err.Error()), reallyDataArray
 					}
 					reallyData[fieldName] = result
 				case schemapb.DataType_VarChar:
@@ -265,7 +263,7 @@ func checkAndSetData(body string, collDescResp *milvuspb.DescribeCollectionRespo
 				case schemapb.DataType_String:
 					reallyData[fieldName] = dataString
 				default:
-					return fmt.Errorf("not support fieldName %s dataType %s", fieldName, fieldType)
+					return merr.WrapErrParameterInvalid("", schemapb.DataType_name[int32(fieldType)], "fieldName: "+fieldName), reallyDataArray
 				}
 			}
 
@@ -274,20 +272,23 @@ func checkAndSetData(body string, collDescResp *milvuspb.DescribeCollectionRespo
 				for mapKey, mapValue := range data.Map() {
 					if !containsString(fieldNames, mapKey) {
 						mapValueStr := mapValue.String()
-						if mapValue.Type == gjson.True || mapValue.Type == gjson.False {
+						switch mapValue.Type {
+						case gjson.True, gjson.False:
 							reallyData[mapKey] = cast.ToBool(mapValueStr)
-						} else if mapValue.Type == gjson.String {
+						case gjson.String:
 							reallyData[mapKey] = mapValueStr
-						} else if mapValue.Type == gjson.Number {
+						case gjson.Number:
 							if strings.Contains(mapValue.Raw, ".") {
 								reallyData[mapKey] = cast.ToFloat64(mapValue.Raw)
 							} else {
 								reallyData[mapKey] = cast.ToInt64(mapValueStr)
 							}
-						} else if mapValue.Type == gjson.JSON {
+						case gjson.JSON:
 							reallyData[mapKey] = mapValue.Value()
-						} else {
-
+						case gjson.Null:
+							// skip null
+						default:
+							log.Warn("unknown json type found", zap.Int("mapValue.Type", int(mapValue.Type)))
 						}
 					}
 				}
@@ -295,11 +296,10 @@ func checkAndSetData(body string, collDescResp *milvuspb.DescribeCollectionRespo
 
 			reallyDataArray = append(reallyDataArray, reallyData)
 		} else {
-			return fmt.Errorf("dataType %s not Json", data.Type)
+			return merr.WrapErrParameterInvalid(gjson.JSON, data.Type, "NULL:0, FALSE:1, NUMBER:2, STRING:3, TRUE:4, JSON:5"), reallyDataArray
 		}
 	}
-	req.Data = reallyDataArray
-	return nil
+	return nil, reallyDataArray
 }
 
 func containsString(arr []string, s string) bool {
@@ -830,7 +830,6 @@ func buildQueryResp(rowsNum int64, needFields []string, fieldDataList []*schemap
 								}
 							}
 						}
-
 					}
 				default:
 					row[fieldDataList[j].FieldName] = ""
@@ -856,10 +855,4 @@ func buildQueryResp(rowsNum int64, needFields []string, fieldDataList []*schemap
 	}
 
 	return queryResp, nil
-}
-
-// --------------------- error code --------------------- //
-
-func Code(err error) int32 {
-	return merr.Code(err)
 }

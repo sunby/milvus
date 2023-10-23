@@ -35,6 +35,7 @@
 #include <variant>
 #include <vector>
 
+#include "fmt/core.h"
 #include "knowhere/binaryset.h"
 #include "knowhere/comp/index_param.h"
 #include "knowhere/dataset.h"
@@ -50,6 +51,33 @@ using idx_t = int64_t;
 using offset_t = int32_t;
 using date_t = int32_t;
 using distance_t = float;
+
+union float16 {
+    unsigned short bits;
+    struct {
+        unsigned short mantissa : 10;
+        unsigned short exponent : 5;
+        unsigned short sign : 1;
+    } parts;
+    float16() {
+    }
+    float16(float f) {
+        unsigned int i = *(unsigned int*)&f;
+        unsigned int sign = (i >> 31) & 0x0001;
+        unsigned int exponent = ((i >> 23) & 0xff) - 127 + 15;
+        unsigned int mantissa = (i >> 13) & 0x3ff;
+        parts.sign = sign;
+        parts.exponent = exponent;
+        parts.mantissa = mantissa;
+    }
+    operator float() const {
+        unsigned int sign = parts.sign << 31;
+        unsigned int exponent = (parts.exponent - 15 + 127) << 23;
+        unsigned int mantissa = parts.mantissa << 13;
+        unsigned int bits = sign | exponent | mantissa;
+        return *(float*)&bits;
+    }
+};
 
 enum class DataType {
     NONE = 0,
@@ -69,6 +97,7 @@ enum class DataType {
 
     VECTOR_BINARY = 100,
     VECTOR_FLOAT = 101,
+    VECTOR_FLOAT16 = 102,
 };
 
 using Timestamp = uint64_t;  // TODO: use TiKV-like timestamp
@@ -137,6 +166,7 @@ using BinarySet = knowhere::BinarySet;
 using Dataset = knowhere::DataSet;
 using DatasetPtr = knowhere::DataSetPtr;
 using MetricType = knowhere::MetricType;
+using IndexVersion = knowhere::IndexVersion;
 // TODO :: type define milvus index type(vector index type and scalar index type)
 using IndexType = knowhere::IndexType;
 
@@ -201,6 +231,65 @@ struct fmt::formatter<milvus::DataType> : formatter<string_view> {
                 break;
             case milvus::DataType::VECTOR_FLOAT:
                 name = "VECTOR_FLOAT";
+                break;
+            case milvus::DataType::VECTOR_FLOAT16:
+                name = "VECTOR_FLOAT16";
+                break;
+        }
+        return formatter<string_view>::format(name, ctx);
+    }
+};
+
+template <>
+struct fmt::formatter<milvus::OpType> : formatter<string_view> {
+    auto
+    format(milvus::OpType c, format_context& ctx) const {
+        string_view name = "unknown";
+        switch (c) {
+            case milvus::OpType::Invalid:
+                name = "Invalid";
+                break;
+            case milvus::OpType::GreaterThan:
+                name = "GreaterThan";
+                break;
+            case milvus::OpType::GreaterEqual:
+                name = "GreaterEqual";
+                break;
+            case milvus::OpType::LessThan:
+                name = "LessThan";
+                break;
+            case milvus::OpType::LessEqual:
+                name = "LessEqual";
+                break;
+            case milvus::OpType::Equal:
+                name = "Equal";
+                break;
+            case milvus::OpType::NotEqual:
+                name = "NotEqual";
+                break;
+            case milvus::OpType::PrefixMatch:
+                name = "PrefixMatch";
+                break;
+            case milvus::OpType::PostfixMatch:
+                name = "PostfixMatch";
+                break;
+            case milvus::OpType::Match:
+                name = "Match";
+                break;
+            case milvus::OpType::Range:
+                name = "Range";
+                break;
+            case milvus::OpType::In:
+                name = "In";
+                break;
+            case milvus::OpType::NotIn:
+                name = "NotIn";
+                break;
+            case milvus::OpType::OpType_INT_MIN_SENTINEL_DO_NOT_USE_:
+                name = "OpType_INT_MIN_SENTINEL_DO_NOT_USE";
+                break;
+            case milvus::OpType::OpType_INT_MAX_SENTINEL_DO_NOT_USE_:
+                name = "OpType_INT_MAX_SENTINEL_DO_NOT_USE";
                 break;
         }
         return formatter<string_view>::format(name, ctx);

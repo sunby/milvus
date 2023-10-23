@@ -103,6 +103,13 @@ EncodeAndUploadIndexSlice2(std::shared_ptr<milvus_storage::Space> space,
                            IndexMeta index_meta,
                            FieldDataMeta field_meta,
                            std::string object_key);
+std::pair<std::string, size_t>
+EncodeAndUploadFieldSlice(ChunkManager* chunk_manager,
+                          uint8_t* buf,
+                          int64_t element_count,
+                          FieldDataMeta field_data_meta,
+                          const FieldMeta& field_meta,
+                          std::string object_key);
 
 std::vector<FieldDataPtr>
 GetObjectData(ChunkManager* remote_chunk_manager,
@@ -142,18 +149,6 @@ ReleaseArrowUnused();
 
 ChunkManagerPtr
 CreateChunkManager(const StorageConfig& storage_config);
-
-FileManagerImplPtr
-CreateFileManager(IndexType index_type,
-                  const FieldDataMeta& field_meta,
-                  const IndexMeta& index_meta,
-                  ChunkManagerPtr cm);
-
-FileManagerImplPtr
-CreateFileManager(IndexType index_type,
-                  const FieldDataMeta& field_meta,
-                  const IndexMeta& index_meta,
-                  std::shared_ptr<milvus_storage::Space> space);
 
 FieldDataPtr
 CreateFieldData(const DataType& type,

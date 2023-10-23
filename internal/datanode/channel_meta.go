@@ -33,9 +33,9 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	milvus_storage "github.com/milvus-io/milvus-storage/go/storage"
+	"github.com/milvus-io/milvus/internal/datanode/broker"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/storage"
-	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/conc"
@@ -62,7 +62,7 @@ type Channel interface {
 	getCollectionAndPartitionID(segID UniqueID) (collID, partitionID UniqueID, err error)
 	getChannelName(segID UniqueID) string
 
-	addSegment(req addSegmentReq) error
+	addSegment(ctx context.Context, req addSegmentReq) error
 	getSegment(segID UniqueID) *Segment
 	removeSegments(segID ...UniqueID)
 	hasSegment(segID UniqueID, countFlushed bool) bool
@@ -77,7 +77,7 @@ type Channel interface {
 	listNewSegmentsStartPositions() []*datapb.SegmentStartPosition
 	transferNewSegments(segmentIDs []UniqueID)
 	updateSegmentPKRange(segID UniqueID, ids storage.FieldData)
-	mergeFlushedSegments(ctx context.Context, seg *Segment, planID UniqueID, compactedFrom []UniqueID) error
+	mergeFlushedSegments(ctx context.Context, seg *Segment, planID UniqueID, compactedFrom []UniqueID)
 	listCompactedSegmentIDs() map[UniqueID][]UniqueID
 	listSegmentIDsToSync(ts Timestamp) []UniqueID
 
@@ -100,7 +100,11 @@ type Channel interface {
 
 	// getTotalMemorySize returns the sum of memory sizes of segments.
 	getTotalMemorySize() int64
-	forceToSync()
+	setIsHighMemory(b bool)
+	getIsHighMemory() bool
+
+	getFlushTs() Timestamp
+	setFlushTs(ts Timestamp)
 
 	getSpace(segmentID UniqueID) (*milvus_storage.Space, bool)
 	setSpace(segmentID UniqueID, space *milvus_storage.Space)
@@ -118,7 +122,15 @@ type ChannelMeta struct {
 	segMu    sync.RWMutex
 	segments map[UniqueID]*Segment
 
-	needToSync   *atomic.Bool
+	// isHighMemory is intended to trigger the syncing of segments
+	// when segment's buffer consumes a significant amount of memory.
+	isHighMemory *atomic.Bool
+
+	// flushTs is intended to trigger:
+	// 1. the syncing of segments when consumed ts exceeds flushTs;
+	// 2. the updating of channelCP when channelCP exceeds flushTs.
+	flushTs *atomic.Uint64
+
 	syncPolicies []segmentSyncPolicy
 
 	metaService  *metaService
@@ -143,8 +155,8 @@ type addSegmentReq struct {
 
 var _ Channel = &ChannelMeta{}
 
-func newChannel(channelName string, collID UniqueID, schema *schemapb.CollectionSchema, rc types.RootCoord, cm storage.ChunkManager) *ChannelMeta {
-	metaService := newMetaService(rc, collID)
+func newChannel(channelName string, collID UniqueID, schema *schemapb.CollectionSchema, broker broker.Broker, cm storage.ChunkManager) *ChannelMeta {
+	metaService := newMetaService(broker, collID)
 
 	channel := ChannelMeta{
 		collectionID: collID,
@@ -153,10 +165,12 @@ func newChannel(channelName string, collID UniqueID, schema *schemapb.Collection
 
 		segments: make(map[UniqueID]*Segment),
 
-		needToSync: atomic.NewBool(false),
+		isHighMemory: atomic.NewBool(false),
+		flushTs:      atomic.NewUint64(math.MaxUint64),
 		syncPolicies: []segmentSyncPolicy{
 			syncPeriodically(),
 			syncMemoryTooHigh(),
+			syncSegmentsAtTs(),
 		},
 
 		metaService:  metaService,
@@ -202,7 +216,7 @@ func (c *ChannelMeta) getChannelName(segID UniqueID) string {
 
 // addSegment adds the segment to current channel. Segments can be added as *new*, *normal* or *flushed*.
 // Make sure to verify `channel.hasSegment(segID)` == false before calling `channel.addSegment()`.
-func (c *ChannelMeta) addSegment(req addSegmentReq) error {
+func (c *ChannelMeta) addSegment(ctx context.Context, req addSegmentReq) error {
 	if req.collID != c.collectionID {
 		log.Warn("failed to addSegment, collection mismatch",
 			zap.Int64("current collection ID", req.collID),
@@ -231,7 +245,7 @@ func (c *ChannelMeta) addSegment(req addSegmentReq) error {
 	}
 	seg.setType(req.segType)
 	// Set up pk stats
-	err := c.InitPKstats(context.TODO(), seg, req.statsBinLogs, req.recoverTs)
+	err := c.InitPKstats(ctx, seg, req.statsBinLogs, req.recoverTs)
 	if err != nil {
 		log.Error("failed to init bloom filter",
 			zap.Int64("segmentID", req.segID),
@@ -285,7 +299,7 @@ func (c *ChannelMeta) listSegmentIDsToSync(ts Timestamp) []UniqueID {
 
 	segIDsToSync := typeutil.NewUniqueSet()
 	for _, policy := range c.syncPolicies {
-		segments := policy(validSegs, ts, c.needToSync)
+		segments := policy(validSegs, c, ts)
 		for _, segID := range segments {
 			segIDsToSync.Insert(segID)
 		}
@@ -670,7 +684,7 @@ func (c *ChannelMeta) getCollectionSchema(collID UniqueID, ts Timestamp) (*schem
 	return c.collSchema, nil
 }
 
-func (c *ChannelMeta) mergeFlushedSegments(ctx context.Context, seg *Segment, planID UniqueID, compactedFrom []UniqueID) error {
+func (c *ChannelMeta) mergeFlushedSegments(ctx context.Context, seg *Segment, planID UniqueID, compactedFrom []UniqueID) {
 	log := log.Ctx(ctx).With(
 		zap.Int64("segmentID", seg.segmentID),
 		zap.Int64("collectionID", seg.collectionID),
@@ -679,20 +693,12 @@ func (c *ChannelMeta) mergeFlushedSegments(ctx context.Context, seg *Segment, pl
 		zap.Int64("planID", planID),
 		zap.String("channelName", c.channelName))
 
-	if seg.collectionID != c.collectionID {
-		log.Warn("failed to mergeFlushedSegments, collection mismatch",
-			zap.Int64("current collection ID", seg.collectionID),
-			zap.Int64("expected collection ID", c.collectionID))
-		return merr.WrapErrParameterInvalid(c.collectionID, seg.collectionID, "collection not match")
-	}
-
 	var inValidSegments []UniqueID
 	for _, ID := range compactedFrom {
 		// no such segments in channel or the segments are unflushed.
 		if !c.hasSegment(ID, true) || c.hasSegment(ID, false) {
 			inValidSegments = append(inValidSegments, ID)
 		}
-
 	}
 
 	if len(inValidSegments) > 0 {
@@ -703,12 +709,6 @@ func (c *ChannelMeta) mergeFlushedSegments(ctx context.Context, seg *Segment, pl
 	log.Info("merge flushed segments")
 	c.segMu.Lock()
 	defer c.segMu.Unlock()
-	select {
-	case <-ctx.Done():
-		log.Warn("the context has been closed", zap.Error(ctx.Err()))
-		return errors.New("invalid context")
-	default:
-	}
 
 	for _, ID := range compactedFrom {
 		// the existent of the segments are already checked
@@ -725,8 +725,6 @@ func (c *ChannelMeta) mergeFlushedSegments(ctx context.Context, seg *Segment, pl
 		seg.setType(datapb.SegmentType_Flushed)
 		c.segments[seg.segmentID] = seg
 	}
-
-	return nil
 }
 
 // for tests only
@@ -803,6 +801,7 @@ func (c *ChannelMeta) listNotFlushedSegmentIDs() []UniqueID {
 }
 
 func (c *ChannelMeta) getChannelCheckpoint(ttPos *msgpb.MsgPosition) *msgpb.MsgPosition {
+	log := log.With().WithRateGroup("ChannelMeta", 1, 60)
 	c.segMu.RLock()
 	defer c.segMu.RUnlock()
 	channelCP := &msgpb.MsgPosition{Timestamp: math.MaxUint64}
@@ -824,8 +823,7 @@ func (c *ChannelMeta) getChannelCheckpoint(ttPos *msgpb.MsgPosition) *msgpb.MsgP
 				channelCP = db.startPos
 			}
 		}
-		// TODO: maybe too many logs would print
-		log.Debug("getChannelCheckpoint for segment", zap.Int64("segmentID", seg.segmentID),
+		log.RatedDebug(10, "getChannelCheckpoint for segment", zap.Int64("segmentID", seg.segmentID),
 			zap.Bool("isCurIBEmpty", seg.curInsertBuf == nil),
 			zap.Bool("isCurDBEmpty", seg.curDeleteBuf == nil),
 			zap.Int("len(hisIB)", len(seg.historyInsertBuf)),
@@ -932,8 +930,12 @@ func (c *ChannelMeta) evictHistoryDeleteBuffer(segmentID UniqueID, endPos *msgpb
 	log.Warn("cannot find segment when evictHistoryDeleteBuffer", zap.Int64("segmentID", segmentID))
 }
 
-func (c *ChannelMeta) forceToSync() {
-	c.needToSync.Store(true)
+func (c *ChannelMeta) setIsHighMemory(b bool) {
+	c.isHighMemory.Store(b)
+}
+
+func (c *ChannelMeta) getIsHighMemory() bool {
+	return c.isHighMemory.Load()
 }
 
 func (c *ChannelMeta) getTotalMemorySize() int64 {
@@ -944,6 +946,14 @@ func (c *ChannelMeta) getTotalMemorySize() int64 {
 		res += segment.memorySize
 	}
 	return res
+}
+
+func (c *ChannelMeta) getFlushTs() Timestamp {
+	return c.flushTs.Load()
+}
+
+func (c *ChannelMeta) setFlushTs(ts Timestamp) {
+	c.flushTs.Store(ts)
 }
 
 func (c *ChannelMeta) close() {

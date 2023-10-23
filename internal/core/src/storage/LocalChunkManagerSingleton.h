@@ -43,16 +43,9 @@ class LocalChunkManagerSingleton {
 
     void
     Init(std::string root_path) {
-        std::unique_lock lck(mutex_);
         if (lcm_ == nullptr) {
             lcm_ = std::make_shared<LocalChunkManager>(root_path);
         }
-    }
-
-    void
-    Release() {
-        std::unique_lock lck(mutex_);
-        lcm_ = nullptr;
     }
 
     LocalChunkManagerSPtr
@@ -61,7 +54,6 @@ class LocalChunkManagerSingleton {
     }
 
  private:
-    mutable std::shared_mutex mutex_;
     LocalChunkManagerSPtr lcm_ = nullptr;
 };
 

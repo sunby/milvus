@@ -24,19 +24,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/errors"
-	"github.com/milvus-io/milvus/pkg/common"
-	"github.com/milvus-io/milvus/tests/integration"
-	"github.com/stretchr/testify/suite"
-
 	"github.com/golang/protobuf/proto"
+	"github.com/stretchr/testify/suite"
+	"go.uber.org/zap"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/metric"
-	"go.uber.org/zap"
+	"github.com/milvus-io/milvus/tests/integration"
 )
 
 type JSONExprSuite struct {
@@ -733,7 +732,10 @@ func (s *JSONExprSuite) insertFlushIndexLoad(ctx context.Context, dbName, collec
 	s.NoError(err)
 	segmentIDs, has := flushResp.GetCollSegIDs()[collectionName]
 	ids := segmentIDs.GetData()
-	s.NotEmpty(segmentIDs)
+	s.Require().NotEmpty(segmentIDs)
+	s.Require().True(has)
+	flushTs, has := flushResp.GetCollFlushTs()[collectionName]
+	s.True(has)
 
 	segments, err := s.Cluster.MetaWatcher.ShowSegments()
 	s.NoError(err)
@@ -741,28 +743,7 @@ func (s *JSONExprSuite) insertFlushIndexLoad(ctx context.Context, dbName, collec
 	for _, segment := range segments {
 		log.Info("ShowSegments result", zap.String("segment", segment.String()))
 	}
-
-	if has && len(ids) > 0 {
-		flushed := func() bool {
-			resp, err := s.Cluster.Proxy.GetFlushState(ctx, &milvuspb.GetFlushStateRequest{
-				SegmentIDs: ids,
-			})
-			if err != nil {
-				//panic(errors.New("GetFlushState failed"))
-				return false
-			}
-			return resp.GetFlushed()
-		}
-		for !flushed() {
-			// respect context deadline/cancel
-			select {
-			case <-ctx.Done():
-				panic(errors.New("deadline exceeded"))
-			default:
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-	}
+	s.WaitForFlush(ctx, ids, flushTs, dbName, collectionName)
 
 	// create index
 	createIndexStatus, err := s.Cluster.Proxy.CreateIndex(ctx, &milvuspb.CreateIndexRequest{
@@ -1160,5 +1141,6 @@ func (s *JSONExprSuite) TestJsonContains() {
 }
 
 func TestJsonExpr(t *testing.T) {
+	t.Skip("Skip integration test, need to refactor integration test framework")
 	suite.Run(t, new(JSONExprSuite))
 }

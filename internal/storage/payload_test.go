@@ -26,7 +26,6 @@ import (
 )
 
 func TestPayload_ReaderAndWriter(t *testing.T) {
-
 	t.Run("TestBool", func(t *testing.T) {
 		w, err := NewPayloadWriter(schemapb.DataType_Bool)
 		require.Nil(t, err)
@@ -60,7 +59,6 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		assert.NoError(t, err)
 		assert.ElementsMatch(t, []bool{false, false, false, false, false, false, false, false}, bools)
 		defer r.ReleasePayloadReader()
-
 	})
 
 	t.Run("TestInt8", func(t *testing.T) {
@@ -534,6 +532,39 @@ func TestPayload_ReaderAndWriter(t *testing.T) {
 		assert.Equal(t, 4, len(floatVecs))
 		assert.ElementsMatch(t, []float32{1.0, 2.0, 3.0, 4.0}, floatVecs)
 		defer r.ReleasePayloadReader()
+	})
+
+	t.Run("TestFloat16Vector", func(t *testing.T) {
+		w, err := NewPayloadWriter(schemapb.DataType_Float16Vector, 1)
+		require.Nil(t, err)
+		require.NotNil(t, w)
+
+		err = w.AddFloat16VectorToPayload([]byte{1, 2}, 1)
+		assert.NoError(t, err)
+		err = w.AddDataToPayload([]byte{3, 4}, 1)
+		assert.NoError(t, err)
+		err = w.FinishPayloadWriter()
+		assert.NoError(t, err)
+
+		length, err := w.GetPayloadLengthFromWriter()
+		assert.NoError(t, err)
+		assert.Equal(t, 2, length)
+		defer w.ReleasePayloadWriter()
+
+		buffer, err := w.GetPayloadBufferFromWriter()
+		assert.NoError(t, err)
+
+		r, err := NewPayloadReader(schemapb.DataType_Float16Vector, buffer)
+		require.Nil(t, err)
+		length, err = r.GetPayloadLengthFromReader()
+		assert.NoError(t, err)
+		assert.Equal(t, length, 2)
+
+		float16Vecs, dim, err := r.GetFloat16VectorFromPayload()
+		assert.NoError(t, err)
+		assert.Equal(t, 1, dim)
+		assert.Equal(t, 4, len(float16Vecs))
+		assert.ElementsMatch(t, []byte{1, 2, 3, 4}, float16Vecs)
 	})
 
 	// t.Run("TestAddDataToPayload", func(t *testing.T) {

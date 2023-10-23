@@ -7,9 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
-	"github.com/stretchr/testify/assert"
 )
 
 type fakeTaskState int
@@ -164,9 +165,9 @@ func TestIndexTaskScheduler(t *testing.T) {
 	tasks := make([]task, 0)
 
 	tasks = append(tasks,
-		newTask(fakeTaskEnqueued, nil, commonpb.IndexState_Failed),
-		newTask(fakeTaskPrepared, nil, commonpb.IndexState_Failed),
-		newTask(fakeTaskBuiltIndex, nil, commonpb.IndexState_Failed),
+		newTask(fakeTaskEnqueued, nil, commonpb.IndexState_Retry),
+		newTask(fakeTaskPrepared, nil, commonpb.IndexState_Retry),
+		newTask(fakeTaskBuiltIndex, nil, commonpb.IndexState_Retry),
 		newTask(fakeTaskSavedIndexes, nil, commonpb.IndexState_Finished),
 		newTask(fakeTaskSavedIndexes, map[fakeTaskState]error{fakeTaskSavedIndexes: fmt.Errorf("auth failed")}, commonpb.IndexState_Retry))
 

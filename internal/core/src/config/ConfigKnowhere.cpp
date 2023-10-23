@@ -17,11 +17,11 @@
 #include <mutex>
 
 #include "ConfigKnowhere.h"
-#include "exceptions/EasyAssert.h"
+#include "common/EasyAssert.h"
 #include "glog/logging.h"
 #include "log/Log.h"
-#include "knowhere/comp/thread_pool.h"
 #include "knowhere/comp/knowhere_config.h"
+#include "knowhere/version.h"
 
 namespace milvus::config {
 
@@ -40,10 +40,11 @@ KnowhereInitImpl(const char* conf_file) {
 #ifdef EMBEDDED_MILVUS
         // always disable all logs for embedded milvus
         google::SetCommandLineOption("minloglevel", "4");
-#endif
+#else
         if (conf_file != nullptr) {
             gflags::SetCommandLineOption("flagfile", conf_file);
         }
+#endif
     };
 
     std::call_once(init_knowhere_once_, init);
@@ -61,28 +62,39 @@ KnowhereSetSimdType(const char* value) {
     } else if (strcmp(value, "avx") == 0 || strcmp(value, "sse4_2") == 0) {
         simd_type = knowhere::KnowhereConfig::SimdType::SSE4_2;
     } else {
-        PanicInfo("invalid SIMD type: " + std::string(value));
+        PanicInfo(ConfigInvalid, "invalid SIMD type: " + std::string(value));
     }
     try {
         return knowhere::KnowhereConfig::SetSimdType(simd_type);
     } catch (std::exception& e) {
         LOG_SERVER_ERROR_ << e.what();
-        PanicInfo(e.what());
+        PanicInfo(ConfigInvalid, e.what());
     }
 }
 
 void
 KnowhereInitBuildThreadPool(const uint32_t num_threads) {
-    knowhere::ThreadPool::InitGlobalBuildThreadPool(num_threads);
+    knowhere::KnowhereConfig::SetBuildThreadPoolSize(num_threads);
 }
 
 void
 KnowhereInitSearchThreadPool(const uint32_t num_threads) {
-    knowhere::ThreadPool::InitGlobalSearchThreadPool(num_threads);
+    knowhere::KnowhereConfig::SetSearchThreadPoolSize(num_threads);
     if (!knowhere::KnowhereConfig::SetAioContextPool(num_threads)) {
-        PanicInfo("Failed to set aio context pool with num_threads " +
-                  std::to_string(num_threads));
+        PanicInfo(ConfigInvalid,
+                  "Failed to set aio context pool with num_threads " +
+                      std::to_string(num_threads));
     }
+}
+
+int32_t
+GetMinimalIndexVersion() {
+    return knowhere::Version::GetMinimalVersion().VersionNumber();
+}
+
+int32_t
+GetCurrentIndexVersion() {
+    return knowhere::Version::GetCurrentVersion().VersionNumber();
 }
 
 }  // namespace milvus::config

@@ -17,9 +17,12 @@
 package checkers
 
 import (
-	"context"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/suite"
+	"go.uber.org/atomic"
 
 	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
@@ -33,9 +36,6 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
-	"github.com/stretchr/testify/mock"
-	"github.com/stretchr/testify/suite"
-	"go.uber.org/atomic"
 )
 
 type CheckerControllerSuite struct {
@@ -126,8 +126,7 @@ func (suite *CheckerControllerSuite) TestBasic() {
 
 	suite.balancer.EXPECT().AssignSegment(mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	suite.balancer.EXPECT().AssignChannel(mock.Anything, mock.Anything).Return(nil)
-	ctx := context.Background()
-	suite.controller.Start(ctx)
+	suite.controller.Start()
 	defer suite.controller.Stop()
 
 	suite.Eventually(func() bool {

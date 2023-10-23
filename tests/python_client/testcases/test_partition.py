@@ -177,8 +177,10 @@ class TestPartitionParams(TestcaseBase):
         partition_name = cf.gen_str_by_length(256)
         self.partition_wrap.init_partition(collection_w.collection, partition_name,
                                            check_task=CheckTasks.err_res,
-                                           check_items={ct.err_code: 1, 'err_msg': "is illegal"}
-                                           )
+                                           check_items={ct.err_code: 65535,
+                                                        ct.err_msg: f"Invalid partition name: {partition_name}. "
+                                                                    f"The length of a partition name must be less "
+                                                                    f"than 255 characters."})
 
     @pytest.mark.tags(CaseLabel.L2)
     @pytest.mark.parametrize("partition_name", ["_Partiti0n", "pArt1_ti0n"])
@@ -208,10 +210,13 @@ class TestPartitionParams(TestcaseBase):
         collection_w = self.init_collection_wrap()
 
         # create partition
+        error1 = {ct.err_code: 1, ct.err_msg: f"`partition_name` value {partition_name} is illegal"}
+        error2 = {ct.err_code: 65535, ct.err_msg: f"Invalid partition name: {partition_name}. Partition name can"
+                                                  f" only contain numbers, letters and underscores."}
+        error = error1 if partition_name in [None, [], 1, [1, "2", 3], (1,), {1: 1}] else error2
         self.partition_wrap.init_partition(collection_w.collection, partition_name,
                                            check_task=CheckTasks.err_res,
-                                           check_items={ct.err_code: 1, 'err_msg': "is illegal"}
-                                           )
+                                           check_items=error)
         # TODO: need an error code issue #5144 and assert independently
 
     @pytest.mark.tags(CaseLabel.L2)
@@ -370,7 +375,8 @@ class TestPartitionParams(TestcaseBase):
         assert partition_w.num_entities == ct.default_nb
 
         # load with 2 replicas
-        error = {ct.err_code: 1, ct.err_msg: f"no enough nodes to create replicas"}
+        error = {ct.err_code: 65535,
+                 ct.err_msg: "failed to load partitions: failed to spawn replica for collection: nodes not enough"}
         collection_w.create_index(ct.default_float_vec_field_name, index_params=ct.default_flat_index)
         partition_w.load(replica_number=3, check_task=CheckTasks.err_res, check_items=error)
 
@@ -397,7 +403,8 @@ class TestPartitionParams(TestcaseBase):
         partition_w.load(replica_number=1)
         collection_w.query(expr=f"{ct.default_int64_field_name} in [0]", check_task=CheckTasks.check_query_results,
                            check_items={'exp_res': [{'int64': 0}]})
-        error = {ct.err_code: 5, ct.err_msg: f"Should release first then reload with the new number of replicas"}
+        error = {ct.err_code: 1100, ct.err_msg: "failed to load partitions: can't change the replica number for "
+                                                "loaded partitions: expected=1, actual=2: invalid parameter"}
         partition_w.load(replica_number=2, check_task=CheckTasks.err_res, check_items=error)
 
         partition_w.release()
@@ -499,7 +506,8 @@ class TestPartitionParams(TestcaseBase):
                                       anns_field=ct.default_float_vec_field_name,
                                       params={"nprobe": 32}, limit=1,
                                       check_task=ct.CheckTasks.err_res,
-                                      check_items={ct.err_code: 1, ct.err_msg: "partitions have been released"})
+                                      check_items={ct.err_code: 65535,
+                                                   ct.err_msg: "collection not loaded"})
 
     @pytest.mark.tags(CaseLabel.L1)
     @pytest.mark.parametrize("data", [cf.gen_default_dataframe_data(10),
@@ -595,7 +603,7 @@ class TestPartitionOperations(TestcaseBase):
         # create partition failed
         self.partition_wrap.init_partition(collection_w.collection, cf.gen_unique_str(prefix),
                                            check_task=CheckTasks.err_res,
-                                           check_items={ct.err_code: 1, ct.err_msg: "can't find collection"})
+                                           check_items={ct.err_code: 4, ct.err_msg: "collection not found"})
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_partition_same_name_in_diff_collections(self):
@@ -665,8 +673,9 @@ class TestPartitionOperations(TestcaseBase):
         self.partition_wrap.init_partition(
             collection_w.collection, p_name,
             check_task=CheckTasks.err_res,
-            check_items={ct.err_code: 1,
-                         ct.err_msg: "maximum partition's number should be limit to 4096"})
+            check_items={ct.err_code: 65535,
+                         ct.err_msg: "partition number (4096) exceeds max configuration (4096), "
+                                     "collection: {}".format(collection_w.name)})
 
         # TODO: Try to verify load collection with a large number of partitions. #11651
 
@@ -849,7 +858,7 @@ class TestPartitionOperations(TestcaseBase):
 
         # release the partition and check err response
         partition_w.release(check_task=CheckTasks.err_res,
-                            check_items={ct.err_code: 1, ct.err_msg: "can't find collection"})
+                            check_items={ct.err_code: 4, ct.err_msg: "collection not found"})
 
     @pytest.mark.tags(CaseLabel.L1)
     def test_partition_release_after_collection_released(self):
@@ -963,7 +972,7 @@ class TestPartitionOperations(TestcaseBase):
         # insert data to partition
         partition_w.insert(cf.gen_default_dataframe_data(),
                            check_task=CheckTasks.err_res,
-                           check_items={ct.err_code: 1, ct.err_msg: "None Type"})
+                           check_items={ct.err_code: 4, ct.err_msg: "collection not found"})
 
     @pytest.mark.tags(CaseLabel.L2)
     def test_partition_insert_maximum_size_data(self):

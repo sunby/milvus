@@ -25,16 +25,16 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
-	"github.com/milvus-io/milvus/internal/util/mock"
+	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proxy"
+	"github.com/milvus-io/milvus/internal/util/mock"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
-	"github.com/stretchr/testify/assert"
-	"google.golang.org/grpc"
 )
 
 func TestMain(m *testing.M) {
@@ -70,15 +70,6 @@ func Test_NewClient(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, client)
 
-	err = client.Init()
-	assert.NoError(t, err)
-
-	err = client.Start()
-	assert.NoError(t, err)
-
-	err = client.Register()
-	assert.NoError(t, err)
-
 	checkFunc := func(retNotNil bool) {
 		retCheck := func(notNil bool, ret any, err error) {
 			if notNil {
@@ -90,13 +81,13 @@ func Test_NewClient(t *testing.T) {
 			}
 		}
 
-		r1, err := client.GetComponentStates(ctx)
+		r1, err := client.GetComponentStates(ctx, nil)
 		retCheck(retNotNil, r1, err)
 
-		r2, err := client.GetTimeTickChannel(ctx)
+		r2, err := client.GetTimeTickChannel(ctx, nil)
 		retCheck(retNotNil, r2, err)
 
-		r3, err := client.GetStatisticsChannel(ctx)
+		r3, err := client.GetStatisticsChannel(ctx, nil)
 		retCheck(retNotNil, r3, err)
 
 		r4, err := client.Flush(ctx, nil)
@@ -120,7 +111,7 @@ func Test_NewClient(t *testing.T) {
 		r10, err := client.GetPartitionStatistics(ctx, nil)
 		retCheck(retNotNil, r10, err)
 
-		r11, err := client.GetSegmentInfoChannel(ctx)
+		r11, err := client.GetSegmentInfoChannel(ctx, nil)
 		retCheck(retNotNil, r11, err)
 
 		// r12, err := client.SaveBinlogPaths(ctx, nil)
@@ -259,6 +250,6 @@ func Test_NewClient(t *testing.T) {
 	assert.NotNil(t, ret)
 	assert.NoError(t, err)
 
-	err = client.Stop()
+	err = client.Close()
 	assert.NoError(t, err)
 }

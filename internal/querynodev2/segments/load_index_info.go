@@ -87,6 +87,10 @@ func (li *LoadIndexInfo) appendLoadIndexInfo(indexInfo *querypb.FieldIndexInfo, 
 		}
 	}
 
+	if err := li.appendIndexEngineVersion(indexInfo.GetCurrentIndexVersion()); err != nil {
+		return err
+	}
+
 	err = li.appendIndexData(indexPaths)
 	return err
 }
@@ -160,4 +164,11 @@ func (li *LoadIndexInfo) appendIndexData(indexKeys []string) error {
 	}
 	return HandleCStatus(&status, "AppendIndex failed")
 
+}
+
+func (li *LoadIndexInfo) appendIndexEngineVersion(indexEngineVersion int32) error {
+	cIndexEngineVersion := C.int32_t(indexEngineVersion)
+
+	status := C.AppendIndexEngineVersionToLoadInfo(li.cLoadIndexInfo, cIndexEngineVersion)
+	return HandleCStatus(&status, "AppendIndexEngineVersion failed")
 }

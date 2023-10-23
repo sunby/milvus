@@ -15,9 +15,9 @@
 // limitations under the License.
 
 #include "storage/storage_c.h"
-#include "common/CGoHelper.h"
 #include "storage/RemoteChunkManagerSingleton.h"
 #include "storage/LocalChunkManagerSingleton.h"
+#include "storage/ChunkCacheSingleton.h"
 
 CStatus
 GetLocalUsedSize(const char* c_dir, int64_t* size) {
@@ -33,7 +33,7 @@ GetLocalUsedSize(const char* c_dir, int64_t* size) {
         }
         return milvus::SuccessCStatus();
     } catch (std::exception& e) {
-        return milvus::FailureCStatus(UnexpectedError, e.what());
+        return milvus::FailureCStatus(&e);
     }
 }
 
@@ -45,7 +45,7 @@ InitLocalChunkManagerSingleton(const char* c_path) {
 
         return milvus::SuccessCStatus();
     } catch (std::exception& e) {
-        return milvus::FailureCStatus(UnexpectedError, e.what());
+        return milvus::FailureCStatus(&e);
     }
 }
 
@@ -62,6 +62,8 @@ InitRemoteChunkManagerSingleton(CStorageConfig c_storage_config) {
         storage_config.root_path = std::string(c_storage_config.root_path);
         storage_config.storage_type =
             std::string(c_storage_config.storage_type);
+        storage_config.cloud_provider =
+            std::string(c_storage_config.cloud_provider);
         storage_config.iam_endpoint =
             std::string(c_storage_config.iam_endpoint);
         storage_config.log_level = std::string(c_storage_config.log_level);
@@ -69,12 +71,24 @@ InitRemoteChunkManagerSingleton(CStorageConfig c_storage_config) {
         storage_config.useIAM = c_storage_config.useIAM;
         storage_config.useVirtualHost = c_storage_config.useVirtualHost;
         storage_config.region = c_storage_config.region;
+        storage_config.requestTimeoutMs = c_storage_config.requestTimeoutMs;
         milvus::storage::RemoteChunkManagerSingleton::GetInstance().Init(
             storage_config);
 
         return milvus::SuccessCStatus();
     } catch (std::exception& e) {
-        return milvus::FailureCStatus(UnexpectedError, e.what());
+        return milvus::FailureCStatus(&e);
+    }
+}
+
+CStatus
+InitChunkCacheSingleton(const char* c_dir_path, const char* read_ahead_policy) {
+    try {
+        milvus::storage::ChunkCacheSingleton::GetInstance().Init(
+            c_dir_path, read_ahead_policy);
+        return milvus::SuccessCStatus();
+    } catch (std::exception& e) {
+        return milvus::FailureCStatus(&e);
     }
 }
 

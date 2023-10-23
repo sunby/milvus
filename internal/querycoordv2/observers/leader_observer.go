@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/samber/lo"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
@@ -30,7 +31,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/commonpbutil"
-	"github.com/samber/lo"
+	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
 
 const (
@@ -41,7 +42,7 @@ const (
 // LeaderObserver is to sync the distribution with leader
 type LeaderObserver struct {
 	wg          sync.WaitGroup
-	closeCh     chan struct{}
+	cancel      context.CancelFunc
 	dist        *meta.DistributionManager
 	meta        *meta.Meta
 	target      *meta.TargetManager
@@ -52,7 +53,10 @@ type LeaderObserver struct {
 	stopOnce sync.Once
 }
 
-func (o *LeaderObserver) Start(ctx context.Context) {
+func (o *LeaderObserver) Start() {
+	ctx, cancel := context.WithCancel(context.Background())
+	o.cancel = cancel
+
 	o.wg.Add(1)
 	go func() {
 		defer o.wg.Done()
@@ -60,12 +64,10 @@ func (o *LeaderObserver) Start(ctx context.Context) {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-o.closeCh:
+			case <-ctx.Done():
 				log.Info("stop leader observer")
 				return
-			case <-ctx.Done():
-				log.Info("stop leader observer due to ctx done")
-				return
+
 			case req := <-o.manualCheck:
 				log.Info("triggering manual check")
 				ret := o.observeCollection(ctx, req.CollectionID)
@@ -81,7 +83,9 @@ func (o *LeaderObserver) Start(ctx context.Context) {
 
 func (o *LeaderObserver) Stop() {
 	o.stopOnce.Do(func() {
-		close(o.closeCh)
+		if o.cancel != nil {
+			o.cancel()
+		}
 		o.wg.Wait()
 	})
 }
@@ -133,13 +137,20 @@ func (o *LeaderObserver) observeCollection(ctx context.Context, collection int64
 	return result
 }
 
-func (ob *LeaderObserver) CheckTargetVersion(collectionID int64) bool {
+func (ob *LeaderObserver) CheckTargetVersion(ctx context.Context, collectionID int64) bool {
 	notifier := make(chan bool)
-	ob.manualCheck <- checkRequest{
-		CollectionID: collectionID,
-		Notifier:     notifier,
+	select {
+	case ob.manualCheck <- checkRequest{CollectionID: collectionID, Notifier: notifier}:
+	case <-ctx.Done():
+		return false
 	}
-	return <-notifier
+
+	select {
+	case result := <-notifier:
+		return result
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (o *LeaderObserver) checkNeedUpdateTargetVersion(ctx context.Context, leaderView *meta.LeaderView) *querypb.SyncAction {
@@ -278,6 +289,8 @@ func (o *LeaderObserver) sync(ctx context.Context, replicaID int64, leaderView *
 		},
 		Version: time.Now().UnixNano(),
 	}
+	ctx, cancel := context.WithTimeout(ctx, paramtable.Get().QueryCoordCfg.SegmentTaskTimeout.GetAsDuration(time.Millisecond))
+	defer cancel()
 	resp, err := o.cluster.SyncDistribution(ctx, leaderView.ID, req)
 	if err != nil {
 		log.Warn("failed to sync distribution", zap.Error(err))
@@ -300,7 +313,6 @@ func NewLeaderObserver(
 	cluster session.Cluster,
 ) *LeaderObserver {
 	return &LeaderObserver{
-		closeCh:     make(chan struct{}),
 		dist:        dist,
 		meta:        meta,
 		target:      targetMgr,

@@ -45,6 +45,7 @@ type ServiceParam struct {
 	LocalStorageCfg LocalStorageConfig
 	MetaStoreCfg    MetaStoreConfig
 	EtcdCfg         EtcdConfig
+	TiKVCfg         TiKVConfig
 	MQCfg           MQConfig
 	PulsarCfg       PulsarConfig
 	KafkaCfg        KafkaConfig
@@ -57,6 +58,7 @@ func (p *ServiceParam) init(bt *BaseTable) {
 	p.LocalStorageCfg.Init(bt)
 	p.MetaStoreCfg.Init(bt)
 	p.EtcdCfg.Init(bt)
+	p.TiKVCfg.Init(bt)
 	p.MQCfg.Init(bt)
 	p.PulsarCfg.Init(bt)
 	p.KafkaCfg.Init(bt)
@@ -257,6 +259,129 @@ We recommend using version 1.2 and above.`,
 	p.EtcdTLSMinVersion.Init(base.mgr)
 }
 
+// /////////////////////////////////////////////////////////////////////////////
+// --- tikv ---
+type TiKVConfig struct {
+	Endpoints        ParamItem          `refreshable:"false"`
+	RootPath         ParamItem          `refreshable:"false"`
+	MetaSubPath      ParamItem          `refreshable:"false"`
+	KvSubPath        ParamItem          `refreshable:"false"`
+	MetaRootPath     CompositeParamItem `refreshable:"false"`
+	KvRootPath       CompositeParamItem `refreshable:"false"`
+	RequestTimeout   ParamItem          `refreshable:"true"`
+	SnapshotScanSize ParamItem          `refreshable:"true"`
+	TiKVUseSSL       ParamItem          `refreshable:"false"`
+	TiKVTLSCert      ParamItem          `refreshable:"false"`
+	TiKVTLSKey       ParamItem          `refreshable:"false"`
+	TiKVTLSCACert    ParamItem          `refreshable:"false"`
+}
+
+func (p *TiKVConfig) Init(base *BaseTable) {
+	p.Endpoints = ParamItem{
+		Key:          "tikv.endpoints",
+		Version:      "2.3.0",
+		DefaultValue: "localhost:2379",
+		PanicIfEmpty: true,
+		Export:       true,
+	}
+	p.Endpoints.Init(base.mgr)
+
+	p.RootPath = ParamItem{
+		Key:          "tikv.rootPath",
+		Version:      "2.3.0",
+		DefaultValue: "by-dev",
+		PanicIfEmpty: true,
+		Doc:          "The root path where data is stored in tikv",
+		Export:       true,
+	}
+	p.RootPath.Init(base.mgr)
+
+	p.MetaSubPath = ParamItem{
+		Key:          "tikv.metaSubPath",
+		Version:      "2.3.0",
+		DefaultValue: "meta",
+		PanicIfEmpty: true,
+		Doc:          "metaRootPath = rootPath + '/' + metaSubPath",
+		Export:       true,
+	}
+	p.MetaSubPath.Init(base.mgr)
+
+	p.MetaRootPath = CompositeParamItem{
+		Items: []*ParamItem{&p.RootPath, &p.MetaSubPath},
+		Format: func(kvs map[string]string) string {
+			return path.Join(kvs[p.RootPath.Key], kvs[p.MetaSubPath.Key])
+		},
+	}
+
+	p.KvSubPath = ParamItem{
+		Key:          "tikv.kvSubPath",
+		Version:      "2.3.0",
+		DefaultValue: "kv",
+		PanicIfEmpty: true,
+		Doc:          "kvRootPath = rootPath + '/' + kvSubPath",
+		Export:       true,
+	}
+	p.KvSubPath.Init(base.mgr)
+
+	p.KvRootPath = CompositeParamItem{
+		Items: []*ParamItem{&p.RootPath, &p.KvSubPath},
+		Format: func(kvs map[string]string) string {
+			return path.Join(kvs[p.RootPath.Key], kvs[p.KvSubPath.Key])
+		},
+	}
+
+	p.RequestTimeout = ParamItem{
+		Key:          "tikv.requestTimeout",
+		Version:      "2.3.0",
+		DefaultValue: "10000",
+		Doc:          "ms, tikv request timeout",
+		Export:       true,
+	}
+	p.RequestTimeout.Init(base.mgr)
+
+	p.SnapshotScanSize = ParamItem{
+		Key:          "tikv.snapshotScanSize",
+		Version:      "2.3.0",
+		DefaultValue: "256",
+		Doc:          "batch size of tikv snapshot scan",
+		Export:       true,
+	}
+	p.SnapshotScanSize.Init(base.mgr)
+
+	p.TiKVUseSSL = ParamItem{
+		Key:          "tikv.ssl.enabled",
+		DefaultValue: "false",
+		Version:      "2.3.0",
+		Doc:          "Whether to support TiKV secure connection mode",
+		Export:       true,
+	}
+	p.TiKVUseSSL.Init(base.mgr)
+
+	p.TiKVTLSCert = ParamItem{
+		Key:     "tikv.ssl.tlsCert",
+		Version: "2.3.0",
+		Doc:     "path to your cert file",
+		Export:  true,
+	}
+	p.TiKVTLSCert.Init(base.mgr)
+
+	p.TiKVTLSKey = ParamItem{
+		Key:     "tikv.ssl.tlsKey",
+		Version: "2.3.0",
+		Doc:     "path to your key file",
+		Export:  true,
+	}
+	p.TiKVTLSKey.Init(base.mgr)
+
+	p.TiKVTLSCACert = ParamItem{
+		Key:     "tikv.ssl.tlsCACert",
+		Version: "2.3.0",
+		Doc:     "path to your CACert file",
+		Export:  true,
+	}
+	p.TiKVTLSCACert.Init(base.mgr)
+}
+
 type LocalStorageConfig struct {
 	Path ParamItem `refreshable:"false"`
 }
@@ -281,7 +406,7 @@ func (p *MetaStoreConfig) Init(base *BaseTable) {
 		Key:          "metastore.type",
 		Version:      "2.2.0",
 		DefaultValue: util.MetaStoreTypeEtcd,
-		Doc:          `Default value: etcd, Valid values: etcd `,
+		Doc:          `Default value: etcd, Valid values: [etcd, tikv] `,
 		Export:       true,
 	}
 	p.MetaStoreType.Init(base.mgr)
@@ -377,6 +502,9 @@ type PulsarConfig struct {
 
 	// Global request timeout
 	RequestTimeout ParamItem `refreshable:"false"`
+
+	// Enable Client side metrics
+	EnableClientMetrics ParamItem `refreshable:"false"`
 }
 
 func (p *PulsarConfig) Init(base *BaseTable) {
@@ -490,6 +618,14 @@ func (p *PulsarConfig) Init(base *BaseTable) {
 		Export:       true,
 	}
 	p.RequestTimeout.Init(base.mgr)
+
+	p.EnableClientMetrics = ParamItem{
+		Key:          "pulsar.enableClientMetrics",
+		Version:      "2.3.0",
+		DefaultValue: "false",
+		Export:       true,
+	}
+	p.EnableClientMetrics.Init(base.mgr)
 }
 
 // --- kafka ---
@@ -501,6 +637,7 @@ type KafkaConfig struct {
 	SecurityProtocol    ParamItem  `refreshable:"false"`
 	ConsumerExtraConfig ParamGroup `refreshable:"false"`
 	ProducerExtraConfig ParamGroup `refreshable:"false"`
+	ReadTimeout         ParamItem  `refreshable:"true"`
 }
 
 func (k *KafkaConfig) Init(base *BaseTable) {
@@ -556,6 +693,14 @@ func (k *KafkaConfig) Init(base *BaseTable) {
 		Version:   "2.2.0",
 	}
 	k.ProducerExtraConfig.Init(base.mgr)
+
+	k.ReadTimeout = ParamItem{
+		Key:          "kafka.readTimeout",
+		DefaultValue: "10",
+		Version:      "2.3.1",
+		Export:       true,
+	}
+	k.ReadTimeout.Init(base.mgr)
 }
 
 // /////////////////////////////////////////////////////////////////////////////
@@ -787,19 +932,20 @@ func (r *NatsmqConfig) Init(base *BaseTable) {
 // /////////////////////////////////////////////////////////////////////////////
 // --- minio ---
 type MinioConfig struct {
-	Address         ParamItem `refreshable:"false"`
-	Port            ParamItem `refreshable:"false"`
-	AccessKeyID     ParamItem `refreshable:"false"`
-	SecretAccessKey ParamItem `refreshable:"false"`
-	UseSSL          ParamItem `refreshable:"false"`
-	BucketName      ParamItem `refreshable:"false"`
-	RootPath        ParamItem `refreshable:"false"`
-	UseIAM          ParamItem `refreshable:"false"`
-	CloudProvider   ParamItem `refreshable:"false"`
-	IAMEndpoint     ParamItem `refreshable:"false"`
-	LogLevel        ParamItem `refreshable:"false"`
-	Region          ParamItem `refreshable:"false"`
-	UseVirtualHost  ParamItem `refreshable:"false"`
+	Address          ParamItem `refreshable:"false"`
+	Port             ParamItem `refreshable:"false"`
+	AccessKeyID      ParamItem `refreshable:"false"`
+	SecretAccessKey  ParamItem `refreshable:"false"`
+	UseSSL           ParamItem `refreshable:"false"`
+	BucketName       ParamItem `refreshable:"false"`
+	RootPath         ParamItem `refreshable:"false"`
+	UseIAM           ParamItem `refreshable:"false"`
+	CloudProvider    ParamItem `refreshable:"false"`
+	IAMEndpoint      ParamItem `refreshable:"false"`
+	LogLevel         ParamItem `refreshable:"false"`
+	Region           ParamItem `refreshable:"false"`
+	UseVirtualHost   ParamItem `refreshable:"false"`
+	RequestTimeoutMs ParamItem `refreshable:"false"`
 }
 
 func (p *MinioConfig) Init(base *BaseTable) {
@@ -872,8 +1018,15 @@ func (p *MinioConfig) Init(base *BaseTable) {
 	p.BucketName.Init(base.mgr)
 
 	p.RootPath = ParamItem{
-		Key:          "minio.rootPath",
-		Version:      "2.0.0",
+		Key:     "minio.rootPath",
+		Version: "2.0.0",
+		Formatter: func(rootPath string) string {
+			if rootPath == "" {
+				return ""
+			}
+			rootPath = strings.TrimLeft(rootPath, "/")
+			return path.Clean(rootPath)
+		},
 		PanicIfEmpty: false,
 		Doc:          "The root path where the message is stored in MinIO/S3",
 		Export:       true,
@@ -943,4 +1096,12 @@ Leave it empty if you want to use AWS default endpoint`,
 	}
 	p.UseVirtualHost.Init(base.mgr)
 
+	p.RequestTimeoutMs = ParamItem{
+		Key:          "minio.requestTimeoutMs",
+		Version:      "2.3.2",
+		DefaultValue: DefaultMinioRequestTimeout,
+		Doc:          "minio timeout for request time in milliseconds",
+		Export:       true,
+	}
+	p.RequestTimeoutMs.Init(base.mgr)
 }

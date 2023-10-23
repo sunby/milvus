@@ -16,8 +16,11 @@
 
 #include "storage/FieldData.h"
 #include "arrow/array/array_binary.h"
+#include "common/EasyAssert.h"
 #include "common/Json.h"
 #include "simdjson/padded_string.h"
+#include "common/Array.h"
+#include "FieldDataInterface.h"
 
 namespace milvus::storage {
 
@@ -130,7 +133,19 @@ FieldDataImpl<Type, is_scalar>::FillFieldData(
             }
             return FillFieldData(values.data(), element_count);
         }
+        case DataType::ARRAY: {
+            auto array_array =
+                std::dynamic_pointer_cast<arrow::BinaryArray>(array);
+            std::vector<Array> values(element_count);
+            for (size_t index = 0; index < element_count; ++index) {
+                ScalarArray field_data;
+                field_data.ParseFromString(array_array->GetString(index));
+                values[index] = Array(field_data);
+            }
+            return FillFieldData(values.data(), element_count);
+        }
         case DataType::VECTOR_FLOAT:
+        case DataType::VECTOR_FLOAT16:
         case DataType::VECTOR_BINARY: {
             auto array_info =
                 GetDataInfoFromArray<arrow::FixedSizeBinaryArray,
@@ -139,9 +154,10 @@ FieldDataImpl<Type, is_scalar>::FillFieldData(
             return FillFieldData(array_info.first, array_info.second);
         }
         default: {
-            throw NotSupportedDataTypeException(GetName() + "::FillFieldData" +
-                                                " not support data type " +
-                                                datatype_name(data_type_));
+            throw SegcoreError(DataTypeInvalid,
+                               GetName() + "::FillFieldData" +
+                                   " not support data type " +
+                                   datatype_name(data_type_));
         }
     }
 }
@@ -157,9 +173,11 @@ template class FieldDataImpl<float, true>;
 template class FieldDataImpl<double, true>;
 template class FieldDataImpl<std::string, true>;
 template class FieldDataImpl<Json, true>;
+template class FieldDataImpl<Array, true>;
 
 // vector data
 template class FieldDataImpl<int8_t, false>;
 template class FieldDataImpl<float, false>;
+template class FieldDataImpl<float16, false>;
 
 }  // namespace milvus::storage

@@ -17,13 +17,14 @@
 package rmq
 
 import (
+	"context"
 	"strconv"
 
 	"github.com/cockroachdb/errors"
-	"github.com/milvus-io/milvus/internal/mq/mqimpl/rocksmq/client"
-	"github.com/milvus-io/milvus/internal/mq/mqimpl/rocksmq/server"
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/internal/mq/mqimpl/rocksmq/client"
+	"github.com/milvus-io/milvus/internal/mq/mqimpl/rocksmq/server"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
@@ -38,7 +39,7 @@ type rmqClient struct {
 	client client.Client
 }
 
-func NewClientWithDefaultOptions() (mqwrapper.Client, error) {
+func NewClientWithDefaultOptions(ctx context.Context) (mqwrapper.Client, error) {
 	option := client.Options{Server: server.Rmq}
 	return NewClient(option)
 }
@@ -83,7 +84,7 @@ func (rc *rmqClient) Subscribe(options mqwrapper.ConsumerOptions) (mqwrapper.Con
 		log.Warn("unexpected subscription consumer options", zap.Error(err))
 		return nil, err
 	}
-	receiveChannel := make(chan client.Message, options.BufSize)
+	receiveChannel := make(chan mqwrapper.Message, options.BufSize)
 
 	cli, err := rc.client.Subscribe(client.ConsumerOptions{
 		Topic:                       options.Topic,
@@ -107,7 +108,7 @@ func (rc *rmqClient) Subscribe(options mqwrapper.ConsumerOptions) (mqwrapper.Con
 // EarliestMessageID returns the earliest message ID for rmq client
 func (rc *rmqClient) EarliestMessageID() mqwrapper.MessageID {
 	rID := client.EarliestMessageID()
-	return &rmqID{messageID: rID}
+	return &server.RmqID{MessageID: rID}
 }
 
 // StringToMsgID converts string id to MessageID
@@ -116,13 +117,13 @@ func (rc *rmqClient) StringToMsgID(id string) (mqwrapper.MessageID, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &rmqID{messageID: rID}, nil
+	return &server.RmqID{MessageID: rID}, nil
 }
 
 // BytesToMsgID converts a byte array to messageID
 func (rc *rmqClient) BytesToMsgID(id []byte) (mqwrapper.MessageID, error) {
-	rID := DeserializeRmqID(id)
-	return &rmqID{messageID: rID}, nil
+	rID := server.DeserializeRmqID(id)
+	return &server.RmqID{MessageID: rID}, nil
 }
 
 func (rc *rmqClient) Close() {

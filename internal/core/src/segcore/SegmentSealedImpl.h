@@ -28,6 +28,7 @@
 #include "SealedIndexingRecord.h"
 #include "SegmentSealed.h"
 #include "TimestampIndex.h"
+#include "common/EasyAssert.h"
 #include "mmap/Column.h"
 #include "index/ScalarIndex.h"
 #include "sys/mman.h"
@@ -38,7 +39,7 @@ namespace milvus::segcore {
 class SegmentSealedImpl : public SegmentSealed {
  public:
     explicit SegmentSealedImpl(SchemaPtr schema, int64_t segment_id);
-    ~SegmentSealedImpl() override = default;
+    ~SegmentSealedImpl() override;
     void
     LoadIndex(const LoadIndexInfo& info) override;
     void
@@ -59,10 +60,18 @@ class SegmentSealedImpl : public SegmentSealed {
     bool
     HasFieldData(FieldId field_id) const override;
 
+    bool
+    Contain(const PkType& pk) const override {
+        return insert_record_.contain(pk);
+    }
+
     void
     LoadFieldData(FieldId field_id, FieldDataInfo& data) override;
     void
     MapFieldData(const FieldId field_id, FieldDataInfo& data) override;
+    void
+    AddFieldDataInfoForSealed(
+        const LoadFieldDataInfo& field_data_info) override;
 
     int64_t
     get_segment_id() const override {
@@ -106,7 +115,7 @@ class SegmentSealedImpl : public SegmentSealed {
     std::string
     debug() const override;
 
-    Status
+    SegcoreError
     Delete(int64_t reserved_offset,
            int64_t size,
            const IdArray* pks,
@@ -119,6 +128,13 @@ class SegmentSealedImpl : public SegmentSealed {
         return insert_record_.pk2offset_->find_first(
             limit, bitset, false_filtered_out);
     }
+
+    // Calculate: output[i] = Vec[seg_offset[i]]
+    // where Vec is determined from field_offset
+    std::unique_ptr<DataArray>
+    bulk_subscript(FieldId field_id,
+                   const int64_t* seg_offsets,
+                   int64_t count) const override;
 
  protected:
     // blob and row_count
@@ -135,13 +151,6 @@ class SegmentSealedImpl : public SegmentSealed {
                    const int64_t* seg_offsets,
                    int64_t count,
                    void* output) const override;
-
-    // Calculate: output[i] = Vec[seg_offset[i]]
-    // where Vec is determined from field_offset
-    std::unique_ptr<DataArray>
-    bulk_subscript(FieldId field_id,
-                   const int64_t* seg_offsets,
-                   int64_t count) const override;
 
     void
     check_search(const query::Plan* plan) const override;
@@ -165,6 +174,12 @@ class SegmentSealedImpl : public SegmentSealed {
     template <typename S, typename T = S>
     static void
     bulk_subscript_impl(const ColumnBase* field,
+                        const int64_t* seg_offsets,
+                        int64_t count,
+                        void* dst_raw);
+
+    static void
+    bulk_subscript_impl(const ColumnBase* column,
                         const int64_t* seg_offsets,
                         int64_t count,
                         void* dst_raw);
@@ -218,6 +233,9 @@ class SegmentSealedImpl : public SegmentSealed {
     std::pair<std::unique_ptr<IdArray>, std::vector<SegOffset>>
     search_ids(const IdArray& id_array, Timestamp timestamp) const override;
 
+    std::tuple<std::string, int64_t>
+    GetFieldDataPath(FieldId field_id, int64_t offset) const;
+
     void
     LoadVecIndex(const LoadIndexInfo& info);
 
@@ -244,6 +262,8 @@ class SegmentSealedImpl : public SegmentSealed {
 
     // deleted pks
     mutable DeletedRecord deleted_record_;
+
+    LoadFieldDataInfo field_data_info_;
 
     SchemaPtr schema_;
     int64_t id_;

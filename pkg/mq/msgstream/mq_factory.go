@@ -23,11 +23,13 @@ import (
 
 	"github.com/apache/pulsar-client-go/pulsar"
 	"github.com/cockroachdb/errors"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/streamnative/pulsarctl/pkg/cli"
 	"github.com/streamnative/pulsarctl/pkg/pulsar/utils"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
 	kafkawrapper "github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper/kafka"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper/nmq"
@@ -49,11 +51,12 @@ type PmsFactory struct {
 	PulsarTenant     string
 	PulsarNameSpace  string
 	RequestTimeout   time.Duration
+	metricRegisterer prometheus.Registerer
 }
 
 func NewPmsFactory(serviceParam *paramtable.ServiceParam) *PmsFactory {
 	config := &serviceParam.PulsarCfg
-	return &PmsFactory{
+	f := &PmsFactory{
 		MQBufSize:        serviceParam.MQCfg.MQBufSize.GetAsInt64(),
 		ReceiveBufSize:   serviceParam.MQCfg.ReceiveBufSize.GetAsInt64(),
 		PulsarAddress:    config.Address.GetValue(),
@@ -64,18 +67,33 @@ func NewPmsFactory(serviceParam *paramtable.ServiceParam) *PmsFactory {
 		PulsarNameSpace:  config.Namespace.GetValue(),
 		RequestTimeout:   config.RequestTimeout.GetAsDuration(time.Second),
 	}
+	if config.EnableClientMetrics.GetAsBool() {
+		// Enable client metrics if config.EnableClientMetrics is true, use pkg-defined registerer.
+		f.metricRegisterer = metrics.GetRegisterer()
+	}
+	return f
 }
 
 // NewMsgStream is used to generate a new Msgstream object
 func (f *PmsFactory) NewMsgStream(ctx context.Context) (MsgStream, error) {
+	var timeout time.Duration = f.RequestTimeout
+
+	if deadline, ok := ctx.Deadline(); ok {
+		if deadline.Before(time.Now()) {
+			return nil, errors.New("context timeout when NewMsgStream")
+		}
+		timeout = time.Until(deadline)
+	}
+
 	auth, err := f.getAuthentication()
 	if err != nil {
 		return nil, err
 	}
 	clientOpts := pulsar.ClientOptions{
-		URL:              f.PulsarAddress,
-		Authentication:   auth,
-		OperationTimeout: f.RequestTimeout,
+		URL:               f.PulsarAddress,
+		Authentication:    auth,
+		OperationTimeout:  timeout,
+		MetricsRegisterer: f.metricRegisterer,
 	}
 
 	pulsarClient, err := pulsarmqwrapper.NewClient(f.PulsarTenant, f.PulsarNameSpace, clientOpts)
@@ -87,13 +105,22 @@ func (f *PmsFactory) NewMsgStream(ctx context.Context) (MsgStream, error) {
 
 // NewTtMsgStream is used to generate a new TtMsgstream object
 func (f *PmsFactory) NewTtMsgStream(ctx context.Context) (MsgStream, error) {
+	var timeout time.Duration = f.RequestTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if deadline.Before(time.Now()) {
+			return nil, errors.New("context timeout when NewTtMsgStream")
+		}
+		timeout = time.Until(deadline)
+	}
 	auth, err := f.getAuthentication()
 	if err != nil {
 		return nil, err
 	}
 	clientOpts := pulsar.ClientOptions{
-		URL:            f.PulsarAddress,
-		Authentication: auth,
+		URL:               f.PulsarAddress,
+		Authentication:    auth,
+		OperationTimeout:  timeout,
+		MetricsRegisterer: f.metricRegisterer,
 	}
 
 	pulsarClient, err := pulsarmqwrapper.NewClient(f.PulsarTenant, f.PulsarNameSpace, clientOpts)
@@ -156,12 +183,18 @@ type KmsFactory struct {
 }
 
 func (f *KmsFactory) NewMsgStream(ctx context.Context) (MsgStream, error) {
-	kafkaClient := kafkawrapper.NewKafkaClientInstanceWithConfig(f.config)
+	kafkaClient, err := kafkawrapper.NewKafkaClientInstanceWithConfig(ctx, f.config)
+	if err != nil {
+		return nil, err
+	}
 	return NewMqMsgStream(ctx, f.ReceiveBufSize, f.MQBufSize, kafkaClient, f.dispatcherFactory.NewUnmarshalDispatcher())
 }
 
 func (f *KmsFactory) NewTtMsgStream(ctx context.Context) (MsgStream, error) {
-	kafkaClient := kafkawrapper.NewKafkaClientInstanceWithConfig(f.config)
+	kafkaClient, err := kafkawrapper.NewKafkaClientInstanceWithConfig(ctx, f.config)
+	if err != nil {
+		return nil, err
+	}
 	return NewMqTtMsgStream(ctx, f.ReceiveBufSize, f.MQBufSize, kafkaClient, f.dispatcherFactory.NewUnmarshalDispatcher())
 }
 
@@ -171,7 +204,7 @@ func (f *KmsFactory) NewMsgStreamDisposer(ctx context.Context) func([]string, st
 		if err != nil {
 			return err
 		}
-		msgstream.AsConsumer(channels, subname, mqwrapper.SubscriptionPositionUnknown)
+		msgstream.AsConsumer(ctx, channels, subname, mqwrapper.SubscriptionPositionUnknown)
 		msgstream.Close()
 		return nil
 	}

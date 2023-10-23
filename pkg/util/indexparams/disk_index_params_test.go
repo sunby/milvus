@@ -22,10 +22,11 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/util/hardware"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
-	"github.com/stretchr/testify/assert"
 )
 
 func TestDiskIndexParams(t *testing.T) {
@@ -132,18 +133,26 @@ func TestDiskIndexParams(t *testing.T) {
 		err := SetDiskIndexBuildParams(indexParams, 100)
 		assert.NoError(t, err)
 
+		_, ok := indexParams[SearchCacheBudgetKey]
+		assert.True(t, ok)
+
 		indexParams[SearchCacheBudgetRatioKey] = "aabb"
 		err = SetDiskIndexBuildParams(indexParams, 100)
 		assert.Error(t, err)
 
-		_, ok := indexParams[PQCodeBudgetKey]
+		delete(indexParams, SearchCacheBudgetRatioKey)
+		delete(indexParams, SearchCacheBudgetKey)
+		err = SetDiskIndexBuildParams(indexParams, 100)
+		assert.NoError(t, err)
+
+		_, ok = indexParams[PQCodeBudgetKey]
 		assert.True(t, ok)
 		_, ok = indexParams[BuildDramBudgetKey]
 		assert.True(t, ok)
 		_, ok = indexParams[NumBuildThreadKey]
 		assert.True(t, ok)
 		_, ok = indexParams[SearchCacheBudgetKey]
-		assert.True(t, ok)
+		assert.False(t, ok)
 	})
 
 	t.Run("set disk index load params without auto index param", func(t *testing.T) {

@@ -22,7 +22,18 @@ endif()
 
 milvus_add_pkg_config("milvus_storage")
 
+if (DEFINED AZURE_BUILD_DIR)
+    add_definitions(-DAZURE_BUILD_DIR)
+    include_directories(azure-blob-storage)
+    include_directories("${AZURE_BUILD_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/include")
+    set(STORAGE_FILES
+        ${STORAGE_FILES}
+        AzureChunkManager.cpp
+        )
+endif()
+
 set(STORAGE_FILES
+    ${STORAGE_FILES}
     parquet_c.cpp
     PayloadStream.cpp
     DataCodec.cpp
@@ -31,29 +42,38 @@ set(STORAGE_FILES
     PayloadReader.cpp
     PayloadWriter.cpp
     BinlogReader.cpp
-        IndexData.cpp
+    IndexData.cpp
     InsertData.cpp
     Event.cpp
     ThreadPool.cpp
     storage_c.cpp
     MinioChunkManager.cpp
+    ChunkManagers.cpp
     AliyunSTSClient.cpp
     AliyunCredentialsProvider.cpp
     MemFileManagerImpl.cpp
     LocalChunkManager.cpp
-    DiskFileManagerImpl.cpp ThreadPools.cpp)
+    DiskFileManagerImpl.cpp
+    ThreadPools.cpp
+    ChunkCache.cpp)
 
 add_library(milvus_storage SHARED ${STORAGE_FILES})
 
-find_package(Boost REQUIRED COMPONENTS filesystem)
-
-# message(FATAL_ERROR "${CONAN_LIBS}") 
-target_link_libraries(milvus_storage PUBLIC 
-        milvus-storage
-        milvus_common 
-        Boost::filesystem 
-        pthread 
-        ${CONAN_LIBS}
-        )
+if (DEFINED AZURE_BUILD_DIR)
+    target_link_libraries(milvus_storage PUBLIC
+            "-L${AZURE_BUILD_DIR} -lblob-chunk-manager"
+            milvus_common
+            milvus-storage
+            pthread
+            ${CONAN_LIBS}
+            )
+else ()
+    target_link_libraries(milvus_storage PUBLIC
+            milvus_common
+            milvus-storage
+            pthread
+            ${CONAN_LIBS}
+            )
+endif()
 
 install(TARGETS milvus_storage DESTINATION "${CMAKE_INSTALL_LIBDIR}")

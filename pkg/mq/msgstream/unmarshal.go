@@ -18,6 +18,7 @@ package msgstream
 
 import (
 	"github.com/cockroachdb/errors"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 )
 
@@ -62,6 +63,16 @@ func (pudf *ProtoUDFactory) NewUnmarshalDispatcher() *ProtoUnmarshalDispatcher {
 	dropPartitionMsg := DropPartitionMsg{}
 	dataNodeTtMsg := DataNodeTtMsg{}
 
+	createIndexMsg := CreateIndexMsg{}
+	dropIndexMsg := DropIndexMsg{}
+
+	loadCollectionMsg := LoadCollectionMsg{}
+	releaseCollectionMsg := ReleaseCollectionMsg{}
+	flushMsg := FlushMsg{}
+
+	createDatabaseMsg := CreateDatabaseMsg{}
+	dropDatabaseMsg := DropDatabaseMsg{}
+
 	p := &ProtoUnmarshalDispatcher{}
 	p.TempMap = make(map[commonpb.MsgType]UnmarshalFunc)
 	p.TempMap[commonpb.MsgType_Insert] = insertMsg.Unmarshal
@@ -72,6 +83,13 @@ func (pudf *ProtoUDFactory) NewUnmarshalDispatcher() *ProtoUnmarshalDispatcher {
 	p.TempMap[commonpb.MsgType_CreatePartition] = createPartitionMsg.Unmarshal
 	p.TempMap[commonpb.MsgType_DropPartition] = dropPartitionMsg.Unmarshal
 	p.TempMap[commonpb.MsgType_DataNodeTt] = dataNodeTtMsg.Unmarshal
+	p.TempMap[commonpb.MsgType_CreateIndex] = createIndexMsg.Unmarshal
+	p.TempMap[commonpb.MsgType_DropIndex] = dropIndexMsg.Unmarshal
+	p.TempMap[commonpb.MsgType_LoadCollection] = loadCollectionMsg.Unmarshal
+	p.TempMap[commonpb.MsgType_ReleaseCollection] = releaseCollectionMsg.Unmarshal
+	p.TempMap[commonpb.MsgType_Flush] = flushMsg.Unmarshal
+	p.TempMap[commonpb.MsgType_CreateDatabase] = createDatabaseMsg.Unmarshal
+	p.TempMap[commonpb.MsgType_DropDatabase] = dropDatabaseMsg.Unmarshal
 
 	return p
 }

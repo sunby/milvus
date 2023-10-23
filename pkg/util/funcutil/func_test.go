@@ -27,11 +27,12 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
-	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
-	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/stretchr/testify/assert"
 	grpcCodes "google.golang.org/grpc/codes"
 	grpcStatus "google.golang.org/grpc/status"
+
+	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
+	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 )
 
 func Test_CheckGrpcReady(t *testing.T) {
@@ -53,6 +54,14 @@ func Test_GetLocalIP(t *testing.T) {
 	ip := GetLocalIP()
 	assert.NotNil(t, ip)
 	assert.NotZero(t, len(ip))
+}
+
+func Test_GetIP(t *testing.T) {
+	ip := GetIP("")
+	assert.NotNil(t, ip)
+	assert.NotZero(t, len(ip))
+	ip = GetIP("127.0.0")
+	assert.Equal(t, ip, "127.0.0")
 }
 
 func Test_ParseIndexParamsMap(t *testing.T) {
@@ -219,6 +228,34 @@ func TestGetNumRowsOfFloatVectorField(t *testing.T) {
 	}
 }
 
+func TestGetNumRowsOfFloat16VectorField(t *testing.T) {
+	cases := []struct {
+		bDatas   []byte
+		dim      int64
+		want     uint64
+		errIsNil bool
+	}{
+		{[]byte{}, -1, 0, false},     // dim <= 0
+		{[]byte{}, 0, 0, false},      // dim <= 0
+		{[]byte{1.0}, 128, 0, false}, // length % dim != 0
+		{[]byte{}, 128, 0, true},
+		{[]byte{1.0, 2.0}, 1, 1, true},
+		{[]byte{1.0, 2.0, 3.0, 4.0}, 2, 1, true},
+	}
+
+	for _, test := range cases {
+		got, err := GetNumRowsOfFloat16VectorField(test.bDatas, test.dim)
+		if test.errIsNil {
+			assert.Equal(t, nil, err)
+			if got != test.want {
+				t.Errorf("GetNumRowsOfFloat16VectorField(%v, %v) = %v, %v", test.bDatas, test.dim, test.want, nil)
+			}
+		} else {
+			assert.NotEqual(t, nil, err)
+		}
+	}
+}
+
 func TestGetNumRowsOfBinaryVectorField(t *testing.T) {
 	cases := []struct {
 		bDatas   []byte
@@ -310,7 +347,7 @@ func Test_ReadBinary(t *testing.T) {
 
 	// float vector
 	bs = []byte{0, 0, 0, 0, 0, 0, 0, 0}
-	var fs = make([]float32, 2)
+	fs := make([]float32, 2)
 	assert.NoError(t, ReadBinary(endian, bs, &fs))
 	assert.ElementsMatch(t, []float32{0, 0}, fs)
 }

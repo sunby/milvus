@@ -31,6 +31,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus/internal/kv"
+	mockkv "github.com/milvus-io/milvus/internal/kv/mocks"
 	"github.com/milvus-io/milvus/internal/metastore/kv/datacoord"
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	"github.com/milvus-io/milvus/internal/mocks"
@@ -39,8 +40,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/testutils"
-
-	mockkv "github.com/milvus-io/milvus/internal/kv/mocks"
 )
 
 // MetaReloadSuite tests meta reload & meta creation related logic
@@ -243,11 +242,11 @@ func TestMeta_Basic(t *testing.T) {
 		segInfo1_1 := buildSegment(collID, partID1, segID1_1, channelName, false)
 
 		// check AddSegment
-		err = meta.AddSegment(segInfo0_0)
+		err = meta.AddSegment(context.TODO(), segInfo0_0)
 		assert.NoError(t, err)
-		err = meta.AddSegment(segInfo1_0)
+		err = meta.AddSegment(context.TODO(), segInfo1_0)
 		assert.NoError(t, err)
-		err = meta.AddSegment(segInfo1_1)
+		err = meta.AddSegment(context.TODO(), segInfo1_1)
 		assert.NoError(t, err)
 
 		// check GetSegment
@@ -311,7 +310,6 @@ func TestMeta_Basic(t *testing.T) {
 		info1_1 = meta.GetHealthySegment(segID1_1)
 		assert.NotNil(t, info1_1)
 		assert.Equal(t, false, info1_1.GetIsImporting())
-
 	})
 
 	t.Run("Test segment with kv fails", func(t *testing.T) {
@@ -325,7 +323,7 @@ func TestMeta_Basic(t *testing.T) {
 		meta, err := newMeta(context.TODO(), catalog, nil)
 		assert.NoError(t, err)
 
-		err = meta.AddSegment(NewSegmentInfo(&datapb.SegmentInfo{}))
+		err = meta.AddSegment(context.TODO(), NewSegmentInfo(&datapb.SegmentInfo{}))
 		assert.Error(t, err)
 
 		metakv2 := mockkv.NewMetaKv(t)
@@ -342,7 +340,7 @@ func TestMeta_Basic(t *testing.T) {
 		err = meta.DropSegment(0)
 		assert.NoError(t, err)
 		// nil, since Save error not injected
-		err = meta.AddSegment(NewSegmentInfo(&datapb.SegmentInfo{}))
+		err = meta.AddSegment(context.TODO(), NewSegmentInfo(&datapb.SegmentInfo{}))
 		assert.NoError(t, err)
 		// error injected
 		err = meta.DropSegment(0)
@@ -351,6 +349,7 @@ func TestMeta_Basic(t *testing.T) {
 		catalog = datacoord.NewCatalog(metakv, "", "")
 		meta, err = newMeta(context.TODO(), catalog, nil)
 		assert.NoError(t, err)
+		assert.NotNil(t, meta)
 	})
 
 	t.Run("Test GetCount", func(t *testing.T) {
@@ -366,7 +365,7 @@ func TestMeta_Basic(t *testing.T) {
 		assert.NoError(t, err)
 		segInfo0 := buildSegment(collID, partID0, segID0, channelName, false)
 		segInfo0.NumOfRows = rowCount0
-		err = meta.AddSegment(segInfo0)
+		err = meta.AddSegment(context.TODO(), segInfo0)
 		assert.NoError(t, err)
 
 		// add seg2 with 300 rows
@@ -374,7 +373,7 @@ func TestMeta_Basic(t *testing.T) {
 		assert.NoError(t, err)
 		segInfo1 := buildSegment(collID, partID0, segID1, channelName, false)
 		segInfo1.NumOfRows = rowCount1
-		err = meta.AddSegment(segInfo1)
+		err = meta.AddSegment(context.TODO(), segInfo1)
 		assert.NoError(t, err)
 
 		// check partition/collection statistics
@@ -432,7 +431,7 @@ func TestMeta_Basic(t *testing.T) {
 		assert.NoError(t, err)
 		segInfo0 := buildSegment(collID, partID0, segID0, channelName, false)
 		segInfo0.size.Store(size0)
-		err = meta.AddSegment(segInfo0)
+		err = meta.AddSegment(context.TODO(), segInfo0)
 		assert.NoError(t, err)
 
 		// add seg1 with size1
@@ -440,7 +439,7 @@ func TestMeta_Basic(t *testing.T) {
 		assert.NoError(t, err)
 		segInfo1 := buildSegment(collID, partID0, segID1, channelName, false)
 		segInfo1.size.Store(size1)
-		err = meta.AddSegment(segInfo1)
+		err = meta.AddSegment(context.TODO(), segInfo1)
 		assert.NoError(t, err)
 
 		// check TotalBinlogSize
@@ -448,6 +447,16 @@ func TestMeta_Basic(t *testing.T) {
 		assert.Len(t, collectionBinlogSize, 1)
 		assert.Equal(t, int64(size0+size1), collectionBinlogSize[collID])
 		assert.Equal(t, int64(size0+size1), total)
+	})
+
+	t.Run("Test AddAllocation", func(t *testing.T) {
+		meta, _ := newMemoryMeta()
+		err := meta.AddAllocation(1, &Allocation{
+			SegmentID:  1,
+			NumOfRows:  1,
+			ExpireTime: 0,
+		})
+		assert.Error(t, err)
 	})
 }
 
@@ -460,7 +469,7 @@ func TestGetUnFlushedSegments(t *testing.T) {
 		PartitionID:  0,
 		State:        commonpb.SegmentState_Growing,
 	}
-	err = meta.AddSegment(NewSegmentInfo(s1))
+	err = meta.AddSegment(context.TODO(), NewSegmentInfo(s1))
 	assert.NoError(t, err)
 	s2 := &datapb.SegmentInfo{
 		ID:           1,
@@ -468,7 +477,7 @@ func TestGetUnFlushedSegments(t *testing.T) {
 		PartitionID:  0,
 		State:        commonpb.SegmentState_Flushed,
 	}
-	err = meta.AddSegment(NewSegmentInfo(s2))
+	err = meta.AddSegment(context.TODO(), NewSegmentInfo(s2))
 	assert.NoError(t, err)
 
 	segments := meta.GetUnFlushedSegments()
@@ -484,9 +493,11 @@ func TestUpdateFlushSegmentsInfo(t *testing.T) {
 		meta, err := newMemoryMeta()
 		assert.NoError(t, err)
 
-		segment1 := &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{ID: 1, State: commonpb.SegmentState_Growing, Binlogs: []*datapb.FieldBinlog{getFieldBinlogPaths(1, getInsertLogPath("binlog0", 1))},
-			Statslogs: []*datapb.FieldBinlog{getFieldBinlogPaths(1, getStatsLogPath("statslog0", 1))}}}
-		err = meta.AddSegment(segment1)
+		segment1 := &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
+			ID: 1, State: commonpb.SegmentState_Growing, Binlogs: []*datapb.FieldBinlog{getFieldBinlogPaths(1, getInsertLogPath("binlog0", 1))},
+			Statslogs: []*datapb.FieldBinlog{getFieldBinlogPaths(1, getStatsLogPath("statslog0", 1))},
+		}}
+		err = meta.AddSegment(context.TODO(), segment1)
 		assert.NoError(t, err)
 
 		err = meta.UpdateFlushSegmentsInfo(1, true, false, false, []*datapb.FieldBinlog{getFieldBinlogPathsWithEntry(1, 10, getInsertLogPath("binlog1", 1))},
@@ -513,7 +524,6 @@ func TestUpdateFlushSegmentsInfo(t *testing.T) {
 		assert.Equal(t, updated.State, expected.State)
 		assert.Equal(t, updated.size.Load(), expected.size.Load())
 		assert.Equal(t, updated.NumOfRows, expected.NumOfRows)
-
 	})
 
 	t.Run("update non-existed segment", func(t *testing.T) {
@@ -529,7 +539,7 @@ func TestUpdateFlushSegmentsInfo(t *testing.T) {
 		assert.NoError(t, err)
 
 		segment1 := &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{ID: 1, State: commonpb.SegmentState_Growing}}
-		err = meta.AddSegment(segment1)
+		err = meta.AddSegment(context.TODO(), segment1)
 		assert.NoError(t, err)
 
 		err = meta.UpdateFlushSegmentsInfo(1, false, false, false, nil, nil, nil, []*datapb.CheckPoint{{SegmentID: 2, NumOfRows: 10}},

@@ -18,33 +18,10 @@ package importutil
 import (
 	"testing"
 
-	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 )
-
-func Test_DeduceTargetPartitions(t *testing.T) {
-	schema := sampleSchema()
-	partitions := map[string]int64{
-		"part_0": 100,
-		"part_1": 200,
-	}
-	partitionIDs, err := DeduceTargetPartitions(partitions, schema, int64(1))
-	assert.NoError(t, err)
-	assert.Equal(t, 1, len(partitionIDs))
-	assert.Equal(t, int64(1), partitionIDs[0])
-
-	schema.Fields[7].IsPartitionKey = true
-	partitionIDs, err = DeduceTargetPartitions(partitions, schema, int64(1))
-	assert.NoError(t, err)
-	assert.Equal(t, len(partitions), len(partitionIDs))
-
-	partitions = map[string]int64{
-		"part_a": 100,
-	}
-	partitionIDs, err = DeduceTargetPartitions(partitions, schema, int64(1))
-	assert.Error(t, err)
-	assert.Nil(t, partitionIDs)
-}
 
 func Test_CollectionInfoNew(t *testing.T) {
 	t.Run("succeed", func(t *testing.T) {

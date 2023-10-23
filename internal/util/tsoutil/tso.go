@@ -19,13 +19,20 @@ package tsoutil
 import (
 	"path"
 
+	"github.com/tikv/client-go/v2/txnkv"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
+	"github.com/milvus-io/milvus/internal/kv/tikv"
 )
 
 // NewTSOKVBase returns a kv.TxnKV object
 func NewTSOKVBase(client *clientv3.Client, tsoRoot, subPath string) kv.TxnKV {
 	return etcdkv.NewEtcdKV(client, path.Join(tsoRoot, subPath))
+}
+
+// NewTSOTiKVBase returns a kv.TxnKV object
+func NewTSOTiKVBase(client *txnkv.Client, tsoRoot, subPath string) kv.TxnKV {
+	return tikv.NewTiKV(client, path.Join(tsoRoot, subPath))
 }

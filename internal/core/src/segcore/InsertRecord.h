@@ -21,8 +21,10 @@
 #include <queue>
 
 #include "TimestampIndex.h"
+#include "common/EasyAssert.h"
 #include "common/Schema.h"
 #include "common/Types.h"
+#include "fmt/format.h"
 #include "mmap/Column.h"
 #include "segcore/AckResponder.h"
 #include "segcore/ConcurrentVector.h"
@@ -39,6 +41,9 @@ constexpr int64_t BruteForceSelectivity = 10;
 class OffsetMap {
  public:
     virtual ~OffsetMap() = default;
+
+    virtual bool
+    contain(const PkType& pk) const = 0;
 
     virtual std::vector<int64_t>
     find(const PkType& pk) const = 0;
@@ -63,6 +68,11 @@ class OffsetMap {
 template <typename T>
 class OffsetOrderedMap : public OffsetMap {
  public:
+    bool
+    contain(const PkType& pk) const override {
+        return map_.find(std::get<T>(pk)) != map_.end();
+    }
+
     std::vector<int64_t>
     find(const PkType& pk) const override {
         auto offset_vector = map_.find(std::get<T>(pk));
@@ -78,6 +88,7 @@ class OffsetOrderedMap : public OffsetMap {
     void
     seal() override {
         PanicInfo(
+            NotImplemented,
             "OffsetOrderedMap used for growing segment could not be sealed.");
     }
 
@@ -104,21 +115,23 @@ class OffsetOrderedMap : public OffsetMap {
     find_first_by_index(int64_t limit,
                         const BitsetType& bitset,
                         bool false_filtered_out) const {
-        std::vector<int64_t> seg_offsets;
-        seg_offsets.reserve(limit);
         int64_t hit_num = 0;  // avoid counting the number everytime.
-        auto cnt = bitset.count();
+        int64_t cnt = bitset.count();
         if (!false_filtered_out) {
             cnt = bitset.size() - bitset.count();
         }
-        for (auto it = map_.begin(); it != map_.end(); it++) {
-            if (hit_num >= limit || hit_num >= cnt) {
-                break;
-            }
+        limit = std::min(limit, cnt);
+        std::vector<int64_t> seg_offsets;
+        seg_offsets.reserve(limit);
+        for (auto it = map_.begin(); hit_num < limit && it != map_.end();
+             it++) {
             for (auto seg_offset : it->second) {
                 if (!(bitset[seg_offset] ^ false_filtered_out)) {
                     seg_offsets.push_back(seg_offset);
                     hit_num++;
+                    if (hit_num >= limit) {
+                        break;
+                    }
                 }
             }
         }
@@ -133,6 +146,19 @@ class OffsetOrderedMap : public OffsetMap {
 template <typename T>
 class OffsetOrderedArray : public OffsetMap {
  public:
+    bool
+    contain(const PkType& pk) const override {
+        const T& target = std::get<T>(pk);
+        auto it =
+            std::lower_bound(array_.begin(),
+                             array_.end(),
+                             target,
+                             [](const std::pair<T, int64_t>& elem,
+                                const T& value) { return elem.first < value; });
+
+        return it != array_.end();
+    }
+
     std::vector<int64_t>
     find(const PkType& pk) const override {
         check_search();
@@ -155,8 +181,10 @@ class OffsetOrderedArray : public OffsetMap {
 
     void
     insert(const PkType& pk, int64_t offset) override {
-        if (is_sealed)
-            PanicInfo("OffsetOrderedArray could not insert after seal");
+        if (is_sealed) {
+            PanicInfo(Unsupported,
+                      "OffsetOrderedArray could not insert after seal");
+        }
         array_.push_back(std::make_pair(std::get<T>(pk), offset));
     }
 
@@ -191,17 +219,16 @@ class OffsetOrderedArray : public OffsetMap {
     find_first_by_index(int64_t limit,
                         const BitsetType& bitset,
                         bool false_filtered_out) const {
-        std::vector<int64_t> seg_offsets;
-        seg_offsets.reserve(limit);
         int64_t hit_num = 0;  // avoid counting the number everytime.
-        auto cnt = bitset.count();
+        int64_t cnt = bitset.count();
         if (!false_filtered_out) {
             cnt = bitset.size() - bitset.count();
         }
-        for (auto it = array_.begin(); it != array_.end(); it++) {
-            if (hit_num >= limit || hit_num >= cnt) {
-                break;
-            }
+        limit = std::min(limit, cnt);
+        std::vector<int64_t> seg_offsets;
+        seg_offsets.reserve(limit);
+        for (auto it = array_.begin(); hit_num < limit && it != array_.end();
+             it++) {
             if (!(bitset[it->second] ^ false_filtered_out)) {
                 seg_offsets.push_back(it->second);
                 hit_num++;
@@ -247,25 +274,29 @@ struct InsertRecord {
                 pk_field_id.value() == field_id) {
                 switch (field_meta.get_data_type()) {
                     case DataType::INT64: {
-                        if (is_sealed)
+                        if (is_sealed) {
                             pk2offset_ =
                                 std::make_unique<OffsetOrderedArray<int64_t>>();
-                        else
+                        } else {
                             pk2offset_ =
                                 std::make_unique<OffsetOrderedMap<int64_t>>();
+                        }
                         break;
                     }
                     case DataType::VARCHAR: {
-                        if (is_sealed)
+                        if (is_sealed) {
                             pk2offset_ = std::make_unique<
                                 OffsetOrderedArray<std::string>>();
-                        else
+                        } else {
                             pk2offset_ = std::make_unique<
                                 OffsetOrderedMap<std::string>>();
+                        }
                         break;
                     }
                     default: {
-                        PanicInfo("unsupported pk type");
+                        PanicInfo(DataTypeInvalid,
+                                  fmt::format("unsupported pk type",
+                                              field_meta.get_data_type()));
                     }
                 }
             }
@@ -279,8 +310,15 @@ struct InsertRecord {
                     this->append_field_data<BinaryVector>(
                         field_id, field_meta.get_dim(), size_per_chunk);
                     continue;
+                } else if (field_meta.get_data_type() ==
+                           DataType::VECTOR_FLOAT16) {
+                    this->append_field_data<Float16Vector>(
+                        field_id, field_meta.get_dim(), size_per_chunk);
+                    continue;
                 } else {
-                    PanicInfo("unsupported");
+                    PanicInfo(DataTypeInvalid,
+                              fmt::format("unsupported vector type",
+                                          field_meta.get_data_type()));
                 }
             }
             switch (field_meta.get_data_type()) {
@@ -321,16 +359,22 @@ struct InsertRecord {
                     this->append_field_data<Json>(field_id, size_per_chunk);
                     break;
                 }
-                // case DataType::ARRAY: {
-                //     this->append_field_data<std::string>(field_id,
-                //                                          size_per_chunk);
-                //     break;
-                // }
+                case DataType::ARRAY: {
+                    this->append_field_data<Array>(field_id, size_per_chunk);
+                    break;
+                }
                 default: {
-                    PanicInfo("unsupported");
+                    PanicInfo(DataTypeInvalid,
+                              fmt::format("unsupported scalar type",
+                                          field_meta.get_data_type()));
                 }
             }
         }
+    }
+
+    bool
+    contain(const PkType& pk) const {
+        return pk2offset_->contain(pk);
     }
 
     std::vector<SegOffset>
@@ -372,7 +416,9 @@ struct InsertRecord {
                 break;
             }
             default: {
-                PanicInfo("unsupported primary key data type");
+                PanicInfo(DataTypeInvalid,
+                          fmt::format("unsupported primary key data type",
+                                      data_type));
             }
         }
     }
@@ -402,7 +448,9 @@ struct InsertRecord {
                     break;
                 }
                 default: {
-                    PanicInfo("unsupported primary key data type");
+                    PanicInfo(DataTypeInvalid,
+                              fmt::format("unsupported primary key data type",
+                                          data_type));
                 }
             }
         }

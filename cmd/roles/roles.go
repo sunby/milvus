@@ -27,6 +27,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.uber.org/zap"
+
 	"github.com/milvus-io/milvus/cmd/components"
 	"github.com/milvus-io/milvus/internal/http"
 	"github.com/milvus-io/milvus/internal/http/healthz"
@@ -37,14 +41,12 @@ import (
 	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/tracer"
 	"github.com/milvus-io/milvus/pkg/util/etcd"
+	"github.com/milvus-io/milvus/pkg/util/generic"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
 	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	_ "github.com/milvus-io/milvus/pkg/util/symbolizer" // support symbolizer and crash dump
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"go.uber.org/zap"
 )
 
 // all milvus related metrics is in a separate registry
@@ -91,7 +93,7 @@ func runComponent[T component](ctx context.Context,
 	runWg *sync.WaitGroup,
 	creator func(context.Context, dependency.Factory) (T, error),
 	metricRegister func(*prometheus.Registry),
-) T {
+) component {
 	var role T
 
 	sign := make(chan struct{})
@@ -118,6 +120,9 @@ func runComponent[T component](ctx context.Context,
 
 	healthz.Register(role)
 	metricRegister(Registry.GoRegistry)
+	if generic.IsZero(role) {
+		return nil
+	}
 	return role
 }
 
@@ -133,9 +138,11 @@ type MilvusRoles struct {
 	EnableIndexNode  bool `env:"ENABLE_INDEX_NODE"`
 
 	Local    bool
+	Alias    string
 	Embedded bool
-	closed   chan struct{}
-	once     sync.Once
+
+	closed chan struct{}
+	once   sync.Once
 }
 
 // NewMilvusRoles creates a new MilvusRoles with private fields initialized.
@@ -161,46 +168,52 @@ func (mr *MilvusRoles) printLDPreLoad() {
 	}
 }
 
-func (mr *MilvusRoles) runRootCoord(ctx context.Context, localMsg bool, wg *sync.WaitGroup) *components.RootCoord {
+func (mr *MilvusRoles) runRootCoord(ctx context.Context, localMsg bool, wg *sync.WaitGroup) component {
 	wg.Add(1)
 	return runComponent(ctx, localMsg, wg, components.NewRootCoord, metrics.RegisterRootCoord)
 }
 
-func (mr *MilvusRoles) runProxy(ctx context.Context, localMsg bool, wg *sync.WaitGroup) *components.Proxy {
+func (mr *MilvusRoles) runProxy(ctx context.Context, localMsg bool, wg *sync.WaitGroup) component {
 	wg.Add(1)
 	return runComponent(ctx, localMsg, wg, components.NewProxy, metrics.RegisterProxy)
 }
 
-func (mr *MilvusRoles) runQueryCoord(ctx context.Context, localMsg bool, wg *sync.WaitGroup) *components.QueryCoord {
+func (mr *MilvusRoles) runQueryCoord(ctx context.Context, localMsg bool, wg *sync.WaitGroup) component {
 	wg.Add(1)
 	return runComponent(ctx, localMsg, wg, components.NewQueryCoord, metrics.RegisterQueryCoord)
 }
 
-func (mr *MilvusRoles) runQueryNode(ctx context.Context, localMsg bool, wg *sync.WaitGroup) *components.QueryNode {
+func (mr *MilvusRoles) runQueryNode(ctx context.Context, localMsg bool, wg *sync.WaitGroup) component {
 	wg.Add(1)
+	// clear local storage
 	rootPath := paramtable.Get().LocalStorageCfg.Path.GetValue()
 	queryDataLocalPath := filepath.Join(rootPath, typeutil.QueryNodeRole)
 	cleanLocalDir(queryDataLocalPath)
+	// clear mmap dir
+	mmapDir := paramtable.Get().QueryNodeCfg.MmapDirPath.GetValue()
+	if len(mmapDir) > 0 {
+		cleanLocalDir(mmapDir)
+	}
 
 	return runComponent(ctx, localMsg, wg, components.NewQueryNode, metrics.RegisterQueryNode)
 }
 
-func (mr *MilvusRoles) runDataCoord(ctx context.Context, localMsg bool, wg *sync.WaitGroup) *components.DataCoord {
+func (mr *MilvusRoles) runDataCoord(ctx context.Context, localMsg bool, wg *sync.WaitGroup) component {
 	wg.Add(1)
 	return runComponent(ctx, localMsg, wg, components.NewDataCoord, metrics.RegisterDataCoord)
 }
 
-func (mr *MilvusRoles) runDataNode(ctx context.Context, localMsg bool, wg *sync.WaitGroup) *components.DataNode {
+func (mr *MilvusRoles) runDataNode(ctx context.Context, localMsg bool, wg *sync.WaitGroup) component {
 	wg.Add(1)
 	return runComponent(ctx, localMsg, wg, components.NewDataNode, metrics.RegisterDataNode)
 }
 
-func (mr *MilvusRoles) runIndexCoord(ctx context.Context, localMsg bool, wg *sync.WaitGroup) *components.IndexCoord {
+func (mr *MilvusRoles) runIndexCoord(ctx context.Context, localMsg bool, wg *sync.WaitGroup) component {
 	wg.Add(1)
 	return runComponent(ctx, localMsg, wg, components.NewIndexCoord, func(registry *prometheus.Registry) {})
 }
 
-func (mr *MilvusRoles) runIndexNode(ctx context.Context, localMsg bool, wg *sync.WaitGroup) *components.IndexNode {
+func (mr *MilvusRoles) runIndexNode(ctx context.Context, localMsg bool, wg *sync.WaitGroup) component {
 	wg.Add(1)
 	rootPath := paramtable.Get().LocalStorageCfg.Path.GetValue()
 	indexDataLocalPath := filepath.Join(rootPath, typeutil.IndexNodeRole)
@@ -237,6 +250,7 @@ func (mr *MilvusRoles) setupLogger() {
 
 // Register serves prometheus http service
 func setupPrometheusHTTPServer(r *internalmetrics.MilvusRegistry) {
+	log.Info("setupPrometheusHTTPServer")
 	http.Register(&http.Handler{
 		Path:    "/metrics",
 		Handler: promhttp.HandlerFor(r, promhttp.HandlerOpts{}),
@@ -282,7 +296,7 @@ func (mr *MilvusRoles) handleSignals() func() {
 }
 
 // Run Milvus components.
-func (mr *MilvusRoles) Run(alias string) {
+func (mr *MilvusRoles) Run() {
 	// start signal handler, defer close func
 	closeFn := mr.handleSignals()
 	defer closeFn()
@@ -325,54 +339,49 @@ func (mr *MilvusRoles) Run(alias string) {
 	}
 
 	http.ServeHTTP()
+	setupPrometheusHTTPServer(Registry)
 
-	var rc *components.RootCoord
 	var wg sync.WaitGroup
 	local := mr.Local
+
+	var rootCoord, queryCoord, indexCoord, dataCoord component
+	var proxy, dataNode, indexNode, queryNode component
 	if mr.EnableRootCoord {
-		rc = mr.runRootCoord(ctx, local, &wg)
+		rootCoord = mr.runRootCoord(ctx, local, &wg)
 	}
 
-	var pn *components.Proxy
 	if mr.EnableProxy {
-		pn = mr.runProxy(ctx, local, &wg)
+		proxy = mr.runProxy(ctx, local, &wg)
 	}
 
-	var qs *components.QueryCoord
 	if mr.EnableQueryCoord {
-		qs = mr.runQueryCoord(ctx, local, &wg)
+		queryCoord = mr.runQueryCoord(ctx, local, &wg)
 	}
 
-	var qn *components.QueryNode
 	if mr.EnableQueryNode {
-		qn = mr.runQueryNode(ctx, local, &wg)
+		queryNode = mr.runQueryNode(ctx, local, &wg)
 	}
 
-	var ds *components.DataCoord
 	if mr.EnableDataCoord {
-		ds = mr.runDataCoord(ctx, local, &wg)
+		dataCoord = mr.runDataCoord(ctx, local, &wg)
 	}
 
-	var dn *components.DataNode
 	if mr.EnableDataNode {
-		dn = mr.runDataNode(ctx, local, &wg)
+		dataNode = mr.runDataNode(ctx, local, &wg)
 	}
 
-	var is *components.IndexCoord
 	if mr.EnableIndexCoord {
-		is = mr.runIndexCoord(ctx, local, &wg)
+		indexCoord = mr.runIndexCoord(ctx, local, &wg)
 	}
 
-	var in *components.IndexNode
 	if mr.EnableIndexNode {
-		in = mr.runIndexNode(ctx, local, &wg)
+		indexNode = mr.runIndexNode(ctx, local, &wg)
 	}
 
 	wg.Wait()
 
 	mr.setupLogger()
 	tracer.Init()
-	setupPrometheusHTTPServer(Registry)
 
 	paramtable.SetCreateTime(time.Now())
 	paramtable.SetUpdateTime(time.Now())
@@ -381,9 +390,11 @@ func (mr *MilvusRoles) Run(alias string) {
 
 	// stop coordinators first
 	//	var component
-	coordinators := []component{rc, qs, ds, is}
-	for _, coord := range coordinators {
+	coordinators := []component{rootCoord, queryCoord, dataCoord, indexCoord}
+	for idx, coord := range coordinators {
+		log.Warn("stop processing")
 		if coord != nil {
+			log.Warn("stop coord", zap.Int("idx", idx), zap.Any("coord", coord))
 			wg.Add(1)
 			go func(coord component) {
 				defer wg.Done()
@@ -395,7 +406,7 @@ func (mr *MilvusRoles) Run(alias string) {
 	log.Info("All coordinators have stopped")
 
 	// stop nodes
-	nodes := []component{qn, in, dn}
+	nodes := []component{queryNode, indexNode, dataNode}
 	for _, node := range nodes {
 		if node != nil {
 			wg.Add(1)
@@ -409,10 +420,39 @@ func (mr *MilvusRoles) Run(alias string) {
 	log.Info("All nodes have stopped")
 
 	// stop proxy
-	if pn != nil {
-		pn.Stop()
+	if proxy != nil {
+		proxy.Stop()
 		log.Info("proxy stopped")
 	}
 
 	log.Info("Milvus components graceful stop done")
+}
+
+func (mr *MilvusRoles) GetRoles() []string {
+	roles := make([]string, 0)
+	if mr.EnableRootCoord {
+		roles = append(roles, typeutil.RootCoordRole)
+	}
+	if mr.EnableProxy {
+		roles = append(roles, typeutil.ProxyRole)
+	}
+	if mr.EnableQueryCoord {
+		roles = append(roles, typeutil.QueryCoordRole)
+	}
+	if mr.EnableQueryNode {
+		roles = append(roles, typeutil.QueryNodeRole)
+	}
+	if mr.EnableDataCoord {
+		roles = append(roles, typeutil.DataCoordRole)
+	}
+	if mr.EnableDataNode {
+		roles = append(roles, typeutil.DataNodeRole)
+	}
+	if mr.EnableIndexCoord {
+		roles = append(roles, typeutil.IndexCoordRole)
+	}
+	if mr.EnableIndexNode {
+		roles = append(roles, typeutil.IndexNodeRole)
+	}
+	return roles
 }

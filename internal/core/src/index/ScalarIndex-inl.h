@@ -20,6 +20,7 @@
 
 #include "index/Meta.h"
 #include "knowhere/dataset.h"
+#include "common/Types.h"
 
 namespace milvus::index {
 template <typename T>
@@ -63,8 +64,9 @@ ScalarIndex<T>::Query(const DatasetPtr& dataset) {
         case OpType::PrefixMatch:
         case OpType::PostfixMatch:
         default:
-            throw std::invalid_argument(std::string(
-                "unsupported operator type: " + std::to_string(op)));
+            throw SegcoreError(
+                OpTypeInvalid,
+                fmt::format("unsupported operator type: {}", op));
     }
 }
 
@@ -73,7 +75,6 @@ inline void
 ScalarIndex<std::string>::BuildWithRawData(size_t n,
                                            const void* values,
                                            const Config& config) {
-    // TODO :: use arrow
     proto::schema::StringArray arr;
     auto ok = arr.ParseFromArray(values, n);
     Assert(ok);

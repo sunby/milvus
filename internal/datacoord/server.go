@@ -28,6 +28,7 @@ import (
 
 	"github.com/blang/semver/v4"
 	"github.com/cockroachdb/errors"
+	"github.com/tikv/client-go/v2/txnkv"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 
@@ -37,6 +38,7 @@ import (
 	rootcoordclient "github.com/milvus-io/milvus/internal/distributed/rootcoord/client"
 	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
+	"github.com/milvus-io/milvus/internal/kv/tikv"
 	"github.com/milvus-io/milvus/internal/metastore/kv/datacoord"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/storage"
@@ -47,6 +49,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream/mqwrapper"
+	"github.com/milvus-io/milvus/pkg/util"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/logutil"
 	"github.com/milvus-io/milvus/pkg/util/merr"
@@ -59,7 +62,7 @@ import (
 )
 
 const (
-	connEtcdMaxRetryTime = 100
+	connMetaMaxRetryTime = 100
 	allPartitionID       = 0 // partitionID means no filtering
 )
 
@@ -79,11 +82,11 @@ type (
 	Timestamp = typeutil.Timestamp
 )
 
-type dataNodeCreatorFunc func(ctx context.Context, addr string, nodeID int64) (types.DataNode, error)
+type dataNodeCreatorFunc func(ctx context.Context, addr string, nodeID int64) (types.DataNodeClient, error)
 
-type indexNodeCreatorFunc func(ctx context.Context, addr string, nodeID int64) (types.IndexNode, error)
+type indexNodeCreatorFunc func(ctx context.Context, addr string, nodeID int64) (types.IndexNodeClient, error)
 
-type rootCoordCreatorFunc func(ctx context.Context, metaRootPath string, etcdClient *clientv3.Client) (types.RootCoord, error)
+type rootCoordCreatorFunc func(ctx context.Context, metaRootPath string, etcdClient *clientv3.Client) (types.RootCoordClient, error)
 
 // makes sure Server implements `DataCoord`
 var _ types.DataCoord = (*Server)(nil)
@@ -102,15 +105,17 @@ type Server struct {
 	helper           ServerHelper
 
 	etcdCli          *clientv3.Client
+	tikvCli          *txnkv.Client
 	address          string
-	kvClient         kv.WatchKV
+	watchClient      kv.WatchKV
+	kv               kv.MetaKv
 	meta             *meta
 	segmentManager   Manager
 	allocator        allocator
 	cluster          *Cluster
 	sessionManager   *SessionManager
 	channelManager   *ChannelManager
-	rootCoordClient  types.RootCoord
+	rootCoordClient  types.RootCoordClient
 	garbageCollector *garbageCollector
 	gcOpt            GcOption
 	handler          Handler
@@ -129,7 +134,8 @@ type Server struct {
 	icSession *sessionutil.Session
 	dnEventCh <-chan *sessionutil.SessionEvent
 	inEventCh <-chan *sessionutil.SessionEvent
-	//qcEventCh <-chan *sessionutil.SessionEvent
+	// qcEventCh <-chan *sessionutil.SessionEvent
+	qnEventCh <-chan *sessionutil.SessionEvent
 
 	enableActiveStandBy bool
 	activateFunc        func() error
@@ -137,11 +143,12 @@ type Server struct {
 	dataNodeCreator        dataNodeCreatorFunc
 	indexNodeCreator       indexNodeCreatorFunc
 	rootCoordClientCreator rootCoordCreatorFunc
-	//indexCoord             types.IndexCoord
+	// indexCoord             types.IndexCoord
 
-	//segReferManager  *SegmentReferenceManager
-	indexBuilder     *indexBuilder
-	indexNodeManager *IndexNodeManager
+	// segReferManager  *SegmentReferenceManager
+	indexBuilder              *indexBuilder
+	indexNodeManager          *IndexNodeManager
+	indexEngineVersionManager *IndexEngineVersionManager
 
 	// manage ways that data coord access other coord
 	broker Broker
@@ -220,15 +227,15 @@ func CreateServer(ctx context.Context, factory dependency.Factory, opts ...Optio
 	return s
 }
 
-func defaultDataNodeCreatorFunc(ctx context.Context, addr string, nodeID int64) (types.DataNode, error) {
+func defaultDataNodeCreatorFunc(ctx context.Context, addr string, nodeID int64) (types.DataNodeClient, error) {
 	return datanodeclient.NewClient(ctx, addr, nodeID)
 }
 
-func defaultIndexNodeCreatorFunc(ctx context.Context, addr string, nodeID int64) (types.IndexNode, error) {
+func defaultIndexNodeCreatorFunc(ctx context.Context, addr string, nodeID int64) (types.IndexNodeClient, error) {
 	return indexnodeclient.NewClient(ctx, addr, nodeID, Params.DataCoordCfg.WithCredential.GetAsBool())
 }
 
-func defaultRootCoordCreatorFunc(ctx context.Context, metaRootPath string, client *clientv3.Client) (types.RootCoord, error) {
+func defaultRootCoordCreatorFunc(ctx context.Context, metaRootPath string, client *clientv3.Client) (types.RootCoordClient, error) {
 	return rootcoordclient.NewClient(ctx, metaRootPath, client)
 }
 
@@ -387,13 +394,8 @@ func (s *Server) startDataCoord() {
 		s.compactionTrigger.start()
 	}
 	s.startServerLoop()
-	// DataCoord (re)starts successfully and starts to collection segment stats
-	// data from all DataNode.
-	// This will prevent DataCoord from missing out any important segment stats
-	// data while offline.
-	log.Info("DataCoord (re)starts successfully and re-collecting segment stats from DataNodes")
-	s.reCollectSegmentStats(s.ctx)
 	s.stateCode.Store(commonpb.StateCode_Healthy)
+	sessionutil.SaveServerInfo(typeutil.DataCoordRole, s.session.ServerID)
 }
 
 func (s *Server) initCluster() error {
@@ -402,7 +404,7 @@ func (s *Server) initCluster() error {
 	}
 
 	var err error
-	s.channelManager, err = NewChannelManager(s.kvClient, s.handler, withMsgstreamFactory(s.factory),
+	s.channelManager, err = NewChannelManager(s.watchClient, s.handler, withMsgstreamFactory(s.factory),
 		withStateChecker(), withBgChecker())
 	if err != nil {
 		return err
@@ -421,15 +423,19 @@ func (s *Server) SetEtcdClient(client *clientv3.Client) {
 	s.etcdCli = client
 }
 
-func (s *Server) SetRootCoord(rootCoord types.RootCoord) {
+func (s *Server) SetTiKVClient(client *txnkv.Client) {
+	s.tikvCli = client
+}
+
+func (s *Server) SetRootCoordClient(rootCoord types.RootCoordClient) {
 	s.rootCoordClient = rootCoord
 }
 
-func (s *Server) SetDataNodeCreator(f func(context.Context, string, int64) (types.DataNode, error)) {
+func (s *Server) SetDataNodeCreator(f func(context.Context, string, int64) (types.DataNodeClient, error)) {
 	s.dataNodeCreator = f
 }
 
-func (s *Server) SetIndexNodeCreator(f func(context.Context, string, int64) (types.IndexNode, error)) {
+func (s *Server) SetIndexNodeCreator(f func(context.Context, string, int64) (types.IndexNodeClient, error)) {
 	s.indexNodeCreator = f
 }
 
@@ -514,6 +520,15 @@ func (s *Server) initServiceDiscovery() error {
 	}
 	s.inEventCh = s.session.WatchServices(typeutil.IndexNodeRole, inRevision+1, nil)
 
+	s.indexEngineVersionManager = newIndexEngineVersionManager()
+	qnSessions, qnRevision, err := s.session.GetSessions(typeutil.QueryNodeRole)
+	if err != nil {
+		log.Warn("DataCoord get QueryNode sessions failed", zap.Error(err))
+		return err
+	}
+	s.indexEngineVersionManager.Startup(qnSessions)
+	s.qnEventCh = s.session.WatchServicesWithVersionRange(typeutil.QueryNodeRole, r, qnRevision+1, nil)
+
 	return nil
 }
 
@@ -532,24 +547,33 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 	if s.meta != nil {
 		return nil
 	}
-	etcdKV := etcdkv.NewEtcdKV(s.etcdCli, Params.EtcdCfg.MetaRootPath.GetValue())
+	s.watchClient = etcdkv.NewEtcdKV(s.etcdCli, Params.EtcdCfg.MetaRootPath.GetValue())
+	metaType := Params.MetaStoreCfg.MetaStoreType.GetValue()
+	log.Info("data coordinator connecting to metadata store", zap.String("metaType", metaType))
+	if metaType == util.MetaStoreTypeTiKV {
+		s.kv = tikv.NewTiKV(s.tikvCli, Params.TiKVCfg.MetaRootPath.GetValue())
+	} else if metaType == util.MetaStoreTypeEtcd {
+		s.kv = etcdkv.NewEtcdKV(s.etcdCli, Params.EtcdCfg.MetaRootPath.GetValue())
+	} else {
+		return retry.Unrecoverable(fmt.Errorf("not supported meta store: %s", metaType))
+	}
+	log.Info("data coordinator successfully connected to metadata store", zap.String("metaType", metaType))
 
-	s.kvClient = etcdKV
 	reloadEtcdFn := func() error {
 		var err error
-		catalog := datacoord.NewCatalog(etcdKV, chunkManager.RootPath(), Params.EtcdCfg.MetaRootPath.GetValue())
+		catalog := datacoord.NewCatalog(s.kv, chunkManager.RootPath(), Params.EtcdCfg.MetaRootPath.GetValue())
 		s.meta, err = newMeta(s.ctx, catalog, chunkManager)
 		if err != nil {
 			return err
 		}
 		return nil
 	}
-	return retry.Do(s.ctx, reloadEtcdFn, retry.Attempts(connEtcdMaxRetryTime))
+	return retry.Do(s.ctx, reloadEtcdFn, retry.Attempts(connMetaMaxRetryTime))
 }
 
 func (s *Server) initIndexBuilder(manager storage.ChunkManager) {
 	if s.indexBuilder == nil {
-		s.indexBuilder = newIndexBuilder(s.ctx, s.meta, s.indexNodeManager, manager)
+		s.indexBuilder = newIndexBuilder(s.ctx, s.meta, s.indexNodeManager, manager, s.indexEngineVersionManager)
 	}
 }
 
@@ -586,7 +610,7 @@ func (s *Server) startDataNodeTtLoop(ctx context.Context) {
 	}
 	subName := fmt.Sprintf("%s-%d-datanodeTl", Params.CommonCfg.DataCoordSubName.GetValue(), paramtable.GetNodeID())
 
-	ttMsgStream.AsConsumer([]string{timeTickChannel}, subName, mqwrapper.SubscriptionPositionLatest)
+	ttMsgStream.AsConsumer(context.TODO(), []string{timeTickChannel}, subName, mqwrapper.SubscriptionPositionLatest)
 	log.Info("DataCoord creates the timetick channel consumer",
 		zap.String("timeTickChannel", timeTickChannel),
 		zap.String("subscription", subName))
@@ -800,6 +824,19 @@ func (s *Server) watchService(ctx context.Context) {
 				}()
 				return
 			}
+		case event, ok := <-s.qnEventCh:
+			if !ok {
+				s.stopServiceWatch()
+				return
+			}
+			if err := s.handleSessionEvent(ctx, typeutil.QueryNodeRole, event); err != nil {
+				go func() {
+					if err := s.Stop(); err != nil {
+						log.Warn("DataCoord server stop error", zap.Error(err))
+					}
+				}()
+				return
+			}
 		}
 	}
 }
@@ -863,6 +900,26 @@ func (s *Server) handleSessionEvent(ctx context.Context, role string, event *ses
 			log.Warn("receive unknown service event type",
 				zap.Any("type", event.EventType))
 		}
+	case typeutil.QueryNodeRole:
+		switch event.EventType {
+		case sessionutil.SessionAddEvent:
+			log.Info("received querynode register",
+				zap.String("address", event.Session.Address),
+				zap.Int64("serverID", event.Session.ServerID))
+			s.indexEngineVersionManager.AddNode(event.Session)
+		case sessionutil.SessionDelEvent:
+			log.Info("received querynode unregister",
+				zap.String("address", event.Session.Address),
+				zap.Int64("serverID", event.Session.ServerID))
+			s.indexEngineVersionManager.RemoveNode(event.Session)
+		case sessionutil.SessionUpdateEvent:
+			serverID := event.Session.ServerID
+			log.Info("received querynode SessionUpdateEvent", zap.Int64("serverID", serverID))
+			s.indexEngineVersionManager.Update(event.Session)
+		default:
+			log.Warn("receive unknown service event type",
+				zap.Any("type", event.EventType))
+		}
 	}
 
 	return nil
@@ -884,7 +941,7 @@ func (s *Server) startFlushLoop(ctx context.Context) {
 				logutil.Logger(s.ctx).Info("flush loop shutdown")
 				return
 			case segmentID := <-s.flushCh:
-				//Ignore return error
+				// Ignore return error
 				log.Info("flush successfully", zap.Any("segmentID", segmentID))
 				err := s.postFlush(ctx, segmentID)
 				if err != nil {
@@ -952,10 +1009,7 @@ func (s *Server) initRootCoordClient() error {
 			return err
 		}
 	}
-	if err = s.rootCoordClient.Init(); err != nil {
-		return err
-	}
-	return s.rootCoordClient.Start()
+	return nil
 }
 
 // Stop do the Server finalize processes
@@ -991,8 +1045,17 @@ func (s *Server) Stop() error {
 
 // CleanMeta only for test
 func (s *Server) CleanMeta() error {
-	log.Debug("clean meta", zap.Any("kv", s.kvClient))
-	return s.kvClient.RemoveWithPrefix("")
+	log.Debug("clean meta", zap.Any("kv", s.kv))
+	err := s.kv.RemoveWithPrefix("")
+	err2 := s.watchClient.RemoveWithPrefix("")
+	if err2 != nil {
+		if err != nil {
+			err = fmt.Errorf("Failed to CleanMeta[metadata cleanup error: %w][watchdata cleanup error: %v]", err, err2)
+		} else {
+			err = err2
+		}
+	}
+	return err
 }
 
 func (s *Server) stopServerLoop() {
@@ -1000,7 +1063,7 @@ func (s *Server) stopServerLoop() {
 	s.serverLoopWg.Wait()
 }
 
-//func (s *Server) validateAllocRequest(collID UniqueID, partID UniqueID, channelName string) error {
+// func (s *Server) validateAllocRequest(collID UniqueID, partID UniqueID, channelName string) error {
 //	if !s.meta.HasCollection(collID) {
 //		return fmt.Errorf("can not find collection %d", collID)
 //	}
@@ -1013,7 +1076,7 @@ func (s *Server) stopServerLoop() {
 //		}
 //	}
 //	return fmt.Errorf("can not find channel %s", channelName)
-//}
+// }
 
 // loadCollectionFromRootCoord communicates with RootCoord and asks for collection information.
 // collection information will be added to server meta info.
@@ -1042,26 +1105,4 @@ func (s *Server) loadCollectionFromRootCoord(ctx context.Context, collectionID i
 	}
 	s.meta.AddCollection(collInfo)
 	return nil
-}
-
-func (s *Server) reCollectSegmentStats(ctx context.Context) {
-	if s.channelManager == nil {
-		log.Error("null channel manager found, which should NOT happen in non-testing environment")
-		return
-	}
-	nodes := s.sessionManager.getLiveNodeIDs()
-	log.Info("re-collecting segment stats from DataNodes",
-		zap.Int64s("DataNode IDs", nodes))
-
-	reCollectFunc := func() error {
-		err := s.cluster.ReCollectSegmentStats(ctx)
-		if err != nil {
-			return err
-		}
-		return nil
-	}
-
-	if err := retry.Do(ctx, reCollectFunc, retry.Attempts(20), retry.Sleep(time.Millisecond*100), retry.MaxSleepTime(5*time.Second)); err != nil {
-		panic(err)
-	}
 }

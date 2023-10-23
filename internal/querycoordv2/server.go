@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"github.com/tikv/client-go/v2/txnkv"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
@@ -34,8 +35,10 @@ import (
 	"github.com/milvus-io/milvus/internal/allocator"
 	"github.com/milvus-io/milvus/internal/kv"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
+	"github.com/milvus-io/milvus/internal/kv/tikv"
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/metastore/kv/querycoord"
+	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/balance"
 	"github.com/milvus-io/milvus/internal/querycoordv2/checkers"
 	"github.com/milvus-io/milvus/internal/querycoordv2/dist"
@@ -52,6 +55,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
+	"github.com/milvus-io/milvus/pkg/util"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
@@ -59,10 +63,8 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
-var (
-	// Only for re-export
-	Params = params.Params
-)
+// Only for re-export
+var Params = params.Params
 
 type Server struct {
 	ctx                 context.Context
@@ -70,6 +72,7 @@ type Server struct {
 	wg                  sync.WaitGroup
 	status              atomic.Int32
 	etcdCli             *clientv3.Client
+	tikvCli             *txnkv.Client
 	address             string
 	session             *sessionutil.Session
 	kv                  kv.MetaKv
@@ -77,8 +80,8 @@ type Server struct {
 	metricsCacheManager *metricsinfo.MetricsCacheManager
 
 	// Coordinators
-	dataCoord types.DataCoord
-	rootCoord types.RootCoord
+	dataCoord types.DataCoordClient
+	rootCoord types.RootCoordClient
 
 	// Meta
 	store     metastore.QueryCoordCatalog
@@ -204,13 +207,21 @@ func (s *Server) Init() error {
 func (s *Server) initQueryCoord() error {
 	s.UpdateStateCode(commonpb.StateCode_Initializing)
 	log.Info("QueryCoord", zap.Any("State", commonpb.StateCode_Initializing))
-	// Init KV
-	etcdKV := etcdkv.NewEtcdKV(s.etcdCli, Params.EtcdCfg.MetaRootPath.GetValue())
-	s.kv = etcdKV
-	log.Info("query coordinator try to connect etcd success")
+	// Init KV and ID allocator
+	metaType := Params.MetaStoreCfg.MetaStoreType.GetValue()
+	var idAllocatorKV kv.TxnKV
+	log.Info(fmt.Sprintf("query coordinator connecting to %s.", metaType))
+	if metaType == util.MetaStoreTypeTiKV {
+		s.kv = tikv.NewTiKV(s.tikvCli, Params.TiKVCfg.MetaRootPath.GetValue())
+		idAllocatorKV = tsoutil.NewTSOTiKVBase(s.tikvCli, Params.TiKVCfg.KvRootPath.GetValue(), "querycoord-id-allocator")
+	} else if metaType == util.MetaStoreTypeEtcd {
+		s.kv = etcdkv.NewEtcdKV(s.etcdCli, Params.EtcdCfg.MetaRootPath.GetValue())
+		idAllocatorKV = tsoutil.NewTSOKVBase(s.etcdCli, Params.EtcdCfg.KvRootPath.GetValue(), "querycoord-id-allocator")
+	} else {
+		return fmt.Errorf("not supported meta store: %s", metaType)
+	}
+	log.Info(fmt.Sprintf("query coordinator successfully connected to %s.", metaType))
 
-	// Init ID allocator
-	idAllocatorKV := tsoutil.NewTSOKVBase(s.etcdCli, Params.EtcdCfg.KvRootPath.GetValue(), "querycoord-id-allocator")
 	idAllocator := allocator.NewGlobalIDAllocator("idTimestamp", idAllocatorKV)
 	err := idAllocator.Initialize()
 	if err != nil {
@@ -310,7 +321,7 @@ func (s *Server) initMeta() error {
 	log.Info("recover meta...")
 	err := s.meta.CollectionManager.Recover(s.broker)
 	if err != nil {
-		log.Warn("failed to recover collections")
+		log.Warn("failed to recover collections", zap.Error(err))
 		return err
 	}
 	collections := s.meta.GetAll()
@@ -323,13 +334,13 @@ func (s *Server) initMeta() error {
 
 	err = s.meta.ReplicaManager.Recover(collections)
 	if err != nil {
-		log.Warn("failed to recover replicas")
+		log.Warn("failed to recover replicas", zap.Error(err))
 		return err
 	}
 
 	err = s.meta.ResourceManager.Recover()
 	if err != nil {
-		log.Warn("failed to recover resource groups")
+		log.Warn("failed to recover resource groups", zap.Error(err))
 		return err
 	}
 
@@ -413,44 +424,46 @@ func (s *Server) startQueryCoord() error {
 	s.startServerLoop()
 	s.afterStart()
 	s.UpdateStateCode(commonpb.StateCode_Healthy)
+	sessionutil.SaveServerInfo(typeutil.QueryCoordRole, s.session.ServerID)
 	return nil
 }
 
 func (s *Server) startServerLoop() {
+	// start the components from inside to outside,
+	// to make the dependencies ready for every component
 	log.Info("start cluster...")
-	s.cluster.Start(s.ctx)
-
-	log.Info("start job scheduler...")
-	s.jobScheduler.Start(s.ctx)
-
-	log.Info("start task scheduler...")
-	s.taskScheduler.Start(s.ctx)
-
-	log.Info("start checker controller...")
-	s.checkerController.Start(s.ctx)
+	s.cluster.Start()
 
 	log.Info("start observers...")
-	s.collectionObserver.Start(s.ctx)
-	s.leaderObserver.Start(s.ctx)
-	s.targetObserver.Start(s.ctx)
-	s.replicaObserver.Start(s.ctx)
-	s.resourceObserver.Start(s.ctx)
+	s.collectionObserver.Start()
+	s.leaderObserver.Start()
+	s.targetObserver.Start()
+	s.replicaObserver.Start()
+	s.resourceObserver.Start()
+
+	log.Info("start task scheduler...")
+	s.taskScheduler.Start()
+
+	log.Info("start checker controller...")
+	s.checkerController.Start()
+
+	log.Info("start job scheduler...")
+	s.jobScheduler.Start()
 }
 
 func (s *Server) Stop() error {
+	// stop the components from outside to inside,
+	// to make the dependencies stopped working properly,
+	// cancel the server context first to stop receiving requests
 	s.cancel()
-	if s.session != nil {
-		s.session.Stop()
-	}
 
-	if s.cluster != nil {
-		log.Info("stop cluster...")
-		s.cluster.Stop()
-	}
+	// FOLLOW the dependence graph:
+	// job scheduler -> checker controller -> task scheduler -> dist controller -> cluster -> session
+	// observers -> dist controller
 
-	if s.distController != nil {
-		log.Info("stop dist controller...")
-		s.distController.Stop()
+	if s.jobScheduler != nil {
+		log.Info("stop job scheduler...")
+		s.jobScheduler.Stop()
 	}
 
 	if s.checkerController != nil {
@@ -461,11 +474,6 @@ func (s *Server) Stop() error {
 	if s.taskScheduler != nil {
 		log.Info("stop task scheduler...")
 		s.taskScheduler.Stop()
-	}
-
-	if s.jobScheduler != nil {
-		log.Info("stop job scheduler...")
-		s.jobScheduler.Stop()
 	}
 
 	log.Info("stop observers...")
@@ -485,6 +493,20 @@ func (s *Server) Stop() error {
 		s.resourceObserver.Stop()
 	}
 
+	if s.distController != nil {
+		log.Info("stop dist controller...")
+		s.distController.Stop()
+	}
+
+	if s.cluster != nil {
+		log.Info("stop cluster...")
+		s.cluster.Stop()
+	}
+
+	if s.session != nil {
+		s.session.Stop()
+	}
+
 	s.wg.Wait()
 	log.Info("QueryCoord stop successfully")
 	return nil
@@ -499,7 +521,7 @@ func (s *Server) State() commonpb.StateCode {
 	return commonpb.StateCode(s.status.Load())
 }
 
-func (s *Server) GetComponentStates(ctx context.Context) (*milvuspb.ComponentStates, error) {
+func (s *Server) GetComponentStates(ctx context.Context, req *milvuspb.GetComponentStatesRequest) (*milvuspb.ComponentStates, error) {
 	nodeID := common.NotRegisteredID
 	if s.session != nil && s.session.Registered() {
 		nodeID = s.session.ServerID
@@ -511,21 +533,21 @@ func (s *Server) GetComponentStates(ctx context.Context) (*milvuspb.ComponentSta
 	}
 
 	return &milvuspb.ComponentStates{
-		Status: merr.Status(nil),
+		Status: merr.Success(),
 		State:  serviceComponentInfo,
-		//SubcomponentStates: subComponentInfos,
+		// SubcomponentStates: subComponentInfos,
 	}, nil
 }
 
-func (s *Server) GetStatisticsChannel(ctx context.Context) (*milvuspb.StringResponse, error) {
+func (s *Server) GetStatisticsChannel(ctx context.Context, req *internalpb.GetStatisticsChannelRequest) (*milvuspb.StringResponse, error) {
 	return &milvuspb.StringResponse{
-		Status: merr.Status(nil),
+		Status: merr.Success(),
 	}, nil
 }
 
-func (s *Server) GetTimeTickChannel(ctx context.Context) (*milvuspb.StringResponse, error) {
+func (s *Server) GetTimeTickChannel(ctx context.Context, req *internalpb.GetTimeTickChannelRequest) (*milvuspb.StringResponse, error) {
 	return &milvuspb.StringResponse{
-		Status: merr.Status(nil),
+		Status: merr.Success(),
 		Value:  Params.CommonCfg.QueryCoordTimeTick.GetValue(),
 	}, nil
 }
@@ -539,8 +561,12 @@ func (s *Server) SetEtcdClient(etcdClient *clientv3.Client) {
 	s.etcdCli = etcdClient
 }
 
+func (s *Server) SetTiKVClient(client *txnkv.Client) {
+	s.tikvCli = client
+}
+
 // SetRootCoord sets root coordinator's client
-func (s *Server) SetRootCoord(rootCoord types.RootCoord) error {
+func (s *Server) SetRootCoordClient(rootCoord types.RootCoordClient) error {
 	if rootCoord == nil {
 		return errors.New("null RootCoord interface")
 	}
@@ -550,7 +576,7 @@ func (s *Server) SetRootCoord(rootCoord types.RootCoord) error {
 }
 
 // SetDataCoord sets data coordinator's client
-func (s *Server) SetDataCoord(dataCoord types.DataCoord) error {
+func (s *Server) SetDataCoordClient(dataCoord types.DataCoordClient) error {
 	if dataCoord == nil {
 		return errors.New("null DataCoord interface")
 	}
@@ -559,7 +585,7 @@ func (s *Server) SetDataCoord(dataCoord types.DataCoord) error {
 	return nil
 }
 
-func (s *Server) SetQueryNodeCreator(f func(ctx context.Context, addr string, nodeID int64) (types.QueryNode, error)) {
+func (s *Server) SetQueryNodeCreator(f func(ctx context.Context, addr string, nodeID int64) (types.QueryNodeClient, error)) {
 	s.queryNodeCreator = f
 }
 
