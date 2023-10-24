@@ -126,7 +126,7 @@ func (suite *TargetObserverSuite) SetupTest() {
 
 func (suite *TargetObserverSuite) TestTriggerUpdateTarget() {
 	suite.Eventually(func() bool {
-		return len(suite.targetMgr.GetHistoricalSegmentsByCollection(suite.collectionID, meta.NextTarget)) == 2 &&
+		return len(suite.targetMgr.GetSealedSegmentsByCollection(suite.collectionID, meta.NextTarget)) == 2 &&
 			len(suite.targetMgr.GetDmChannelsByCollection(suite.collectionID, meta.NextTarget)) == 2
 	}, 5*time.Second, 1*time.Second)
 
@@ -168,7 +168,7 @@ func (suite *TargetObserverSuite) TestTriggerUpdateTarget() {
 		GetRecoveryInfoV2(mock.Anything, mock.Anything).
 		Return(suite.nextTargetChannels, suite.nextTargetSegments, nil)
 	suite.Eventually(func() bool {
-		return len(suite.targetMgr.GetHistoricalSegmentsByCollection(suite.collectionID, meta.NextTarget)) == 3 &&
+		return len(suite.targetMgr.GetSealedSegmentsByCollection(suite.collectionID, meta.NextTarget)) == 3 &&
 			len(suite.targetMgr.GetDmChannelsByCollection(suite.collectionID, meta.NextTarget)) == 2
 	}, 7*time.Second, 1*time.Second)
 	suite.broker.AssertExpectations(suite.T())
@@ -206,7 +206,7 @@ func (suite *TargetObserverSuite) TestTriggerUpdateTarget() {
 		default:
 		}
 		return isReady &&
-			len(suite.targetMgr.GetHistoricalSegmentsByCollection(suite.collectionID, meta.CurrentTarget)) == 3 &&
+			len(suite.targetMgr.GetSealedSegmentsByCollection(suite.collectionID, meta.CurrentTarget)) == 3 &&
 			len(suite.targetMgr.GetDmChannelsByCollection(suite.collectionID, meta.CurrentTarget)) == 2
 	}, 7*time.Second, 1*time.Second)
 }
@@ -273,41 +273,10 @@ func (suite *TargetObserverCheckSuite) SetupTest() {
 	suite.NoError(err)
 }
 
-func (suite *TargetObserverCheckSuite) TestCheckCtxDone() {
-	observer := suite.observer
-
-	suite.Run("check_channel_blocked", func() {
-		oldCh := observer.manualCheck
-		defer func() {
-			observer.manualCheck = oldCh
-		}()
-
-		// zero-length channel
-		observer.manualCheck = make(chan checkRequest)
-
-		ctx, cancel := context.WithCancel(context.Background())
-		// cancel context, make test return fast
-		cancel()
-
-		result := observer.Check(ctx, suite.collectionID)
-		suite.False(result)
-	})
-
-	suite.Run("check_return_ctx_timeout", func() {
-		oldCh := observer.manualCheck
-		defer func() {
-			observer.manualCheck = oldCh
-		}()
-
-		// make channel length = 1, task received
-		observer.manualCheck = make(chan checkRequest, 1)
-
-		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*200)
-		defer cancel()
-
-		result := observer.Check(ctx, suite.collectionID)
-		suite.False(result)
-	})
+func (s *TargetObserverCheckSuite) TestCheck() {
+	r := s.observer.Check(context.Background(), s.collectionID)
+	s.False(r)
+	s.True(s.observer.dispatcher.tasks.Contain(s.collectionID))
 }
 
 func TestTargetObserver(t *testing.T) {

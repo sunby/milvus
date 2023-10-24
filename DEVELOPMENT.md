@@ -118,7 +118,7 @@ Milvus uses Conan to manage third-party dependencies for c++.
 Install Conan
 
 ```shell
-pip install conan==1.58.0
+pip install conan==1.61.0
 ```
 
 Note: Conan version 2.x is not currently supported, please use version 1.58.
@@ -288,7 +288,7 @@ start the cluster on your host machine
 
 ```shell
 $ ./build/builder.sh make install // build milvus
-$ ./build/build_image.sh // build milvus lastest docker image
+$ ./build/build_image.sh // build milvus latest docker image
 $ docker images // check if milvus latest image is ready
 REPOSITORY                 TAG                                 IMAGE ID       CREATED          SIZE
 milvusdb/milvus            latest                              63c62ff7c1b7   52 minutes ago   570MB

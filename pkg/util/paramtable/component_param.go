@@ -1212,6 +1212,7 @@ type queryCoordConfig struct {
 	CheckHealthRPCTimeout       ParamItem `refreshable:"true"`
 	BrokerTimeout               ParamItem `refreshable:"false"`
 	CollectionRecoverTimesLimit ParamItem `refreshable:"true"`
+	ObserverTaskParallel        ParamItem `refreshable:"false"`
 }
 
 func (p *queryCoordConfig) init(base *BaseTable) {
@@ -1523,6 +1524,16 @@ func (p *queryCoordConfig) init(base *BaseTable) {
 		Export:       true,
 	}
 	p.CollectionRecoverTimesLimit.Init(base.mgr)
+
+	p.ObserverTaskParallel = ParamItem{
+		Key:          "queryCoord.observerTaskParallel",
+		Version:      "2.3.2",
+		DefaultValue: "16",
+		PanicIfEmpty: true,
+		Doc:          "the parallel observer dispatcher task number",
+		Export:       true,
+	}
+	p.ObserverTaskParallel.Init(base.mgr)
 }
 
 // /////////////////////////////////////////////////////////////////////////////

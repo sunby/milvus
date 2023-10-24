@@ -41,14 +41,15 @@ const (
 
 // LeaderObserver is to sync the distribution with leader
 type LeaderObserver struct {
-	wg          sync.WaitGroup
-	cancel      context.CancelFunc
-	dist        *meta.DistributionManager
-	meta        *meta.Meta
-	target      *meta.TargetManager
-	broker      meta.Broker
-	cluster     session.Cluster
-	manualCheck chan checkRequest
+	wg      sync.WaitGroup
+	cancel  context.CancelFunc
+	dist    *meta.DistributionManager
+	meta    *meta.Meta
+	target  *meta.TargetManager
+	broker  meta.Broker
+	cluster session.Cluster
+
+	dispatcher *taskDispatcher[int64]
 
 	stopOnce sync.Once
 }
@@ -57,27 +58,12 @@ func (o *LeaderObserver) Start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	o.cancel = cancel
 
+	o.dispatcher.Start()
+
 	o.wg.Add(1)
 	go func() {
 		defer o.wg.Done()
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				log.Info("stop leader observer")
-				return
-
-			case req := <-o.manualCheck:
-				log.Info("triggering manual check")
-				ret := o.observeCollection(ctx, req.CollectionID)
-				req.Notifier <- ret
-				log.Info("manual check done", zap.Bool("result", ret))
-
-			case <-ticker.C:
-				o.observe(ctx)
-			}
-		}
+		o.schedule(ctx)
 	}()
 }
 
@@ -87,7 +73,24 @@ func (o *LeaderObserver) Stop() {
 			o.cancel()
 		}
 		o.wg.Wait()
+
+		o.dispatcher.Stop()
 	})
+}
+
+func (o *LeaderObserver) schedule(ctx context.Context) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info("stop leader observer")
+			return
+
+		case <-ticker.C:
+			o.observe(ctx)
+		}
+	}
 }
 
 func (o *LeaderObserver) observe(ctx context.Context) {
@@ -105,14 +108,13 @@ func (o *LeaderObserver) observeSegmentsDist(ctx context.Context) {
 	collectionIDs := o.meta.CollectionManager.GetAll()
 	for _, cid := range collectionIDs {
 		if o.readyToObserve(cid) {
-			o.observeCollection(ctx, cid)
+			o.dispatcher.AddTask(cid)
 		}
 	}
 }
 
-func (o *LeaderObserver) observeCollection(ctx context.Context, collection int64) bool {
+func (o *LeaderObserver) observeCollection(ctx context.Context, collection int64) {
 	replicas := o.meta.ReplicaManager.GetByCollection(collection)
-	result := true
 	for _, replica := range replicas {
 		leaders := o.dist.ChannelDistManager.GetShardLeadersByReplica(replica)
 		for ch, leaderID := range leaders {
@@ -128,29 +130,42 @@ func (o *LeaderObserver) observeCollection(ctx context.Context, collection int64
 			if updateVersionAction != nil {
 				actions = append(actions, updateVersionAction)
 			}
-			success := o.sync(ctx, replica.GetID(), leaderView, actions)
-			if !success {
-				result = false
-			}
+			o.sync(ctx, replica.GetID(), leaderView, actions)
 		}
 	}
+}
+
+func (o *LeaderObserver) CheckTargetVersion(ctx context.Context, collectionID int64) bool {
+	// if not ready to observer, skip add task
+	if !o.readyToObserve(collectionID) {
+		return false
+	}
+
+	result := o.checkCollectionLeaderVersionIsCurrent(ctx, collectionID)
+	if !result {
+		o.dispatcher.AddTask(collectionID)
+	}
+
 	return result
 }
 
-func (ob *LeaderObserver) CheckTargetVersion(ctx context.Context, collectionID int64) bool {
-	notifier := make(chan bool)
-	select {
-	case ob.manualCheck <- checkRequest{CollectionID: collectionID, Notifier: notifier}:
-	case <-ctx.Done():
-		return false
-	}
+func (o *LeaderObserver) checkCollectionLeaderVersionIsCurrent(ctx context.Context, collectionID int64) bool {
+	replicas := o.meta.ReplicaManager.GetByCollection(collectionID)
+	for _, replica := range replicas {
+		leaders := o.dist.ChannelDistManager.GetShardLeadersByReplica(replica)
+		for ch, leaderID := range leaders {
+			leaderView := o.dist.LeaderViewManager.GetLeaderShardView(leaderID, ch)
+			if leaderView == nil {
+				return false
+			}
 
-	select {
-	case result := <-notifier:
-		return result
-	case <-ctx.Done():
-		return false
+			action := o.checkNeedUpdateTargetVersion(ctx, leaderView)
+			if action != nil {
+				return false
+			}
+		}
 	}
+	return true
 }
 
 func (o *LeaderObserver) checkNeedUpdateTargetVersion(ctx context.Context, leaderView *meta.LeaderView) *querypb.SyncAction {
@@ -169,8 +184,8 @@ func (o *LeaderObserver) checkNeedUpdateTargetVersion(ctx context.Context, leade
 		zap.Int64("newVersion", targetVersion),
 	)
 
-	sealedSegments := o.target.GetHistoricalSegmentsByChannel(leaderView.CollectionID, leaderView.Channel, meta.CurrentTarget)
-	growingSegments := o.target.GetStreamingSegmentsByChannel(leaderView.CollectionID, leaderView.Channel, meta.CurrentTarget)
+	sealedSegments := o.target.GetSealedSegmentsByChannel(leaderView.CollectionID, leaderView.Channel, meta.CurrentTarget)
+	growingSegments := o.target.GetGrowingSegmentsByChannel(leaderView.CollectionID, leaderView.Channel, meta.CurrentTarget)
 	droppedSegments := o.target.GetDroppedSegmentsByChannel(leaderView.CollectionID, leaderView.Channel, meta.CurrentTarget)
 
 	return &querypb.SyncAction{
@@ -187,9 +202,9 @@ func (o *LeaderObserver) findNeedLoadedSegments(leaderView *meta.LeaderView, dis
 	dists = utils.FindMaxVersionSegments(dists)
 	for _, s := range dists {
 		version, ok := leaderView.Segments[s.GetID()]
-		currentTarget := o.target.GetHistoricalSegment(s.CollectionID, s.GetID(), meta.CurrentTarget)
+		currentTarget := o.target.GetSealedSegment(s.CollectionID, s.GetID(), meta.CurrentTarget)
 		existInCurrentTarget := currentTarget != nil
-		existInNextTarget := o.target.GetHistoricalSegment(s.CollectionID, s.GetID(), meta.NextTarget) != nil
+		existInNextTarget := o.target.GetSealedSegment(s.CollectionID, s.GetID(), meta.NextTarget) != nil
 
 		if !existInCurrentTarget && !existInNextTarget {
 			continue
@@ -231,8 +246,8 @@ func (o *LeaderObserver) findNeedRemovedSegments(leaderView *meta.LeaderView, di
 	}
 	for sid, s := range leaderView.Segments {
 		_, ok := distMap[sid]
-		existInCurrentTarget := o.target.GetHistoricalSegment(leaderView.CollectionID, sid, meta.CurrentTarget) != nil
-		existInNextTarget := o.target.GetHistoricalSegment(leaderView.CollectionID, sid, meta.NextTarget) != nil
+		existInCurrentTarget := o.target.GetSealedSegment(leaderView.CollectionID, sid, meta.CurrentTarget) != nil
+		existInNextTarget := o.target.GetSealedSegment(leaderView.CollectionID, sid, meta.NextTarget) != nil
 		if ok || existInCurrentTarget || existInNextTarget {
 			continue
 		}
@@ -312,12 +327,16 @@ func NewLeaderObserver(
 	broker meta.Broker,
 	cluster session.Cluster,
 ) *LeaderObserver {
-	return &LeaderObserver{
-		dist:        dist,
-		meta:        meta,
-		target:      targetMgr,
-		broker:      broker,
-		cluster:     cluster,
-		manualCheck: make(chan checkRequest, 10),
+	ob := &LeaderObserver{
+		dist:    dist,
+		meta:    meta,
+		target:  targetMgr,
+		broker:  broker,
+		cluster: cluster,
 	}
+
+	dispatcher := newTaskDispatcher[int64](ob.observeCollection)
+	ob.dispatcher = dispatcher
+
+	return ob
 }
