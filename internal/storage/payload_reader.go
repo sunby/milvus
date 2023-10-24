@@ -326,7 +326,11 @@ func (r *PayloadReader) GetFloat16VectorFromPayload() ([]byte, int, error) {
 	if r.colType != schemapb.DataType_Float16Vector {
 		return nil, -1, fmt.Errorf("failed to get float vector from datatype %v", r.colType.String())
 	}
-	dim := r.reader.RowGroup(0).Column(0).Descriptor().TypeLength() / 2
+	colReader, err := r.reader.RowGroup(0).Column(0)
+	if err != nil {
+		return nil, -1, err
+	}
+	dim := colReader.Descriptor().TypeLength() / 2
 	values := make([]parquet.FixedLenByteArray, r.numRows)
 	valuesRead, err := ReadDataFromAllRowGroups[parquet.FixedLenByteArray, *file.FixedLenByteArrayColumnChunkReader](r.reader, values, 0, r.numRows)
 	if err != nil {

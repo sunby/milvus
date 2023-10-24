@@ -311,7 +311,7 @@ AppendIndexV3(CLoadIndexInfo c_load_index_info) {
         std::shared_ptr<milvus_storage::Space> space = std::move(res.value());
         load_index_info->index =
             milvus::index::IndexFactory::GetInstance().CreateIndex(
-                index_info, nullptr, space);
+                index_info, milvus::storage::FileManagerContext(), space);
 
         if (!load_index_info->mmap_dir_path.empty() &&
             load_index_info->index->IsMmapSupported()) {
@@ -326,12 +326,12 @@ AppendIndexV3(CLoadIndexInfo c_load_index_info) {
 
         load_index_info->index->LoadV2(config);
         auto status = CStatus();
-        status.error_code = Success;
+        status.error_code = milvus::Success;
         status.error_msg = "";
         return status;
     } catch (std::exception& e) {
         auto status = CStatus();
-        status.error_code = UnexpectedError;
+        status.error_code = milvus::UnexpectedError;
         status.error_msg = strdup(e.what());
         return status;
     }

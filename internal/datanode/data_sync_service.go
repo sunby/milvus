@@ -21,7 +21,6 @@ import (
 	"sync"
 
 	"github.com/cockroachdb/errors"
-	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/datanode/allocator"
@@ -351,10 +350,10 @@ func getServiceWithChannel(initCtx context.Context, node *DataNode, info *datapb
 	// init flushManager
 	if Params.CommonCfg.EnableStorageV2.GetAsBool() {
 		ds.flushManager = NewRendezvousFlushManagerV2(node.allocator, node.chunkManager, channel,
-			flushNotifyFunc2(ds, retry.Attempts(50)), dropVirtualChannelFunc(ds), ds, ds.cli)
+			flushNotifyFunc2(ds, retry.Attempts(50)), dropVirtualChannelFunc(ds), ds, node.etcdCli)
 	} else {
-		ds.flushManager = NewRendezvousFlushManagerV2(node.allocator, node.chunkManager, channel,
-			flushNotifyFunc2(ds, retry.Attempts(50)), dropVirtualChannelFunc(ds), ds)
+		ds.flushManager = NewRendezvousFlushManager(node.allocator, node.chunkManager, channel,
+			flushNotifyFunc(ds, retry.Attempts(50)), dropVirtualChannelFunc(ds))
 	}
 
 	// flushManager := NewRendezvousFlushManager(
@@ -390,7 +389,7 @@ func getServiceWithChannel(initCtx context.Context, node *DataNode, info *datapb
 		flushCh,
 		resendTTCh,
 		delBufferManager,
-		flushManager,
+		ds.flushManager,
 		node.segmentCache,
 		node.timeTickSender,
 		config,
@@ -399,7 +398,7 @@ func getServiceWithChannel(initCtx context.Context, node *DataNode, info *datapb
 		return nil, err
 	}
 
-	deleteNode, err := newDeleteNode(node.ctx, flushManager, delBufferManager, node.clearSignal, config)
+	deleteNode, err := newDeleteNode(node.ctx, ds.flushManager, delBufferManager, node.clearSignal, config)
 	if err != nil {
 		return nil, err
 	}

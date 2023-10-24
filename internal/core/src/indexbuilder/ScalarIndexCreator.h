@@ -29,7 +29,7 @@ class ScalarIndexCreator : public IndexCreatorBase {
 
     ScalarIndexCreator(DataType data_type,
                        Config& config,
-                       storage::FileManagerImplPtr file_manager,
+                       const storage::FileManagerContext& file_manager_context,
                        std::shared_ptr<milvus_storage::Space> space);
     void
     Build(const milvus::DatasetPtr& dataset) override;
@@ -72,9 +72,9 @@ CreateScalarIndex(DataType dtype,
 inline ScalarIndexCreatorPtr
 CreateScalarIndex(DataType dtype,
                   Config& config,
-                  storage::FileManagerImplPtr file_manager,
+                  const storage::FileManagerContext& file_manager_context,
                   std::shared_ptr<milvus_storage::Space> space) {
     return std::make_unique<ScalarIndexCreator>(
-        dtype, config, file_manager, space);
+        dtype, config, file_manager_context, space);
 }
 }  // namespace milvus::indexbuilder

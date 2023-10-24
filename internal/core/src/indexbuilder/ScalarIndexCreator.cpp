@@ -17,6 +17,7 @@
 #include "pb/index_cgo_msg.pb.h"
 
 #include <string>
+#include <utility>
 
 namespace milvus::indexbuilder {
 
@@ -24,7 +25,7 @@ ScalarIndexCreator::ScalarIndexCreator(
     DataType dtype,
     Config& config,
     const storage::FileManagerContext& file_manager_context)
-    : dtype_(dtype), config_(config) {
+    : config_(config), dtype_(dtype) {
     milvus::index::CreateIndexInfo index_info;
     index_info.field_type = dtype_;
     index_info.index_type = index_type();
@@ -35,14 +36,14 @@ ScalarIndexCreator::ScalarIndexCreator(
 ScalarIndexCreator::ScalarIndexCreator(
     DataType dtype,
     Config& config,
-    storage::FileManagerImplPtr file_manager,
+    const storage::FileManagerContext& file_manager_context,
     std::shared_ptr<milvus_storage::Space> space)
-    : dtype_(dtype), config_(config) {
+    : config_(config), dtype_(dtype) {
     milvus::index::CreateIndexInfo index_info;
     index_info.field_type = dtype_;
     index_info.index_type = index_type();
     index_ = index::IndexFactory::GetInstance().CreateIndex(
-        index_info, file_manager, space);
+        index_info, file_manager_context, std::move(space));
 }
 void
 ScalarIndexCreator::Build(const milvus::DatasetPtr& dataset) {

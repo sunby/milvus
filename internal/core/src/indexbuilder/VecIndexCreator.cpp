@@ -28,11 +28,11 @@ VecIndexCreator::VecIndexCreator(
 
 VecIndexCreator::VecIndexCreator(
     DataType data_type,
-    std::string field_name,
+    const std::string& field_name,
     Config& config,
     const storage::FileManagerContext& file_manager_context,
     std::shared_ptr<milvus_storage::Space> space)
-    : data_type_(data_type), config_(config), space_(space) {
+    : config_(config), data_type_(data_type), space_(space) {
     index::CreateIndexInfo index_info;
     index_info.field_type = data_type_;
     index_info.index_type = index::GetIndexTypeFromConfig(config_);

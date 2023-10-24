@@ -200,32 +200,28 @@ CreateIndexV3(CIndex* res_index, CBuildIndexInfo c_build_index_info) {
                                index_space.status().ToString()));
 
         LOG_SEGCORE_INFO_ << "init space success";
-        auto file_manager =
-            milvus::storage::CreateFileManager(index_info.index_type,
-                                               field_meta,
-                                               index_meta,
-                                               std::move(index_space.value()));
-        AssertInfo(file_manager != nullptr, "create file manager failed!");
+        // auto file_manager =
+        //     milvus::storage::CreateFileManager(index_info.index_type,
+        //                                        field_meta,
+        //                                        index_meta,
+        //                                        std::move(index_space.value()));
+        auto chunk_manager = milvus::storage::CreateChunkManager(
+            build_index_info->storage_config);
+        milvus::storage::FileManagerContext fileManagerContext(
+            field_meta, index_meta, chunk_manager);
 
         auto index =
             milvus::indexbuilder::IndexFactory::GetInstance().CreateIndex(
                 build_index_info->field_type,
                 build_index_info->field_name,
                 config,
-                file_manager,
+                fileManagerContext,
                 std::move(store_space.value()));
         index->BuildV2();
         *res_index = index.release();
-        auto status = CStatus();
-        status.error_code = Success;
-        status.error_msg = "";
-        return status;
-
+        return milvus::SuccessCStatus();
     } catch (std::exception& e) {
-        auto status = CStatus();
-        status.error_code = UnexpectedError;
-        status.error_msg = strdup(e.what());
-        return status;
+        return milvus::FailureCStatus(&e);
     }
 }
 

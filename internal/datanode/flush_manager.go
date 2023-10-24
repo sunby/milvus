@@ -1366,30 +1366,16 @@ func flushNotifyFunc2(dsService *dataSyncService, opts ...retry.Option) notifyMe
 			StorageVersion: pack.storageVersion,
 		}
 		err := retry.Do(context.Background(), func() error {
-			rsp, err := dsService.dataCoord.SaveBinlogPaths(context.Background(), req)
-			// should be network issue, return error and retry
-			if err != nil {
-				return err
-			}
+			err := dsService.broker.SaveBinlogPaths(context.Background(), req)
 
-			// Segment not found during stale segment flush. Segment might get compacted already.
-			// Stop retry and still proceed to the end, ignoring this error.
-			if !pack.flushed && rsp.GetErrorCode() == commonpb.ErrorCode_SegmentNotFound {
-				log.Warn("stale segment not found, could be compacted",
-					zap.Int64("segmentID", pack.segmentID))
-				log.Warn("failed to SaveBinlogPaths",
-					zap.Int64("segmentID", pack.segmentID),
-					zap.Error(errors.New(rsp.GetReason())))
-				return nil
-			}
 			// meta error, datanode handles a virtual channel does not belong here
-			if rsp.GetErrorCode() == commonpb.ErrorCode_MetaFailed {
+			if errors.IsAny(err, merr.ErrSegmentNotFound, merr.ErrChannelNotFound) {
 				log.Warn("meta error found, skip sync and start to drop virtual channel", zap.String("channel", dsService.vchannelName))
 				return nil
 			}
 
-			if rsp.ErrorCode != commonpb.ErrorCode_Success {
-				return fmt.Errorf("data service save bin log path failed, reason = %s", rsp.Reason)
+			if err != nil {
+				return err
 			}
 
 			dsService.channel.transferNewSegments(lo.Map(startPos, func(pos *datapb.SegmentStartPosition, _ int) UniqueID {
@@ -1425,7 +1411,7 @@ func flushNotifyFunc2(dsService *dataSyncService, opts ...retry.Option) notifyMe
 
 func getStorageVersion(dsService *dataSyncService, segmentID int64) func() (int64, error) {
 	return func() (int64, error) {
-		infos, err := dsService.getSegmentInfos([]int64{segmentID})
+		infos, err := dsService.broker.GetSegmentInfo(context.Background(), []int64{segmentID})
 		if err != nil {
 			return -1, nil
 		}

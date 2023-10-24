@@ -254,7 +254,7 @@ LoadFieldDataV2(CSegmentInterface c_segment,
         segment->LoadFieldDataV2(*load_info);
         return milvus::SuccessCStatus();
     } catch (std::exception& e) {
-        return milvus::FailureCStatus(UnexpectedError, e.what());
+        return milvus::FailureCStatus(&e);
     }
 }
 // just for test

@@ -128,19 +128,10 @@ func (fm *flowgraphManager) addAndStartWithEtcdTickler(dn *DataNode, vchan *data
 		return nil
 	}
 
-	var dataSyncService *dataSyncService
-	var err error
-	if Params.CommonCfg.EnableStorageV2.GetAsBool() {
-		dataSyncService, err := newServiceWithEtcdTicklerV2(context.TODO(), dn, &datapb.ChannelWatchInfo{
-			Schema: schema,
-			Vchan:  vchan,
-		}, tickler)
-	} else {
-		dataSyncService, err := newServiceWithEtcdTickler(context.TODO(), dn, &datapb.ChannelWatchInfo{
-			Schema: schema,
-			Vchan:  vchan,
-		}, tickler)
-	}
+	dataSyncService, err := newServiceWithEtcdTickler(context.TODO(), dn, &datapb.ChannelWatchInfo{
+		Schema: schema,
+		Vchan:  vchan,
+	}, tickler)
 	if err != nil {
 		log.Warn("fail to create new DataSyncService", zap.Error(err))
 		return err

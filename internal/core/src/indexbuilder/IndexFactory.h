@@ -76,7 +76,7 @@ class IndexFactory {
     CreateIndex(DataType type,
                 const std::string& field_name,
                 Config& config,
-                storage::FileManagerImplPtr file_manager,
+                const storage::FileManagerContext& file_manager_context,
                 std::shared_ptr<milvus_storage::Space> space) {
         auto invalid_dtype_msg =
             std::string("invalid data type: ") + std::to_string(int(type));
@@ -91,12 +91,13 @@ class IndexFactory {
             case DataType::DOUBLE:
             case DataType::VARCHAR:
             case DataType::STRING:
-                return CreateScalarIndex(type, config, file_manager, space);
+                return CreateScalarIndex(
+                    type, config, file_manager_context, space);
 
             case DataType::VECTOR_FLOAT:
             case DataType::VECTOR_BINARY:
                 return std::make_unique<VecIndexCreator>(
-                    type, field_name, config, file_manager, space);
+                    type, field_name, config, file_manager_context, space);
             default:
                 throw std::invalid_argument(invalid_dtype_msg);
         }
