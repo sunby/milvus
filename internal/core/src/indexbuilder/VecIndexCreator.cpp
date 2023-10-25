@@ -10,6 +10,7 @@
 // or implied. See the License for the specific language governing permissions and limitations under the License
 
 #include <map>
+#include <utility>
 
 #include "common/EasyAssert.h"
 #include "indexbuilder/VecIndexCreator.h"
@@ -32,7 +33,7 @@ VecIndexCreator::VecIndexCreator(
     Config& config,
     const storage::FileManagerContext& file_manager_context,
     std::shared_ptr<milvus_storage::Space> space)
-    : config_(config), data_type_(data_type), space_(space) {
+    : config_(config), data_type_(data_type), space_(std::move(space)) {
     index::CreateIndexInfo index_info;
     index_info.field_type = data_type_;
     index_info.index_type = index::GetIndexTypeFromConfig(config_);

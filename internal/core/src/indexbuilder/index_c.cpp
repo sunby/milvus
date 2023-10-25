@@ -160,6 +160,11 @@ CreateIndexV3(CIndex* res_index, CBuildIndexInfo c_build_index_info) {
         AssertInfo(index_type.has_value(), "index type is empty");
         index_info.index_type = index_type.value();
 
+        auto engine_version = build_index_info->index_engine_version;
+        index_info.index_engine_version = engine_version;
+        config[milvus::index::INDEX_ENGINE_VERSION] =
+            std::to_string(engine_version);
+
         // get metric type
         if (milvus::datatype_is_vector(field_type)) {
             auto metric_type = milvus::index::GetValueFromConfig<std::string>(
@@ -200,11 +205,6 @@ CreateIndexV3(CIndex* res_index, CBuildIndexInfo c_build_index_info) {
                                index_space.status().ToString()));
 
         LOG_SEGCORE_INFO_ << "init space success";
-        // auto file_manager =
-        //     milvus::storage::CreateFileManager(index_info.index_type,
-        //                                        field_meta,
-        //                                        index_meta,
-        //                                        std::move(index_space.value()));
         auto chunk_manager = milvus::storage::CreateChunkManager(
             build_index_info->storage_config);
         milvus::storage::FileManagerContext fileManagerContext(

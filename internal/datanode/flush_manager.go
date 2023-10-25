@@ -665,6 +665,10 @@ func (m *rendezvousFlushManager) isFull() bool {
 }
 
 func buildRecord(b *array.RecordBuilder, data *BufferData, fields []*schemapb.FieldSchema) error {
+	if data == nil || data.buffer == nil {
+		log.Info("no buffer data to flush")
+		return nil
+	}
 	for i, field := range fields {
 		fBuilder := b.Field(i)
 		switch field.DataType {

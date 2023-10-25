@@ -82,6 +82,7 @@ type indexBuilder struct {
 	policy                    buildIndexPolicy
 	nodeManager               *IndexNodeManager
 	chunkManager              storage.ChunkManager
+	handler                   Handler
 	indexEngineVersionManager *IndexEngineVersionManager
 }
 
@@ -89,6 +90,7 @@ func newIndexBuilder(
 	ctx context.Context,
 	metaTable *meta, nodeManager *IndexNodeManager,
 	chunkManager storage.ChunkManager,
+	handler Handler,
 	indexEngineVersionManager *IndexEngineVersionManager,
 ) *indexBuilder {
 	ctx, cancel := context.WithCancel(ctx)
@@ -103,6 +105,7 @@ func newIndexBuilder(
 		policy:                    defaultBuildIndexPolicy,
 		nodeManager:               nodeManager,
 		chunkManager:              chunkManager,
+		handler:                   handler,
 		indexEngineVersionManager: indexEngineVersionManager,
 	}
 	ib.reloadFromKV()
@@ -302,7 +305,13 @@ func (ib *indexBuilder) process(buildID UniqueID) bool {
 			}
 		}
 
-		schema := ib.meta.GetCollection(segment.GetCollectionID()).Schema
+		collectionInfo, err := ib.handler.GetCollection(ib.ctx, segment.GetCollectionID())
+		if err != nil {
+			log.Info("index builder get collection info failed", zap.Int64("collectionID", segment.GetCollectionID()), zap.Error(err))
+			return false
+		}
+
+		schema := collectionInfo.Schema
 		var field *schemapb.FieldSchema
 
 		for _, f := range schema.Fields {

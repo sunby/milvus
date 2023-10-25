@@ -11,6 +11,8 @@
 
 #include <google/protobuf/text_format.h>
 
+#include <memory>
+
 #include "pb/schema.pb.h"
 #include "segcore/Collection.h"
 #include "log/Log.h"
@@ -61,8 +63,7 @@ Collection::parseIndexMeta(const std::string_view index_meta_proto_) {
         return;
     }
 
-    index_meta_ = std::shared_ptr<CollectionIndexMeta>(
-        new CollectionIndexMeta(protobuf_indexMeta));
+    index_meta_ = std::make_shared<CollectionIndexMeta>(protobuf_indexMeta);
     LOG_SEGCORE_INFO_ << "index meta info : " << index_meta_->ToString();
 }
 

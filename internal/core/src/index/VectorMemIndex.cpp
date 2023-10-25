@@ -70,9 +70,10 @@ VectorMemIndex::VectorMemIndex(
     index_ = knowhere::IndexFactory::Instance().Create(GetIndexType(), version);
 }
 
-VectorMemIndex::VectorMemIndex(const CreateIndexInfo& create_index_info,
-                               const storage::FileManagerContext& file_manager_context,
-                               std::shared_ptr<milvus_storage::Space> space)
+VectorMemIndex::VectorMemIndex(
+    const CreateIndexInfo& create_index_info,
+    const storage::FileManagerContext& file_manager_context,
+    std::shared_ptr<milvus_storage::Space> space)
     : VectorIndex(create_index_info.index_type, create_index_info.metric_type),
       space_(space),
       create_index_info_(create_index_info) {
@@ -173,15 +174,13 @@ VectorMemIndex::LoadV2(const Config& config) {
         -> std::unique_ptr<storage::DataCodec> {
         auto res = space_->GetBlobByteSize(file_name);
         if (!res.ok()) {
-            PanicInfo(DataFormatBroken,
-                          "unable to read index blob");
+            PanicInfo(DataFormatBroken, "unable to read index blob");
         }
         auto index_blob_data =
             std::shared_ptr<uint8_t[]>(new uint8_t[res.value()]);
         auto status = space_->ReadBlob(file_name, index_blob_data.get());
         if (!status.ok()) {
-            PanicInfo(DataFormatBroken,
-                          "unable to read index blob");
+            PanicInfo(DataFormatBroken, "unable to read index blob");
         }
         return storage::DeserializeFileData(index_blob_data, res.value());
     };
@@ -192,8 +191,7 @@ VectorMemIndex::LoadV2(const Config& config) {
         auto status =
             space_->ReadBlob(INDEX_FILE_SLICE_META, slice_meta_data.get());
         if (!status.ok()) {
-            PanicInfo(DataFormatBroken,
-                          "unable to read slice meta");
+            PanicInfo(DataFormatBroken, "unable to read slice meta");
         }
         auto raw_slice_meta =
             storage::DeserializeFileData(slice_meta_data, slice_meta_sz);
@@ -379,7 +377,8 @@ VectorMemIndex::BuildV2(const Config& config) {
     auto dim = create_index_info_.dim;
     auto res = space_->ScanData();
     if (!res.ok()) {
-        PanicInfo(IndexBuildError, fmt::format("failed to create scan iterator: {}",
+        PanicInfo(IndexBuildError,
+                  fmt::format("failed to create scan iterator: {}",
                               res.status().ToString()));
     }
 
@@ -387,11 +386,13 @@ VectorMemIndex::BuildV2(const Config& config) {
     std::vector<storage::FieldDataPtr> field_datas;
     for (auto rec : *reader) {
         if (!rec.ok()) {
-            PanicInfo(IndexBuildError,fmt::format("failed to read data: {}",
+            PanicInfo(IndexBuildError,
+                      fmt::format("failed to read data: {}",
                                   rec.status().ToString()));
         }
         auto data = rec.ValueUnsafe();
         if (data == nullptr) {
+            LOG_SEGCORE_INFO_ << "data is null";
             break;
         }
         auto total_num_rows = data->num_rows();
@@ -405,7 +406,7 @@ VectorMemIndex::BuildV2(const Config& config) {
     }
     int64_t total_size = 0;
     int64_t total_num_rows = 0;
-    for (auto data : field_datas) {
+    for (const auto& data : field_datas) {
         total_size += data->Size();
         total_num_rows += data->get_num_rows();
         AssertInfo(dim == 0 || dim == data->get_dim(),
@@ -729,15 +730,13 @@ VectorMemIndex::LoadFromFileV2(const Config& config) {
         -> std::unique_ptr<storage::DataCodec> {
         auto res = space_->GetBlobByteSize(file_name);
         if (!res.ok()) {
-            PanicInfo(DataFormatBroken,
-                          "unable to read index blob");
+            PanicInfo(DataFormatBroken, "unable to read index blob");
         }
         auto index_blob_data =
             std::shared_ptr<uint8_t[]>(new uint8_t[res.value()]);
         auto status = space_->ReadBlob(file_name, index_blob_data.get());
         if (!status.ok()) {
-            PanicInfo(DataFormatBroken,
-                          "unable to read index blob");
+            PanicInfo(DataFormatBroken, "unable to read index blob");
         }
         return storage::DeserializeFileData(index_blob_data, res.value());
     };
@@ -748,8 +747,7 @@ VectorMemIndex::LoadFromFileV2(const Config& config) {
         auto status =
             space_->ReadBlob(INDEX_FILE_SLICE_META, slice_meta_data.get());
         if (!status.ok()) {
-            PanicInfo(DataFormatBroken,
-                          "unable to read slice meta");
+            PanicInfo(DataFormatBroken, "unable to read slice meta");
         }
         auto raw_slice_meta =
             storage::DeserializeFileData(slice_meta_data, slice_meta_sz);
@@ -788,8 +786,8 @@ VectorMemIndex::LoadFromFileV2(const Config& config) {
     auto stat = index_.DeserializeFromFile(filepath.value(), conf);
     if (stat != knowhere::Status::success) {
         PanicInfo(DataFormatBroken,
-                      fmt::format("failed to Deserialize index: {}",
-                                  KnowhereStatusString(stat)));
+                  fmt::format("failed to Deserialize index: {}",
+                              KnowhereStatusString(stat)));
     }
 
     auto dim = index_.Dim();
