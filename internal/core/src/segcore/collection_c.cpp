@@ -25,10 +25,11 @@ NewCollection(const char* schema_proto_blob) {
 }
 
 void
-SetIndexMeta(CCollection collection, const char* index_meta_proto_blob) {
+SetIndexMeta(CCollection collection,
+             const void* index_meta_proto_blob,
+             const int64_t size) {
     auto col = (milvus::segcore::Collection*)collection;
-    auto proto = std::string_view(index_meta_proto_blob);
-    col->parseIndexMeta(proto);
+    col->parseIndexMeta(index_meta_proto_blob, size);
 }
 
 void

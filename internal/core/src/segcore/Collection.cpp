@@ -51,13 +51,13 @@ Collection::parse() {
 }
 
 void
-Collection::parseIndexMeta(const std::string_view index_meta_proto_) {
-    Assert(!index_meta_proto_.empty());
-
+Collection::parseIndexMeta(const void* blob, size_t size) {
+    // Assert(!index_meta_proto_.empty());
     milvus::proto::segcore::CollectionIndexMeta protobuf_indexMeta;
-    auto suc = google::protobuf::TextFormat::ParseFromString(
-        std::string(index_meta_proto_), &protobuf_indexMeta);
-
+    auto suc = protobuf_indexMeta.ParseFromArray(blob, size);
+    // auto suc = google::protobuf::TextFormat::ParseFromString(
+    //     std::string(index_meta_proto_), &protobuf_indexMeta);
+    //
     if (!suc) {
         LOG_SEGCORE_ERROR_ << "unmarshal index meta string failed" << std::endl;
         return;

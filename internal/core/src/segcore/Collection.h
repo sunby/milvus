@@ -27,7 +27,7 @@ class Collection {
     parse();
 
     void
-    parseIndexMeta(const std::string_view index_meta_proto_blob);
+    parseIndexMeta(const void*, size_t);
 
  public:
     SchemaPtr&

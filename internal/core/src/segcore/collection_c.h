@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -21,7 +23,9 @@ CCollection
 NewCollection(const char* schema_proto_blob);
 
 void
-SetIndexMeta(CCollection collection, const char* index_meta_proto_blob);
+SetIndexMeta(CCollection collection,
+             const void* index_meta_proto_blob,
+             const int64_t size);
 
 void
 DeleteCollection(CCollection collection);

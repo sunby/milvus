@@ -821,6 +821,15 @@ func (s *Server) GetRecoveryInfoV2(ctx context.Context, req *datapb.GetRecoveryI
 			continue
 		}
 
+		if Params.CommonCfg.EnableStorageV2.GetAsBool() {
+			segmentInfos = append(segmentInfos, &datapb.SegmentInfo{
+				ID:            segment.ID,
+				PartitionID:   segment.PartitionID,
+				CollectionID:  segment.CollectionID,
+				InsertChannel: segment.InsertChannel,
+			})
+			continue
+		}
 		binlogs := segment.GetBinlogs()
 		if len(binlogs) == 0 {
 			continue

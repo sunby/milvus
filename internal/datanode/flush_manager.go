@@ -19,6 +19,7 @@ package datanode
 import (
 	"context"
 	"fmt"
+	"math"
 	"path"
 	"strconv"
 	"sync"
@@ -699,11 +700,27 @@ func buildRecord(b *array.RecordBuilder, data *BufferData, fields []*schemapb.Fi
 			}
 		case schemapb.DataType_FloatVector:
 			vecData := data.buffer.Data[field.FieldID].(*storage.FloatVectorFieldData)
-			lb := fBuilder.(*array.FixedSizeListBuilder)
-			vb := lb.ValueBuilder().(*array.Float32Builder)
-			for i := 0; i < len(vecData.Data); i += vecData.Dim {
-				lb.Append(true)
-				vb.AppendValues(vecData.Data[i:i+vecData.Dim], nil)
+			// lb := fBuilder.(*array.FixedSizeListBuilder)
+			// vb := lb.ValueBuilder().(*array.Float32Builder)
+			// for i := 0; i < len(vecData.Data); i += vecData.Dim {
+			// 	lb.Append(true)
+			// 	vb.AppendValues(vecData.Data[i:i+vecData.Dim], nil)
+			// }
+			builder := fBuilder.(*array.FixedSizeBinaryBuilder)
+			dim := vecData.Dim
+			data := vecData.Data
+			byteLength := dim * 4
+			length := len(data) / dim
+
+			builder.Reserve(length)
+			bytesData := make([]byte, byteLength)
+			for i := 0; i < length; i++ {
+				vec := data[i*dim : (i+1)*dim]
+				for j := range vec {
+					bytes := math.Float32bits(vec[j])
+					common.Endian.PutUint32(bytesData[j*4:], bytes)
+				}
+				builder.Append(bytesData)
 			}
 		default:
 			return fmt.Errorf("unknown type %v", field.DataType)
@@ -843,9 +860,13 @@ func covertToArrowSchema(fields []*schemapb.FieldSchema) (*arrow.Schema, error) 
 			if err != nil {
 				return nil, err
 			}
+			// arrowFields = append(arrowFields, arrow.Field{
+			// 	Name: field.Name,
+			// 	Type: arrow.FixedSizeListOf(int32(dim), arrow.PrimitiveTypes.Float32),
+			// })
 			arrowFields = append(arrowFields, arrow.Field{
 				Name: field.Name,
-				Type: arrow.FixedSizeListOf(int32(dim), arrow.PrimitiveTypes.Float32),
+				Type: &arrow.FixedSizeBinaryType{ByteWidth: dim * 4},
 			})
 		default:
 			return nil, fmt.Errorf("unknown type %v", field.DataType)

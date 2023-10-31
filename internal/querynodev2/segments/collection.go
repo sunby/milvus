@@ -202,9 +202,8 @@ func NewCollection(collectionID int64, schema *schemapb.CollectionSchema, indexM
 	collection := C.NewCollection(cSchemaBlob)
 
 	if indexMeta != nil && len(indexMeta.GetIndexMetas()) > 0 && indexMeta.GetMaxIndexRowCount() > 0 {
-		indexMetaBlob := proto.MarshalTextString(indexMeta)
-		cIndexMetaBlob := C.CString(indexMetaBlob)
-		C.SetIndexMeta(collection, cIndexMetaBlob)
+		indexMetaBlob, _ := proto.Marshal(indexMeta)
+		C.SetIndexMeta(collection, unsafe.Pointer(&indexMetaBlob[0]), (C.int64_t)(len(indexMetaBlob)))
 	}
 
 	return &Collection{
