@@ -64,6 +64,9 @@ class VecIndexCreator : public IndexCreatorBase {
     BinarySet
     Upload() override;
 
+    BinarySet
+    UploadV2() override;
+
  public:
     void
     CleanLocalData();

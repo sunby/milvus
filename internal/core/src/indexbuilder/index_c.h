@@ -99,6 +99,9 @@ CStatus
 SerializeIndexAndUpLoad(CIndex index, CBinarySet* c_binary_set);
 
 CStatus
+SerializeIndexAndUpLoadV2(CIndex index, CBinarySet* c_binary_set);
+
+CStatus
 CreateIndexV3(CIndex* res_index, CBuildIndexInfo c_build_index_info);
 
 CStatus

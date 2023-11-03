@@ -82,8 +82,8 @@ VectorMemIndex::VectorMemIndex(
                create_index_info.index_type +
                    " doesn't support metric: " + create_index_info.metric_type);
     if (file_manager_context.Valid()) {
-        file_manager_ =
-            std::make_shared<storage::MemFileManagerImpl>(file_manager_context);
+        file_manager_ = std::make_shared<storage::MemFileManagerImpl>(
+            file_manager_context, file_manager_context.space_);
         AssertInfo(file_manager_ != nullptr, "create file manager failed!");
     }
     auto version = create_index_info.index_engine_version;
@@ -93,7 +93,9 @@ VectorMemIndex::VectorMemIndex(
 
 BinarySet
 VectorMemIndex::UploadV2(const Config& config) {
+    LOG_SEGCORE_INFO_ << "[remove me] call uploadv2";
     auto binary_set = Serialize(config);
+    LOG_SEGCORE_INFO_ << "[remove me] ready to add file";
     file_manager_->AddFileV2(binary_set);
 
     auto remote_paths_to_size = file_manager_->GetRemotePathsToFileSize();

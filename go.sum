@@ -587,6 +587,8 @@ github.com/milvus-io/milvus-storage/go v0.0.0-20231017063757-b4720fe2ec8f h1:NGI
 github.com/milvus-io/milvus-storage/go v0.0.0-20231017063757-b4720fe2ec8f/go.mod h1:GPETMcTZq1gLY1WA6Na5kiNAKnq8SEMMiVKUZrM3sho=
 github.com/milvus-io/milvus-storage/go v0.0.0-20231023145603-276c8317ab83 h1:4FYI1hdj/24Igvp0r6dTqa+5JjNoJWW3g3FHlOT2ImA=
 github.com/milvus-io/milvus-storage/go v0.0.0-20231023145603-276c8317ab83/go.mod h1:GPETMcTZq1gLY1WA6Na5kiNAKnq8SEMMiVKUZrM3sho=
+github.com/milvus-io/milvus-storage/go v0.0.0-20231102061405-eeb09fe2c467 h1:RlCnkspW8jhHU4KQo7c6CjiSk1KARURHWc3V/bnewE0=
+github.com/milvus-io/milvus-storage/go v0.0.0-20231102061405-eeb09fe2c467/go.mod h1:GPETMcTZq1gLY1WA6Na5kiNAKnq8SEMMiVKUZrM3sho=
 github.com/milvus-io/pulsar-client-go v0.6.10 h1:eqpJjU+/QX0iIhEo3nhOqMNXL+TyInAs1IAHZCrCM/A=
 github.com/milvus-io/pulsar-client-go v0.6.10/go.mod h1:lQqCkgwDF8YFYjKA+zOheTk1tev2B+bKj5j7+nm8M1w=
 github.com/minio/asm2plan9s v0.0.0-20200509001527-cdd76441f9d8 h1:AMFGa4R4MiIpspGNG7Z948v4n35fFGB3RR3G/ry4FWs=

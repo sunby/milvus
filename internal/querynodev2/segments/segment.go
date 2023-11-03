@@ -48,6 +48,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/segcorepb"
+	"github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/querynodev2/pkoracle"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/log"
@@ -228,7 +229,13 @@ func NewSegmentV2(collection *Collection,
 		zap.Int64("segmentID", segmentID),
 		zap.String("segmentType", segmentType.String()))
 
-	url := fmt.Sprintf("s3://%s:%s@%s/%d?endpoint_override=%s", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue(), segmentID, paramtable.Get().MinioCfg.Address.GetValue())
+	var scheme string
+	if params.Params.MinioCfg.UseSSL.GetAsBool() {
+		scheme = "https"
+	} else {
+		scheme = "http"
+	}
+	url := fmt.Sprintf("s3://%s:%s@%s/%d?scheme=%s&endpoint_override=%s", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue(), segmentID, scheme, paramtable.Get().MinioCfg.Address.GetValue())
 	space, err := milvus_storage.Open(url, options.NewSpaceOptionBuilder().SetVersion(storageVersion).Build())
 	if err != nil {
 		return nil, err
@@ -677,7 +684,14 @@ func (s *LocalSegment) LoadMultiFieldData(rowCount int64, fields []*datapb.Field
 	var status C.CStatus
 	GetDynamicPool().Submit(func() (any, error) {
 		if paramtable.Get().CommonCfg.EnableStorageV2.GetAsBool() {
-			uri := fmt.Sprintf("s3://%s:%s@%s/%d?endpoint_override=%s", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue(), s.segmentID, paramtable.Get().MinioCfg.Address.GetValue())
+			var scheme string
+			if params.Params.MinioCfg.UseSSL.GetAsBool() {
+				scheme = "https"
+			} else {
+				scheme = "http"
+			}
+			uri := fmt.Sprintf("s3://%s:%s@%s/%d?scheme=%s&endpoint_override=%s", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue(), s.segmentID, scheme, paramtable.Get().MinioCfg.Address.GetValue())
+
 			loadFieldDataInfo.appendUri(uri)
 			loadFieldDataInfo.appendStorageVersion(s.space.GetCurrentVersion())
 			status = C.LoadFieldDataV2(s.ptr, loadFieldDataInfo.cLoadFieldDataInfo)
@@ -737,9 +751,17 @@ func (s *LocalSegment) LoadFieldData(fieldID int64, rowCount int64, field *datap
 	GetDynamicPool().Submit(func() (any, error) {
 		log.Info("submitted loadFieldData task to dy pool")
 		if paramtable.Get().CommonCfg.EnableStorageV2.GetAsBool() {
-			uri := fmt.Sprintf("s3://%s:%s@%s/%d?endpoint_override=%s", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue(), s.segmentID, paramtable.Get().MinioCfg.Address.GetValue())
+			var scheme string
+			if params.Params.MinioCfg.UseSSL.GetAsBool() {
+				scheme = "https"
+			} else {
+				scheme = "http"
+			}
+			uri := fmt.Sprintf("s3://%s:%s@%s/%d?scheme=%s&endpoint_override=%s", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue(), s.segmentID, scheme, paramtable.Get().MinioCfg.Address.GetValue())
+
 			loadFieldDataInfo.appendUri(uri)
 			loadFieldDataInfo.appendStorageVersion(s.space.GetCurrentVersion())
+			log.Info("[remove me] load field data v2", zap.Any("uri", uri))
 			status = C.LoadFieldDataV2(s.ptr, loadFieldDataInfo.cLoadFieldDataInfo)
 		} else {
 			status = C.LoadFieldData(s.ptr, loadFieldDataInfo.cLoadFieldDataInfo)
@@ -973,8 +995,15 @@ func (s *LocalSegment) LoadIndex(indexInfo *querypb.FieldIndexInfo, fieldType sc
 	}
 
 	if paramtable.Get().CommonCfg.EnableStorageV2.GetAsBool() {
-		url := fmt.Sprintf("s3://%s:%s@%s/%d?endpoint_override=%s", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue(), s.segmentID, paramtable.Get().MinioCfg.Address.GetValue())
-		loadIndexInfo.appendStorgeInfo(url, s.space.GetCurrentVersion())
+		var scheme string
+		if params.Params.MinioCfg.UseSSL.GetAsBool() {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
+		uri := fmt.Sprintf("s3://%s:%s@%s/index/%d?scheme=%s&endpoint_override=%s", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue(), s.segmentID, scheme, paramtable.Get().MinioCfg.Address.GetValue())
+
+		loadIndexInfo.appendStorgeInfo(uri, s.space.GetCurrentVersion())
 	}
 	err = loadIndexInfo.appendLoadIndexInfo(indexInfo, s.collectionID, s.partitionID, s.segmentID, fieldType)
 	if err != nil {

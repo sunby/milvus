@@ -172,6 +172,95 @@ func (loader *segmentLoaderV2) loadBloomFilter(ctx context.Context, segmentID in
 	return nil
 }
 
+func (loader *segmentLoaderV2) loadSegment(ctx context.Context,
+	segment *LocalSegment,
+	loadInfo *querypb.SegmentLoadInfo,
+) error {
+	log := log.Ctx(ctx).With(
+		zap.Int64("collectionID", segment.Collection()),
+		zap.Int64("partitionID", segment.Partition()),
+		zap.String("shard", segment.Shard()),
+		zap.Int64("segmentID", segment.ID()),
+	)
+	log.Info("start loading segment files",
+		zap.Int64("rowNum", loadInfo.GetNumOfRows()),
+		zap.String("segmentType", segment.Type().String()))
+
+	collection := loader.manager.Collection.Get(segment.Collection())
+	if collection == nil {
+		err := merr.WrapErrCollectionNotFound(segment.Collection())
+		log.Warn("failed to get collection while loading segment", zap.Error(err))
+		return err
+	}
+	pkField := GetPkField(collection.Schema())
+
+	// TODO(xige-16): Optimize the data loading process and reduce data copying
+	// for now, there will be multiple copies in the process of data loading into segCore
+	defer debug.FreeOSMemory()
+
+	if segment.Type() == SegmentTypeSealed {
+		fieldID2IndexInfo := make(map[int64]*querypb.FieldIndexInfo)
+		for _, indexInfo := range loadInfo.IndexInfos {
+			if len(indexInfo.GetIndexFilePaths()) > 0 {
+				fieldID := indexInfo.FieldID
+				fieldID2IndexInfo[fieldID] = indexInfo
+			}
+		}
+
+		indexedFieldInfos := make(map[int64]*IndexedFieldInfo)
+		fieldBinlogs := make([]*datapb.FieldBinlog, 0, len(loadInfo.BinlogPaths))
+
+		for _, fieldBinlog := range loadInfo.BinlogPaths {
+			fieldID := fieldBinlog.FieldID
+			// check num rows of data meta and index meta are consistent
+			if indexInfo, ok := fieldID2IndexInfo[fieldID]; ok {
+				fieldInfo := &IndexedFieldInfo{
+					FieldBinlog: fieldBinlog,
+					IndexInfo:   indexInfo,
+				}
+				indexedFieldInfos[fieldID] = fieldInfo
+			} else {
+				fieldBinlogs = append(fieldBinlogs, fieldBinlog)
+			}
+		}
+
+		log.Info("load fields...",
+			zap.Int64s("indexedFields", lo.Keys(indexedFieldInfos)),
+		)
+		if err := loader.loadFieldsIndex(ctx, collection.Schema(), segment, loadInfo.GetNumOfRows(), indexedFieldInfos); err != nil {
+			return err
+		}
+		if err := loader.loadSealedSegmentFields(ctx, segment, fieldBinlogs, loadInfo.GetNumOfRows()); err != nil {
+			return err
+		}
+		if err := segment.AddFieldDataInfo(loadInfo.GetNumOfRows(), loadInfo.GetBinlogPaths()); err != nil {
+			return err
+		}
+		// https://github.com/milvus-io/milvus/23654
+		// legacy entry num = 0
+		if err := loader.patchEntryNumber(ctx, segment, loadInfo); err != nil {
+			return err
+		}
+	} else {
+		if err := segment.LoadMultiFieldData(loadInfo.GetNumOfRows(), loadInfo.BinlogPaths); err != nil {
+			return err
+		}
+	}
+
+	// load statslog if it's growing segment
+	if segment.typ == SegmentTypeGrowing {
+		log.Info("loading statslog...")
+		pkStatsBinlogs, logType := loader.filterPKStatsBinlogs(loadInfo.Statslogs, pkField.GetFieldID())
+		err := loader.loadBloomFilter(ctx, segment.segmentID, segment.bloomFilterSet, pkStatsBinlogs, logType)
+		if err != nil {
+			return err
+		}
+	}
+
+	log.Info("loading delta...")
+	return loader.LoadDeltaLogs(ctx, segment, loadInfo.Deltalogs)
+}
+
 func NewLoader(
 	manager *Manager,
 	cm storage.ChunkManager,

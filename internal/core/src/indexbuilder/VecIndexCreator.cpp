@@ -91,6 +91,11 @@ VecIndexCreator::Upload() {
     return index_->Upload();
 }
 
+BinarySet
+VecIndexCreator::UploadV2() {
+    return index_->UploadV2();
+}
+
 void
 VecIndexCreator::CleanLocalData() {
     auto vector_index = dynamic_cast<index::VectorIndex*>(index_.get());

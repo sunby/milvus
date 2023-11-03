@@ -38,6 +38,9 @@ class IndexCreatorBase {
 
     virtual BinarySet
     Upload() = 0;
+
+    virtual BinarySet
+    UploadV2() = 0;
 };
 
 using IndexCreatorBasePtr = std::unique_ptr<IndexCreatorBase>;

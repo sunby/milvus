@@ -39,6 +39,7 @@ type CodecIndex interface {
 	Delete() error
 	CleanLocalData() error
 	UpLoad() (map[string]int64, error)
+	UpLoadV2() (map[string]int64, error)
 }
 
 var _ CodecIndex = (*CgoIndex)(nil)
@@ -346,6 +347,42 @@ func (index *CgoIndex) UpLoad() (map[string]int64, error) {
 	var cBinarySet C.CBinarySet
 
 	status := C.SerializeIndexAndUpLoad(index.indexPtr, &cBinarySet)
+	defer func() {
+		if cBinarySet != nil {
+			C.DeleteBinarySet(cBinarySet)
+		}
+	}()
+	if err := HandleCStatus(&status, "failed to serialize index and upload index"); err != nil {
+		return nil, err
+	}
+
+	res := make(map[string]int64)
+	indexFilePaths, err := GetBinarySetKeys(cBinarySet)
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range indexFilePaths {
+		size, err := GetBinarySetSize(cBinarySet, path)
+		if err != nil {
+			return nil, err
+		}
+		res[path] = size
+	}
+
+	runtime.SetFinalizer(index, func(index *CgoIndex) {
+		if index != nil && !index.close {
+			log.Error("there is leakage in index object, please check.")
+		}
+	})
+
+	return res, nil
+}
+
+func (index *CgoIndex) UpLoadV2() (map[string]int64, error) {
+	log.Info("[remove me] upload v2")
+	var cBinarySet C.CBinarySet
+
+	status := C.SerializeIndexAndUpLoadV2(index.indexPtr, &cBinarySet)
 	defer func() {
 		if cBinarySet != nil {
 			C.DeleteBinarySet(cBinarySet)

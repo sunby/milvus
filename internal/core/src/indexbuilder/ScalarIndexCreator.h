@@ -49,6 +49,9 @@ class ScalarIndexCreator : public IndexCreatorBase {
     BinarySet
     Upload() override;
 
+    BinarySet
+    UploadV2() override;
+
  private:
     std::string
     index_type();

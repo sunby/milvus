@@ -83,4 +83,9 @@ ScalarIndexCreator::Upload() {
     return index_->Upload();
 }
 
+BinarySet
+ScalarIndexCreator::UploadV2() {
+    return index_->UploadV2();
+}
+
 }  // namespace milvus::indexbuilder

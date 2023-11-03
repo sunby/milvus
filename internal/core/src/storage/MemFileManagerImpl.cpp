@@ -18,6 +18,7 @@
 #include <memory>
 #include <unordered_map>
 
+#include "log/Log.h"
 #include "storage/FieldData.h"
 #include "storage/FileManager.h"
 #include "storage/Util.h"
@@ -29,7 +30,8 @@ MemFileManagerImpl::MemFileManagerImpl(
     const FileManagerContext& fileManagerContext,
     std::shared_ptr<milvus_storage::Space> space)
     : FileManagerImpl(fileManagerContext.fieldDataMeta,
-                      fileManagerContext.indexMeta), space_(space) {
+                      fileManagerContext.indexMeta),
+      space_(space) {
     rcm_ = fileManagerContext.chunkManagerPtr;
 }
 
@@ -96,6 +98,7 @@ MemFileManagerImpl::AddFileV2(const BinarySet& binary_set) {
     std::vector<std::string> slice_names;
 
     auto AddBatchIndexFiles = [&]() {
+        LOG_SEGCORE_INFO_ << "[remove me] ready to add batch index files";
         auto res = PutIndexData(space_,
                                 data_slices,
                                 slice_sizes,

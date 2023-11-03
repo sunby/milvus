@@ -208,7 +208,10 @@ CreateIndexV3(CIndex* res_index, CBuildIndexInfo c_build_index_info) {
         auto chunk_manager = milvus::storage::CreateChunkManager(
             build_index_info->storage_config);
         milvus::storage::FileManagerContext fileManagerContext(
-            field_meta, index_meta, chunk_manager);
+            field_meta,
+            index_meta,
+            chunk_manager,
+            std::move(index_space.value()));
 
         auto index =
             milvus::indexbuilder::IndexFactory::GetInstance().CreateIndex(
@@ -630,6 +633,32 @@ SerializeIndexAndUpLoad(CIndex index, CBinarySet* c_binary_set) {
             reinterpret_cast<milvus::indexbuilder::IndexCreatorBase*>(index);
         auto binary =
             std::make_unique<knowhere::BinarySet>(real_index->Upload());
+        *c_binary_set = binary.release();
+        status.error_code = Success;
+        status.error_msg = "";
+    } catch (std::exception& e) {
+        status.error_code = UnexpectedError;
+        status.error_msg = strdup(e.what());
+    }
+    return status;
+}
+
+CStatus
+SerializeIndexAndUpLoadV2(CIndex index, CBinarySet* c_binary_set) {
+    LOG_SEGCORE_INFO_ << "[remove me] call serialize index and upload";
+    auto status = CStatus();
+    try {
+        AssertInfo(
+            index,
+            "failed to serialize index to binary set, passed index was null");
+        LOG_SEGCORE_INFO_ << "[remove me] reintercept";
+
+        auto real_index =
+            reinterpret_cast<milvus::indexbuilder::IndexCreatorBase*>(index);
+        LOG_SEGCORE_INFO_ << "[remove me] ready to call uploadv2";
+
+        auto binary =
+            std::make_unique<knowhere::BinarySet>(real_index->UploadV2());
         *c_binary_set = binary.release();
         status.error_code = Success;
         status.error_msg = "";
