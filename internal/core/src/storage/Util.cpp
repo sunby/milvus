@@ -445,7 +445,7 @@ EncodeAndUploadIndexSlice2(std::shared_ptr<milvus_storage::Space> space,
     indexData->SetFieldDataMeta(field_meta);
     auto serialized_index_data = indexData->serialize_to_remote_file();
     auto serialized_index_size = serialized_index_data.size();
-    LOG_SEGCORE_INFO_ << "[remove me] write blob to space: " << object_key;
+    LOG_SEGCORE_ERROR_ << "[remove me] write blob to space: " << object_key;
     auto status = space->WriteBolb(
         object_key, serialized_index_data.data(), serialized_index_size);
     AssertInfo(status.ok(),
@@ -618,7 +618,7 @@ PutIndexData(std::shared_ptr<milvus_storage::Space> space,
     AssertInfo(data_slices.size() == slice_names.size(),
                "inconsistent size of data slices with slice names!");
 
-    LOG_SEGCORE_INFO_ << "[remove me] ready to upload files to space";
+    LOG_SEGCORE_ERROR_ << "[remove me] ready to upload files to space";
     for (int64_t i = 0; i < data_slices.size(); ++i) {
         futures.push_back(pool.Submit(EncodeAndUploadIndexSlice2,
                                       space,

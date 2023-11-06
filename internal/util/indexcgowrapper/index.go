@@ -16,6 +16,7 @@ import (
 	"unsafe"
 
 	"github.com/golang/protobuf/proto"
+	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
@@ -39,7 +40,7 @@ type CodecIndex interface {
 	Delete() error
 	CleanLocalData() error
 	UpLoad() (map[string]int64, error)
-	UpLoadV2() (map[string]int64, error)
+	UpLoadV2() (int64, error)
 }
 
 var _ CodecIndex = (*CgoIndex)(nil)
@@ -378,7 +379,7 @@ func (index *CgoIndex) UpLoad() (map[string]int64, error) {
 	return res, nil
 }
 
-func (index *CgoIndex) UpLoadV2() (map[string]int64, error) {
+func (index *CgoIndex) UpLoadV2() (int64, error) {
 	log.Info("[remove me] upload v2")
 	var cBinarySet C.CBinarySet
 
@@ -389,21 +390,25 @@ func (index *CgoIndex) UpLoadV2() (map[string]int64, error) {
 		}
 	}()
 	if err := HandleCStatus(&status, "failed to serialize index and upload index"); err != nil {
-		return nil, err
+		return -1, err
 	}
 
-	res := make(map[string]int64)
-	indexFilePaths, err := GetBinarySetKeys(cBinarySet)
+	buffer, err := GetBinarySetValue(cBinarySet, "index_store_version")
 	if err != nil {
-		return nil, err
+		return -1, err
 	}
-	for _, path := range indexFilePaths {
-		size, err := GetBinarySetSize(cBinarySet, path)
-		if err != nil {
-			return nil, err
-		}
-		res[path] = size
-	}
+	var version int64
+
+	version = int64(buffer[7])
+	version = (version << 8) + int64(buffer[6])
+	version = (version << 8) + int64(buffer[5])
+	version = (version << 8) + int64(buffer[4])
+	version = (version << 8) + int64(buffer[3])
+	version = (version << 8) + int64(buffer[2])
+	version = (version << 8) + int64(buffer[1])
+	version = (version << 8) + int64(buffer[0])
+
+	log.Info("[remove me] upload v2", zap.Int64("version", version))
 
 	runtime.SetFinalizer(index, func(index *CgoIndex) {
 		if index != nil && !index.close {
@@ -411,5 +416,5 @@ func (index *CgoIndex) UpLoadV2() (map[string]int64, error) {
 		}
 	})
 
-	return res, nil
+	return version, nil
 }

@@ -302,11 +302,11 @@ AppendIndexV3(CLoadIndexInfo c_load_index_info) {
 
         auto config = milvus::index::ParseConfigFromIndexParams(
             load_index_info->index_params);
-        config["index_files"] = load_index_info->index_files;
 
         auto res = milvus_storage::Space::Open(
             load_index_info->uri,
-            milvus_storage::Options{nullptr, load_index_info->storage_version});
+            milvus_storage::Options{nullptr,
+                                    load_index_info->index_store_version});
         AssertInfo(!res.ok(), "init space failed");
         std::shared_ptr<milvus_storage::Space> space = std::move(res.value());
         load_index_info->index =
@@ -431,5 +431,5 @@ AppendStorageInfo(CLoadIndexInfo c_load_index_info,
                   int64_t version) {
     auto load_index_info = (milvus::segcore::LoadIndexInfo*)c_load_index_info;
     load_index_info->uri = uri;
-    load_index_info->storage_version = version;
+    load_index_info->index_store_version = version;
 }

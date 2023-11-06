@@ -739,12 +739,15 @@ func (s *LocalSegment) LoadFieldData(fieldID int64, rowCount int64, field *datap
 		return err
 	}
 
-	for _, binlog := range field.Binlogs {
-		err = loadFieldDataInfo.appendLoadFieldDataPath(fieldID, binlog)
-		if err != nil {
-			return err
+	if field != nil {
+		for _, binlog := range field.Binlogs {
+			err = loadFieldDataInfo.appendLoadFieldDataPath(fieldID, binlog)
+			if err != nil {
+				return err
+			}
 		}
 	}
+
 	loadFieldDataInfo.appendMMapDirPath(paramtable.Get().QueryNodeCfg.MmapDirPath.GetValue())
 
 	var status C.CStatus
@@ -1003,7 +1006,8 @@ func (s *LocalSegment) LoadIndex(indexInfo *querypb.FieldIndexInfo, fieldType sc
 		}
 		uri := fmt.Sprintf("s3://%s:%s@%s/index/%d?scheme=%s&endpoint_override=%s", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue(), s.segmentID, scheme, paramtable.Get().MinioCfg.Address.GetValue())
 
-		loadIndexInfo.appendStorgeInfo(uri, s.space.GetCurrentVersion())
+		log.Info("[remove me] load index v2", zap.Any("uri", uri))
+		loadIndexInfo.appendStorgeInfo(uri, indexInfo.IndexStoreVersion)
 	}
 	err = loadIndexInfo.appendLoadIndexInfo(indexInfo, s.collectionID, s.partitionID, s.segmentID, fieldType)
 	if err != nil {

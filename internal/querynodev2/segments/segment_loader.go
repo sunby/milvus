@@ -115,6 +115,132 @@ func NewLoaderV2(
 	}
 }
 
+func (loader *segmentLoaderV2) Load(ctx context.Context,
+	collectionID int64,
+	segmentType SegmentType,
+	version int64,
+	segments ...*querypb.SegmentLoadInfo,
+) ([]Segment, error) {
+	log := log.Ctx(ctx).With(
+		zap.Int64("collectionID", collectionID),
+		zap.String("segmentType", segmentType.String()),
+	)
+
+	if len(segments) == 0 {
+		log.Info("no segment to load")
+		return nil, nil
+	}
+	// Filter out loaded & loading segments
+	infos := loader.prepare(segmentType, version, segments...)
+	defer loader.unregister(infos...)
+
+	log.With(
+		zap.Int64s("requestSegments", lo.Map(segments, func(s *querypb.SegmentLoadInfo, _ int) int64 { return s.GetSegmentID() })),
+		zap.Int64s("preparedSegments", lo.Map(infos, func(s *querypb.SegmentLoadInfo, _ int) int64 { return s.GetSegmentID() })),
+	)
+
+	// continue to wait other task done
+	log.Info("start loading...", zap.Int("segmentNum", len(segments)), zap.Int("afterFilter", len(infos)))
+
+	// Check memory & storage limit
+	resource, concurrencyLevel, err := loader.requestResource(ctx, infos...)
+	if err != nil {
+		log.Error("request resource failed", zap.Error(err))
+		return nil, err
+	}
+	defer loader.freeRequest(resource)
+
+	newSegments := typeutil.NewConcurrentMap[int64, *LocalSegment]()
+	loaded := typeutil.NewConcurrentMap[int64, *LocalSegment]()
+	defer func() {
+		newSegments.Range(func(_ int64, s *LocalSegment) bool {
+			s.Release()
+			return true
+		})
+		debug.FreeOSMemory()
+	}()
+
+	for _, info := range infos {
+		segmentID := info.SegmentID
+		partitionID := info.PartitionID
+		collectionID := info.CollectionID
+		shard := info.InsertChannel
+
+		collection := loader.manager.Collection.Get(collectionID)
+		if collection == nil {
+			err := merr.WrapErrCollectionNotFound(collectionID)
+			log.Warn("failed to get collection", zap.Error(err))
+			return nil, err
+		}
+
+		var segment *LocalSegment
+		segment, err = NewSegmentV2(collection, segmentID, partitionID, collectionID, shard, segmentType, version, info.GetStartPosition(), info.GetDeltaPosition(), info.GetStorageVersion())
+
+		if err != nil {
+			log.Warn("load segment failed when create new segment",
+				zap.Int64("partitionID", partitionID),
+				zap.Int64("segmentID", segmentID),
+				zap.Error(err),
+			)
+			return nil, err
+		}
+
+		newSegments.Insert(segmentID, segment)
+	}
+
+	loadSegmentFunc := func(idx int) error {
+		loadInfo := infos[idx]
+		partitionID := loadInfo.PartitionID
+		segmentID := loadInfo.SegmentID
+		segment, _ := newSegments.Get(segmentID)
+
+		tr := timerecord.NewTimeRecorder("loadDurationPerSegment")
+		err := loader.loadSegment(ctx, segment, loadInfo)
+		if err != nil {
+			log.Warn("load segment failed when load data into memory",
+				zap.Int64("partitionID", partitionID),
+				zap.Int64("segmentID", segmentID),
+				zap.Error(err),
+			)
+			return err
+		}
+		loader.manager.Segment.Put(segmentType, segment)
+		newSegments.GetAndRemove(segmentID)
+		loaded.Insert(segmentID, segment)
+		log.Info("load segment done", zap.Int64("segmentID", segmentID))
+		loader.notifyLoadFinish(loadInfo)
+
+		metrics.QueryNodeLoadSegmentLatency.WithLabelValues(fmt.Sprint(paramtable.GetNodeID())).Observe(tr.ElapseSpan().Seconds())
+		return nil
+	}
+
+	// Start to load,
+	// Make sure we can always benefit from concurrency, and not spawn too many idle goroutines
+	log.Info("start to load segments in parallel",
+		zap.Int("segmentNum", len(infos)),
+		zap.Int("concurrencyLevel", concurrencyLevel))
+	err = funcutil.ProcessFuncParallel(len(infos),
+		concurrencyLevel, loadSegmentFunc, "loadSegmentFunc")
+	if err != nil {
+		log.Warn("failed to load some segments", zap.Error(err))
+		return nil, err
+	}
+
+	// Wait for all segments loaded
+	if err := loader.waitSegmentLoadDone(ctx, segmentType, lo.Map(segments, func(info *querypb.SegmentLoadInfo, _ int) int64 { return info.GetSegmentID() })...); err != nil {
+		log.Warn("failed to wait the filtered out segments load done", zap.Error(err))
+		return nil, err
+	}
+
+	log.Info("all segment load done")
+	var result []Segment
+	loaded.Range(func(_ int64, s *LocalSegment) bool {
+		result = append(result, s)
+		return true
+	})
+	return result, nil
+}
+
 func (loader *segmentLoaderV2) loadBloomFilter(ctx context.Context, segmentID int64, bfs *pkoracle.BloomFilterSet,
 	binlogPaths []string, logType storage.StatsLogType) error {
 
@@ -199,38 +325,41 @@ func (loader *segmentLoaderV2) loadSegment(ctx context.Context,
 	defer debug.FreeOSMemory()
 
 	if segment.Type() == SegmentTypeSealed {
-		fieldID2IndexInfo := make(map[int64]*querypb.FieldIndexInfo)
-		for _, indexInfo := range loadInfo.IndexInfos {
-			if len(indexInfo.GetIndexFilePaths()) > 0 {
-				fieldID := indexInfo.FieldID
-				fieldID2IndexInfo[fieldID] = indexInfo
-			}
+		fieldsMap := typeutil.NewConcurrentMap[int64, *schemapb.FieldSchema]()
+		for _, field := range collection.Schema().Fields {
+			fieldsMap.Insert(field.FieldID, field)
 		}
-
+		// fieldID2IndexInfo := make(map[int64]*querypb.FieldIndexInfo)
 		indexedFieldInfos := make(map[int64]*IndexedFieldInfo)
-		fieldBinlogs := make([]*datapb.FieldBinlog, 0, len(loadInfo.BinlogPaths))
-
-		for _, fieldBinlog := range loadInfo.BinlogPaths {
-			fieldID := fieldBinlog.FieldID
-			// check num rows of data meta and index meta are consistent
-			if indexInfo, ok := fieldID2IndexInfo[fieldID]; ok {
+		for _, indexInfo := range loadInfo.IndexInfos {
+			if indexInfo.GetIndexStoreVersion() > 0 {
+				fieldID := indexInfo.FieldID
 				fieldInfo := &IndexedFieldInfo{
-					FieldBinlog: fieldBinlog,
-					IndexInfo:   indexInfo,
+					IndexInfo: indexInfo,
 				}
 				indexedFieldInfos[fieldID] = fieldInfo
-			} else {
-				fieldBinlogs = append(fieldBinlogs, fieldBinlog)
+				fieldsMap.Remove(fieldID)
+				// fieldID2IndexInfo[fieldID] = indexInfo
 			}
 		}
 
 		log.Info("load fields...",
 			zap.Int64s("indexedFields", lo.Keys(indexedFieldInfos)),
 		)
+
 		if err := loader.loadFieldsIndex(ctx, collection.Schema(), segment, loadInfo.GetNumOfRows(), indexedFieldInfos); err != nil {
 			return err
 		}
-		if err := loader.loadSealedSegmentFields(ctx, segment, fieldBinlogs, loadInfo.GetNumOfRows()); err != nil {
+
+		// REMOVEME
+		keys := make([]int64, 0)
+		fieldsMap.Range(func(key int64, value *schemapb.FieldSchema) bool {
+			keys = append(keys, key)
+			return true
+		})
+		log.Info("[remove me] load fields...", zap.Any("fields", keys))
+
+		if err := loader.loadSealedSegmentFields(ctx, segment, fieldsMap, loadInfo.GetNumOfRows()); err != nil {
 			return err
 		}
 		if err := segment.AddFieldDataInfo(loadInfo.GetNumOfRows(), loadInfo.GetBinlogPaths()); err != nil {
@@ -259,6 +388,28 @@ func (loader *segmentLoaderV2) loadSegment(ctx context.Context,
 
 	log.Info("loading delta...")
 	return loader.LoadDeltaLogs(ctx, segment, loadInfo.Deltalogs)
+}
+
+func (loader *segmentLoaderV2) loadSealedSegmentFields(ctx context.Context, segment *LocalSegment, fields *typeutil.ConcurrentMap[int64, *schemapb.FieldSchema], rowCount int64) error {
+	runningGroup, _ := errgroup.WithContext(ctx)
+	fields.Range(func(fieldID int64, fieldSchema *schemapb.FieldSchema) bool {
+		runningGroup.Go(func() error {
+			return segment.LoadFieldData(fieldID, rowCount, nil)
+		})
+		return true
+	})
+
+	err := runningGroup.Wait()
+	if err != nil {
+		return err
+	}
+
+	log.Ctx(ctx).Info("load field binlogs done for sealed segment",
+		zap.Int64("collection", segment.collectionID),
+		zap.Int64("segment", segment.segmentID),
+		zap.String("segmentType", segment.Type().String()))
+
+	return nil
 }
 
 func NewLoader(

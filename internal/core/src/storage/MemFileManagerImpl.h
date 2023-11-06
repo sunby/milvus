@@ -66,6 +66,11 @@ class MemFileManagerImpl : public FileManagerImpl {
     bool
     AddFileV2(const BinarySet& binary_set);
 
+    std::shared_ptr<milvus_storage::Space>
+    space() const {
+        return space_;
+    }
+
     std::map<std::string, int64_t>
     GetRemotePathsToFileSize() const {
         return remote_paths_to_size_;

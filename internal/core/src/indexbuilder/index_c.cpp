@@ -645,17 +645,17 @@ SerializeIndexAndUpLoad(CIndex index, CBinarySet* c_binary_set) {
 
 CStatus
 SerializeIndexAndUpLoadV2(CIndex index, CBinarySet* c_binary_set) {
-    LOG_SEGCORE_INFO_ << "[remove me] call serialize index and upload";
+    LOG_SEGCORE_ERROR_ << "[remove me] call serialize index and upload";
     auto status = CStatus();
     try {
         AssertInfo(
             index,
             "failed to serialize index to binary set, passed index was null");
-        LOG_SEGCORE_INFO_ << "[remove me] reintercept";
+        LOG_SEGCORE_ERROR_ << "[remove me] reintercept";
 
         auto real_index =
             reinterpret_cast<milvus::indexbuilder::IndexCreatorBase*>(index);
-        LOG_SEGCORE_INFO_ << "[remove me] ready to call uploadv2";
+        LOG_SEGCORE_ERROR_ << "[remove me] ready to call uploadv2";
 
         auto binary =
             std::make_unique<knowhere::BinarySet>(real_index->UploadV2());

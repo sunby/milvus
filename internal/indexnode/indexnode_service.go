@@ -157,6 +157,7 @@ func (i *IndexNode) QueryJobs(ctx context.Context, req *indexpb.QueryJobsRequest
 				serializedSize:      info.serializedSize,
 				failReason:          info.failReason,
 				currentIndexVersion: info.currentIndexVersion,
+				indexStoreVersion:   info.indexStoreVersion,
 			}
 		}
 	})
@@ -178,6 +179,7 @@ func (i *IndexNode) QueryJobs(ctx context.Context, req *indexpb.QueryJobsRequest
 			ret.IndexInfos[i].SerializedSize = info.serializedSize
 			ret.IndexInfos[i].FailReason = info.failReason
 			ret.IndexInfos[i].CurrentIndexVersion = info.currentIndexVersion
+			ret.IndexInfos[i].IndexStoreVersion = info.indexStoreVersion
 			log.RatedDebug(5, "querying index build task",
 				zap.Int64("indexBuildID", buildID),
 				zap.String("state", info.state.String()),

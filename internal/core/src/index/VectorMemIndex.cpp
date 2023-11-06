@@ -18,6 +18,8 @@
 
 #include <unistd.h>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -93,16 +95,31 @@ VectorMemIndex::VectorMemIndex(
 
 BinarySet
 VectorMemIndex::UploadV2(const Config& config) {
-    LOG_SEGCORE_INFO_ << "[remove me] call uploadv2";
+    LOG_SEGCORE_ERROR_ << "[remove me] call uploadv2";
     auto binary_set = Serialize(config);
-    LOG_SEGCORE_INFO_ << "[remove me] ready to add file";
+    LOG_SEGCORE_ERROR_ << "[remove me] ready to add file";
     file_manager_->AddFileV2(binary_set);
 
-    auto remote_paths_to_size = file_manager_->GetRemotePathsToFileSize();
+    auto store_version = file_manager_->space()->GetCurrentVersion();
+    std::shared_ptr<uint8_t[]> store_version_data(
+        new uint8_t[sizeof(store_version)]);
+    store_version_data[0] = store_version & 0x00000000000000FF;
+    store_version = store_version >> 8;
+    store_version_data[1] = store_version & 0x00000000000000FF;
+    store_version = store_version >> 8;
+    store_version_data[2] = store_version & 0x00000000000000FF;
+    store_version = store_version >> 8;
+    store_version_data[3] = store_version & 0x00000000000000FF;
+    store_version = store_version >> 8;
+    store_version_data[4] = store_version & 0x00000000000000FF;
+    store_version = store_version >> 8;
+    store_version_data[5] = store_version & 0x00000000000000FF;
+    store_version = store_version >> 8;
+    store_version_data[6] = store_version & 0x00000000000000FF;
+    store_version = store_version >> 8;
+    store_version_data[7] = store_version & 0x00000000000000FF;
     BinarySet ret;
-    for (auto& file : remote_paths_to_size) {
-        ret.Append(file.first, nullptr, file.second);
-    }
+    ret.Append("index_store_version", store_version_data, 8);
 
     return ret;
 }
@@ -154,15 +171,12 @@ VectorMemIndex::LoadV2(const Config& config) {
     if (config.contains(kMmapFilepath)) {
         return LoadFromFileV2(config);
     }
-    auto index_files =
-        GetValueFromConfig<std::vector<std::string>>(config, "index_files");
-    AssertInfo(index_files.has_value(),
-               "index file paths is empty when load index");
 
-    std::unordered_set<std::string> pending_index_files(index_files->begin(),
-                                                        index_files->end());
-
-    LOG_SEGCORE_INFO_ << "load index files: " << index_files.value().size();
+    auto blobs = space_->StatisticsBlobs();
+    std::unordered_set<std::string> pending_index_files(blobs.size());
+    for (auto& blob : blobs) {
+        pending_index_files.insert(blob.name);
+    }
 
     auto res = space_->GetBlobByteSize(std::string(INDEX_FILE_SLICE_META));
     std::map<std::string, storage::FieldDataPtr> index_datas{};
@@ -187,6 +201,7 @@ VectorMemIndex::LoadV2(const Config& config) {
         return storage::DeserializeFileData(index_blob_data, res.value());
     };
     if (slice_meta_exist) {
+        pending_index_files.erase(INDEX_FILE_SLICE_META);
         auto slice_meta_sz = res.value();
         auto slice_meta_data =
             std::shared_ptr<uint8_t[]>(new uint8_t[slice_meta_sz]);
@@ -711,15 +726,11 @@ VectorMemIndex::LoadFromFileV2(const Config& config) {
 
     auto file = File::Open(filepath.value(), O_CREAT | O_TRUNC | O_RDWR);
 
-    auto index_files =
-        GetValueFromConfig<std::vector<std::string>>(config, "index_files");
-    AssertInfo(index_files.has_value(),
-               "index file paths is empty when load index");
-
-    std::unordered_set<std::string> pending_index_files(index_files->begin(),
-                                                        index_files->end());
-
-    LOG_SEGCORE_INFO_ << "load index files: " << index_files.value().size();
+    auto blobs = space_->StatisticsBlobs();
+    std::unordered_set<std::string> pending_index_files(blobs.size());
+    for (auto& blob : blobs) {
+        pending_index_files.insert(blob.name);
+    }
 
     auto res = space_->GetBlobByteSize(std::string(INDEX_FILE_SLICE_META));
 
@@ -743,6 +754,7 @@ VectorMemIndex::LoadFromFileV2(const Config& config) {
         return storage::DeserializeFileData(index_blob_data, res.value());
     };
     if (slice_meta_exist) {
+        pending_index_files.erase(INDEX_FILE_SLICE_META);
         auto slice_meta_sz = res.value();
         auto slice_meta_data =
             std::shared_ptr<uint8_t[]>(new uint8_t[slice_meta_sz]);
