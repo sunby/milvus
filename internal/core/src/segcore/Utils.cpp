@@ -15,6 +15,7 @@
 #include <string>
 
 #include "index/ScalarIndex.h"
+#include "log/Log.h"
 #include "mmap/Types.h"
 #include "storage/FieldData.h"
 #include "storage/RemoteChunkManagerSingleton.h"
@@ -713,6 +714,9 @@ LoadFieldDatasFromRemote2(std::shared_ptr<milvus_storage::Space> space,
             if (field.second.get_id().get() != field_data_info.field_id) {
                 continue;
             }
+            LOG_SEGCORE_ERROR_ << "load field data from remote: "
+                               << field.second.get_name().get()
+                               << ", nums:" << total_num_rows;
             auto col_data =
                 data->GetColumnByName(field.second.get_name().get());
             auto field_data =
