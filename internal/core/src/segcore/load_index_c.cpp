@@ -303,11 +303,14 @@ AppendIndexV3(CLoadIndexInfo c_load_index_info) {
         auto config = milvus::index::ParseConfigFromIndexParams(
             load_index_info->index_params);
 
+        LOG_SEGCORE_ERROR_ << "[remove me] uri = " << load_index_info->uri
+                           << " index_store_version = "
+                           << load_index_info->index_store_version;
         auto res = milvus_storage::Space::Open(
             load_index_info->uri,
             milvus_storage::Options{nullptr,
                                     load_index_info->index_store_version});
-        AssertInfo(!res.ok(), "init space failed");
+        AssertInfo(res.ok(), "init space failed");
         std::shared_ptr<milvus_storage::Space> space = std::move(res.value());
         load_index_info->index =
             milvus::index::IndexFactory::GetInstance().CreateIndex(

@@ -238,8 +238,14 @@ SegmentSealedImpl::LoadFieldDataV2(const LoadFieldDataInfo& load_info) {
         // auto load_future = pool.Submit(
         //     LoadFieldDatasFromRemote, insert_files, field_data_info.channel);
 
-        // TODO: create space;
-        std::shared_ptr<milvus_storage::Space> space;
+        auto res = milvus_storage::Space::Open(
+            load_info.url,
+            milvus_storage::Options{nullptr, load_info.storage_version});
+        AssertInfo(res.ok(),
+                   fmt::format("init space failed: {}, error: {}",
+                               load_info.url,
+                               res.status().ToString()));
+        std::shared_ptr<milvus_storage::Space> space = std::move(res.value());
         auto load_future = pool.Submit(
             LoadFieldDatasFromRemote2, space, schema_, field_data_info);
         LOG_SEGCORE_ERROR_ << "finish submitting LoadFieldDatasFromRemote task "
@@ -1252,7 +1258,9 @@ SegmentSealedImpl::mask_with_timestamps(BitsetType& bitset_chunk,
                "num chunk not equal to 1 for sealed segment");
     const auto& timestamps_data = insert_record_.timestamps_.get_chunk(0);
     AssertInfo(timestamps_data.size() == get_row_count(),
-               "Timestamp size not equal to row count");
+               fmt::format("Timestamp size not equal to row count: {}, {}",
+                           timestamps_data.size(),
+                           get_row_count()));
     auto range = insert_record_.timestamp_index_.get_active_range(timestamp);
 
     // range == (size_, size_) and size_ is this->timestamps_.size().
