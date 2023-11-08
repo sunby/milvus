@@ -827,6 +827,7 @@ func (s *Server) GetRecoveryInfoV2(ctx context.Context, req *datapb.GetRecoveryI
 				PartitionID:   segment.PartitionID,
 				CollectionID:  segment.CollectionID,
 				InsertChannel: segment.InsertChannel,
+				NumOfRows:     segment.NumOfRows,
 			})
 			continue
 		}

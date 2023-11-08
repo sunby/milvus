@@ -121,6 +121,7 @@ func (dh *distHandler) updateSegmentsDistribution(resp *querypb.GetDataDistribut
 		}
 		var segment *meta.Segment
 		if segmentInfo == nil {
+			log.Info("[remove me] dist segment info is nil")
 			segment = &meta.Segment{
 				SegmentInfo: &datapb.SegmentInfo{
 					ID:            s.GetID(),
@@ -134,6 +135,7 @@ func (dh *distHandler) updateSegmentsDistribution(resp *querypb.GetDataDistribut
 				IndexInfo:          s.GetIndexInfo(),
 			}
 		} else {
+			log.Info("[remove me] dist segment row num", zap.Int64("num", segmentInfo.GetNumOfRows()))
 			segment = &meta.Segment{
 				SegmentInfo:        proto.Clone(segmentInfo).(*datapb.SegmentInfo),
 				Node:               resp.GetNodeID(),

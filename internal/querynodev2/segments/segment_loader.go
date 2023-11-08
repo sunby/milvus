@@ -247,14 +247,11 @@ func (loader *segmentLoaderV2) loadBloomFilter(ctx context.Context, segmentID in
 	log := log.Ctx(ctx).With(
 		zap.Int64("segmentID", segmentID),
 	)
-	if len(binlogPaths) == 0 {
-		log.Info("there are no stats logs saved with segment")
-		return nil
-	}
 
 	startTs := time.Now()
 
 	blobs := []*storage.Blob{}
+
 	for _, path := range binlogPaths {
 		size, err := loader.space.GetBlobByteSize(path)
 		if err != nil {

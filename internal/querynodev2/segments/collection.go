@@ -195,6 +195,7 @@ func NewCollection(collectionID int64, schema *schemapb.CollectionSchema, indexM
 		CCollection
 		NewCollection(const char* schema_proto_blob);
 	*/
+	log.Info("[remove me] schema fields num", zap.Int("num", len(schema.Fields)))
 	schemaBlob := proto.MarshalTextString(schema)
 	cSchemaBlob := C.CString(schemaBlob)
 	defer C.free(unsafe.Pointer(cSchemaBlob))
