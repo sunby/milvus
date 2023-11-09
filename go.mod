@@ -60,7 +60,7 @@ require (
 
 require (
 	github.com/apache/arrow/go/v12 v12.0.0-20230223012627-e0e740bd7a24
-	github.com/milvus-io/milvus-storage/go v0.0.0-20231102061405-eeb09fe2c467
+	github.com/milvus-io/milvus-storage/go v0.0.0-20231109072809-1cd7b0866092
 	github.com/pingcap/log v1.1.1-0.20221015072633-39906604fb81
 )
 
