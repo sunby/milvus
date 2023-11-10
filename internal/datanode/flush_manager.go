@@ -370,9 +370,17 @@ func (m *rendezvousFlushManagerV2) flushBufferData(data *BufferData, segmentID U
 	defer itr.Release()
 
 	inCodec := storage.NewInsertCodecWithSchema(meta)
-	pkStatsBlob, stats, err := m.serializePkStatsLog(segmentID, flushed, data, inCodec)
+	// FIXME: we dont combine all stats log when flushed is true for now
+	pkStatsBlob, stats, err := m.serializePkStatsLog(segmentID, false, data, inCodec)
 	if err != nil {
 		return nil, err
+	}
+	if pkStatsBlob != nil {
+		statsID, err := m.AllocOne()
+		if err != nil {
+			return nil, err
+		}
+		pkStatsBlob.Key = strconv.Itoa(int(statsID))
 	}
 
 	itr.Retain()

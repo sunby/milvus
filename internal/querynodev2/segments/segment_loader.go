@@ -326,10 +326,13 @@ func (loader *segmentLoaderV2) loadBloomFilter(ctx context.Context, segmentID in
 
 	for _, statsBlob := range statsBlobs {
 		blob := make([]byte, statsBlob.Size, statsBlob.Size)
-		_, err := space.ReadBlob(statsBlob.Name, blob)
+		n, err := space.ReadBlob(statsBlob.Name, blob)
 		if err != nil && err != io.EOF {
 			return err
 		}
+
+		log.Info("[remove me] read blob size not match", zap.Int("read", n), zap.Int64("size", statsBlob.Size))
+
 		blobs = append(blobs, &storage.Blob{Value: blob})
 	}
 

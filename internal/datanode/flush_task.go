@@ -273,6 +273,7 @@ func (t *flushTaskRunner) waitFinishV2(notifyFunc notifyMetaFunc, postFunc taskP
 	})
 	t.space.SetLockManager(lm)
 	var err error
+	// log.Info("[remove me] stats blobs size", zap.String("key", t.statsBlob.Key), zap.Int("size", len(t.statsBlob.Value)))
 	if t.deleteRec != nil {
 		err = t.space.NewTransaction().
 			Write(t.insertRec, &options.DefaultWriteOptions).
