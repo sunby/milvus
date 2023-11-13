@@ -87,13 +87,16 @@ func DeleteBuildIndexInfo(info *BuildIndexInfo) {
 	C.DeleteBuildIndexInfo(info.cBuildIndexInfo)
 }
 
-func (bi *BuildIndexInfo) AppendFieldMetaInfo(collectionID int64, partitionID int64, segmentID int64, fieldID int64, fieldType schemapb.DataType) error {
+func (bi *BuildIndexInfo) AppendFieldMetaInfo(collectionID int64, partitionID int64, segmentID int64, fieldID int64, fieldType schemapb.DataType, fieldName string, dim int64) error {
 	cColID := C.int64_t(collectionID)
 	cParID := C.int64_t(partitionID)
 	cSegID := C.int64_t(segmentID)
 	cFieldID := C.int64_t(fieldID)
 	cintDType := uint32(fieldType)
-	status := C.AppendFieldMetaInfo(bi.cBuildIndexInfo, cColID, cParID, cSegID, cFieldID, cintDType)
+	cFieldName := C.CString(fieldName)
+	cDim := C.int64_t(dim)
+	defer C.free(unsafe.Pointer(cFieldName))
+	status := C.AppendFieldMetaInfo(bi.cBuildIndexInfo, cColID, cParID, cSegID, cFieldID, cFieldName, cintDType, cDim)
 	return HandleCStatus(&status, "appendFieldMetaInfo failed")
 }
 
@@ -104,6 +107,16 @@ func (bi *BuildIndexInfo) AppendIndexMetaInfo(indexID int64, buildID int64, inde
 
 	status := C.AppendIndexMetaInfo(bi.cBuildIndexInfo, cIndexID, cBuildID, cIndexVersion)
 	return HandleCStatus(&status, "appendIndexMetaInfo failed")
+}
+
+func (bi *BuildIndexInfo) AppendIndexStorageInfo(dataStorePath, indexStorePath string, dataStoreVersion int64) error {
+	cDataStorePath := C.CString(dataStorePath)
+	defer C.free(unsafe.Pointer(cDataStorePath))
+	cIndexStorePath := C.CString(indexStorePath)
+	defer C.free(unsafe.Pointer(cIndexStorePath))
+	cVersion := C.int64_t(dataStoreVersion)
+	status := C.AppendIndexStorageInfo(bi.cBuildIndexInfo, cDataStorePath, cIndexStorePath, cVersion)
+	return HandleCStatus(&status, "appendIndexStorageInfo failed")
 }
 
 func (bi *BuildIndexInfo) AppendBuildIndexParam(indexParams map[string]string) error {

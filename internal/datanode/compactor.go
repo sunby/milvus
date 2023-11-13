@@ -22,12 +22,15 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cockroachdb/errors"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	milvus_storage "github.com/milvus-io/milvus-storage/go/storage"
 	"github.com/milvus-io/milvus/internal/datanode/allocator"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/etcdpb"
@@ -84,6 +87,8 @@ type compactionTask struct {
 	tr           *timerecord.TimeRecorder
 	chunkManager storage.ChunkManager
 	inject       *taskInjection
+
+	space *milvus_storage.Space
 }
 
 func newCompactionTask(
@@ -946,4 +951,192 @@ func (t *compactionTask) isExpiredEntity(ts, now Timestamp) bool {
 	pnow, _ := tsoutil.ParseTS(now)
 	expireTime := pts.Add(time.Duration(t.plan.GetCollectionTtl()))
 	return expireTime.Before(pnow)
+}
+
+type compactionTaskV2 struct {
+	compactionTask
+	space *milvus_storage.Space
+}
+
+func (t *compactionTaskV2) compact() (*datapb.CompactionResult, error) {
+	log := log.With(zap.Int64("planID", t.plan.GetPlanID()))
+	compactStart := time.Now()
+	if ok := funcutil.CheckCtxValid(t.ctx); !ok {
+		log.Warn("compact wrong, task context done or timeout")
+		return nil, errContext
+	}
+
+	durInQueue := t.tr.RecordSpan()
+	ctxTimeout, cancelAll := context.WithTimeout(t.ctx, time.Duration(t.plan.GetTimeoutInSeconds())*time.Second)
+	defer cancelAll()
+
+	var targetSegID UniqueID
+	var err error
+	switch {
+
+	case t.plan.GetType() == datapb.CompactionType_UndefinedCompaction:
+		log.Warn("compact wrong, compaction type undefined")
+		return nil, errCompactionTypeUndifined
+
+	case len(t.plan.GetSegmentBinlogs()) < 1:
+		log.Warn("compact wrong, there's no segments in segment binlogs")
+		return nil, errIllegalCompactionPlan
+
+	case t.plan.GetType() == datapb.CompactionType_MergeCompaction || t.plan.GetType() == datapb.CompactionType_MixCompaction:
+		targetSegID, err = t.AllocOne()
+		if err != nil {
+			log.Warn("compact wrong", zap.Error(err))
+			return nil, err
+		}
+	}
+
+	log.Info("compact start", zap.Int32("timeout in seconds", t.plan.GetTimeoutInSeconds()))
+	segIDs := make([]UniqueID, 0, len(t.plan.GetSegmentBinlogs()))
+	for _, s := range t.plan.GetSegmentBinlogs() {
+		segIDs = append(segIDs, s.GetSegmentID())
+	}
+
+	_, partID, meta, err := t.getSegmentMeta(segIDs[0])
+	if err != nil {
+		log.Warn("compact wrong", zap.Error(err))
+		return nil, err
+	}
+
+	// Inject to stop flush
+	injectStart := time.Now()
+
+	var injectionPostFunc = func(pack *segmentFlushPack) {
+		pack.segmentID = targetSegID
+		if err := t.space.Delete(pack.deleteRec); err != nil {
+			pack.err = err
+			return
+		}
+		pack.storageVersion = t.space.GetCurrentVersion()
+	}
+	ti := newTaskInjection(len(segIDs), injectionPostFunc)
+	defer func() {
+		// the injection will be closed if fail to compact
+		if t.inject == nil {
+			close(ti.injectOver)
+		}
+	}()
+
+	t.injectFlush(ti, segIDs...)
+	<-ti.Injected()
+	log.Info("compact inject elapse", zap.Duration("elapse", time.Since(injectStart)))
+
+	var (
+		// SegmentID to deltaBlobs
+		dblobs = make(map[UniqueID][]*Blob)
+		dmu    sync.Mutex
+	)
+
+	allPath := make([][]string, 0)
+
+	downloadStart := time.Now()
+	g, gCtx := errgroup.WithContext(ctxTimeout)
+	for _, s := range t.plan.GetSegmentBinlogs() {
+
+		// Get the number of field binlog files from non-empty segment
+		var binlogNum int
+		for _, b := range s.GetFieldBinlogs() {
+			if b != nil {
+				binlogNum = len(b.GetBinlogs())
+				break
+			}
+		}
+		// Unable to deal with all empty segments cases, so return error
+		if binlogNum == 0 {
+			log.Warn("compact wrong, all segments' binlogs are empty")
+			return nil, errIllegalCompactionPlan
+		}
+
+		for idx := 0; idx < binlogNum; idx++ {
+			var ps []string
+			for _, f := range s.GetFieldBinlogs() {
+				ps = append(ps, f.GetBinlogs()[idx].GetLogPath())
+			}
+			allPath = append(allPath, ps)
+		}
+
+		segID := s.GetSegmentID()
+		for _, d := range s.GetDeltalogs() {
+			for _, l := range d.GetBinlogs() {
+				path := l.GetLogPath()
+				g.Go(func() error {
+					bs, err := t.download(gCtx, []string{path})
+					if err != nil {
+						log.Warn("compact download deltalogs wrong", zap.String("path", path), zap.Error(err))
+						return err
+					}
+
+					dmu.Lock()
+					dblobs[segID] = append(dblobs[segID], bs...)
+					dmu.Unlock()
+
+					return nil
+				})
+			}
+		}
+	}
+
+	err = g.Wait()
+	log.Info("compact download deltalogs elapse", zap.Duration("elapse", time.Since(downloadStart)))
+
+	if err != nil {
+		log.Warn("compact IO wrong", zap.Error(err))
+		return nil, err
+	}
+
+	deltaPk2Ts, err := t.mergeDeltalogs(dblobs)
+	if err != nil {
+		return nil, err
+	}
+
+	inPaths, statsPaths, numRows, err := t.merge(ctxTimeout, allPath, targetSegID, partID, meta, deltaPk2Ts)
+	if err != nil {
+		log.Warn("compact wrong", zap.Error(err))
+		return nil, err
+	}
+
+	pack := &datapb.CompactionResult{
+		PlanID:              t.plan.GetPlanID(),
+		SegmentID:           targetSegID,
+		InsertLogs:          inPaths,
+		Field2StatslogPaths: statsPaths,
+		NumOfRows:           numRows,
+		Channel:             t.plan.GetChannel(),
+	}
+
+	t.inject = ti
+
+	log.Info("compact done",
+		zap.Int64("targetSegmentID", targetSegID),
+		zap.Int64s("compactedFrom", segIDs),
+		zap.Int("num of binlog paths", len(inPaths)),
+		zap.Int("num of stats paths", len(statsPaths)),
+		zap.Int("num of delta paths", len(pack.GetDeltalogs())),
+	)
+
+	log.Info("compact overall elapse", zap.Duration("elapse", time.Since(compactStart)))
+	metrics.DataNodeCompactionLatency.WithLabelValues(fmt.Sprint(paramtable.GetNodeID())).Observe(t.tr.ElapseSpan().Seconds())
+	metrics.DataNodeCompactionLatencyInQueue.WithLabelValues(fmt.Sprint(paramtable.GetNodeID())).Observe(float64(durInQueue.Milliseconds()))
+
+	return pack, nil
+}
+
+func newCompactionTaskV2(
+	ctx context.Context,
+	dl downloader,
+	ul uploader,
+	channel Channel,
+	fm flushManager,
+	alloc allocator.Allocator,
+	plan *datapb.CompactionPlan,
+	chunkManager storage.ChunkManager,
+	space *milvus_storage.Space) *compactionTaskV2 {
+	return &compactionTaskV2{
+		compactionTask: *newCompactionTask(ctx, dl, ul, channel, fm, alloc, plan, chunkManager),
+		space:          space,
+	}
 }

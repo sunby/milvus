@@ -22,6 +22,8 @@ import (
 
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
+	"github.com/pingcap/log"
+	"go.uber.org/zap"
 )
 
 // PkOracle interface for pk oracle.
@@ -52,6 +54,7 @@ func (pko *pkOracle) Get(pk storage.PrimaryKey, filters ...CandidateFilter) ([]i
 				return true
 			}
 		}
+		log.Info("[remove me] candidate id", zap.Int64("id", candidate.ID()))
 		if candidate.MayPkExist(pk) {
 			result = append(result, candidate.ID())
 		}

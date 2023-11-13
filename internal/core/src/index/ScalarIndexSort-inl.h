@@ -20,6 +20,7 @@
 #include <pb/schema.pb.h>
 #include <vector>
 #include <string>
+#include "index/ScalarIndex.h"
 #include "knowhere/log.h"
 #include "Meta.h"
 #include "common/Utils.h"
@@ -38,6 +39,22 @@ inline ScalarIndexSort<T>::ScalarIndexSort(
             std::make_shared<storage::MemFileManagerImpl>(file_manager_context);
         AssertInfo(file_manager_ != nullptr, "create file manager failed!");
     }
+}
+
+template <typename T>
+inline ScalarIndexSort<T>::ScalarIndexSort(
+    const storage::FileManagerContext& file_manager_context,
+    std::shared_ptr<milvus_storage::Space> space)
+    : is_built_(false), data_(), space_(space) {
+    if (file_manager_context.Valid()) {
+        file_manager_ =
+            std::make_shared<storage::MemFileManagerImpl>(file_manager_context, space_);
+        AssertInfo(file_manager_ != nullptr, "create file manager failed!");
+    }
+}
+template <typename T>
+inline void
+ScalarIndexSort<T>::BuildV2(const Config& config) {
 }
 
 template <typename T>
@@ -140,6 +157,20 @@ ScalarIndexSort<T>::Upload(const Config& config) {
 }
 
 template <typename T>
+inline BinarySet
+ScalarIndexSort<T>::UploadV2(const Config& config) {
+    auto binary_set = Serialize(config);
+    file_manager_->AddFileV2(binary_set);
+
+    auto remote_paths_to_size = file_manager_->GetRemotePathsToFileSize();
+    BinarySet ret;
+    for (auto& file : remote_paths_to_size) {
+        ret.Append(file.first, nullptr, file.second);
+    }
+
+    return ret;
+}
+template <typename T>
 inline void
 ScalarIndexSort<T>::LoadWithoutAssemble(const BinarySet& index_binary,
                                         const Config& config) {
@@ -172,6 +203,44 @@ ScalarIndexSort<T>::Load(const Config& config) {
     AssertInfo(index_files.has_value(),
                "index file paths is empty when load disk ann index");
     auto index_datas = file_manager_->LoadIndexToMemory(index_files.value());
+    AssembleIndexDatas(index_datas);
+    BinarySet binary_set;
+    for (auto& [key, data] : index_datas) {
+        auto size = data->Size();
+        auto deleter = [&](uint8_t*) {};  // avoid repeated deconstruction
+        auto buf = std::shared_ptr<uint8_t[]>(
+            (uint8_t*)const_cast<void*>(data->Data()), deleter);
+        binary_set.Append(key, buf, size);
+    }
+
+    LoadWithoutAssemble(binary_set, config);
+}
+
+template <typename T>
+inline void
+ScalarIndexSort<T>::LoadV2(const Config& config) {
+    auto index_files =
+        GetValueFromConfig<std::vector<std::string>>(config, "index_files");
+    AssertInfo(index_files.has_value(),
+               "index file paths is empty when load disk ann index");
+    std::map<std::string, storage::FieldDataPtr> index_datas{};
+    for (auto& file_name : index_files.value()) {
+        auto res = space_->GetBlobByteSize(file_name);
+        if (!res.ok()) {
+            PanicInfo(S3Error,
+                          "unable to read index blob");
+        }
+        auto index_blob_data =
+            std::shared_ptr<uint8_t[]>(new uint8_t[res.value()]);
+        auto status = space_->ReadBlob(file_name, index_blob_data.get());
+        if (!status.ok()) {
+            PanicInfo(S3Error,
+                          "unable to read index blob");
+        }
+        auto raw_index_blob =
+            storage::DeserializeFileData(index_blob_data, res.value());
+        index_datas[file_name] = raw_index_blob->GetFieldData();
+    }
     AssembleIndexDatas(index_datas);
     BinarySet binary_set;
     for (auto& [key, data] : index_datas) {

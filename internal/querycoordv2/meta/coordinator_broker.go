@@ -75,6 +75,7 @@ func (broker *CoordinatorBroker) DescribeCollection(ctx context.Context, collect
 		CollectionID: collectionID,
 	}
 	resp, err := broker.rootCoord.DescribeCollection(ctx, req)
+	log.Info("[remove me] collection fields num", zap.Int("num", len(resp.Schema.Fields)))
 	if err := merr.CheckRPCCall(resp, err); err != nil {
 		log.Ctx(ctx).Warn("failed to get collection schema", zap.Error(err))
 		return nil, err

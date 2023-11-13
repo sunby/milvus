@@ -31,6 +31,9 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/apache/arrow/go/v12/arrow/array"
+	"github.com/milvus-io/milvus/pkg/common"
+
 	"github.com/cockroachdb/errors"
 	"github.com/golang/protobuf/proto"
 	"go.opentelemetry.io/otel/trace"
@@ -40,9 +43,12 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	milvus_storage "github.com/milvus-io/milvus-storage/go/storage"
+	"github.com/milvus-io/milvus-storage/go/storage/options"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/segcorepb"
+	"github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/querynodev2/pkoracle"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/log"
@@ -155,6 +161,7 @@ type LocalSegment struct {
 
 	lastDeltaTimestamp *atomic.Uint64
 	fieldIndexes       *typeutil.ConcurrentMap[int64, *IndexedFieldInfo]
+	space              *milvus_storage.Space
 }
 
 func NewSegment(collection *Collection,
@@ -201,6 +208,60 @@ func NewSegment(collection *Collection,
 		memSize:     atomic.NewInt64(-1),
 		rowNum:      atomic.NewInt64(-1),
 		insertCount: atomic.NewInt64(0),
+	}
+
+	return segment, nil
+}
+
+func NewSegmentV2(collection *Collection,
+	segmentID int64,
+	partitionID int64,
+	collectionID int64,
+	shard string,
+	segmentType SegmentType,
+	version int64,
+	startPosition *msgpb.MsgPosition,
+	deltaPosition *msgpb.MsgPosition,
+	storageVersion int64,
+) (*LocalSegment, error) {
+	/*
+		CSegmentInterface
+		NewSegment(CCollection collection, uint64_t segment_id, SegmentType seg_type);
+	*/
+	var segmentPtr C.CSegmentInterface
+	switch segmentType {
+	case SegmentTypeSealed:
+		segmentPtr = C.NewSegment(collection.collectionPtr, C.Sealed, C.int64_t(segmentID))
+	case SegmentTypeGrowing:
+		segmentPtr = C.NewSegment(collection.collectionPtr, C.Growing, C.int64_t(segmentID))
+	default:
+		return nil, fmt.Errorf("illegal segment type %d when create segment %d", segmentType, segmentID)
+	}
+
+	log.Info("create segment",
+		zap.Int64("collectionID", collectionID),
+		zap.Int64("partitionID", partitionID),
+		zap.Int64("segmentID", segmentID),
+		zap.String("segmentType", segmentType.String()))
+
+	var scheme string
+	if params.Params.MinioCfg.UseSSL.GetAsBool() {
+		scheme = "https"
+	} else {
+		scheme = "http"
+	}
+	url := fmt.Sprintf("s3://%s:%s@%s/%d?scheme=%s&endpoint_override=%s", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue(), segmentID, scheme, paramtable.Get().MinioCfg.Address.GetValue())
+	space, err := milvus_storage.Open(url, options.NewSpaceOptionBuilder().SetVersion(storageVersion).Build())
+	if err != nil {
+		return nil, err
+	}
+
+	var segment = &LocalSegment{
+		baseSegment:        newBaseSegment(segmentID, partitionID, collectionID, shard, segmentType, version, startPosition),
+		ptr:                segmentPtr,
+		lastDeltaTimestamp: atomic.NewUint64(deltaPosition.GetTimestamp()),
+		fieldIndexes:       typeutil.NewConcurrentMap[int64, *IndexedFieldInfo](),
+		space:              space,
 	}
 
 	return segment, nil
@@ -653,7 +714,21 @@ func (s *LocalSegment) LoadMultiFieldData(rowCount int64, fields []*datapb.Field
 
 	var status C.CStatus
 	GetDynamicPool().Submit(func() (any, error) {
-		status = C.LoadFieldData(s.ptr, loadFieldDataInfo.cLoadFieldDataInfo)
+		if paramtable.Get().CommonCfg.EnableStorageV2.GetAsBool() {
+			var scheme string
+			if params.Params.MinioCfg.UseSSL.GetAsBool() {
+				scheme = "https"
+			} else {
+				scheme = "http"
+			}
+			uri := fmt.Sprintf("s3://%s:%s@%s/%d?scheme=%s&endpoint_override=%s", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue(), s.segmentID, scheme, paramtable.Get().MinioCfg.Address.GetValue())
+
+			loadFieldDataInfo.appendUri(uri)
+			loadFieldDataInfo.appendStorageVersion(s.space.GetCurrentVersion())
+			status = C.LoadFieldDataV2(s.ptr, loadFieldDataInfo.cLoadFieldDataInfo)
+		} else {
+			status = C.LoadFieldData(s.ptr, loadFieldDataInfo.cLoadFieldDataInfo)
+		}
 		return nil, nil
 	}).Await()
 	if err := HandleCStatus(&status, "LoadMultiFieldData failed"); err != nil {
@@ -696,18 +771,36 @@ func (s *LocalSegment) LoadFieldData(fieldID int64, rowCount int64, field *datap
 		return err
 	}
 
-	for _, binlog := range field.Binlogs {
-		err = loadFieldDataInfo.appendLoadFieldDataPath(fieldID, binlog)
-		if err != nil {
-			return err
+	if field != nil {
+		for _, binlog := range field.Binlogs {
+			err = loadFieldDataInfo.appendLoadFieldDataPath(fieldID, binlog)
+			if err != nil {
+				return err
+			}
 		}
 	}
+
 	loadFieldDataInfo.appendMMapDirPath(paramtable.Get().QueryNodeCfg.MmapDirPath.GetValue())
 
 	var status C.CStatus
 	GetDynamicPool().Submit(func() (any, error) {
 		log.Info("submitted loadFieldData task to dy pool")
-		status = C.LoadFieldData(s.ptr, loadFieldDataInfo.cLoadFieldDataInfo)
+		if paramtable.Get().CommonCfg.EnableStorageV2.GetAsBool() {
+			var scheme string
+			if params.Params.MinioCfg.UseSSL.GetAsBool() {
+				scheme = "https"
+			} else {
+				scheme = "http"
+			}
+			uri := fmt.Sprintf("s3://%s:%s@%s/%d?scheme=%s&endpoint_override=%s", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue(), s.segmentID, scheme, paramtable.Get().MinioCfg.Address.GetValue())
+
+			loadFieldDataInfo.appendUri(uri)
+			loadFieldDataInfo.appendStorageVersion(s.space.GetCurrentVersion())
+			log.Info("[remove me] load field data v2", zap.Any("uri", uri))
+			status = C.LoadFieldDataV2(s.ptr, loadFieldDataInfo.cLoadFieldDataInfo)
+		} else {
+			status = C.LoadFieldData(s.ptr, loadFieldDataInfo.cLoadFieldDataInfo)
+		}
 		return nil, nil
 	}).Await()
 	if err := HandleCStatus(&status, "LoadFieldData failed"); err != nil {
@@ -720,6 +813,90 @@ func (s *LocalSegment) LoadFieldData(fieldID int64, rowCount int64, field *datap
 	return nil
 }
 
+func (s *LocalSegment) LoadDeltaData2(schema *schemapb.CollectionSchema) error {
+	deleteReader, err := s.space.ScanDelete()
+	if err != nil {
+		return err
+	}
+	if deleteReader.Schema().HasField(common.TimeStampFieldName) {
+		return fmt.Errorf("can not read timestamp field in space")
+	}
+	pkFieldSchema, err := typeutil.GetPrimaryFieldSchema(schema)
+	if err != nil {
+		return err
+	}
+	ids := &schemapb.IDs{}
+	var pkint64s []int64
+	var pkstrings []string
+	var tss []int64
+	for deleteReader.Next() {
+		rec := deleteReader.Record()
+		indices := rec.Schema().FieldIndices(common.TimeStampFieldName)
+		tss = append(tss, rec.Column(indices[0]).(*array.Int64).Int64Values()...)
+		indices = rec.Schema().FieldIndices(pkFieldSchema.Name)
+		switch pkFieldSchema.DataType {
+		case schemapb.DataType_Int64:
+			pkint64s = append(pkint64s, rec.Column(indices[0]).(*array.Int64).Int64Values()...)
+		case schemapb.DataType_String:
+			columnData := rec.Column(indices[0]).(*array.String)
+			for i := 0; i < columnData.Len(); i++ {
+				pkstrings = append(pkstrings, columnData.Value(i))
+			}
+		default:
+			return fmt.Errorf("unknown data type %v", pkFieldSchema.DataType)
+		}
+	}
+	if err := deleteReader.Err(); err != nil {
+		return err
+	}
+
+	switch pkFieldSchema.DataType {
+	case schemapb.DataType_Int64:
+		ids.IdField = &schemapb.IDs_IntId{
+			IntId: &schemapb.LongArray{
+				Data: pkint64s,
+			},
+		}
+	case schemapb.DataType_String:
+		ids.IdField = &schemapb.IDs_StrId{
+			StrId: &schemapb.StringArray{
+				Data: pkstrings,
+			},
+		}
+	default:
+		return fmt.Errorf("unknown data type %v", pkFieldSchema.DataType)
+	}
+
+	idsBlob, err := proto.Marshal(ids)
+	if err != nil {
+		return err
+	}
+
+	loadInfo := C.CLoadDeletedRecordInfo{
+		timestamps:        unsafe.Pointer(&tss[0]),
+		primary_keys:      (*C.uint8_t)(unsafe.Pointer(&idsBlob[0])),
+		primary_keys_size: C.uint64_t(len(idsBlob)),
+		row_count:         C.int64_t(len(tss)),
+	}
+	/*
+		CStatus
+		LoadDeletedRecord(CSegmentInterface c_segment, CLoadDeletedRecordInfo deleted_record_info)
+	*/
+	var status C.CStatus
+	GetDynamicPool().Submit(func() (any, error) {
+		status = C.LoadDeletedRecord(s.ptr, loadInfo)
+		return nil, nil
+	}).Await()
+
+	if err := HandleCStatus(&status, "LoadDeletedRecord failed"); err != nil {
+		return err
+	}
+
+	log.Info("load deleted record done",
+		zap.Int("rowNum", len(tss)),
+		zap.String("segmentType", s.Type().String()))
+	return nil
+}
 func (s *LocalSegment) AddFieldDataInfo(rowCount int64, fields []*datapb.FieldBinlog) error {
 	s.ptrLock.RLock()
 	defer s.ptrLock.RUnlock()
@@ -854,6 +1031,18 @@ func (s *LocalSegment) LoadIndex(indexInfo *querypb.FieldIndexInfo, fieldType sc
 		return err
 	}
 
+	if paramtable.Get().CommonCfg.EnableStorageV2.GetAsBool() {
+		var scheme string
+		if params.Params.MinioCfg.UseSSL.GetAsBool() {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
+		uri := fmt.Sprintf("s3://%s:%s@%s/index/%d?scheme=%s&endpoint_override=%s", paramtable.Get().MinioCfg.AccessKeyID.GetValue(), paramtable.Get().MinioCfg.SecretAccessKey.GetValue(), paramtable.Get().MinioCfg.BucketName.GetValue(), s.segmentID, scheme, paramtable.Get().MinioCfg.Address.GetValue())
+
+		log.Info("[remove me] load index v2", zap.Any("uri", uri))
+		loadIndexInfo.appendStorgeInfo(uri, indexInfo.IndexStoreVersion)
+	}
 	err = loadIndexInfo.appendLoadIndexInfo(indexInfo, s.collectionID, s.partitionID, s.segmentID, fieldType, enableMmap)
 	if err != nil {
 		if loadIndexInfo.cleanLocalData() != nil {

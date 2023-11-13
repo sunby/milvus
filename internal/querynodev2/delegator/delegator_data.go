@@ -213,6 +213,7 @@ func (sd *shardDelegator) ProcessDelete(deleteData []*DeleteData, ts uint64) {
 				// delete will be processed after loaded again
 				return nil
 			}
+			log.Info("[remove me] ready to apply delete via worker", zap.Int64("nodeID", entry.NodeID))
 			offlineSegments.Upsert(sd.applyDelete(ctx, entry.NodeID, worker, delRecords, entry.Segments)...)
 			return nil
 		})
@@ -258,6 +259,7 @@ func (sd *shardDelegator) applyDelete(ctx context.Context, nodeID int64, worker 
 		)
 		delRecord, ok := delRecords[segmentEntry.SegmentID]
 		if ok {
+			log.Info("[remove me] found delete records")
 			log.Debug("delegator plan to applyDelete via worker")
 			err := retry.Do(ctx, func() error {
 				if sd.Stopped() {
@@ -291,6 +293,8 @@ func (sd *shardDelegator) applyDelete(ctx context.Context, nodeID int64, worker 
 				log.Warn("apply delete for segment failed, marking it offline")
 				offlineSegments = append(offlineSegments, segmentEntry.SegmentID)
 			}
+		} else {
+			log.Info("[remove me] not found delete records")
 		}
 	}
 	return offlineSegments
