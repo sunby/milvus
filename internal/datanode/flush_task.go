@@ -20,12 +20,16 @@ import (
 	"context"
 	"sync"
 
+	"github.com/apache/arrow/go/v12/arrow/array"
 	"github.com/cockroachdb/errors"
+	milvus_storage "github.com/milvus-io/milvus-storage/go/storage"
+	"github.com/milvus-io/milvus-storage/go/storage/options"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus/internal/kv"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
+	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/retry"
 	"github.com/milvus-io/milvus/pkg/util/tsoutil"
@@ -112,6 +116,10 @@ func (ti *taskInjection) injectDone(success bool) {
 	for i := 0; i < cap(ti.injectOver); i++ {
 		ti.injectOver <- true
 	}
+}
+
+func (t *flushTaskRunner) getFinishSignal() chan struct{} {
+	return t.finishSignal
 }
 
 // init initializes flushTaskRunner with provided actions and signal
@@ -245,5 +253,130 @@ func newFlushTaskRunner(segmentID UniqueID, injectCh <-chan *taskInjection) *flu
 	}
 	// insert & del
 	t.Add(2)
+	return t
+}
+
+type flushTaskRunnerV2 struct {
+	*flushTaskRunner
+
+	txnErr    error
+	space     *milvus_storage.Space
+	insertRec array.RecordReader
+	statsBlob *storage.Blob
+	deleteRec array.RecordReader
+}
+
+func (t *flushTaskRunnerV2) init(f notifyMetaFunc, postFunc taskPostFunc, signal <-chan struct{}) {
+	t.initOnce.Do(func() {
+		t.startSignal = signal
+		t.finishSignal = make(chan struct{})
+		go t.waitFinish(f, postFunc)
+	})
+}
+
+// runFlushInsert executes flush insert task with once and retry
+func (t *flushTaskRunnerV2) runFlushInsert(task flushInsertTask, flushed bool, dropped bool, pos *msgpb.MsgPosition, opts ...retry.Option) {
+	t.insertOnce.Do(func() {
+		t.flushed = flushed
+		t.pos = pos
+		t.dropped = dropped
+		log.Info("running flush insert task",
+			zap.Int64("segmentID", t.segmentID),
+			zap.Bool("flushed", flushed),
+			zap.Bool("dropped", dropped),
+			zap.Any("position", pos),
+			zap.Time("PosTime", tsoutil.PhysicalTime(pos.GetTimestamp())),
+		)
+		taskv2 := task.(*flushBufferInsertTask2)
+		t.space = taskv2.space
+		t.insertRec = taskv2.reader
+		t.insertRec.Retain()
+		t.statsBlob = taskv2.statsBlob
+		t.Done()
+	})
+}
+
+// runFlushDel execute flush delete task with once and retry
+func (t *flushTaskRunnerV2) runFlushDel(task flushDeleteTask, opts ...retry.Option) {
+	t.deleteOnce.Do(func() {
+		taskv2 := task.(*flushBufferDeleteTask2)
+		t.deleteRec = taskv2.rec
+		if t.deleteRec != nil {
+			t.deleteRec.Retain()
+		}
+		t.Done()
+	})
+}
+
+func (t *flushTaskRunnerV2) waitFinish(notifyFunc notifyMetaFunc, postFunc taskPostFunc) {
+	defer func() {
+		t.insertRec.Release()
+		if t.deleteRec != nil {
+			t.deleteRec.Release()
+		}
+	}()
+
+	// wait insert & del done
+	t.Wait()
+	// wait previous task done
+	<-t.startSignal
+
+	// log.Info("[remove me] stats blobs size", zap.String("key", t.statsBlob.Key), zap.Int("size", len(t.statsBlob.Value)))
+	txn := t.space.NewTransaction()
+	txn = txn.Write(t.insertRec, &options.DefaultWriteOptions)
+	if t.deleteRec != nil {
+		txn = txn.Delete(t.deleteRec)
+	}
+	if t.statsBlob != nil {
+		txn = txn.WriteBlob(t.statsBlob.Value, t.statsBlob.Key, t.flushed)
+	}
+	err := txn.Commit()
+	if err != nil {
+		t.txnErr = err
+	}
+
+	pack := t.getFlushPack()
+	var postInjection postInjectionFunc
+	select {
+	case injection := <-t.injectSignal:
+		// notify injected
+		injection.injectOne()
+		ok := <-injection.injectOver
+		if ok {
+			// apply postInjection func
+			postInjection = injection.postInjection
+		}
+	default:
+	}
+	postFunc(pack, postInjection)
+
+	// notify next task
+	close(t.finishSignal)
+}
+
+func (t *flushTaskRunnerV2) getFlushPack() *segmentFlushPack {
+	pack := &segmentFlushPack{
+		segmentID: t.segmentID,
+		pos:       t.pos,
+		flushed:   t.flushed,
+		dropped:   t.dropped,
+		deleteRec: t.deleteRec,
+		err:       t.txnErr,
+	}
+	log.Debug("flush pack composed",
+		zap.Int64("segmentID", t.segmentID),
+		zap.Bool("flushed", t.flushed),
+		zap.Bool("dropped", t.dropped),
+	)
+
+	return pack
+}
+
+func newFlushTaskRunnerV2(segmentID UniqueID,
+	injectCh <-chan *taskInjection,
+) *flushTaskRunnerV2 {
+	t := &flushTaskRunnerV2{
+		flushTaskRunner: newFlushTaskRunner(segmentID, injectCh),
+	}
 	return t
 }

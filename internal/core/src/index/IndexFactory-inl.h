@@ -28,23 +28,30 @@ IndexFactory::CreateScalarIndex(
     const storage::FileManagerContext& file_manager_context) {
     return CreateScalarIndexSort<T>(file_manager_context);
 }
-
-// template <>
-// inline ScalarIndexPtr<bool>
-// IndexFactory::CreateScalarIndex(const IndexType& index_type) {
-//    return CreateBoolIndex();
-//}
+template <typename T>
+inline ScalarIndexPtr<T>
+IndexFactory::CreateScalarIndex(
+    const IndexType& index_type,
+    const storage::FileManagerContext& file_manager_context,
+    std::shared_ptr<milvus_storage::Space> space) {
+    return CreateScalarIndexSort<T>(file_manager_context, space);
+}
 
 template <>
 inline ScalarIndexPtr<std::string>
 IndexFactory::CreateScalarIndex(
     const IndexType& index_type,
     const storage::FileManagerContext& file_manager_context) {
-#if defined(__linux__) || defined(__APPLE__)
     return CreateStringIndexMarisa(file_manager_context);
-#else
-    throw std::runtime_error("unsupported platform");
-#endif
+}
+
+template <>
+inline ScalarIndexPtr<std::string>
+IndexFactory::CreateScalarIndex(
+    const IndexType& index_type,
+    const storage::FileManagerContext& file_manager_context,
+    std::shared_ptr<milvus_storage::Space> space) {
+    return CreateStringIndexMarisa(file_manager_context, space);
 }
 
 }  // namespace milvus::index

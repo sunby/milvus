@@ -87,6 +87,11 @@ VectorDiskAnnIndex<T>::Load(const Config& config) {
 }
 
 template <typename T>
+void
+VectorDiskAnnIndex<T>::LoadV2(const Config& config) {
+}
+
+template <typename T>
 BinarySet
 VectorDiskAnnIndex<T>::Upload(const Config& config) {
     BinarySet ret;
@@ -97,6 +102,15 @@ VectorDiskAnnIndex<T>::Upload(const Config& config) {
     }
 
     return ret;
+}
+template <typename T>
+BinarySet
+VectorDiskAnnIndex<T>::UploadV2(const Config& config) {
+}
+
+template <typename T>
+void
+VectorDiskAnnIndex<T>::BuildV2(const Config& config) {
 }
 
 template <typename T>

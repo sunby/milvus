@@ -17,10 +17,18 @@
 package datanode
 
 import (
+	"fmt"
 	"testing"
 
+	"github.com/apache/arrow/go/v12/arrow"
+	"github.com/apache/arrow/go/v12/arrow/array"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
+	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	milvus_storage "github.com/milvus-io/milvus-storage/go/storage"
+	"github.com/milvus-io/milvus-storage/go/storage/options"
+	"github.com/milvus-io/milvus-storage/go/storage/schema"
 	"github.com/milvus-io/milvus/pkg/util/retry"
 )
 
@@ -144,4 +152,41 @@ func TestFlushTaskRunner_Injection(t *testing.T) {
 
 	assert.True(t, saveFlag)
 	assert.True(t, nextFlag)
+}
+
+func TestFlushTaskRunnerV2(t *testing.T) {
+	tmpDir := t.TempDir()
+	injectCh := make(chan *taskInjection)
+	runner := newFlushTaskRunnerV2(1, injectCh)
+	startSig := make(chan struct{})
+
+	flushed := false
+	runner.init(func(*segmentFlushPack) {
+		flushed = true
+	}, func(pack *segmentFlushPack, i postInjectionFunc) {}, startSig)
+
+	arrowSchema, err := convertToArrowSchema([]*schemapb.FieldSchema{
+		{Name: "pk", IsPrimaryKey: true, DataType: schemapb.DataType_Int64},
+		{Name: "vec", DataType: schemapb.DataType_FloatVector, TypeParams: []*commonpb.KeyValuePair{{Key: "dim", Value: "128"}}},
+		{Name: "ts", DataType: schemapb.DataType_Int64},
+	})
+	assert.NoError(t, err)
+
+	space, err := milvus_storage.Open(fmt.Sprintf("file:///%s", tmpDir), options.NewSpaceOptionBuilder().SetSchema(schema.NewSchema(arrowSchema, &schema.SchemaOptions{PrimaryColumn: "pk", VectorColumn: "vec", VersionColumn: "ts"})).Build())
+	assert.NoError(t, err)
+
+	itr, err := array.NewRecordReader(arrowSchema, []arrow.Record{})
+	assert.NoError(t, err)
+	task := &flushBufferInsertTask2{
+		space:     space,
+		reader:    itr,
+		statsBlob: nil,
+		flush:     true,
+	}
+	runner.runFlushInsert(task, false, true, nil)
+	runner.runFlushDel(&flushBufferDeleteTask2{})
+
+	startSig <- struct{}{}
+	<-runner.finishSignal
+	assert.True(t, flushed)
 }

@@ -182,6 +182,7 @@ func (ex *Executor) processMergeTask(mergeTask *LoadSegmentsTask) {
 	}
 
 	log.Info("load segments...")
+	log.Info("[remove me] loading segment with schema fields num", zap.Int("num", len(mergeTask.req.Schema.Fields)))
 	status, err := ex.cluster.LoadSegments(task.Context(), leader, mergeTask.req)
 	if err != nil {
 		log.Warn("failed to load segment", zap.Error(err))

@@ -31,6 +31,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	milvus_storage "github.com/milvus-io/milvus-storage/go/storage"
 	"github.com/milvus-io/milvus/internal/datanode/broker"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/storage"
@@ -104,6 +105,9 @@ type Channel interface {
 	getFlushTs() Timestamp
 	setFlushTs(ts Timestamp)
 
+	getSpace(segmentID UniqueID) (*milvus_storage.Space, bool)
+	setSpace(segmentID UniqueID, space *milvus_storage.Space)
+
 	close()
 }
 
@@ -131,6 +135,8 @@ type ChannelMeta struct {
 	metaService  *metaService
 	chunkManager storage.ChunkManager
 	workerPool   *conc.Pool[any]
+
+	spaces typeutil.ConcurrentMap[int64, *milvus_storage.Space]
 
 	closed *atomic.Bool
 }
@@ -951,4 +957,11 @@ func (c *ChannelMeta) setFlushTs(ts Timestamp) {
 
 func (c *ChannelMeta) close() {
 	c.closed.Store(true)
+}
+
+func (c *ChannelMeta) getSpace(segmentID UniqueID) (*milvus_storage.Space, bool) {
+	return c.spaces.Get(segmentID)
+}
+func (c *ChannelMeta) setSpace(segmentID UniqueID, space *milvus_storage.Space) {
+	c.spaces.GetOrInsert(segmentID, space)
 }

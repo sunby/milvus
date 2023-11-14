@@ -39,15 +39,15 @@ Schema::ParseFrom(const milvus::proto::schema::CollectionSchema& schema_proto) {
         auto field_id = FieldId(child.fieldid());
         auto name = FieldName(child.name());
 
-        if (field_id.get() < 100) {
-            // system field id
-            auto is_system =
-                SystemProperty::Instance().SystemFieldVerify(name, field_id);
-            AssertInfo(is_system,
-                       "invalid system type: name(" + name.get() + "), id(" +
-                           std::to_string(field_id.get()) + ")");
-            continue;
-        }
+        // if (field_id.get() < 100) {
+        //     // system field id
+        //     auto is_system =
+        //         SystemProperty::Instance().SystemFieldVerify(name, field_id);
+        //     AssertInfo(is_system,
+        //                "invalid system type: name(" + name.get() + "), id(" +
+        //                    std::to_string(field_id.get()) + ")");
+        //     continue;
+        // }
 
         auto data_type = DataType(child.data_type());
 

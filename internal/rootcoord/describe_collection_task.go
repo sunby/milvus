@@ -21,6 +21,8 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
+	"github.com/milvus-io/milvus/pkg/log"
+	"go.uber.org/zap"
 )
 
 // describeCollectionTask describe collection request task
@@ -45,6 +47,7 @@ func (t *describeCollectionTask) Execute(ctx context.Context) (err error) {
 		return err
 	}
 	aliases := t.core.meta.ListAliasesByID(coll.CollectionID)
+	log.Info("[remove me] collection fields num", zap.Int("num", len(coll.Fields)))
 	t.Rsp = convertModelToDesc(coll, aliases)
 	t.Rsp.DbName = t.Req.GetDbName()
 	return nil

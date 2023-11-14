@@ -489,6 +489,9 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 	// save checkpoints.
 	operators = append(operators, UpdateCheckPointOperator(segmentID, req.GetImporting(), req.GetCheckPoints()))
 
+	if Params.CommonCfg.EnableStorageV2.GetAsBool() {
+		operators = append(operators, UpdateStorageVersionOperator(segmentID, req.GetStorageVersion()))
+	}
 	// run all operator and update new segment info
 	err := s.meta.UpdateSegmentsInfo(operators...)
 	if err != nil {
@@ -814,6 +817,16 @@ func (s *Server) GetRecoveryInfoV2(ctx context.Context, req *datapb.GetRecoveryI
 			continue
 		}
 
+		if Params.CommonCfg.EnableStorageV2.GetAsBool() {
+			segmentInfos = append(segmentInfos, &datapb.SegmentInfo{
+				ID:            segment.ID,
+				PartitionID:   segment.PartitionID,
+				CollectionID:  segment.CollectionID,
+				InsertChannel: segment.InsertChannel,
+				NumOfRows:     segment.NumOfRows,
+			})
+			continue
+		}
 		binlogs := segment.GetBinlogs()
 		if len(binlogs) == 0 {
 			continue

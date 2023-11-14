@@ -77,3 +77,14 @@ func (ld *LoadFieldDataInfo) appendMMapDirPath(dir string) {
 
 	C.AppendMMapDirPath(ld.cLoadFieldDataInfo, cDir)
 }
+
+func (ld *LoadFieldDataInfo) appendUri(uri string) {
+	cUri := C.CString(uri)
+	defer C.free(unsafe.Pointer(cUri))
+	C.SetUri(ld.cLoadFieldDataInfo, cUri)
+}
+
+func (ld *LoadFieldDataInfo) appendStorageVersion(version int64) {
+	cVersion := C.int64_t(version)
+	C.SetStorageVersion(ld.cLoadFieldDataInfo, cVersion)
+}

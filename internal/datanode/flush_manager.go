@@ -19,10 +19,14 @@ package datanode
 import (
 	"context"
 	"fmt"
+	"math"
 	"path"
 	"strconv"
 	"sync"
 
+	"github.com/apache/arrow/go/v12/arrow"
+	"github.com/apache/arrow/go/v12/arrow/array"
+	"github.com/apache/arrow/go/v12/arrow/memory"
 	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
 	"go.uber.org/atomic"
@@ -31,6 +35,10 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
+	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	milvus_storage "github.com/milvus-io/milvus-storage/go/storage"
+	"github.com/milvus-io/milvus-storage/go/storage/options"
+	"github.com/milvus-io/milvus-storage/go/storage/schema"
 	"github.com/milvus-io/milvus/internal/datanode/allocator"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/etcdpb"
@@ -67,14 +75,21 @@ type flushManager interface {
 
 // segmentFlushPack contains result to save into meta
 type segmentFlushPack struct {
-	segmentID  UniqueID
-	insertLogs map[UniqueID]*datapb.Binlog
-	statsLogs  map[UniqueID]*datapb.Binlog
-	deltaLogs  []*datapb.Binlog
-	pos        *msgpb.MsgPosition
-	flushed    bool
-	dropped    bool
-	err        error // task execution error, if not nil, notify func should stop datanode
+	segmentID      UniqueID
+	insertLogs     map[UniqueID]*datapb.Binlog
+	statsLogs      map[UniqueID]*datapb.Binlog
+	deltaLogs      []*datapb.Binlog
+	pos            *msgpb.MsgPosition
+	flushed        bool
+	dropped        bool
+	err            error // task execution error, if not nil, notify func should stop datanode
+	storageVersion int64
+	deleteRec      array.RecordReader
+}
+
+type runner interface {
+	getFinishSignal() chan struct{}
+	init(f notifyMetaFunc, postFunc taskPostFunc, signal <-chan struct{})
 }
 
 // notifyMetaFunc notify meta to persistent flush result
@@ -100,7 +115,7 @@ type orderFlushQueue struct {
 	injectCh  chan *taskInjection
 
 	// MsgID => flushTask
-	working    *typeutil.ConcurrentMap[string, *flushTaskRunner]
+	working    *typeutil.ConcurrentMap[string, runner]
 	notifyFunc notifyMetaFunc
 
 	tailMut sync.Mutex
@@ -118,7 +133,7 @@ func newOrderFlushQueue(segID UniqueID, channel string, f notifyMetaFunc) *order
 		channel:    channel,
 		notifyFunc: f,
 		injectCh:   make(chan *taskInjection, 100),
-		working:    typeutil.NewConcurrentMap[string, *flushTaskRunner](),
+		working:    typeutil.NewConcurrentMap[string, runner](),
 	}
 	return q
 }
@@ -130,6 +145,27 @@ func (q *orderFlushQueue) init() {
 		q.tailCh = make(chan struct{})
 		close(q.tailCh)
 	})
+}
+
+func (q *orderFlushQueue) getFlushTaskRunnerV2(pos *msgpb.MsgPosition) *flushTaskRunnerV2 {
+	t, loaded := q.working.GetOrInsert(getSyncTaskID(pos), newFlushTaskRunnerV2(q.segmentID, q.injectCh))
+	// not loaded means the task runner is new, do initializtion
+	if !loaded {
+		// take over injection if task queue is handling it
+		q.injectMut.Lock()
+		q.runningTasks++
+		q.injectMut.Unlock()
+		// add task to tail
+		q.tailMut.Lock()
+		t.init(q.notifyFunc, q.postTask, q.tailCh)
+		q.tailCh = t.getFinishSignal()
+		q.tailMut.Unlock()
+		log.Info("new flush task runner created and initialized",
+			zap.Int64("segmentID", q.segmentID),
+			zap.String("pos message ID", string(pos.GetMsgID())),
+		)
+	}
+	return t.(*flushTaskRunnerV2)
 }
 
 func (q *orderFlushQueue) getFlushTaskRunner(pos *msgpb.MsgPosition) *flushTaskRunner {
@@ -144,14 +180,14 @@ func (q *orderFlushQueue) getFlushTaskRunner(pos *msgpb.MsgPosition) *flushTaskR
 		// add task to tail
 		q.tailMut.Lock()
 		t.init(q.notifyFunc, q.postTask, q.tailCh)
-		q.tailCh = t.finishSignal
+		q.tailCh = t.getFinishSignal()
 		q.tailMut.Unlock()
 		log.Info("new flush task runner created and initialized",
 			zap.Int64("segmentID", q.segmentID),
 			zap.String("pos message ID", string(pos.GetMsgID())),
 		)
 	}
-	return t
+	return t.(*flushTaskRunner)
 }
 
 // postTask handles clean up work after a task is done
@@ -190,6 +226,16 @@ func (q *orderFlushQueue) enqueueInsertFlush(task flushInsertTask, binlogs, stat
 // enqueueDelBuffer put delete buffer data into queue
 func (q *orderFlushQueue) enqueueDelFlush(task flushDeleteTask, deltaLogs *DelDataBuf, pos *msgpb.MsgPosition) {
 	q.getFlushTaskRunner(pos).runFlushDel(task, deltaLogs)
+}
+
+// enqueueInsertBuffer put insert buffer data into queue
+func (q *orderFlushQueue) enqueueInsertFlushV2(task flushInsertTask, flushed bool, dropped bool, pos *msgpb.MsgPosition) {
+	q.getFlushTaskRunnerV2(pos).runFlushInsert(task, flushed, dropped, pos)
+}
+
+// enqueueDelBuffer put delete buffer data into queue
+func (q *orderFlushQueue) enqueueDelFlushV2(task flushDeleteTask, pos *msgpb.MsgPosition) {
+	q.getFlushTaskRunnerV2(pos).runFlushDel(task)
 }
 
 // inject performs injection for current task queue
@@ -268,6 +314,195 @@ type dropHandler struct {
 	flushAndDrop flushAndDropFunc
 	allFlushed   chan struct{}
 	packs        []*segmentFlushPack
+}
+
+type rendezvousFlushManagerV2 struct {
+	*rendezvousFlushManager
+	arrowSchemas *typeutil.ConcurrentMap[UniqueID, *arrow.Schema]
+}
+
+// TODO: make it singleton
+var pool memory.Allocator = memory.NewGoAllocator()
+
+func (m *rendezvousFlushManagerV2) flushBufferData(data *BufferData, segmentID UniqueID, flushed bool, dropped bool, pos *msgpb.MsgPosition) (*storage.PrimaryKeyStats, error) {
+	// convert to record reader
+	collID, _, meta, err := m.getSegmentMeta(segmentID, pos)
+	if err != nil {
+		return nil, err
+	}
+
+	arrowSchema, err := m.getOrCreateaArrowSchema(collID, meta.Schema)
+	if err != nil {
+		return nil, err
+	}
+	b := array.NewRecordBuilder(pool, arrowSchema)
+	defer b.Release()
+
+	if err = buildRecord(b, data, meta.Schema.Fields); err != nil {
+		return nil, err
+	}
+
+	rec := b.NewRecord()
+	defer rec.Release()
+
+	itr, err := array.NewRecordReader(arrowSchema, []arrow.Record{rec})
+	if err != nil {
+		return nil, err
+	}
+	defer itr.Release()
+
+	inCodec := storage.NewInsertCodecWithSchema(meta)
+	// FIXME: we dont combine all stats log when flushed is true for now
+	pkStatsBlob, stats, err := m.serializePkStatsLog(segmentID, false, data, inCodec)
+	if err != nil {
+		return nil, err
+	}
+	if pkStatsBlob != nil {
+		statsID, err := m.AllocOne()
+		if err != nil {
+			return nil, err
+		}
+		pkStatsBlob.Key = strconv.Itoa(int(statsID))
+	}
+
+	itr.Retain()
+	space, err := m.createSpaceIfNotExist(segmentID, meta, arrowSchema)
+	if err != nil {
+		return nil, err
+	}
+	m.handleInsertTask(segmentID, &flushBufferInsertTask2{
+		space:     space,
+		reader:    itr,
+		statsBlob: pkStatsBlob,
+		flush:     flushed,
+	}, flushed, dropped, pos)
+
+	return stats, nil
+}
+
+func (m *rendezvousFlushManagerV2) createSpaceIfNotExist(segmentID int64, meta *etcdpb.CollectionMeta, arrowSchema *arrow.Schema) (*milvus_storage.Space, error) {
+	space, ok := m.getSpace(segmentID)
+	if !ok {
+		url := fmt.Sprintf("s3://%s:%s@%s/%d?endpoint_override=%s", Params.MinioCfg.AccessKeyID.GetValue(), Params.MinioCfg.SecretAccessKey.GetValue(), Params.MinioCfg.BucketName.GetValue(), segmentID, Params.MinioCfg.Address.GetValue())
+		pkSchema, err := typeutil.GetPrimaryFieldSchema(meta.Schema)
+		if err != nil {
+			return nil, err
+		}
+		vecSchema, err := typeutil.GetVectorFieldSchema(meta.Schema)
+		if err != nil {
+			return nil, err
+		}
+		space, err = milvus_storage.Open(url, options.NewSpaceOptionBuilder().SetSchema(schema.NewSchema(arrowSchema, &schema.SchemaOptions{PrimaryColumn: pkSchema.Name, VectorColumn: vecSchema.Name, VersionColumn: common.TimeStampFieldName})).Build())
+		if err != nil {
+			return nil, err
+		}
+		m.setSpace(segmentID, space)
+	}
+	return space, nil
+}
+
+func (m *rendezvousFlushManagerV2) getOrCreateaArrowSchema(collectionID UniqueID, schema *schemapb.CollectionSchema) (*arrow.Schema, error) {
+	var err error
+	arrowSchema, ok := m.arrowSchemas.Get(collectionID)
+	if !ok {
+		fields := schema.Fields
+		arrowSchema, err = convertToArrowSchema(fields)
+		if err != nil {
+			return nil, err
+		}
+		m.arrowSchemas.Insert(collectionID, arrowSchema)
+	}
+	return arrowSchema, nil
+}
+
+func (m *rendezvousFlushManagerV2) getFlushQueue(segmentID UniqueID) *orderFlushQueue {
+	newQueue := newOrderFlushQueue(segmentID, m.getChannelName(), m.notifyFunc)
+	queue, _ := m.dispatcher.GetOrInsert(segmentID, newQueue)
+	queue.init()
+	return queue
+}
+func (m *rendezvousFlushManagerV2) handleDeleteTask(segmentID UniqueID, task flushDeleteTask, pos *msgpb.MsgPosition) {
+	m.getFlushQueue(segmentID).enqueueDelFlushV2(task, pos)
+}
+
+func (m *rendezvousFlushManagerV2) handleInsertTask(segmentID UniqueID, task flushInsertTask, flushed bool, dropped bool, pos *msgpb.MsgPosition) {
+	m.getFlushQueue(segmentID).enqueueInsertFlushV2(task, flushed, dropped, pos)
+}
+
+func (m *rendezvousFlushManagerV2) flushDelData(data *DelDataBuf, segmentID UniqueID,
+	pos *msgpb.MsgPosition) error {
+	if data == nil || data.delData == nil {
+		m.handleDeleteTask(segmentID, &flushBufferDeleteTask2{}, pos)
+		return nil
+	}
+
+	_, _, meta, err := m.getSegmentMeta(segmentID, pos)
+	if err != nil {
+		return err
+	}
+
+	fields := make([]*schemapb.FieldSchema, 0)
+	pkField := getPKField(meta)
+	fields = append(fields, pkField)
+	tsField := &schemapb.FieldSchema{
+		FieldID:  common.TimeStampField,
+		Name:     common.TimeStampFieldName,
+		DataType: schemapb.DataType_Int64,
+	}
+	fields = append(fields, tsField)
+
+	schema, err := convertToArrowSchema(fields)
+	if err != nil {
+		return err
+	}
+
+	b := array.NewRecordBuilder(pool, schema)
+	defer b.Release()
+
+	switch pkField.DataType {
+	case schemapb.DataType_Int64:
+		pb := b.Field(0).(*array.Int64Builder)
+		for _, pk := range data.delData.Pks {
+			pb.Append(pk.GetValue().(int64))
+		}
+	case schemapb.DataType_VarChar:
+		pb := b.Field(0).(*array.StringBuilder)
+		for _, pk := range data.delData.Pks {
+			pb.Append(pk.GetValue().(string))
+		}
+	default:
+		return fmt.Errorf("unexpected pk type %v", pkField.DataType)
+	}
+
+	for _, ts := range data.delData.Tss {
+		b.Field(1).(*array.Int64Builder).Append(int64(ts))
+	}
+
+	rec := b.NewRecord()
+	defer rec.Release()
+
+	reader, err := array.NewRecordReader(schema, []arrow.Record{rec})
+	if err != nil {
+		return err
+	}
+
+	space, err := m.createSpaceIfNotExist(segmentID, meta, schema)
+	if err != nil {
+		return err
+	}
+	m.handleDeleteTask(segmentID, &flushBufferDeleteTask2{
+		space: space,
+		rec:   reader,
+	}, pos)
+
+	return nil
+}
+
+func NewRendezvousFlushManagerV2(allocator allocator.Allocator, cm storage.ChunkManager, channel Channel, f notifyMetaFunc, drop flushAndDropFunc) *rendezvousFlushManagerV2 {
+	return &rendezvousFlushManagerV2{
+		rendezvousFlushManager: NewRendezvousFlushManager(allocator, cm, channel, f, drop),
+		arrowSchemas:           typeutil.NewConcurrentMap[UniqueID, *arrow.Schema](),
+	}
 }
 
 // rendezvousFlushManager makes sure insert & del buf all flushed
@@ -427,6 +662,241 @@ func (m *rendezvousFlushManager) serializePkStatsLog(segmentID int64, flushed bo
 func (m *rendezvousFlushManager) isFull() bool {
 	return getOrCreateFlushTaskCounter().getOrZero(m.getChannelName()) >=
 		int32(Params.DataNodeCfg.MaxParallelSyncTaskNum.GetAsInt())
+}
+
+func buildRecord(b *array.RecordBuilder, data *BufferData, fields []*schemapb.FieldSchema) error {
+	if data == nil || data.buffer == nil {
+		log.Info("no buffer data to flush")
+		return nil
+	}
+	for i, field := range fields {
+		fBuilder := b.Field(i)
+		switch field.DataType {
+		case schemapb.DataType_Bool:
+			fBuilder.(*array.BooleanBuilder).AppendValues(data.buffer.Data[field.FieldID].(*storage.BoolFieldData).Data, nil)
+		case schemapb.DataType_Int8:
+			fBuilder.(*array.Int8Builder).AppendValues(data.buffer.Data[field.FieldID].(*storage.Int8FieldData).Data, nil)
+		case schemapb.DataType_Int16:
+			fBuilder.(*array.Int16Builder).AppendValues(data.buffer.Data[field.FieldID].(*storage.Int16FieldData).Data, nil)
+		case schemapb.DataType_Int32:
+			fBuilder.(*array.Int32Builder).AppendValues(data.buffer.Data[field.FieldID].(*storage.Int32FieldData).Data, nil)
+		case schemapb.DataType_Int64:
+			fBuilder.(*array.Int64Builder).AppendValues(data.buffer.Data[field.FieldID].(*storage.Int64FieldData).Data, nil)
+		case schemapb.DataType_Float:
+			fBuilder.(*array.Float32Builder).AppendValues(data.buffer.Data[field.FieldID].(*storage.FloatFieldData).Data, nil)
+		case schemapb.DataType_Double:
+			fBuilder.(*array.Float64Builder).AppendValues(data.buffer.Data[field.FieldID].(*storage.DoubleFieldData).Data, nil)
+		case schemapb.DataType_VarChar, schemapb.DataType_String:
+			fBuilder.(*array.StringBuilder).AppendValues(data.buffer.Data[field.FieldID].(*storage.StringFieldData).Data, nil)
+		case schemapb.DataType_Array:
+			appendListValues(fBuilder.(*array.ListBuilder), data.buffer.Data[field.FieldID].(*storage.ArrayFieldData))
+		case schemapb.DataType_JSON:
+			fBuilder.(*array.BinaryBuilder).AppendValues(data.buffer.Data[field.FieldID].(*storage.JSONFieldData).Data, nil)
+		case schemapb.DataType_BinaryVector:
+			vecData := data.buffer.Data[field.FieldID].(*storage.BinaryVectorFieldData)
+			for i := 0; i < len(vecData.Data); i += vecData.Dim / 8 {
+				fBuilder.(*array.FixedSizeBinaryBuilder).Append(vecData.Data[i : i+vecData.Dim/8])
+			}
+		case schemapb.DataType_FloatVector:
+			vecData := data.buffer.Data[field.FieldID].(*storage.FloatVectorFieldData)
+			// lb := fBuilder.(*array.FixedSizeListBuilder)
+			// vb := lb.ValueBuilder().(*array.Float32Builder)
+			// for i := 0; i < len(vecData.Data); i += vecData.Dim {
+			// 	lb.Append(true)
+			// 	vb.AppendValues(vecData.Data[i:i+vecData.Dim], nil)
+			// }
+			builder := fBuilder.(*array.FixedSizeBinaryBuilder)
+			dim := vecData.Dim
+			data := vecData.Data
+			byteLength := dim * 4
+			length := len(data) / dim
+
+			builder.Reserve(length)
+			bytesData := make([]byte, byteLength)
+			for i := 0; i < length; i++ {
+				vec := data[i*dim : (i+1)*dim]
+				for j := range vec {
+					bytes := math.Float32bits(vec[j])
+					common.Endian.PutUint32(bytesData[j*4:], bytes)
+				}
+				builder.Append(bytesData)
+			}
+		default:
+			return fmt.Errorf("unknown type %v", field.DataType)
+		}
+	}
+
+	return nil
+}
+
+func appendListValues(builder *array.ListBuilder, data *storage.ArrayFieldData) error {
+	vb := builder.ValueBuilder()
+	switch data.ElementType {
+	case schemapb.DataType_Bool:
+		for _, data := range data.Data {
+			builder.Append(true)
+			vb.(*array.BooleanBuilder).AppendValues(data.GetBoolData().Data, nil)
+		}
+	case schemapb.DataType_Int8:
+		for _, data := range data.Data {
+			builder.Append(true)
+			vb.(*array.Int8Builder).AppendValues(castIntArray[int8](data.GetIntData().Data), nil)
+		}
+	case schemapb.DataType_Int16:
+		for _, data := range data.Data {
+			builder.Append(true)
+			vb.(*array.Int16Builder).AppendValues(castIntArray[int16](data.GetIntData().Data), nil)
+		}
+	case schemapb.DataType_Int32:
+		for _, data := range data.Data {
+			builder.Append(true)
+			vb.(*array.Int32Builder).AppendValues(data.GetIntData().Data, nil)
+		}
+	case schemapb.DataType_Int64:
+		for _, data := range data.Data {
+			builder.Append(true)
+			vb.(*array.Int64Builder).AppendValues(data.GetLongData().Data, nil)
+		}
+	case schemapb.DataType_Float:
+		for _, data := range data.Data {
+			builder.Append(true)
+			vb.(*array.Float32Builder).AppendValues(data.GetFloatData().Data, nil)
+		}
+	case schemapb.DataType_Double:
+		for _, data := range data.Data {
+			builder.Append(true)
+			vb.(*array.Float64Builder).AppendValues(data.GetDoubleData().Data, nil)
+		}
+	case schemapb.DataType_String, schemapb.DataType_VarChar:
+		for _, data := range data.Data {
+			builder.Append(true)
+			vb.(*array.StringBuilder).AppendValues(data.GetStringData().Data, nil)
+		}
+
+	default:
+		return fmt.Errorf("unexpected type %v", data.ElementType)
+	}
+	return nil
+}
+
+func castIntArray[T int8 | int16](nums []int32) []T {
+	ret := make([]T, 0, len(nums))
+	for _, n := range nums {
+		ret = append(ret, T(n))
+	}
+	return ret
+}
+
+func convertToArrowSchema(fields []*schemapb.FieldSchema) (*arrow.Schema, error) {
+	arrowFields := make([]arrow.Field, 0, len(fields))
+	for _, field := range fields {
+		switch field.DataType {
+		case schemapb.DataType_Bool:
+			arrowFields = append(arrowFields, arrow.Field{
+				Name: field.Name,
+				Type: arrow.FixedWidthTypes.Boolean,
+			})
+		case schemapb.DataType_Int8:
+			arrowFields = append(arrowFields, arrow.Field{
+				Name: field.Name,
+				Type: arrow.PrimitiveTypes.Int8,
+			})
+		case schemapb.DataType_Int16:
+			arrowFields = append(arrowFields, arrow.Field{
+				Name: field.Name,
+				Type: arrow.PrimitiveTypes.Int16,
+			})
+		case schemapb.DataType_Int32:
+			arrowFields = append(arrowFields, arrow.Field{
+				Name: field.Name,
+				Type: arrow.PrimitiveTypes.Int32,
+			})
+		case schemapb.DataType_Int64:
+			arrowFields = append(arrowFields, arrow.Field{
+				Name: field.Name,
+				Type: arrow.PrimitiveTypes.Int64,
+			})
+		case schemapb.DataType_Float:
+			arrowFields = append(arrowFields, arrow.Field{
+				Name: field.Name,
+				Type: arrow.PrimitiveTypes.Float32,
+			})
+		case schemapb.DataType_Double:
+			arrowFields = append(arrowFields, arrow.Field{
+				Name: field.Name,
+				Type: arrow.PrimitiveTypes.Float64,
+			})
+		case schemapb.DataType_String, schemapb.DataType_VarChar:
+			arrowFields = append(arrowFields, arrow.Field{
+				Name: field.Name,
+				Type: arrow.BinaryTypes.String,
+			})
+		case schemapb.DataType_Array:
+			elemType, err := convertToArrowType(field.ElementType)
+			if err != nil {
+				return nil, err
+			}
+			arrowFields = append(arrowFields, arrow.Field{
+				Name: field.Name,
+				Type: arrow.ListOf(elemType),
+			})
+		case schemapb.DataType_JSON:
+			arrowFields = append(arrowFields, arrow.Field{
+				Name: field.Name,
+				Type: arrow.BinaryTypes.Binary,
+			})
+		case schemapb.DataType_BinaryVector:
+			dim, err := storage.GetDimFromParams(field.TypeParams)
+			if err != nil {
+				return nil, err
+			}
+			arrowFields = append(arrowFields, arrow.Field{
+				Name: field.Name,
+				Type: &arrow.FixedSizeBinaryType{ByteWidth: dim / 8},
+			})
+		case schemapb.DataType_FloatVector:
+			dim, err := storage.GetDimFromParams(field.TypeParams)
+			if err != nil {
+				return nil, err
+			}
+			// arrowFields = append(arrowFields, arrow.Field{
+			// 	Name: field.Name,
+			// 	Type: arrow.FixedSizeListOf(int32(dim), arrow.PrimitiveTypes.Float32),
+			// })
+			arrowFields = append(arrowFields, arrow.Field{
+				Name: field.Name,
+				Type: &arrow.FixedSizeBinaryType{ByteWidth: dim * 4},
+			})
+		default:
+			return nil, fmt.Errorf("unknown type %v", field.DataType)
+
+		}
+	}
+
+	return arrow.NewSchema(arrowFields, nil), nil
+}
+
+func convertToArrowType(dataType schemapb.DataType) (arrow.DataType, error) {
+	switch dataType {
+	case schemapb.DataType_Bool:
+		return arrow.FixedWidthTypes.Boolean, nil
+	case schemapb.DataType_Int8:
+		return arrow.PrimitiveTypes.Int8, nil
+	case schemapb.DataType_Int16:
+		return arrow.PrimitiveTypes.Int16, nil
+	case schemapb.DataType_Int32:
+		return arrow.PrimitiveTypes.Int32, nil
+	case schemapb.DataType_Int64:
+		return arrow.PrimitiveTypes.Int64, nil
+	case schemapb.DataType_Float:
+		return arrow.PrimitiveTypes.Float32, nil
+	case schemapb.DataType_Double:
+		return arrow.PrimitiveTypes.Float64, nil
+	case schemapb.DataType_String, schemapb.DataType_VarChar:
+		return arrow.BinaryTypes.String, nil
+	default:
+		return nil, fmt.Errorf("unexpected type %v", dataType)
+	}
 }
 
 // flushBufferData notifies flush manager insert buffer data.
@@ -692,6 +1162,18 @@ func (t *flushBufferInsertTask) flushInsertData() error {
 	return nil
 }
 
+type flushBufferInsertTask2 struct {
+	space     *milvus_storage.Space
+	reader    array.RecordReader
+	statsBlob *storage.Blob
+	flush     bool
+}
+
+func (t *flushBufferInsertTask2) flushInsertData() error {
+	// we just use this task to pass data
+	return nil
+}
+
 type flushBufferDeleteTask struct {
 	storage.ChunkManager
 	data map[string][]byte
@@ -712,6 +1194,16 @@ func (t *flushBufferDeleteTask) flushDeleteData() error {
 		}
 		return err
 	}
+	return nil
+}
+
+type flushBufferDeleteTask2 struct {
+	space *milvus_storage.Space
+	rec   array.RecordReader
+}
+
+func (t *flushBufferDeleteTask2) flushDeleteData() error {
+	// we just use this task to pass data
 	return nil
 }
 
@@ -844,6 +1336,111 @@ func dropVirtualChannelFunc(dsService *dataSyncService, opts ...retry.Option) fl
 			dsService.channel.segmentFlushed(segID)
 			dsService.flushingSegCache.Remove(segID)
 		}
+	}
+}
+
+func flushNotifyFunc2(dsService *dataSyncService, opts ...retry.Option) notifyMetaFunc {
+	return func(pack *segmentFlushPack) {
+		if pack.err != nil {
+			log.Error("flush pack with error, DataNode quit now", zap.Error(pack.err))
+			panic(pack.err)
+		}
+		var checkPoints = []*datapb.CheckPoint{}
+		// only current segment checkpoint info,
+		updates, _ := dsService.channel.getSegmentStatisticsUpdates(pack.segmentID)
+		checkPoints = append(checkPoints, &datapb.CheckPoint{
+			SegmentID: pack.segmentID,
+			// this shouldn't be used because we are not sure this is aligned
+			NumOfRows: updates.GetNumRows(),
+			Position:  pack.pos,
+		})
+
+		startPos := dsService.channel.listNewSegmentsStartPositions()
+
+		log.Info("SaveBinlogPath",
+			zap.Int64("SegmentID", pack.segmentID),
+			zap.Int64("CollectionID", dsService.collectionID),
+			zap.Any("startPos", startPos),
+			zap.Any("checkPoints", checkPoints),
+			zap.String("vChannelName", dsService.vchannelName),
+		)
+
+		req := &datapb.SaveBinlogPathsRequest{
+			Base: commonpbutil.NewMsgBase(
+				commonpbutil.WithMsgType(0),
+				commonpbutil.WithMsgID(0),
+				commonpbutil.WithSourceID(dsService.serverID),
+			),
+			SegmentID:    pack.segmentID,
+			CollectionID: dsService.collectionID,
+
+			CheckPoints: checkPoints,
+
+			StartPositions: startPos,
+			Flushed:        pack.flushed,
+			Dropped:        pack.dropped,
+			Channel:        dsService.vchannelName,
+			StorageVersion: pack.storageVersion,
+		}
+		err := retry.Do(context.Background(), func() error {
+			err := dsService.broker.SaveBinlogPaths(context.Background(), req)
+
+			// meta error, datanode handles a virtual channel does not belong here
+			if errors.IsAny(err, merr.ErrSegmentNotFound, merr.ErrChannelNotFound) {
+				log.Warn("meta error found, skip sync and start to drop virtual channel", zap.String("channel", dsService.vchannelName))
+				return nil
+			}
+
+			if err != nil {
+				return err
+			}
+
+			dsService.channel.transferNewSegments(lo.Map(startPos, func(pos *datapb.SegmentStartPosition, _ int) UniqueID {
+				return pos.GetSegmentID()
+			}))
+			return nil
+		}, opts...)
+		if err != nil {
+			log.Warn("failed to SaveBinlogPaths",
+				zap.Int64("segmentID", pack.segmentID),
+				zap.Error(err))
+			// TODO change to graceful stop
+			panic(err)
+		}
+		if pack.dropped {
+			dsService.channel.removeSegments(pack.segmentID)
+		} else if pack.flushed {
+			dsService.channel.segmentFlushed(pack.segmentID)
+		}
+
+		if dsService.flushListener != nil {
+			dsService.flushListener <- pack
+		}
+		dsService.flushingSegCache.Remove(req.GetSegmentID())
+		dsService.channel.evictHistoryInsertBuffer(req.GetSegmentID(), pack.pos)
+		dsService.channel.evictHistoryDeleteBuffer(req.GetSegmentID(), pack.pos)
+		segment := dsService.channel.getSegment(req.GetSegmentID())
+		dsService.channel.updateSingleSegmentMemorySize(req.GetSegmentID())
+		segment.setSyncing(false)
+		// dsService.channel.saveBinlogPath(fieldStats)
+	}
+}
+
+func getStorageVersion(dsService *dataSyncService, segmentID int64) func() (int64, error) {
+	return func() (int64, error) {
+		infos, err := dsService.broker.GetSegmentInfo(context.Background(), []int64{segmentID})
+		if err != nil {
+			return -1, nil
+		}
+		return infos[0].StorageVersion, nil
+	}
+}
+
+func saveStorageVersion(dsService *dataSyncService, segmentID int64, notifyFunc func(segment *segmentFlushPack)) func(*segmentFlushPack, int64) error {
+	return func(pack *segmentFlushPack, version int64) error {
+		pack.storageVersion = version
+		notifyFunc(pack)
+		return nil
 	}
 }
 

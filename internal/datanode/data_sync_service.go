@@ -348,13 +348,21 @@ func getServiceWithChannel(initCtx context.Context, node *DataNode, info *datapb
 	}
 
 	// init flushManager
-	flushManager := NewRendezvousFlushManager(
-		node.allocator,
-		node.chunkManager,
-		channel,
-		flushNotifyFunc(ds, retry.Attempts(50)), dropVirtualChannelFunc(ds),
-	)
-	ds.flushManager = flushManager
+	if Params.CommonCfg.EnableStorageV2.GetAsBool() {
+		ds.flushManager = NewRendezvousFlushManagerV2(node.allocator, node.chunkManager, channel,
+			flushNotifyFunc2(ds, retry.Attempts(50)), dropVirtualChannelFunc(ds))
+	} else {
+		ds.flushManager = NewRendezvousFlushManager(node.allocator, node.chunkManager, channel,
+			flushNotifyFunc(ds, retry.Attempts(50)), dropVirtualChannelFunc(ds))
+	}
+
+	// flushManager := NewRendezvousFlushManager(
+	// 	node.allocator,
+	// 	node.chunkManager,
+	// 	channel,
+	// 	flushNotifyFunc(ds, retry.Attempts(50)), dropVirtualChannelFunc(ds),
+	// )
+	// ds.flushManager = flushManager
 
 	// init flowgraph
 	fg := flowgraph.NewTimeTickedFlowGraph(node.ctx)
@@ -381,7 +389,7 @@ func getServiceWithChannel(initCtx context.Context, node *DataNode, info *datapb
 		flushCh,
 		resendTTCh,
 		delBufferManager,
-		flushManager,
+		ds.flushManager,
 		node.segmentCache,
 		node.timeTickSender,
 		config,
@@ -390,7 +398,7 @@ func getServiceWithChannel(initCtx context.Context, node *DataNode, info *datapb
 		return nil, err
 	}
 
-	deleteNode, err := newDeleteNode(node.ctx, flushManager, delBufferManager, node.clearSignal, config)
+	deleteNode, err := newDeleteNode(node.ctx, ds.flushManager, delBufferManager, node.clearSignal, config)
 	if err != nil {
 		return nil, err
 	}
