@@ -258,7 +258,7 @@ func (g *rowCountBasedPlanGenerator) generatePlans() []SegmentAssignPlan {
 		nodesWithRowCount = append(nodesWithRowCount, &nodeWithRowCount{
 			id:       node,
 			count:    rowCount,
-			segments: segments,
+			segments: append([]*meta.Segment{}, segments...),
 		})
 	}
 
@@ -335,7 +335,7 @@ func (g *segmentCountBasedPlanGenerator) generatePlans() []SegmentAssignPlan {
 		nodesWithSegmentCount = append(nodesWithSegmentCount, &nodeWithSegmentCount{
 			id:       node,
 			count:    len(nodeSegments[node]),
-			segments: segments,
+			segments: append([]*meta.Segment{}, segments...),
 		})
 	}
 

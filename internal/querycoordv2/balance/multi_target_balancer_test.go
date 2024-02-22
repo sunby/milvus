@@ -1,7 +1,11 @@
 package balance
 
 import (
+	"encoding/csv"
+	"fmt"
 	"math/rand"
+	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -350,6 +354,146 @@ func (suite *MultiTargetBalancerTestSuite) TestPlanNoConflict() {
 		segmentSet.Insert(p.Segment.ID)
 		suite.NotEqual(p.From, p.To)
 	}
+}
+
+func (suite *MultiTargetBalancerTestSuite) TestWithComplicateDistribution() {
+	f, err := os.OpenFile("/home/sunby/Downloads/8a8c-distribution.csv", os.O_RDONLY, 0644)
+	suite.NoError(err)
+	reader := csv.NewReader(f)
+	records, err := reader.ReadAll()
+	suite.NoError(err)
+
+	collectionServerSegment := make(map[int64]map[int64][]*meta.Segment)
+	serverSegmentCount := make(map[int64]int)
+	serverRowCount := make(map[int64]int64)
+
+	globalServerSegment := make(map[int64][]*meta.Segment)
+
+	for _, r := range records {
+		// serverID,collectionID,partitionID,segmentID,channelName,rowNum,state
+		serverID, err := strconv.ParseInt(r[0], 10, 64)
+		suite.NoError(err)
+		collectionID, err := strconv.ParseInt(r[1], 10, 64)
+		suite.NoError(err)
+		segmentID, err := strconv.ParseInt(r[3], 10, 64)
+		suite.NoError(err)
+		rowNum, err := strconv.ParseInt(r[5], 10, 64)
+		suite.NoError(err)
+		state := r[6]
+
+		// ignore growing for now
+		if state == "Growing" {
+			continue
+		}
+
+		if _, ok := collectionServerSegment[collectionID]; !ok {
+			collectionServerSegment[collectionID] = make(map[int64][]*meta.Segment)
+		}
+		collectionServerSegment[collectionID][serverID] = append(collectionServerSegment[collectionID][serverID],
+			&meta.Segment{SegmentInfo: &datapb.SegmentInfo{
+				ID:        segmentID,
+				NumOfRows: rowNum,
+			}},
+		)
+
+		globalServerSegment[serverID] = append(globalServerSegment[serverID],
+			&meta.Segment{SegmentInfo: &datapb.SegmentInfo{
+				ID:        segmentID,
+				NumOfRows: rowNum,
+			}},
+		)
+
+		serverSegmentCount[serverID]++
+		serverRowCount[serverID] += rowNum
+	}
+
+	// print stats before balance
+
+	fmt.Printf("global stats: \n")
+	for serverID, segmentCount := range serverSegmentCount {
+		fmt.Printf("server %d, segment count: %d\n", serverID, segmentCount)
+	}
+	for serverID, rowCount := range serverRowCount {
+		fmt.Printf("server %d, row count: %d\n", serverID, rowCount)
+	}
+
+	fmt.Println("================================")
+	fmt.Println("collection level stats: ")
+	for collectionID, serverSegments := range collectionServerSegment {
+		fmt.Printf("collection %d: \n", collectionID)
+		for serverID, segments := range serverSegments {
+			fmt.Printf("server %d, segment count: %d\n", serverID, len(segments))
+		}
+	}
+
+	for collectionID, serverSegments := range collectionServerSegment {
+		fmt.Printf("collection %d: \n", collectionID)
+		for serverID, segments := range serverSegments {
+			sum := 0
+			for _, s := range segments {
+				sum += int(s.NumOfRows)
+			}
+			fmt.Printf("server %d, row count: %d\n", serverID, sum)
+		}
+	}
+
+	// balance
+	allPlans := make([]SegmentAssignPlan, 0)
+	collectionServerSegmentsAfterBalance := make(map[int64]map[int64][]*meta.Segment)
+	for collectionID, serverSegments := range collectionServerSegment {
+		global := make(map[int64][]*meta.Segment)
+		for serverID := range serverSegments {
+			global[serverID] = globalServerSegment[serverID]
+		}
+		balancer := &MultiTargetBalancer{}
+		plans := balancer.genPlanByDistributions(serverSegments, global)
+		for _, p := range plans {
+			fmt.Printf("segment %d, from %d to %d\n", p.Segment.ID, p.From, p.To)
+		}
+		gen := &basePlanGenerator{}
+		afterBalance := gen.applyPlans(serverSegments, plans)
+		collectionServerSegmentsAfterBalance[collectionID] = afterBalance
+		allPlans = append(allPlans, plans...)
+	}
+	gen := &basePlanGenerator{}
+	globalAfterBalance := gen.applyPlans(globalServerSegment, allPlans)
+
+	fmt.Println("================================")
+	fmt.Printf("generate %d plans\n", len(allPlans))
+	fmt.Printf("global stats after balance: \n")
+
+	for serverID, segments := range globalAfterBalance {
+		fmt.Printf("server %d, segment count: %d\n", serverID, len(segments))
+	}
+
+	for serverID, segments := range globalAfterBalance {
+		sum := 0
+		for _, s := range segments {
+			sum += int(s.NumOfRows)
+		}
+		fmt.Printf("server %d, row count: %d\n", serverID, sum)
+	}
+
+	fmt.Println("================================")
+	fmt.Println("collection level stats: ")
+	for collectionID, serverSegments := range collectionServerSegmentsAfterBalance {
+		fmt.Printf("collection %d: \n", collectionID)
+		for serverID, segments := range serverSegments {
+			fmt.Printf("server %d, segment count: %d\n", serverID, len(segments))
+		}
+	}
+
+	for collectionID, serverSegments := range collectionServerSegmentsAfterBalance {
+		fmt.Printf("collection %d: \n", collectionID)
+		for serverID, segments := range serverSegments {
+			sum := 0
+			for _, s := range segments {
+				sum += int(s.NumOfRows)
+			}
+			fmt.Printf("server %d, row count: %d\n", serverID, sum)
+		}
+	}
+
 }
 
 func TestMultiTargetBalancerTestSuite(t *testing.T) {

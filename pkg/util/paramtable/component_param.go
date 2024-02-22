@@ -1521,7 +1521,7 @@ func (p *queryCoordConfig) init(base *BaseTable) {
 	p.SegmentCountMaxSteps = ParamItem{
 		Key:          "queryCoord.segmentCountMaxSteps",
 		Version:      "2.3.0",
-		DefaultValue: "50",
+		DefaultValue: "500",
 		PanicIfEmpty: true,
 		Doc:          "segment count based plan generator max steps",
 		Export:       true,
@@ -1531,7 +1531,7 @@ func (p *queryCoordConfig) init(base *BaseTable) {
 	p.RowCountMaxSteps = ParamItem{
 		Key:          "queryCoord.rowCountMaxSteps",
 		Version:      "2.3.0",
-		DefaultValue: "50",
+		DefaultValue: "500",
 		PanicIfEmpty: true,
 		Doc:          "segment count based plan generator max steps",
 		Export:       true,
@@ -1541,7 +1541,7 @@ func (p *queryCoordConfig) init(base *BaseTable) {
 	p.RandomMaxSteps = ParamItem{
 		Key:          "queryCoord.randomMaxSteps",
 		Version:      "2.3.0",
-		DefaultValue: "10",
+		DefaultValue: "1000",
 		PanicIfEmpty: true,
 		Doc:          "segment count based plan generator max steps",
 		Export:       true,
@@ -1600,7 +1600,7 @@ func (p *queryCoordConfig) init(base *BaseTable) {
 	p.BalanceCostThreshold = ParamItem{
 		Key:          "queryCoord.balanceCostThreshold",
 		Version:      "2.3.5",
-		DefaultValue: "0.001",
+		DefaultValue: "0.0001",
 		PanicIfEmpty: true,
 		Doc:          "the threshold of balance cost",
 		Export:       true,
