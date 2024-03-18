@@ -84,9 +84,10 @@ class ColumnBase {
 
         size_ = size;
         cap_size_ = size;
-        LOG_ERROR("cap_size_+padding = {}, capsize {} ",
+        LOG_ERROR("cap_size_+padding = {}, capsize {} , fd {}",
                   cap_size_ + padding_,
-                  cap_size_)
+                  cap_size_,
+                  file.Descriptor());
         data_ = static_cast<char*>(mmap(nullptr,
                                         cap_size_ + padding_,
                                         PROT_READ,
@@ -94,8 +95,9 @@ class ColumnBase {
                                         file.Descriptor(),
                                         0));
         AssertInfo(data_ != MAP_FAILED,
-                   "failed to create file-backed map, err: {}",
-                   strerror(errno));
+                   "failed to create file-backed map, err: {}, errno: {}",
+                   strerror(errno),
+                   errno);
         madvise(data_, cap_size_ + padding_, MADV_WILLNEED);
     }
 
