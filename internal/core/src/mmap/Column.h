@@ -84,6 +84,9 @@ class ColumnBase {
 
         size_ = size;
         cap_size_ = size;
+        LOG_ERROR("cap_size_+padding = {}, capsize {} ",
+                  cap_size_ + padding_,
+                  cap_size_)
         data_ = static_cast<char*>(mmap(nullptr,
                                         cap_size_ + padding_,
                                         PROT_READ,
