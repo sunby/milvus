@@ -799,6 +799,7 @@ LoadFieldDatasFromRemote(const std::vector<std::string>& remote_files,
         for (const auto& file : remote_files) {
             auto future = pool.Submit([&]() {
                 auto fileSize = rcm->Size(file);
+                LOG_ERROR("file size: {}, file: {}", fileSize, file);
                 auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[fileSize]);
                 rcm->Read(file, buf.get(), fileSize);
                 auto result = storage::DeserializeFileData(buf, fileSize);
