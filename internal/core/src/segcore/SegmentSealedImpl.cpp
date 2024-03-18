@@ -255,6 +255,9 @@ SegmentSealedImpl::LoadFieldData(const LoadFieldDataInfo& load_info) {
             ThreadPools::GetThreadPool(milvus::ThreadPoolPriority::MIDDLE);
         pool.Submit(
             LoadFieldDatasFromRemote, insert_files, field_data_info.channel);
+        LOG_ERROR("[remove me] insert files size: {}, field id {}",
+                  insert_files.size(),
+                  field_id.get());
 
         LOG_INFO("segment {} submits load field {} task to thread pool",
                  this->get_segment_id(),
@@ -518,11 +521,14 @@ SegmentSealedImpl::MapFieldData(const FieldId field_id, FieldDataInfo& data) {
     auto filepath = std::filesystem::path(data.mmap_dir_path) /
                     std::to_string(get_segment_id()) /
                     std::to_string(field_id.get());
-    LOG_ERROR("[remove me] mmap file path: {}, mmap dir path{} ",
+    LOG_ERROR("[remove me] mmap file path: {}, mmap dir path{}, field id {} ",
               filepath.string(),
-              data.mmap_dir_path);
+              data.mmap_dir_path,
+              field_id.get());
     auto dir = filepath.parent_path();
-    LOG_ERROR("[remove me] parent path: {}", dir.string());
+    LOG_ERROR("[remove me] parent path: {}, field id {}",
+              dir.string(),
+              field_id.get());
     std::filesystem::create_directories(dir);
 
     auto file = File::Open(filepath.string(), O_CREAT | O_TRUNC | O_RDWR);
@@ -539,6 +545,12 @@ SegmentSealedImpl::MapFieldData(const FieldId field_id, FieldDataInfo& data) {
         auto written =
             WriteFieldData(file, data_type, field_data, element_indices);
 
+        LOG_ERROR(
+            "[remove me] write field data to disk, field id {}, written "
+            "size: {}, field data size : {}",
+            field_id.get(),
+            written,
+            field_data->Size());
         AssertInfo(written == field_data->Size(),
                    fmt::format("failed to write data file {}, written {} but "
                                "total {}, err: {}",

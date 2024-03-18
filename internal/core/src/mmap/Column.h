@@ -84,10 +84,14 @@ class ColumnBase {
 
         size_ = size;
         cap_size_ = size;
-        LOG_ERROR("cap_size_+padding = {}, capsize {} , fd {}",
-                  cap_size_ + padding_,
-                  cap_size_,
-                  file.Descriptor());
+        LOG_ERROR(
+            "[remove me] cap_size_+padding = {}, capsize {} , fd {}, field id "
+            "{}, type {}",
+            cap_size_ + padding_,
+            cap_size_,
+            file.Descriptor(),
+            field_meta.get_id().get(),
+            field_meta.get_data_type());
         data_ = static_cast<char*>(mmap(nullptr,
                                         cap_size_ + padding_,
                                         PROT_READ,

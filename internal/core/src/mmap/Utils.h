@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "common/FieldMeta.h"
+#include "log/Log.h"
 #include "mmap/Types.h"
 #include "storage/Util.h"
 #include "common/File.h"
@@ -46,6 +47,13 @@ WriteFieldData(File& file,
                         static_cast<const std::string*>(data->RawValue(i));
                     ssize_t written = file.Write(str->data(), str->size());
                     if (written < str->size()) {
+                        LOG_ERROR(
+                            "WriteFieldData failed: written {} bytes, "
+                            "expected {} bytes, errno {} {}",
+                            written,
+                            str->size(),
+                            strerror(errno),
+                            errno);
                         break;
                     }
                     total_written += written;
@@ -59,6 +67,13 @@ WriteFieldData(File& file,
                     ssize_t written =
                         file.Write(padded_string.data(), padded_string.size());
                     if (written < padded_string.size()) {
+                        LOG_ERROR(
+                            "WriteFieldData failed: written {} bytes, "
+                            "expected {} bytes, errno {} {}",
+                            written,
+                            padded_string.size(),
+                            strerror(errno),
+                            errno);
                         break;
                     }
                     total_written += written;
@@ -71,6 +86,13 @@ WriteFieldData(File& file,
                     ssize_t written =
                         file.Write(array->data(), array->byte_size());
                     if (written < array->byte_size()) {
+                        LOG_ERROR(
+                            "WriteFieldData failed: written {} bytes, "
+                            "expected {} bytes, errno {} {}",
+                            written,
+                            array->byte_size(),
+                            strerror(errno),
+                            errno);
                         break;
                     }
                     element_indices.emplace_back(array->get_offsets());
@@ -90,7 +112,17 @@ WriteFieldData(File& file,
                           datatype_name(data_type));
         }
     } else {
-        total_written += file.Write(data->Data(), data->Size());
+        auto written = file.Write(data->Data(), data->Size());
+        if (written < data->Size()) {
+            LOG_ERROR(
+                "WriteFieldData failed: written {} bytes, "
+                "expected {} bytes, errno {} {}",
+                written,
+                data->Size(),
+                strerror(errno),
+                errno);
+        }
+        total_written += written;
     }
 
     return total_written;
