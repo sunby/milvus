@@ -805,7 +805,7 @@ LoadFieldDatasFromRemote(const std::vector<std::string>& remote_files,
                 rcm->Read(file, buf.get(), fileSize);
                 auto result = storage::DeserializeFileData(buf, fileSize);
                 LOG_ERROR("[remove me] result size: {}, file: {}",
-                          result->Size(),
+                          result->GetFieldData()->Size(),
                           file);
                 return result->GetFieldData();
             });
