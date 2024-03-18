@@ -518,7 +518,11 @@ SegmentSealedImpl::MapFieldData(const FieldId field_id, FieldDataInfo& data) {
     auto filepath = std::filesystem::path(data.mmap_dir_path) /
                     std::to_string(get_segment_id()) /
                     std::to_string(field_id.get());
+    LOG_ERROR("[remove me] mmap file path: {}, mmap dir path{} ",
+              filepath.string(),
+              data.mmap_dir_path);
     auto dir = filepath.parent_path();
+    LOG_ERROR("[remove me] parent path: {}", dir.string());
     std::filesystem::create_directories(dir);
 
     auto file = File::Open(filepath.string(), O_CREAT | O_TRUNC | O_RDWR);

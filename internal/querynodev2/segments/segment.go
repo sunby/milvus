@@ -868,6 +868,7 @@ func (s *LocalSegment) LoadFieldData(ctx context.Context, fieldID int64, rowCoun
 	}
 
 	mmapEnabled := options.LoadStatus == LoadStatusMapped
+	log.Info("[remove me] mmapEnabled", zap.Bool("mmapEnabled", mmapEnabled), zap.String("dir", paramtable.Get().QueryNodeCfg.MmapDirPath.GetValue()))
 	loadFieldDataInfo.appendMMapDirPath(paramtable.Get().QueryNodeCfg.MmapDirPath.GetValue())
 	loadFieldDataInfo.enableMmap(fieldID, mmapEnabled)
 
