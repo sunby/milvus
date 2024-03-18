@@ -15,6 +15,7 @@
 // limitations under the License.
 
 #include "storage/DataCodec.h"
+#include "log/Log.h"
 #include "storage/Event.h"
 #include "storage/Util.h"
 #include "storage/InsertData.h"
@@ -45,6 +46,11 @@ DeserializeRemoteFileData(BinlogReaderPtr reader) {
                 InsertEventData(reader, event_data_length, data_type);
             auto insert_data =
                 std::make_unique<InsertData>(insert_event_data.field_data);
+            LOG_ERROR(
+                "[remove me] remote insert event data length: {}, loaded size "
+                "{}",
+                event_data_length,
+                insert_data->GetFieldData()->Size());
             insert_data->SetFieldDataMeta(data_meta);
             insert_data->SetTimestamps(insert_event_data.start_timestamp,
                                        insert_event_data.end_timestamp);
