@@ -369,16 +369,19 @@ func (t *queryTask) PreExecute(ctx context.Context) error {
 	// convert partition names only when requery is false
 	if !t.reQuery {
 		partitionNames := t.request.GetPartitionNames()
+		log.Info("[remove me] partitionNames", zap.Strings("partitionNames", partitionNames), zap.Any("expr", t.request.Expr))
 		if t.partitionKeyMode {
 			expr, err := exprutil.ParseExprFromPlan(t.plan)
 			if err != nil {
 				return err
 			}
+			log.Info("[remove me] expr", zap.Any("expr", expr.String()))
 			partitionKeys := exprutil.ParseKeys(expr, exprutil.PartitionKey)
 			hashedPartitionNames, err := assignPartitionKeys(ctx, t.request.GetDbName(), t.request.CollectionName, partitionKeys)
 			if err != nil {
 				return err
 			}
+			log.Info("[remove me] hashedPartitionNames", zap.Strings("hashedPartitionNames", hashedPartitionNames), zap.Any("partitionkey", partitionKeys), zap.Any("expr", t.request.Expr))
 
 			partitionNames = append(partitionNames, hashedPartitionNames...)
 		}
@@ -386,6 +389,7 @@ func (t *queryTask) PreExecute(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		log.Info("[remove me] partitionIDs", zap.Int64s("partitionIDs", t.RetrieveRequest.PartitionIDs))
 	}
 
 	// count with pagination
