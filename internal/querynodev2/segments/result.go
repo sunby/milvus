@@ -428,7 +428,7 @@ func MergeSegcoreRetrieveResults(ctx context.Context, retrieveResults []*segcore
 		}
 
 		pk := typeutil.GetPK(validRetrieveResults[sel].GetIds(), cursors[sel])
-		log.Info("[remove me] merge pk", zap.Any("pk", pk), zap.Any("sel", sel))
+		log.Info("[remove me] merge pk", zap.Any("pk", pk), zap.Any("sel", sel), zap.Any("cursor", cursors[sel]))
 		if _, ok := idSet[pk]; !ok {
 			typeutil.AppendPKs(ret.Ids, pk)
 			retSize += typeutil.AppendFieldData(ret.FieldsData, validRetrieveResults[sel].GetFieldsData(), cursors[sel])

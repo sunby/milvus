@@ -59,7 +59,7 @@ func retrieveOnSegments(ctx context.Context, mgr *Manager, segments []Segment, s
 			log.Error("[remove me] retrieveOnSegments failed", zap.Error(err))
 			return err
 		}
-		log.Info("[remove me] retrieve on segment id len", zap.Any("segid", s.ID()), zap.Any("len", typeutil.GetSizeOfIDs(result.GetIds())), zap.Any("offset", len(result.GetOffset())))
+		log.Info("[remove me] retrieve on segment id len", zap.Any("segid", s.ID()), zap.Any("len", typeutil.GetSizeOfIDs(result.GetIds())), zap.Any("offset", result.Offset))
 		resultCh <- result
 		metrics.QueryNodeSQSegmentLatency.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()),
 			metrics.QueryLabel, label).Observe(float64(tr.ElapseSpan().Milliseconds()))
