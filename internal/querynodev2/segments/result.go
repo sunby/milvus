@@ -428,6 +428,7 @@ func MergeSegcoreRetrieveResults(ctx context.Context, retrieveResults []*segcore
 		}
 
 		pk := typeutil.GetPK(validRetrieveResults[sel].GetIds(), cursors[sel])
+		log.Info("[remove me] merge pk", zap.Any("pk", pk), zap.Any("sel", sel))
 		if _, ok := idSet[pk]; !ok {
 			typeutil.AppendPKs(ret.Ids, pk)
 			retSize += typeutil.AppendFieldData(ret.FieldsData, validRetrieveResults[sel].GetFieldsData(), cursors[sel])
@@ -445,7 +446,7 @@ func MergeSegcoreRetrieveResults(ctx context.Context, retrieveResults []*segcore
 		cursors[sel]++
 	}
 
-	log.Info("[remove me] skipDupCnt", zap.Int64("skipDupCnt", skipDupCnt), zap.Int("size", len(validRetrieveResults)), zap.Int("loopEnd", loopEnd), zap.Any("retSize", retSize), zap.Any("offset len", len(ret.GetOffset())))
+	log.Info("[remove me] skipDupCnt", zap.Int64("skipDupCnt", skipDupCnt), zap.Int("size", len(validRetrieveResults)), zap.Int("loopEnd", loopEnd), zap.Any("retSize", retSize), zap.Any("offset len", getsiz))
 	if skipDupCnt > 0 {
 		log.Debug("skip duplicated query result while reducing segcore.RetrieveResults", zap.Int64("dupCount", skipDupCnt))
 	}

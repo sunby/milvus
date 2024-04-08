@@ -1204,14 +1204,17 @@ func IsPrimaryFieldType(dataType schemapb.DataType) bool {
 
 func GetPK(data *schemapb.IDs, idx int64) interface{} {
 	if int64(GetSizeOfIDs(data)) <= idx {
+		log.Info("[remove me] get pk return nil", zap.Any("idx", idx), zap.Any("size", GetSizeOfIDs(data)))
 		return nil
 	}
 	switch data.GetIdField().(type) {
 	case *schemapb.IDs_IntId:
+		log.Info("[remov me] get pk", zap.Any("data", data.GetIntId().GetData()[idx]), zap.Any("idx", idx))
 		return data.GetIntId().GetData()[idx]
 	case *schemapb.IDs_StrId:
 		return data.GetStrId().GetData()[idx]
 	}
+	log.Info("[remove me] get pk return nil")
 	return nil
 }
 
