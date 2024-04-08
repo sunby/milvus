@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sync/atomic"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/samber/lo"
@@ -373,8 +374,12 @@ func getTS(i *internalpb.RetrieveResults, idx int64) uint64 {
 	return 0
 }
 
+var atomicCnt int64
+
 func MergeSegcoreRetrieveResults(ctx context.Context, retrieveResults []*segcorepb.RetrieveResults, param *mergeParam) (*segcorepb.RetrieveResults, error) {
-	log.Ctx(ctx).Debug("mergeSegcoreRetrieveResults",
+	cnt := atomic.AddInt64(&atomicCnt, 1)
+	log := log.With(zap.Any("cnt", cnt))
+	log.Debug("mergeSegcoreRetrieveResults",
 		zap.Int64("limit", param.limit),
 		zap.Int("resultNum", len(retrieveResults)),
 	)
@@ -440,7 +445,7 @@ func MergeSegcoreRetrieveResults(ctx context.Context, retrieveResults []*segcore
 		cursors[sel]++
 	}
 
-	log.Info("[remove me] skipDupCnt", zap.Int64("skipDupCnt", skipDupCnt), zap.Any("retSize", retSize))
+	log.Info("[remove me] skipDupCnt", zap.Int64("skipDupCnt", skipDupCnt), zap.Int("size", len(validRetrieveResults)), zap.Int("loopEnd", loopEnd), zap.Any("retSize", retSize), zap.Any("offset len", len(ret.GetOffset())))
 	if skipDupCnt > 0 {
 		log.Debug("skip duplicated query result while reducing segcore.RetrieveResults", zap.Int64("dupCount", skipDupCnt))
 	}
