@@ -446,7 +446,7 @@ func MergeSegcoreRetrieveResults(ctx context.Context, retrieveResults []*segcore
 		cursors[sel]++
 	}
 
-	log.Info("[remove me] skipDupCnt", zap.Int64("skipDupCnt", skipDupCnt), zap.Int("size", len(validRetrieveResults)), zap.Int("loopEnd", loopEnd), zap.Any("retSize", retSize), zap.Any("offset len", getsiz))
+	log.Info("[remove me] skipDupCnt", zap.Int64("skipDupCnt", skipDupCnt), zap.Int("size", len(validRetrieveResults)), zap.Int("loopEnd", loopEnd), zap.Any("retSize", retSize), zap.Any("offset len", typeutil.GetSizeOfIDs(ret.GetIds())))
 	if skipDupCnt > 0 {
 		log.Debug("skip duplicated query result while reducing segcore.RetrieveResults", zap.Int64("dupCount", skipDupCnt))
 	}
