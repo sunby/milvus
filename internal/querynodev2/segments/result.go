@@ -399,6 +399,7 @@ func MergeSegcoreRetrieveResults(ctx context.Context, retrieveResults []*segcore
 		loopEnd += size
 	}
 
+	log.Info("[remove me] validRetrieveResults", zap.Int("size", len(validRetrieveResults)), zap.Int("loopEnd", loopEnd), zap.Int64("limit", param.limit), zap.Bool("mergeStopForBest", param.mergeStopForBest))
 	if len(validRetrieveResults) == 0 {
 		return ret, nil
 	}
@@ -406,6 +407,8 @@ func MergeSegcoreRetrieveResults(ctx context.Context, retrieveResults []*segcore
 	if param.limit != typeutil.Unlimited && !param.mergeStopForBest {
 		loopEnd = int(param.limit)
 	}
+
+	log.Info("[remove me] loopEnd", zap.Int("loopEnd", loopEnd))
 
 	ret.FieldsData = make([]*schemapb.FieldData, len(validRetrieveResults[0].GetFieldsData()))
 	idSet := make(map[interface{}]struct{})
@@ -437,6 +440,7 @@ func MergeSegcoreRetrieveResults(ctx context.Context, retrieveResults []*segcore
 		cursors[sel]++
 	}
 
+	log.Info("[remove me] skipDupCnt", zap.Int64("skipDupCnt", skipDupCnt), zap.Any("retSize", retSize))
 	if skipDupCnt > 0 {
 		log.Debug("skip duplicated query result while reducing segcore.RetrieveResults", zap.Int64("dupCount", skipDupCnt))
 	}
