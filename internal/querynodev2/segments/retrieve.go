@@ -35,6 +35,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/timerecord"
+	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 // retrieveOnSegments performs retrieve on listed segments
@@ -54,10 +55,12 @@ func retrieveOnSegments(ctx context.Context, mgr *Manager, segments []Segment, s
 	retriever := func(s Segment) error {
 		tr := timerecord.NewTimeRecorder("retrieveOnSegments")
 		result, err := s.Retrieve(ctx, plan)
-		resultCh <- result
 		if err != nil {
+			log.Error("[remove me] retrieveOnSegments failed", zap.Error(err))
 			return err
 		}
+		log.Info("[remove me] retrieve on segment id len", zap.Any("segid", s.ID()), zap.Any("len", typeutil.GetSizeOfIDs(result.GetIds())), zap.Any("offset", len(result.GetOffset())))
+		resultCh <- result
 		metrics.QueryNodeSQSegmentLatency.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()),
 			metrics.QueryLabel, label).Observe(float64(tr.ElapseSpan().Milliseconds()))
 		return nil
