@@ -147,7 +147,9 @@ func searchSegmentsStreamly(ctx context.Context,
 	searcher := func(seg Segment) error {
 		// record search time
 		tr := timerecord.NewTimeRecorder("searchOnSegments")
+		log.Info("[remove me] search start", zap.Any("segment", seg.ID()))
 		searchResult, searchErr := seg.Search(ctx, searchReq)
+		log.Info("[remove me] search done", zap.Any("segment", seg.ID()))
 		searchDuration := tr.RecordSpan()
 		if searchErr != nil {
 			return searchErr
