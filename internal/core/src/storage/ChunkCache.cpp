@@ -16,6 +16,7 @@
 
 #include "ChunkCache.h"
 #include "common/Types.h"
+#include "log/Log.h"
 #include "mmap/Utils.h"
 
 namespace milvus::storage {
@@ -23,6 +24,16 @@ namespace milvus::storage {
 std::shared_ptr<ColumnBase>
 ChunkCache::Read(const std::string& filepath) {
     auto path = CachePath(filepath);
+    LOG_INFO("[remove me] chunk cache read {}", path);
+
+    {
+        std::shared_lock lck(mutex_);
+        auto it = columns_.find(path);
+        if (it != columns_.end()) {
+            AssertInfo(it->second, "unexpected null column, file={}", filepath);
+            return it->second;
+        }
+    }
 
     {
         std::shared_lock lck(mutex_);
