@@ -88,6 +88,7 @@ func (li *LoadIndexInfo) appendLoadIndexInfo(ctx context.Context, indexInfo *que
 	indexParams := funcutil.KeyValuePair2Map(indexInfo.IndexParams)
 
 	enableMmap := isIndexMmapEnable(indexInfo)
+	log.Info("[remove me] appendLoadIndexInfo", zap.Any("fieldID", fieldID), zap.Any("enableMmap", enableMmap))
 	// as Knowhere reports error if encounter a unknown param, we need to delete it
 	delete(indexParams, common.MmapEnabledKey)
 
