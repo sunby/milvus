@@ -149,6 +149,8 @@ GatherInfoBasedOnExpr(const std::shared_ptr<milvus::plan::PlanNode>& node) {
 template <typename VectorType>
 void
 ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
+    LOG_INFO("[remove me] enter VectorVisitorImpl, id: {}",
+             segment_.get_segment_id());
     // TODO: optimize here, remove the dynamic cast
     assert(!search_result_opt_.has_value());
     auto segment =
@@ -170,6 +172,8 @@ ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
         return;
     }
 
+    LOG_INFO("[remove me]  VectorVisitorImpl p1, id: {}",
+             segment_.get_segment_id());
     std::unique_ptr<BitsetType> bitset_holder;
     if (node.filter_plannode_.has_value()) {
         if (node.search_info_.materialized_view_involved) {
@@ -196,6 +200,8 @@ ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
     } else {
         bitset_holder = std::make_unique<BitsetType>(active_count, false);
     }
+    LOG_INFO("[remove me]  VectorVisitorImpl p2, id: {}",
+             segment_.get_segment_id());
     segment->mask_with_timestamps(*bitset_holder, timestamp_);
 
     segment->mask_with_delete(*bitset_holder, active_count, timestamp_);
@@ -207,6 +213,8 @@ ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
         return;
     }
     BitsetView final_view = *bitset_holder;
+    LOG_INFO("[remove me]  VectorVisitorImpl p3, id: {}",
+             segment_.get_segment_id());
     segment->vector_search(node.search_info_,
                            src_data,
                            num_queries,
@@ -231,6 +239,8 @@ ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
                    search_result.seg_offsets_.size());
     }
     search_result_opt_ = std::move(search_result);
+    LOG_INFO("[remove me]  VectorVisitorImpl p4, id: {}",
+             segment_.get_segment_id());
 }
 
 std::unique_ptr<RetrieveResult>

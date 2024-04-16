@@ -103,6 +103,8 @@ Search(CTraceContext c_trace,
         auto span = milvus::tracer::StartSpan("SegCoreSearch", &trace_ctx);
         milvus::tracer::SetRootSpan(span);
 
+        LOG_INFO("[remove me] before search in cpp, id: {}",
+                 segment->get_segment_id());
         auto search_result = segment->Search(plan, phg_ptr, timestamp);
         if (!milvus::PositivelyRelated(
                 plan->plan_node_->search_info_.metric_type_)) {

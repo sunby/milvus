@@ -18,6 +18,7 @@
 #include "common/SystemProperty.h"
 #include "common/Tracer.h"
 #include "common/Types.h"
+#include "log/Log.h"
 #include "query/generated/ExecPlanNodeVisitor.h"
 
 namespace milvus::segcore {
@@ -73,6 +74,7 @@ SegmentInternalInterface::Search(
     milvus::tracer::AddEvent("obtained_segment_lock_mutex");
     check_search(plan);
     query::ExecPlanNodeVisitor visitor(*this, timestamp, placeholder_group);
+    LOG_INFO("[remove me] search in cpp start, id: {}", get_segment_id());
     auto results = std::make_unique<SearchResult>();
     *results = visitor.get_moved_result(*plan->plan_node_);
     results->segment_ = (void*)this;
