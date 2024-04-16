@@ -78,6 +78,9 @@ SegmentInternalInterface::Search(
     auto results = std::make_unique<SearchResult>();
     *results = visitor.get_moved_result(*plan->plan_node_);
     results->segment_ = (void*)this;
+    LOG_INFO("[remove me] search in cpp end, id: {}, res: {}",
+             get_segment_id(),
+             results->get_total_result_count());
     return results;
 }
 
