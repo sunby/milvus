@@ -13,6 +13,7 @@
 #include "Reduce.h"
 #include "common/QueryResult.h"
 #include "common/EasyAssert.h"
+#include "log/Log.h"
 #include "query/Plan.h"
 #include "segcore/reduce_c.h"
 #include "segcore/StreamReduce.h"
