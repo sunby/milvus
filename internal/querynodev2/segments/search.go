@@ -156,7 +156,9 @@ func searchSegmentsStreamly(ctx context.Context,
 		}
 		searchResultsToClear = append(searchResultsToClear, searchResult)
 		reduceMutex.Lock()
+		log.Info("[remove me] reduce start", zap.Any("segment", seg.ID()))
 		reducedErr := streamReduce(searchResult)
+		log.Info("[remove me] reduce end", zap.Any("segment", seg.ID()))
 		reduceMutex.Unlock()
 		reduceDuration := tr.RecordSpan()
 		if reducedErr != nil {
@@ -168,6 +170,8 @@ func searchSegmentsStreamly(ctx context.Context,
 			metrics.SearchLabel, searchLabel).Observe(float64(searchDuration))
 		metrics.QueryNodeSegmentSearchLatencyPerVector.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()),
 			metrics.SearchLabel, searchLabel).Observe(float64(searchDuration) / float64(searchReq.getNumOfQuery()))
+
+		log.Info("[remove me] search end", zap.Any("segment", seg.ID()))
 		return nil
 	}
 
