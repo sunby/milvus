@@ -171,7 +171,7 @@ func searchSegmentsStreamly(ctx context.Context,
 		metrics.QueryNodeSegmentSearchLatencyPerVector.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()),
 			metrics.SearchLabel, searchLabel).Observe(float64(searchDuration) / float64(searchReq.getNumOfQuery()))
 
-		log.Info("[remove me] search end", zap.Any("segment", seg.ID()))
+		// log.Info("[remove me] search end", zap.Any("segment", seg.ID()))
 		return nil
 	}
 

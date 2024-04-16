@@ -74,7 +74,7 @@ SegmentInternalInterface::Search(
     milvus::tracer::AddEvent("obtained_segment_lock_mutex");
     check_search(plan);
     query::ExecPlanNodeVisitor visitor(*this, timestamp, placeholder_group);
-    LOG_INFO("[remove me] search in cpp start, id: {}", get_segment_id());
+    // LOG_INFO("[remove me] search in cpp start, id: {}", get_segment_id());
     auto results = std::make_unique<SearchResult>();
     *results = visitor.get_moved_result(*plan->plan_node_);
     results->segment_ = (void*)this;
