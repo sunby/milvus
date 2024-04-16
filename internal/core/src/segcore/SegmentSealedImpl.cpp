@@ -268,8 +268,12 @@ SegmentSealedImpl::LoadFieldData(const LoadFieldDataInfo& load_info) {
                  field_id.get());
         if (!info.enable_mmap ||
             SystemProperty::Instance().IsSystem(field_id)) {
+            LOG_INFO("[remove me] load field data without mmap: {}",
+                     field_id.get());
             LoadFieldData(field_id, field_data_info);
         } else {
+            LOG_INFO("[remove me] load field data with mmap: {}",
+                     field_id.get());
             MapFieldData(field_id, field_data_info);
         }
         LOG_INFO("segment {} loads field {} done",
