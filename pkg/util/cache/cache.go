@@ -66,6 +66,7 @@ type Scavenger[K comparable] interface {
 	//	before it gets a false.
 	Spare(key K) func(K) bool
 	Replace(key K) (bool, func(K) bool, func())
+	Size() int64
 }
 
 type LazyScavenger[K comparable] struct {
@@ -81,6 +82,10 @@ func NewLazyScavenger[K comparable](weight func(K) int64, capacity int64) *LazyS
 		weight:   weight,
 		weights:  make(map[K]int64),
 	}
+}
+
+func (s *LazyScavenger[K]) Size() int64 {
+	return s.size
 }
 
 func (s *LazyScavenger[K]) Collect(key K) (bool, func(K) bool) {
@@ -314,7 +319,7 @@ func (c *lruCache[K, V]) DoWait(ctx context.Context, key K, timeout time.Duratio
 		} else if err == ErrNotEnoughSpace {
 			log.Warn("Failed to get disk cache for segment, wait and try again")
 		} else if err == merr.ErrServiceResourceInsufficient {
-			log.Warn("Failed to load segment for insufficient resource, wait and try later")
+			log.Warn("Failed to load segment for insufficient resource, wait and try later", zap.Any("size", c.scavenger.Size()))
 		} else if err != nil {
 			return true, err
 		}
