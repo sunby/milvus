@@ -18,6 +18,7 @@
 #include "common/SystemProperty.h"
 #include "common/Tracer.h"
 #include "common/Types.h"
+#include "log/Log.h"
 #include "query/generated/ExecPlanNodeVisitor.h"
 
 namespace milvus::segcore {
@@ -96,11 +97,19 @@ SegmentInternalInterface::Retrieve(tracer::TraceContext* trace_ctx,
     int64_t output_data_size = 0;
     for (auto field_id : plan->field_ids_) {
         output_data_size += get_field_avg_size(field_id) * result_rows;
+        LOG_INFO("retrieve result rows: {}, output data size: {}, field id: {}",
+                 result_rows,
+                 output_data_size,
+                 field_id.get());
     }
     if (output_data_size > limit_size) {
         throw SegcoreError(
             RetrieveError,
-            fmt::format("query results exceed the limit size ", limit_size));
+            fmt::format("query results exceed the limit size {}, output data "
+                        "size {}, result rows {}",
+                        limit_size,
+                        output_data_size,
+                        result_rows));
     }
 
     results->set_all_retrieve_count(retrieve_results.total_data_cnt_);
