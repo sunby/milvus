@@ -173,6 +173,9 @@ type lruCache[K comparable, V any] struct {
 	finalizer Finalizer[K, V]
 	scavenger Scavenger[K]
 	reloader  Loader[K, V]
+
+	estimator Estimator
+	allocator Allocator
 }
 
 type CacheBuilder[K comparable, V any] struct {
@@ -348,7 +351,12 @@ func (c *lruCache[K, V]) getAndPin(ctx context.Context, key K) (*cacheItem[K, V]
 			return item, false, nil
 		}
 		timer := time.Now()
+		// allocator resources
+		if err := c.allocateResource(ctx, key); err != nil {
+			return nil, false, err
+		}
 		value, err := c.loader(ctx, key)
+		c.releaseResource(key)
 
 		for retryAttempt := 0; merr.ErrServiceDiskLimitExceeded.Is(err) && retryAttempt < paramtable.Get().QueryNodeCfg.LazyLoadMaxRetryTimes.GetAsInt(); retryAttempt++ {
 			// Try to evict one item if there is not enough disk space, then retry.
@@ -372,6 +380,43 @@ func (c *lruCache[K, V]) getAndPin(ctx context.Context, key K) (*cacheItem[K, V]
 		return item, true, nil
 	}
 	return nil, true, ErrNoSuchItem
+}
+
+func (c *lruCache[K, V]) allocateResource(ctx context.Context, key K) error {
+	c.rwlock.Lock()
+	defer c.rwlock.Unlock()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			succ, _ := c.allocator.Allocate(key, c.estimator.Estimate(key))
+			if succ {
+				return nil
+			}
+
+			noEvict := true
+			for p := c.accessList.Back(); p != nil; p = p.Prev() {
+				evictItem := p.Value.(*cacheItem[K, V])
+				if evictItem.pinCount.Load() > 0 {
+					continue
+				}
+				c.evict(ctx, evictItem.key)
+				noEvict = false
+				break
+			}
+
+			if noEvict {
+				return ErrNotEnoughSpace
+			}
+		}
+	}
+}
+
+func (c *lruCache[K, V]) releaseResource(key K) {
+	c.rwlock.Lock()
+	defer c.rwlock.Unlock()
+	c.allocator.Release(key)
 }
 
 func (c *lruCache[K, V]) tryScavenge(key K) ([]K, bool) {
