@@ -45,6 +45,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/metautil"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
+	"github.com/milvus-io/milvus/pkg/util/vralloc"
 )
 
 // TODO maybe move to manager and change segment constructor
@@ -238,6 +239,15 @@ func NewManager() *Manager {
 		}
 
 		return segment, nil
+	}).WithEstimator(func(key int64) (vralloc.Resource, error) {
+		segment := segMgr.GetWithType(key, SegmentTypeSealed)
+		if segment == nil {
+			return vralloc.Resource{}, merr.ErrSegmentNotFound
+		}
+		return vralloc.Resource{
+			Memory: int64(segment.ResourceUsageEstimate().MemorySize),
+			Disk:   int64(segment.ResourceUsageEstimate().DiskSize),
+		}, nil
 	}).Build()
 
 	segMgr.registerReleaseCallback(func(s Segment) {
@@ -710,6 +720,7 @@ func (mgr *segmentManager) Clear(ctx context.Context) {
 		delete(mgr.sealedSegments, id)
 		mgr.remove(ctx, segment)
 	}
+
 	mgr.updateMetric()
 }
 

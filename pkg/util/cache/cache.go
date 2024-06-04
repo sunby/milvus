@@ -19,6 +19,7 @@ package cache
 import (
 	"container/list"
 	"context"
+	"math"
 	"sync"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util/hardware"
 	"github.com/milvus-io/milvus/pkg/util/lock"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
@@ -48,6 +50,7 @@ type cacheItem[K comparable, V any] struct {
 type (
 	Loader[K comparable, V any]    func(ctx context.Context, key K) (V, error)
 	Finalizer[K comparable, V any] func(ctx context.Context, key K, value V) error
+	Estimator[K comparable]        func(key K) (vralloc.Resource, error)
 )
 
 // Scavenger records occupation of cache and decide whether to evict if necessary.
@@ -175,8 +178,11 @@ type lruCache[K comparable, V any] struct {
 	scavenger Scavenger[K]
 	reloader  Loader[K, V]
 
-	estimator func(key K) vralloc.Resource
-	allocator vralloc.Allocator
+	estimator Estimator[K]
+	allocator vralloc.Allocator[K]
+
+	closeCh       chan struct{}
+	evictSignalCh chan struct{}
 }
 
 type CacheBuilder[K comparable, V any] struct {
@@ -184,6 +190,7 @@ type CacheBuilder[K comparable, V any] struct {
 	finalizer Finalizer[K, V]
 	scavenger Scavenger[K]
 	reloader  Loader[K, V]
+	estimator Estimator[K]
 }
 
 func NewCacheBuilder[K comparable, V any]() *CacheBuilder[K, V] {
@@ -229,8 +236,24 @@ func (b *CacheBuilder[K, V]) WithReloader(reloader Loader[K, V]) *CacheBuilder[K
 	return b
 }
 
+func (b *CacheBuilder[K, V]) WithEstimator(estimator Estimator[K]) *CacheBuilder[K, V] {
+	b.estimator = estimator
+	return b
+}
+
 func (b *CacheBuilder[K, V]) Build() Cache[K, V] {
-	return newLRUCache(b.loader, b.finalizer, b.scavenger, b.reloader)
+	totalMem, totalDisk := hardware.GetMemoryCount(), paramtable.Get().QueryNodeCfg.DiskCacheCapacityLimit.GetAsInt64()
+	limit := vralloc.Resource{
+		Memory: math.MaxInt64,
+		Disk:   math.MaxInt64,
+		CPU:    math.MaxInt64,
+	}
+	allocator := vralloc.NewPhysicalAwareFixedSizeAllocator[K](
+		&limit,
+		int64(float64(totalMem)*paramtable.Get().QueryNodeCfg.OverloadedMemoryThresholdPercentage.GetAsFloat()),
+		int64(float64(totalDisk)*paramtable.Get().QueryNodeCfg.MaxDiskUsagePercentage.GetAsFloat()),
+		paramtable.Get().LocalStorageCfg.Path.GetValue())
+	return newLRUCache(b.loader, b.finalizer, b.scavenger, b.reloader, b.estimator, allocator)
 }
 
 func newLRUCache[K comparable, V any](
@@ -238,8 +261,10 @@ func newLRUCache[K comparable, V any](
 	finalizer Finalizer[K, V],
 	scavenger Scavenger[K],
 	reloader Loader[K, V],
+	estimator Estimator[K],
+	allocator vralloc.Allocator[K],
 ) Cache[K, V] {
-	return &lruCache[K, V]{
+	cache := &lruCache[K, V]{
 		items:          make(map[K]*list.Element),
 		accessList:     list.New(),
 		waitNotifier:   syncutil.NewVersionedNotifier(),
@@ -249,7 +274,14 @@ func newLRUCache[K comparable, V any](
 		finalizer:      finalizer,
 		scavenger:      scavenger,
 		reloader:       reloader,
+		estimator:      estimator,
+		allocator:      allocator,
+		closeCh:        make(chan struct{}),
+		evictSignalCh:  make(chan struct{}),
 	}
+
+	go cache.bgEvict()
+	return cache
 }
 
 func (c *lruCache[K, V]) Do(ctx context.Context, key K, doer func(context.Context, V) error) (bool, error) {
@@ -391,7 +423,11 @@ func (c *lruCache[K, V]) allocateResource(ctx context.Context, key K) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			succ, _ := c.allocator.Allocate(key, c.estimator(key))
+			resource, err := c.estimator(key)
+			if err != nil {
+				return err
+			}
+			succ, _ := c.allocator.Allocate(key, &resource)
 			if succ {
 				return nil
 			}
@@ -556,4 +592,19 @@ func (c *lruCache[K, V]) MarkItemNeedReload(ctx context.Context, key K) bool {
 	}
 
 	return false
+}
+
+func (c *lruCache[K, V]) bgEvict() {
+	for {
+		select {
+		case <-c.closeCh:
+			return
+		case <-c.evictSignalCh:
+			c.evictItems(context.Background(), c.accessList.Len()/2)
+		}
+	}
+}
+
+func (c *lruCache[K, V]) close() {
+	close(c.closeCh)
 }
