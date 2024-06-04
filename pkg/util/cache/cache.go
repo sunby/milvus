@@ -384,7 +384,6 @@ func (c *lruCache[K, V]) getAndPin(ctx context.Context, key K) (*cacheItem[K, V]
 			return item, false, nil
 		}
 		timer := time.Now()
-		// allocator resources
 		if err := c.allocateResource(ctx, key); err != nil {
 			return nil, false, err
 		}
@@ -418,15 +417,15 @@ func (c *lruCache[K, V]) getAndPin(ctx context.Context, key K) (*cacheItem[K, V]
 func (c *lruCache[K, V]) allocateResource(ctx context.Context, key K) error {
 	c.rwlock.Lock()
 	defer c.rwlock.Unlock()
+	resource, err := c.estimator(key)
+	if err != nil {
+		return err
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			resource, err := c.estimator(key)
-			if err != nil {
-				return err
-			}
 			succ, _ := c.allocator.Allocate(key, &resource)
 			if succ {
 				return nil
