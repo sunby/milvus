@@ -30,6 +30,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/syncutil"
+	"github.com/milvus-io/milvus/pkg/util/vralloc"
 )
 
 var (
@@ -174,8 +175,8 @@ type lruCache[K comparable, V any] struct {
 	scavenger Scavenger[K]
 	reloader  Loader[K, V]
 
-	estimator Estimator
-	allocator Allocator
+	estimator func(key K) vralloc.Resource
+	allocator vralloc.Allocator
 }
 
 type CacheBuilder[K comparable, V any] struct {
@@ -390,7 +391,7 @@ func (c *lruCache[K, V]) allocateResource(ctx context.Context, key K) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			succ, _ := c.allocator.Allocate(key, c.estimator.Estimate(key))
+			succ, _ := c.allocator.Allocate(key, c.estimator(key))
 			if succ {
 				return nil
 			}
