@@ -152,9 +152,19 @@ get_deleted_bitmap(int64_t del_barrier,
     }
 
     for (auto& [pk, timestamp] : delete_timestamps) {
+        auto is_pk = false;
+        if (std::get<int64_t>(pk) == 56366657) {
+            is_pk = true;
+            LOG_INFO("[remove me] pk ts {}", timestamp);
+        }
         auto segOffsets = insert_record.search_pk(pk, insert_barrier);
         for (auto offset : segOffsets) {
             int64_t insert_row_offset = offset.get();
+            if (is_pk) {
+                LOG_INFO("[remove me] insert ts {}, query ts {}",
+                         insert_record.timestamps_[insert_row_offset],
+                         query_timestamp);
+            }
 
             // The deletion record do not take effect in search/query,
             // and reset bitmap to 0
