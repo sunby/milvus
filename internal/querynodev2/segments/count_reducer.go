@@ -6,6 +6,8 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/segcorepb"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/log"
+	"go.uber.org/zap"
 )
 
 type cntReducer struct{}
@@ -33,15 +35,16 @@ func (r *cntReducer) Reduce(ctx context.Context, results []*internalpb.RetrieveR
 
 type cntReducerSegCore struct{}
 
-func (r *cntReducerSegCore) Reduce(ctx context.Context, results []*segcorepb.RetrieveResults, _ []Segment, _ *RetrievePlan) (*segcorepb.RetrieveResults, error) {
+func (r *cntReducerSegCore) Reduce(ctx context.Context, results []*segcorepb.RetrieveResults, segments []Segment, _ *RetrievePlan) (*segcorepb.RetrieveResults, error) {
 	cnt := int64(0)
 	allRetrieveCount := int64(0)
-	for _, res := range results {
+	for i, res := range results {
 		allRetrieveCount += res.GetAllRetrieveCount()
 		c, err := funcutil.CntOfSegCoreResult(res)
 		if err != nil {
 			return nil, err
 		}
+		log.Info("[remove me] segment count reduce", zap.Int("segment id", int(segments[i].GetID())), zap.Int64("count", c))
 		cnt += c
 	}
 	res := funcutil.WrapCntToSegCoreResult(cnt)

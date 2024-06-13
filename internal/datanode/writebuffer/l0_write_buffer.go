@@ -67,7 +67,7 @@ func (wb *l0WriteBuffer) dispatchDeleteMsgs(groups []*inData, deleteMsgs []*msgs
 				}
 			}
 			if len(deletePks) != len(pks) {
-				wb.logger.Warn("delete pk not exists in segment", zap.Any("segment", segment.SegmentID()), zap.Any("pks", len(pks)), zap.Any("delete pks", len(deletePks)))
+				wb.logger.Warn("[remove me] delete pk not exists in segment", zap.Any("segment", segment.SegmentID()), zap.Any("pks", len(pks)), zap.Any("delete pks", len(deletePks)))
 			}
 			if len(deletePks) > 0 {
 				wb.bufferDelete(l0SegmentID, deletePks, deleteTss, startPos, endPos)
