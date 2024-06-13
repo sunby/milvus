@@ -38,10 +38,12 @@ type cntReducerSegCore struct{}
 func (r *cntReducerSegCore) Reduce(ctx context.Context, results []*segcorepb.RetrieveResults, segments []Segment, _ *RetrievePlan) (*segcorepb.RetrieveResults, error) {
 	cnt := int64(0)
 	allRetrieveCount := int64(0)
+	log.Info("[remove me] count reduce results len", zap.Int("len", len(results)))
 	for i, res := range results {
 		allRetrieveCount += res.GetAllRetrieveCount()
 		c, err := funcutil.CntOfSegCoreResult(res)
 		if err != nil {
+			log.Info("[remove me] count reduce error", zap.Error(err))
 			return nil, err
 		}
 		log.Info("[remove me] segment count reduce", zap.Int("segment id", int(segments[i].ID())), zap.Int64("count", c))

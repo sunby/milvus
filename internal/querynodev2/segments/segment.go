@@ -52,6 +52,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querynodev2/pkoracle"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments/state"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util/funcutil"
 	typeutil_internal "github.com/milvus-io/milvus/internal/util/typeutil"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
@@ -651,8 +652,14 @@ func (s *LocalSegment) Retrieve(ctx context.Context, plan *RetrievePlan) (*segco
 		return nil, err
 	}
 
+	c, err := funcutil.CntOfSegCoreResult(result)
+	if err != nil {
+		return nil, err
+	}
 	log.Debug("retrieve segment done",
 		zap.Int("resultNum", len(result.Offset)),
+		// remove me
+		zap.Any("count", c),
 	)
 
 	// Sort was done by the segcore.
