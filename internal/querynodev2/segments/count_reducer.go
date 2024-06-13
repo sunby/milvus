@@ -44,7 +44,7 @@ func (r *cntReducerSegCore) Reduce(ctx context.Context, results []*segcorepb.Ret
 		if err != nil {
 			return nil, err
 		}
-		log.Info("[remove me] segment count reduce", zap.Int("segment id", int(segments[i].GetID())), zap.Int64("count", c))
+		log.Info("[remove me] segment count reduce", zap.Int("segment id", int(segments[i].ID())), zap.Int64("count", c))
 		cnt += c
 	}
 	res := funcutil.WrapCntToSegCoreResult(cnt)
