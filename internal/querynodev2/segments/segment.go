@@ -660,6 +660,7 @@ func (s *LocalSegment) Retrieve(ctx context.Context, plan *RetrievePlan) (*segco
 		zap.Int("resultNum", len(result.Offset)),
 		// remove me
 		zap.Any("count", c),
+		zap.Any("segment", s.ID()),
 	)
 
 	// Sort was done by the segcore.
