@@ -118,6 +118,9 @@ AsyncSearch(CTraceContext c_trace,
             }
             span->End();
             milvus::tracer::CloseRootSpan();
+            LOG_INFO("[remove me] search result: {}, segment: {}",
+                     search_result->result_offsets_.size(),
+                     segment->get_segment_id());
             return search_result.release();
         });
     return static_cast<CFuture*>(static_cast<void*>(

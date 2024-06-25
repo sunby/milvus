@@ -18,6 +18,7 @@
 
 #include "common/QueryInfo.h"
 #include "knowhere/index/index_node.h"
+#include "log/Log.h"
 #include "segcore/SegmentInterface.h"
 #include "segcore/SegmentGrowingImpl.h"
 #include "segcore/SegmentSealedImpl.h"
@@ -140,6 +141,8 @@ PrepareVectorIteratorsFromIndex(const SearchInfo& search_info,
             if (iterators_val.has_value()) {
                 search_result.AssembleChunkVectorIterators(
                     nq, 1, -1, iterators_val.value());
+                LOG_INFO("[remove me] get from vector iter {}",
+                         search_result.result_offsets_.size());
             } else {
                 LOG_ERROR(
                     "Returned knowhere iterator has non-ready iterators "
