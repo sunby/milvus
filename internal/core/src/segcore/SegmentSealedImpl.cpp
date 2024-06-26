@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -49,6 +50,7 @@
 #include "storage/Util.h"
 #include "storage/ThreadPools.h"
 #include "storage/MmapManager.h"
+#include "storage/prometheus_client.h"
 
 namespace milvus::segcore {
 
@@ -236,6 +238,7 @@ SegmentSealedImpl::LoadFieldData(const LoadFieldDataInfo& load_info) {
     // only one field for now, parallel load field data in golang
     size_t num_rows = storage::GetNumRowsForLoadInfo(load_info);
 
+    std::chrono::milliseconds download_d(0);
     for (auto& [id, info] : load_info.field_infos) {
         AssertInfo(info.row_count > 0, "The row count of field data is 0");
 
@@ -260,8 +263,10 @@ SegmentSealedImpl::LoadFieldData(const LoadFieldDataInfo& load_info) {
         field_data_info.channel->set_capacity(parallel_degree * 2);
         auto& pool =
             ThreadPools::GetThreadPool(milvus::ThreadPoolPriority::MIDDLE);
-        pool.Submit(
-            LoadFieldDatasFromRemote, insert_files, field_data_info.channel);
+        pool.Submit(LoadFieldDatasFromRemote,
+                    insert_files,
+                    field_data_info.channel,
+                    &download_d);
 
         LOG_INFO("segment {} submits load field {} task to thread pool",
                  this->get_segment_id(),
@@ -276,6 +281,9 @@ SegmentSealedImpl::LoadFieldData(const LoadFieldDataInfo& load_info) {
                  this->get_segment_id(),
                  field_id.get());
     }
+
+    storage::internal_load_field_time_rawdata_download.Observe(
+        download_d.count());
 }
 
 void
@@ -333,6 +341,7 @@ SegmentSealedImpl::LoadFieldDataV2(const LoadFieldDataInfo& load_info) {
 void
 SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
     auto num_rows = data.row_count;
+    std::chrono::milliseconds d(0);
     if (SystemProperty::Instance().IsSystem(field_id)) {
         auto system_field_type =
             SystemProperty::Instance().GetSystemFieldType(field_id);
@@ -340,6 +349,7 @@ SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
             std::vector<Timestamp> timestamps(num_rows);
             int64_t offset = 0;
             auto field_data = storage::CollectFieldDataChannel(data.channel);
+            auto start = std::chrono::steady_clock::now();
             for (auto& data : field_data) {
                 int64_t row_count = data->get_num_rows();
                 std::copy_n(static_cast<const Timestamp*>(data->Data()),
@@ -364,6 +374,9 @@ SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
             AssertInfo(insert_record_.timestamps_.num_chunk() == 1,
                        "num chunk not equal to 1 for sealed segment");
             stats_.mem_size += sizeof(Timestamp) * data.row_count;
+            auto end = std::chrono::steady_clock::now();
+            d += std::chrono::duration_cast<std::chrono::milliseconds>(end -
+                                                                       start);
         } else {
             AssertInfo(system_field_type == SystemFieldType::RowId,
                        "System field type of id column is not RowId");
@@ -391,13 +404,21 @@ SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
                             num_rows, field_meta);
                     FieldDataPtr field_data;
                     while (data.channel->pop(field_data)) {
+                        auto s = std::chrono::steady_clock::now();
                         var_column->Append(std::move(field_data));
+                        auto e = std::chrono::steady_clock::now();
+                        d += std::chrono::duration_cast<
+                            std::chrono::milliseconds>(e - s);
                     }
+                    auto s = std::chrono::steady_clock::now();
                     var_column->Seal();
                     field_data_size = var_column->ByteSize();
                     stats_.mem_size += var_column->ByteSize();
                     LoadStringSkipIndex(field_id, 0, *var_column);
                     column = std::move(var_column);
+                    auto e = std::chrono::steady_clock::now();
+                    d += std::chrono::duration_cast<std::chrono::milliseconds>(
+                        e - s);
                     break;
                 }
                 case milvus::DataType::JSON: {
@@ -406,12 +427,20 @@ SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
                             num_rows, field_meta);
                     FieldDataPtr field_data;
                     while (data.channel->pop(field_data)) {
+                        auto s = std::chrono::steady_clock::now();
                         var_column->Append(std::move(field_data));
+                        auto e = std::chrono::steady_clock::now();
+                        d += std::chrono::duration_cast<
+                            std::chrono::milliseconds>(e - s);
                     }
+                    auto s = std::chrono::steady_clock::now();
                     var_column->Seal();
                     stats_.mem_size += var_column->ByteSize();
                     field_data_size = var_column->ByteSize();
                     column = std::move(var_column);
+                    auto e = std::chrono::steady_clock::now();
+                    d += std::chrono::duration_cast<std::chrono::milliseconds>(
+                        e - s);
                     break;
                 }
                 case milvus::DataType::ARRAY: {
@@ -419,6 +448,7 @@ SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
                         std::make_shared<ArrayColumn>(num_rows, field_meta);
                     FieldDataPtr field_data;
                     while (data.channel->pop(field_data)) {
+                        auto s = std::chrono::steady_clock::now();
                         for (auto i = 0; i < field_data->get_num_rows(); i++) {
                             auto rawValue = field_data->RawValue(i);
                             auto array =
@@ -431,17 +461,28 @@ SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
                             stats_.mem_size +=
                                 array->byte_size() + sizeof(uint64_t);
                         }
+                        auto e = std::chrono::steady_clock::now();
+                        d += std::chrono::duration_cast<
+                            std::chrono::milliseconds>(e - s);
                     }
+                    auto s = std::chrono::steady_clock::now();
                     var_column->Seal();
                     column = std::move(var_column);
+                    auto e = std::chrono::steady_clock::now();
+                    d += std::chrono::duration_cast<std::chrono::milliseconds>(
+                        e - s);
                     break;
                 }
                 case milvus::DataType::VECTOR_SPARSE_FLOAT: {
                     auto col = std::make_shared<SparseFloatColumn>(field_meta);
                     FieldDataPtr field_data;
                     while (data.channel->pop(field_data)) {
+                        auto s = std::chrono::steady_clock::now();
                         stats_.mem_size += field_data->Size();
                         col->AppendBatch(field_data);
+                        auto e = std::chrono::steady_clock::now();
+                        d += std::chrono::duration_cast<
+                            std::chrono::milliseconds>(e - s);
                     }
                     column = std::move(col);
                     break;
@@ -459,14 +500,22 @@ SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
             column = std::make_shared<Column>(num_rows, field_meta);
             FieldDataPtr field_data;
             while (data.channel->pop(field_data)) {
+                auto s = std::chrono::steady_clock::now();
                 column->AppendBatch(field_data);
 
                 stats_.mem_size += field_data->Size();
+                auto e = std::chrono::steady_clock::now();
+                d += std::chrono::duration_cast<std::chrono::milliseconds>(e -
+                                                                           s);
             }
+            auto s = std::chrono::steady_clock::now();
             LoadPrimitiveSkipIndex(
                 field_id, 0, data_type, column->Span().data(), num_rows);
+            auto e = std::chrono::steady_clock::now();
+            d += std::chrono::duration_cast<std::chrono::milliseconds>(e - s);
         }
 
+        auto s = std::chrono::steady_clock::now();
         AssertInfo(column->NumRows() == num_rows,
                    fmt::format("data lost while loading column {}: loaded "
                                "num rows {} but expected {}",
@@ -505,7 +554,11 @@ SegmentSealedImpl::LoadFieldData(FieldId field_id, FieldDataInfo& data) {
             std::unique_lock lck(mutex_);
             set_bit(field_data_ready_bitset_, field_id, true);
         }
+        auto e = std::chrono::steady_clock::now();
+        d += std::chrono::duration_cast<std::chrono::milliseconds>(e - s);
     }
+    milvus::storage::internal_load_field_time_rawdata_process.Observe(
+        d.count());
     {
         std::unique_lock lck(mutex_);
         update_row_count(num_rows);

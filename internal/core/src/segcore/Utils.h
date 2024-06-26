@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <unordered_map>
 #include <exception>
 #include <memory>
@@ -185,7 +186,8 @@ ReverseDataFromIndex(const index::IndexBase* index,
 
 void
 LoadFieldDatasFromRemote(const std::vector<std::string>& remote_files,
-                         FieldDataChannelPtr channel);
+                         FieldDataChannelPtr channel,
+                         std::chrono::milliseconds* d = nullptr);
 
 void
 LoadFieldDatasFromRemote2(std::shared_ptr<milvus_storage::Space> space,

@@ -15,6 +15,7 @@
 // limitations under the License.
 
 #include "storage/DataCodec.h"
+#include "log/Log.h"
 #include "storage/Event.h"
 #include "storage/Util.h"
 #include "storage/InsertData.h"
@@ -70,6 +71,7 @@ DeserializeRemoteFileData(BinlogReaderPtr reader) {
                     field_data->Size());
                 field_data = new_field_data;
             }
+            // LOG_INFO("deser field size: {}", field_data->Size());
 
             auto index_data = std::make_unique<IndexData>(field_data);
             index_data->SetFieldDataMeta(data_meta);

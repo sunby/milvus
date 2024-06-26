@@ -18,6 +18,7 @@
 #include "common/FieldMeta.h"
 #include "common/Types.h"
 #include "storage/PayloadWriter.h"
+#include <arrow/util/type_fwd.h>
 #include "storage/Util.h"
 
 namespace milvus::storage {
@@ -98,7 +99,8 @@ PayloadWriter::finish() {
                                      output_,
                                      1024 * 1024 * 1024,
                                      parquet::WriterProperties::Builder()
-                                         .compression(arrow::Compression::ZSTD)
+                                         .disable_dictionary()
+                                         ->compression(arrow::Compression::ZSTD)
                                          ->compression_level(3)
                                          ->build());
     AssertInfo(ast.ok(), ast.ToString());

@@ -185,6 +185,77 @@ DEFINE_PROMETHEUS_HISTOGRAM_WITH_BUCKETS(
     mmapAllocatedSpaceFileLabel,
     bytesBuckets)
 
+std::map<std::string, std::string> download_label = {{"type", "download"}};
+std::map<std::string, std::string> assemble_label = {{"type", "assemble"}};
+std::map<std::string, std::string> knowhere_label = {{"type", "knowhere"}};
+std::map<std::string, std::string> process_label = {{"type", "process"}};
+std::map<std::string, std::string> deser_label = {{"type", "deser"}};
+std::map<std::string, std::string> fill_label = {{"type", "fill"}};
+const prometheus::Histogram::BucketBoundaries time_buckets = {
+    1, 5, 10, 15, 20, 60};
+DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(internal_load_field_time_index,
+                                   "[cpp]load field time stats")
+DEFINE_PROMETHEUS_HISTOGRAM_WITH_BUCKETS(
+    internal_load_field_time_index_download,
+    internal_load_field_time_index,
+    download_label,
+    time_buckets)
+DEFINE_PROMETHEUS_HISTOGRAM_WITH_BUCKETS(
+    internal_load_field_time_index_assemble,
+    internal_load_field_time_index,
+    assemble_label,
+    time_buckets)
+DEFINE_PROMETHEUS_HISTOGRAM_WITH_BUCKETS(
+    internal_load_field_time_index_knowhere,
+    internal_load_field_time_index,
+    knowhere_label,
+    time_buckets)
+
+DEFINE_PROMETHEUS_HISTOGRAM_WITH_BUCKETS(internal_load_field_time_index_fill,
+                                         internal_load_field_time_index,
+                                         fill_label,
+                                         time_buckets)
+
+DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(internal_load_field_time_rawdata,
+                                   "[cpp]load field time stats")
+DEFINE_PROMETHEUS_HISTOGRAM_WITH_BUCKETS(
+    internal_load_field_time_rawdata_download,
+    internal_load_field_time_rawdata,
+    download_label,
+    time_buckets)
+DEFINE_PROMETHEUS_HISTOGRAM_WITH_BUCKETS(
+    internal_load_field_time_rawdata_process,
+    internal_load_field_time_rawdata,
+    process_label,
+    time_buckets)
+
+DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(
+    internal_load_file_download_deser_time_rawdata,
+    "[cpp]load file download deser time rawdata")
+DEFINE_PROMETHEUS_HISTOGRAM_WITH_BUCKETS(
+    internal_load_file_download_time_rawdata,
+    internal_load_file_download_deser_time_rawdata,
+    download_label,
+    time_buckets)
+DEFINE_PROMETHEUS_HISTOGRAM_WITH_BUCKETS(
+    internal_load_file_deser_time_rawdata,
+    internal_load_file_download_deser_time_rawdata,
+    deser_label,
+    time_buckets)
+
+DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(internal_load_file_download_deser_time_index,
+                                   "[cpp]load file download deser time rawdata")
+DEFINE_PROMETHEUS_HISTOGRAM_WITH_BUCKETS(
+    internal_load_file_download_time_index,
+    internal_load_file_download_deser_time_index,
+    download_label,
+    time_buckets)
+DEFINE_PROMETHEUS_HISTOGRAM_WITH_BUCKETS(
+    internal_load_file_deser_time_index,
+    internal_load_file_download_deser_time_index,
+    deser_label,
+    time_buckets)
+
 DEFINE_PROMETHEUS_GAUGE_FAMILY(internal_mmap_in_used_space_bytes,
                                "[cpp]mmap in used space stats")
 DEFINE_PROMETHEUS_GAUGE(internal_mmap_in_used_space_bytes_anon,

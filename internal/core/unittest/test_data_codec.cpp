@@ -15,6 +15,9 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
+#include <cstdint>
+#include <fstream>
+#include <memory>
 
 #include "storage/DataCodec.h"
 #include "storage/InsertData.h"
@@ -467,3 +470,16 @@ TEST(storage, InsertDataStringArray) {
         ASSERT_TRUE(data[i].operator==(new_data[i]));
     }
 }
+
+// TEST(storage, TestDeser) {
+//     std::ifstream ifs("/home/sunby/Downloads/HNSW_0");
+//     ifs.seekg(0, std::ios::end);
+//     auto len = ifs.tellg();
+//     std::cout << "len: " << len << std::endl;
+//     ifs.seekg(0, std::ios::beg);
+//     auto buffer = std::shared_ptr<uint8_t[]>(new uint8_t[len]);
+//     auto a = buffer.get();
+//     ifs.read((char*)(a), len);
+
+//     storage::DeserializeFileData(buffer, len);
+// }

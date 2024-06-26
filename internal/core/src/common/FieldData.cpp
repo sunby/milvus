@@ -15,6 +15,8 @@
 // limitations under the License.
 
 #include "common/FieldData.h"
+#include <algorithm>
+#include <chrono>
 
 #include "arrow/array/array_binary.h"
 #include "common/Array.h"
@@ -28,8 +30,8 @@ namespace milvus {
 
 template <typename Type, bool is_type_entire_row>
 void
-FieldDataImpl<Type, is_type_entire_row>::FillFieldData(const void* source,
-                                                       ssize_t element_count) {
+FieldDataImpl<Type, is_type_entire_row>::FillFieldData(
+    const void* source, ssize_t element_count, std::chrono::milliseconds* d) {
     if (element_count == 0) {
         return;
     }
@@ -38,9 +40,14 @@ FieldDataImpl<Type, is_type_entire_row>::FillFieldData(const void* source,
     if (length_ + element_count > get_num_rows()) {
         resize_field_data(length_ + element_count);
     }
+    auto s = std::chrono::steady_clock::now();
     std::copy_n(static_cast<const Type*>(source),
                 element_count * dim_,
                 field_data_.data() + length_ * dim_);
+    if (d) {
+        *d += std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - s);
+    }
     length_ += element_count;
 }
 

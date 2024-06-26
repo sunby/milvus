@@ -17,6 +17,7 @@
 #include "index/VectorMemIndex.h"
 
 #include <unistd.h>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -305,6 +306,8 @@ template <typename T>
 void
 VectorMemIndex<T>::Load(milvus::tracer::TraceContext ctx,
                         const Config& config) {
+    std::chrono::milliseconds d2(0);
+
     if (config.contains(kMmapFilepath)) {
         return LoadFromFile(config);
     }
@@ -347,8 +350,11 @@ VectorMemIndex<T>::Load(milvus::tracer::TraceContext ctx,
             std::string index_file_prefix = slice_meta_filepath.substr(
                 0, slice_meta_filepath.find_last_of('/') + 1);
 
+            auto s = std::chrono::steady_clock::now();
             auto result =
-                file_manager_->LoadIndexToMemory({slice_meta_filepath});
+                file_manager_->LoadIndexToMemory({slice_meta_filepath}, false);
+            d2 += std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - s);
             auto raw_slice_meta = result[INDEX_FILE_SLICE_META];
             Config meta_data = Config::parse(
                 std::string(static_cast<const char*>(raw_slice_meta->Data()),
@@ -369,7 +375,22 @@ VectorMemIndex<T>::Load(milvus::tracer::TraceContext ctx,
                     batch.push_back(index_file_prefix + file_name);
                 }
 
-                auto batch_data = file_manager_->LoadIndexToMemory(batch);
+                s = std::chrono::steady_clock::now();
+                auto batch_data = file_manager_->LoadIndexToMemory(batch, true);
+                d2 += std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - s);
+                s = std::chrono::steady_clock::now();
+
+                auto total_size = 0;
+                for (auto& [k, v] : batch_data) {
+                    total_size += v->Size();
+                }
+                new_field_data->Reserve(total_size);
+                LOG_INFO("batch size {}, total size {}",
+                         batch_data.size(),
+                         total_size);
+
+                std::chrono::milliseconds fill_duration(0);
                 for (const auto& file_path : batch) {
                     const std::string file_name =
                         file_path.substr(file_path.find_last_of('/') + 1);
@@ -377,8 +398,17 @@ VectorMemIndex<T>::Load(milvus::tracer::TraceContext ctx,
                                "lost index slice data: {}",
                                file_name);
                     auto data = batch_data[file_name];
-                    new_field_data->FillFieldData(data->Data(), data->Size());
+                    new_field_data->FillFieldData(
+                        data->Data(), data->Size(), &fill_duration);
                 }
+                auto assemble_duration =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - s);
+                storage::internal_load_field_time_index_fill.Observe(
+                    fill_duration.count());
+                storage::internal_load_field_time_index_assemble.Observe(
+                    assemble_duration.count());
+
                 for (auto& file : batch) {
                     pending_index_files.erase(file);
                 }
@@ -391,9 +421,13 @@ VectorMemIndex<T>::Load(milvus::tracer::TraceContext ctx,
         }
 
         if (!pending_index_files.empty()) {
-            auto result =
-                file_manager_->LoadIndexToMemory(std::vector<std::string>(
-                    pending_index_files.begin(), pending_index_files.end()));
+            auto s = std::chrono::steady_clock::now();
+            auto result = file_manager_->LoadIndexToMemory(
+                std::vector<std::string>(pending_index_files.begin(),
+                                         pending_index_files.end()),
+                true);
+            d2 += std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - s);
             for (auto&& index_data : result) {
                 index_datas.insert(std::move(index_data));
             }
@@ -402,6 +436,7 @@ VectorMemIndex<T>::Load(milvus::tracer::TraceContext ctx,
         read_file_span->End();
     }
 
+    auto s = std::chrono::steady_clock::now();
     LOG_INFO("construct binary set...");
     BinarySet binary_set;
     for (auto& [key, data] : index_datas) {
@@ -422,6 +457,11 @@ VectorMemIndex<T>::Load(milvus::tracer::TraceContext ctx,
     LoadWithoutAssemble(binary_set, config);
     span_load_engine->End();
     LOG_INFO("load vector index done");
+    auto knowhere_d = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - s);
+    storage::internal_load_field_time_index_knowhere.Observe(
+        knowhere_d.count());
+    storage::internal_load_field_time_index_download.Observe(d2.count());
 }
 
 template <typename T>
@@ -693,7 +733,8 @@ VectorMemIndex<T>::GetSparseVector(const DatasetPtr dataset) const {
 }
 
 template <typename T>
-void VectorMemIndex<T>::LoadFromFile(const Config& config) {
+void
+VectorMemIndex<T>::LoadFromFile(const Config& config) {
     auto filepath = GetValueFromConfig<std::string>(config, kMmapFilepath);
     AssertInfo(filepath.has_value(), "mmap filepath is empty when load index");
 

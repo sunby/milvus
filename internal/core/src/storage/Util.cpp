@@ -15,6 +15,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <chrono>
 #include <memory>
 
 #include "arrow/array/builder_binary.h"
@@ -26,6 +27,7 @@
 #include "common/EasyAssert.h"
 #include "common/FieldData.h"
 #include "common/FieldDataInterface.h"
+#include "storage/prometheus_client.h"
 #ifdef AZURE_BUILD_DIR
 #include "storage/AzureChunkManager.h"
 #endif
@@ -468,12 +470,26 @@ GetSegmentRawDataPathPrefix(ChunkManagerPtr cm, int64_t segment_id) {
 
 std::unique_ptr<DataCodec>
 DownloadAndDecodeRemoteFile(ChunkManager* chunk_manager,
-                            const std::string& file) {
+                            const std::string& file,
+                            bool index) {
+    auto s = std::chrono::steady_clock::now();
     auto fileSize = chunk_manager->Size(file);
     auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[fileSize]);
     chunk_manager->Read(file, buf.get(), fileSize);
+    if (index) {
+        auto d1 = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - s);
+        internal_load_file_download_time_index.Observe(d1.count());
+    }
 
-    return DeserializeFileData(buf, fileSize);
+    s = std::chrono::steady_clock::now();
+    auto ret = DeserializeFileData(buf, fileSize);
+    if (index) {
+        auto d2 = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - s);
+        internal_load_file_deser_time_index.Observe(d2.count());
+    }
+    return ret;
 }
 
 std::unique_ptr<DataCodec>
@@ -499,6 +515,15 @@ EncodeAndUploadIndexSlice(ChunkManager* chunk_manager,
                           IndexMeta index_meta,
                           FieldDataMeta field_meta,
                           std::string object_key) {
+    // auto field_data = CreateFieldData(DataType::STRING);
+    // arrow::StringBuilder sb;
+    // sb.Append(buf, batch_size);
+    // auto sa = std::dynamic_pointer_cast<arrow::StringArray>(
+    //     sb.Finish().ValueUnsafe());
+
+    // auto string_field_data =
+    //     std::dynamic_pointer_cast<FieldDataStringImpl>(field_data);
+    // string_field_data->FillFieldData(sa);
     auto field_data = CreateFieldData(DataType::INT8);
     field_data->FillFieldData(buf, batch_size);
     auto indexData = std::make_shared<IndexData>(field_data);
@@ -556,13 +581,14 @@ EncodeAndUploadFieldSlice(ChunkManager* chunk_manager,
 
 std::vector<std::future<std::unique_ptr<DataCodec>>>
 GetObjectData(ChunkManager* remote_chunk_manager,
-              const std::vector<std::string>& remote_files) {
+              const std::vector<std::string>& remote_files,
+              bool index) {
     auto& pool = ThreadPools::GetThreadPool(milvus::ThreadPoolPriority::HIGH);
     std::vector<std::future<std::unique_ptr<DataCodec>>> futures;
     futures.reserve(remote_files.size());
     for (auto& file : remote_files) {
         futures.emplace_back(pool.Submit(
-            DownloadAndDecodeRemoteFile, remote_chunk_manager, file));
+            DownloadAndDecodeRemoteFile, remote_chunk_manager, file, index));
     }
     return futures;
 }

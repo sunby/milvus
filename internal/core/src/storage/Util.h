@@ -16,7 +16,9 @@
 
 #pragma once
 
+#include <chrono>
 #include <memory>
+#include <ratio>
 #include <string>
 #include <vector>
 #include <future>
@@ -87,7 +89,8 @@ GetSegmentRawDataPathPrefix(ChunkManagerPtr cm, int64_t segment_id);
 
 std::unique_ptr<DataCodec>
 DownloadAndDecodeRemoteFile(ChunkManager* chunk_manager,
-                            const std::string& file);
+                            const std::string& file,
+                            bool index = false);
 
 std::unique_ptr<DataCodec>
 DownloadAndDecodeRemoteFileV2(std::shared_ptr<milvus_storage::Space> space,
@@ -118,7 +121,8 @@ EncodeAndUploadFieldSlice(ChunkManager* chunk_manager,
 
 std::vector<std::future<std::unique_ptr<DataCodec>>>
 GetObjectData(ChunkManager* remote_chunk_manager,
-              const std::vector<std::string>& remote_files);
+              const std::vector<std::string>& remote_files,
+              bool index = false);
 
 std::vector<FieldDataPtr>
 GetObjectData(std::shared_ptr<milvus_storage::Space> space,
