@@ -343,7 +343,7 @@ ReduceHelper::ReduceResultData() {
                 qi, slice_topKs_[slice_index], offset);
         }
     }
-    if (this->heap_.top() != nullptr) {
+    if (!this->heap_.empty()) {
         auto res_num =
             this->heap_.top()->search_result_->result_offsets_.size();
         LOG_INFO("[remove me] reduce num: {}", res_num);
