@@ -317,7 +317,7 @@ DiskFileManagerImpl::CacheIndexToDisk(
             batch_remote_files.push_back(origin_file);
         }
 
-        auto index_chunks = GetObjectData(rcm_.get(), batch_remote_files);
+        auto index_chunks = GetObjectData(rcm_.get(), batch_remote_files, true);
         for (auto& chunk : index_chunks) {
             auto index_data = chunk.get()->GetFieldData();
             auto index_size = index_data->Size();
