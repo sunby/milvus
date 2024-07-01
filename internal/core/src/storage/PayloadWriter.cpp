@@ -18,6 +18,8 @@
 #include "common/FieldMeta.h"
 #include "common/Types.h"
 #include "storage/PayloadWriter.h"
+#include <arrow/util/type_fwd.h>
+#include <parquet/types.h>
 #include "storage/Util.h"
 
 namespace milvus::storage {
@@ -98,6 +100,7 @@ PayloadWriter::finish() {
                                      output_,
                                      1024 * 1024 * 1024,
                                      parquet::WriterProperties::Builder()
+                                         // .disable_dictionary()
                                          .compression(arrow::Compression::ZSTD)
                                          ->compression_level(3)
                                          ->build());

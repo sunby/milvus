@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <iostream>
 #include <memory>
@@ -47,7 +48,9 @@ class FieldDataBase {
     // For all FieldDataImpl subclasses, source is a pointer to element_count of
     // Type
     virtual void
-    FillFieldData(const void* source, ssize_t element_count) = 0;
+    FillFieldData(const void* source,
+                  ssize_t element_count,
+                  std::chrono::milliseconds* d = nullptr) = 0;
 
     virtual void
     FillFieldData(const std::shared_ptr<arrow::Array> array) = 0;
@@ -129,7 +132,9 @@ class FieldDataImpl : public FieldDataBase {
     }
 
     void
-    FillFieldData(const void* source, ssize_t element_count) override;
+    FillFieldData(const void* source,
+                  ssize_t element_count,
+                  std::chrono::milliseconds* d = nullptr) override;
 
     void
     FillFieldData(const std::shared_ptr<arrow::Array> array) override;
@@ -378,7 +383,9 @@ class FieldDataSparseVectorImpl
     // source is a pointer to element_count of
     // knowhere::sparse::SparseRow<float>
     void
-    FillFieldData(const void* source, ssize_t element_count) override {
+    FillFieldData(const void* source,
+                  ssize_t element_count,
+                  std::chrono::milliseconds* d) override {
         if (element_count == 0) {
             return;
         }

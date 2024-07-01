@@ -11,6 +11,7 @@
 
 #include "segcore/Utils.h"
 
+#include <chrono>
 #include <future>
 #include <memory>
 #include <string>
@@ -25,6 +26,7 @@
 #include "storage/RemoteChunkManagerSingleton.h"
 #include "storage/ThreadPools.h"
 #include "storage/Util.h"
+#include "storage/prometheus_client.h"
 
 namespace milvus::segcore {
 
@@ -793,8 +795,10 @@ LoadFieldDatasFromRemote2(std::shared_ptr<milvus_storage::Space> space,
 // segcore use default remote chunk manager to load data from minio/s3
 void
 LoadFieldDatasFromRemote(const std::vector<std::string>& remote_files,
-                         FieldDataChannelPtr channel) {
+                         FieldDataChannelPtr channel,
+                         std::chrono::milliseconds* d) {
     try {
+        auto start = std::chrono::steady_clock::now();
         auto rcm = storage::RemoteChunkManagerSingleton::GetInstance()
                        .GetRemoteChunkManager();
         auto& pool = ThreadPools::GetThreadPool(ThreadPoolPriority::HIGH);
@@ -803,15 +807,39 @@ LoadFieldDatasFromRemote(const std::vector<std::string>& remote_files,
         futures.reserve(remote_files.size());
         for (const auto& file : remote_files) {
             auto future = pool.Submit([&]() {
+                auto s = std::chrono::steady_clock::now();
                 auto fileSize = rcm->Size(file);
                 auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[fileSize]);
                 rcm->Read(file, buf.get(), fileSize);
+                auto e1 = std::chrono::steady_clock::now();
+                if (d) {
+                    auto d1 =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            e1 - s);
+                    storage::internal_load_file_download_time_rawdata.Observe(
+                        d1.count());
+                }
                 auto result = storage::DeserializeFileData(buf, fileSize);
+                auto e2 = std::chrono::steady_clock::now();
+                if (d) {
+                    auto d2 =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            e2 - e1);
+                    storage::internal_load_file_deser_time_rawdata.Observe(
+                        d2.count());
+                }
                 return result->GetFieldData();
             });
             futures.emplace_back(std::move(future));
         }
 
+        for (auto& future : futures) {
+            future.wait();
+        }
+        if (d) {
+            *d += std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start);
+        }
         for (auto& future : futures) {
             auto field_data = future.get();
             channel->push(field_data);

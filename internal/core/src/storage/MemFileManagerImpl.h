@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -55,7 +56,8 @@ class MemFileManagerImpl : public FileManagerImpl {
     }
 
     std::map<std::string, FieldDataPtr>
-    LoadIndexToMemory(const std::vector<std::string>& remote_files);
+    LoadIndexToMemory(const std::vector<std::string>& remote_files,
+                      bool index = false);
 
     std::vector<FieldDataPtr>
     CacheRawDataToMemory(std::vector<std::string> remote_files);

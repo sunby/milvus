@@ -205,8 +205,8 @@ SegmentGrowingImpl::LoadFieldData(const LoadFieldDataInfo& infos) {
                  this->get_segment_id(),
                  field_id.get(),
                  num_rows);
-        auto load_future =
-            pool.Submit(LoadFieldDatasFromRemote, insert_files, channel);
+        auto load_future = pool.Submit(
+            LoadFieldDatasFromRemote, insert_files, channel, nullptr);
 
         LOG_INFO("segment {} submits load field {} task to thread pool",
                  this->get_segment_id(),
