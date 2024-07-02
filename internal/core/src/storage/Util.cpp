@@ -515,17 +515,17 @@ EncodeAndUploadIndexSlice(ChunkManager* chunk_manager,
                           IndexMeta index_meta,
                           FieldDataMeta field_meta,
                           std::string object_key) {
-    // auto field_data = CreateFieldData(DataType::STRING);
-    // arrow::StringBuilder sb;
-    // sb.Append(buf, batch_size);
-    // auto sa = std::dynamic_pointer_cast<arrow::StringArray>(
-    //     sb.Finish().ValueUnsafe());
+    auto field_data = CreateFieldData(DataType::STRING);
+    arrow::StringBuilder sb;
+    sb.Append(buf, batch_size);
+    auto sa = std::dynamic_pointer_cast<arrow::StringArray>(
+        sb.Finish().ValueUnsafe());
 
-    // auto string_field_data =
-    //     std::dynamic_pointer_cast<FieldDataStringImpl>(field_data);
-    // string_field_data->FillFieldData(sa);
-    auto field_data = CreateFieldData(DataType::INT8);
-    field_data->FillFieldData(buf, batch_size);
+    auto string_field_data =
+        std::dynamic_pointer_cast<FieldDataStringImpl>(field_data);
+    string_field_data->FillFieldData(sa);
+    // auto field_data = CreateFieldData(DataType::INT8);
+    // field_data->FillFieldData(buf, batch_size);
     auto indexData = std::make_shared<IndexData>(field_data);
     indexData->set_index_meta(index_meta);
     indexData->SetFieldDataMeta(field_meta);
