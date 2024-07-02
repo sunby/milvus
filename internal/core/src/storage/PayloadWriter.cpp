@@ -20,6 +20,7 @@
 #include "storage/PayloadWriter.h"
 #include <arrow/util/type_fwd.h>
 #include <parquet/types.h>
+#include "log/Log.h"
 #include "storage/Util.h"
 
 namespace milvus::storage {
@@ -105,6 +106,7 @@ PayloadWriter::finish() {
             ->compression(arrow::Compression::UNCOMPRESSED)
             //  ->compression_level(3)
             ->build());
+    LOG_INFO("[remove me] new payload writer");
     AssertInfo(ast.ok(), ast.ToString());
 }
 

@@ -515,6 +515,7 @@ EncodeAndUploadIndexSlice(ChunkManager* chunk_manager,
                           IndexMeta index_meta,
                           FieldDataMeta field_meta,
                           std::string object_key) {
+    LOG_INFO("[remove me] write index as string with size {}", batch_size);
     auto field_data = CreateFieldData(DataType::STRING);
     arrow::StringBuilder sb;
     sb.Append(buf, batch_size);
