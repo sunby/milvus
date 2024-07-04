@@ -128,4 +128,10 @@ DECLARE_PROMETHEUS_GAUGE_FAMILY(internal_mmap_in_used_space_bytes);
 DECLARE_PROMETHEUS_GAUGE(internal_mmap_in_used_space_bytes_anon);
 DECLARE_PROMETHEUS_GAUGE(internal_mmap_in_used_space_bytes_file);
 
+DECLARE_PROMETHEUS_HISTOGRAM_FAMILY(retrieve_c_time)
+DECLARE_PROMETHEUS_HISTOGRAM(retrieve_c_time_segment)
+DECLARE_PROMETHEUS_HISTOGRAM(retrieve_c_time_serialize)
+DECLARE_PROMETHEUS_HISTOGRAM(retrieve_c_time_fill)
+DECLARE_PROMETHEUS_HISTOGRAM(retrieve_c_time_visitor)
+
 }  // namespace milvus::storage

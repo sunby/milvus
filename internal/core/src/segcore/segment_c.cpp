@@ -11,6 +11,7 @@
 
 #include "segcore/segment_c.h"
 
+#include <chrono>
 #include <memory>
 #include <limits>
 
@@ -27,6 +28,7 @@
 #include "segcore/SegmentSealedImpl.h"
 #include "segcore/Utils.h"
 #include "storage/Util.h"
+#include "storage/prometheus_client.h"
 #include "storage/space.h"
 
 //////////////////////////////    common interfaces    //////////////////////////////
@@ -142,12 +144,21 @@ Retrieve(CTraceContext c_trace,
             c_trace.traceID, c_trace.spanID, c_trace.traceFlags};
         milvus::tracer::AutoSpan span("SegCoreRetrieve", &trace_ctx, true);
 
+        auto s = std::chrono::steady_clock::now();
         auto retrieve_result = segment->Retrieve(
             &trace_ctx, plan, timestamp, limit_size, ignore_non_pk);
+        auto s1 = std::chrono::steady_clock::now();
+        auto d1 = std::chrono::duration_cast<std::chrono::milliseconds>(s1 - s)
+                      .count();
+        milvus::storage::retrieve_c_time_segment.Observe(d1);
 
         auto size = retrieve_result->ByteSizeLong();
         std::unique_ptr<uint8_t[]> buffer(new uint8_t[size]);
         retrieve_result->SerializePartialToArray(buffer.get(), size);
+        auto s2 = std::chrono::steady_clock::now();
+        auto d2 = std::chrono::duration_cast<std::chrono::milliseconds>(s2 - s1)
+                      .count();
+        milvus::storage::retrieve_c_time_serialize.Observe(d2);
 
         result->proto_blob = buffer.release();
         result->proto_size = size;
