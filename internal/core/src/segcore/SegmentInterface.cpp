@@ -13,12 +13,14 @@
 
 #include <cstdint>
 
+#include <chrono>
 #include "Utils.h"
 #include "common/EasyAssert.h"
 #include "common/SystemProperty.h"
 #include "common/Tracer.h"
 #include "common/Types.h"
 #include "query/generated/ExecPlanNodeVisitor.h"
+#include "storage/prometheus_client.h"
 
 namespace milvus::segcore {
 
@@ -89,7 +91,12 @@ SegmentInternalInterface::Retrieve(tracer::TraceContext* trace_ctx,
     tracer::AutoSpan span("Retrieve", trace_ctx, false);
     auto results = std::make_unique<proto::segcore::RetrieveResults>();
     query::ExecPlanNodeVisitor visitor(*this, timestamp);
+    auto s = std::chrono::steady_clock::now();
     auto retrieve_results = visitor.get_retrieve_result(*plan->plan_node_);
+    auto s1 = std::chrono::steady_clock::now();
+    storage::retrieve_c_time_visitor.Observe(
+        std::chrono::duration_cast<std::chrono::microseconds>(s1 - s).count());
+
     retrieve_results.segment_ = (void*)this;
     results->set_has_more_result(retrieve_results.has_more_result);
 
@@ -114,6 +121,8 @@ SegmentInternalInterface::Retrieve(tracer::TraceContext* trace_ctx,
 
     results->mutable_offset()->Add(retrieve_results.result_offsets_.begin(),
                                    retrieve_results.result_offsets_.end());
+    auto s2 = std::chrono::steady_clock::now();
+
     FillTargetEntry(trace_ctx,
                     plan,
                     results,
@@ -121,6 +130,10 @@ SegmentInternalInterface::Retrieve(tracer::TraceContext* trace_ctx,
                     retrieve_results.result_offsets_.size(),
                     ignore_non_pk,
                     true);
+
+    auto s3 = std::chrono::steady_clock::now();
+    storage::retrieve_c_time_fill.Observe(
+        std::chrono::duration_cast<std::chrono::microseconds>(s3 - s2).count());
     return results;
 }
 

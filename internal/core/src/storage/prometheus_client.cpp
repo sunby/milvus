@@ -193,4 +193,24 @@ DEFINE_PROMETHEUS_GAUGE(internal_mmap_in_used_space_bytes_anon,
 DEFINE_PROMETHEUS_GAUGE(internal_mmap_in_used_space_bytes_file,
                         internal_mmap_in_used_space_bytes,
                         mmapAllocatedSpaceFileLabel)
+
+std::map<std::string, std::string> retrieve_ser_labels = {
+    {"type", "serialize"}};
+std::map<std::string, std::string> retrieve_seg_labels = {{"type", "segment"}};
+std::map<std::string, std::string> retrieve_fill_labels = {{"type", "fill"}};
+std::map<std::string, std::string> retrieve_visitor_labels = {
+    {"type", "visit"}};
+DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(retrieve_c_time, "[cpp]retrieve c time")
+DEFINE_PROMETHEUS_HISTOGRAM(retrieve_c_time_serialize,
+                            retrieve_c_time,
+                            retrieve_ser_labels)
+DEFINE_PROMETHEUS_HISTOGRAM(retrieve_c_time_segment,
+                            retrieve_c_time,
+                            retrieve_seg_labels)
+DEFINE_PROMETHEUS_HISTOGRAM(retrieve_c_time_fill,
+                            retrieve_c_time,
+                            retrieve_fill_labels)
+DEFINE_PROMETHEUS_HISTOGRAM(retrieve_c_time_visitor,
+                            retrieve_c_time,
+                            retrieve_visitor_labels)
 }  // namespace milvus::storage
