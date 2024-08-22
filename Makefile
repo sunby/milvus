@@ -19,14 +19,14 @@ INSTALL_PATH := $(PWD)/bin
 LIBRARY_PATH := $(PWD)/lib
 PGO_PATH := $(PWD)/configs/pgo
 OS := $(shell uname -s)
-mode = Release
+mode = Debug
 
 use_disk_index = OFF
 ifdef disk_index
 	use_disk_index = ${disk_index}
 endif
 
-use_asan = OFF
+use_asan = ON
 ifdef USE_ASAN
 	use_asan =${USE_ASAN}
 endif
