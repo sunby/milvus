@@ -128,6 +128,8 @@ if (LINUX OR MSYS)
                   "-fopenmp"
                   "-Wno-error"
                   "-Wno-all"
+                  "-fsanitize=address"
+                  "-fno-omit-frame-pointer"
                   )
     if (CMAKE_BUILD_TYPE STREQUAL "Release")
         append_flags( CMAKE_CXX_FLAGS
