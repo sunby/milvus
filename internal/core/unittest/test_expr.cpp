@@ -6670,6 +6670,9 @@ TEST(JsonInvertedIndex, UnaryExpr) {
     load_index_info.index_params = {{"json_path", "/json/int"}};
     seg->LoadIndex(load_index_info);
 
+    auto json_field_data_info = FieldDataInfo(json_fid.get(), N, {json_field});
+    seg->LoadFieldData(json_fid, json_field_data_info);
+
     proto::plan::GenericValue value;
     value.set_int64_val(1);
     auto unary_expr = std::make_shared<expr::UnaryRangeFilterExpr>(
