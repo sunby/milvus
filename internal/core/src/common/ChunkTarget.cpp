@@ -103,10 +103,10 @@ MmapChunkTarget::get() {
 
     flush();
 
-    AssertInfo(size_ % PAGE_SIZE == 0,
+    AssertInfo(size_ % SYS_PAGE_SIZE == 0,
                "size_ {} is not aligned with page size {}",
                size_,
-               PAGE_SIZE);
+               SYS_PAGE_SIZE);
 
     auto m = mmap(
         nullptr, size_, PROT_READ, MAP_SHARED, file_.Descriptor(), offset_);
