@@ -12,6 +12,7 @@
 #include <sys/mman.h>
 #include <cstdint>
 #include "common/Array.h"
+#include "common/EasyAssert.h"
 #include "common/Span.h"
 #include "common/Types.h"
 #include "common/Chunk.h"
@@ -22,6 +23,9 @@ std::pair<std::vector<std::string_view>, FixedVector<bool>>
 StringChunk::StringViews() {
     std::vector<std::string_view> ret;
     for (int i = 0; i < row_nums_; i++) {
+        AssertInfo(
+            offsets_[i] <= offsets_[i + 1] && offsets_[i + 1] <= size_,
+            "offsets_[i] should be less than or equal to offsets_[i + 1]");
         ret.emplace_back(data_ + offsets_[i], offsets_[i + 1] - offsets_[i]);
     }
     return {ret, valid_};
@@ -35,6 +39,11 @@ ArrayChunk::ConstructViews() {
         int offset = offsets_lens_[2 * i];
         int next_offset = offsets_lens_[2 * (i + 1)];
         int len = offsets_lens_[2 * i + 1];
+        AssertInfo(len >= 0, "len should be non-negative");
+        AssertInfo(next_offset >= offset,
+                   "next_offset should be greater than offset");
+        AssertInfo(next_offset <= size_,
+                   "next_offset should be less than size_");
 
         auto data_ptr = data_ + offset;
         auto offsets_len = 0;
@@ -46,6 +55,9 @@ ArrayChunk::ConstructViews() {
                 reinterpret_cast<uint64_t*>(data_ptr + offsets_len));
             element_indices = std::move(tmp);
         }
+
+        AssertInfo(offsets_len <= next_offset - offset,
+                   "offsets_len should be less than next_offset - offset");
         views_.emplace_back(data_ptr + offsets_len,
                             next_offset - offset - offsets_len,
                             element_type_,

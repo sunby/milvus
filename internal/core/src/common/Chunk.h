@@ -197,6 +197,9 @@ class SparseFloatVectorChunk : public Chunk {
         auto offsets_ptr =
             reinterpret_cast<uint64_t*>(data + null_bitmap_bytes_num);
         for (int i = 0; i < row_nums; i++) {
+            AssertInfo(
+                offsets_ptr[i] <= offsets_ptr[i + 1],
+                "offsets_[i] should be less than or equal to offsets_[i + 1]");
             vec_[i] = {(offsets_ptr[i + 1] - offsets_ptr[i]) /
                            knowhere::sparse::SparseRow<float>::element_size(),
                        (uint8_t*)(data + offsets_ptr[i]),

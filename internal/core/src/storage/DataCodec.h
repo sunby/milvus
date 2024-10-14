@@ -22,6 +22,7 @@
 #include <memory>
 #include <utility>
 
+#include "common/EasyAssert.h"
 #include "common/FieldData.h"
 #include "storage/PayloadReader.h"
 #include "storage/Types.h"
@@ -78,6 +79,7 @@ class DataCodec {
 
     virtual std::shared_ptr<ArrowDataWrapper>
     GetReader() {
+        AssertInfo(data_ != nullptr, "data is nullptr");
         auto ret = std::make_shared<ArrowDataWrapper>();
         ret->reader = payload_reader_->get_reader();
         ret->arrow_reader = payload_reader_->get_file_reader();
