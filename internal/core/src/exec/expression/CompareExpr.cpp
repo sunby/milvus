@@ -46,21 +46,13 @@ PhyCompareFilterExpr::GetChunkData(FieldId field_id,
     if (index) {
         auto& indexing = const_cast<index::ScalarIndex<T>&>(
             segment_->chunk_scalar_index<T>(field_id, current_chunk_id));
-        auto current_chunk_size = segment_->type() == SegmentType::Growing
-                                      ? size_per_chunk_
-                                      : active_count_;
 
         if (indexing.HasRawData()) {
-            return [&, current_chunk_size]() -> const number {
-                if (current_chunk_pos >= current_chunk_size) {
-                    current_chunk_id++;
-                    current_chunk_pos = 0;
-                    indexing = const_cast<index::ScalarIndex<T>&>(
-                        segment_->chunk_scalar_index<T>(field_id,
-                                                        current_chunk_id));
+            return [&]() -> const number {
+                if (current_chunk_pos >= active_count_) {
+                    return std::nullopt;
                 }
-                auto raw = indexing.Reverse_Lookup(current_chunk_pos);
-                current_chunk_pos++;
+                auto raw = indexing.Reverse_Lookup(current_chunk_pos++);
                 if (!raw.has_value()) {
                     return std::nullopt;
                 }
@@ -104,21 +96,13 @@ PhyCompareFilterExpr::GetChunkData<std::string>(FieldId field_id,
         auto& indexing = const_cast<index::ScalarIndex<std::string>&>(
             segment_->chunk_scalar_index<std::string>(field_id,
                                                       current_chunk_id));
-        auto current_chunk_size = segment_->type() == SegmentType::Growing
-                                      ? size_per_chunk_
-                                      : active_count_;
 
         if (indexing.HasRawData()) {
-            return [&, current_chunk_size]() mutable -> const number {
-                if (current_chunk_pos >= current_chunk_size) {
-                    current_chunk_id++;
-                    current_chunk_pos = 0;
-                    indexing = const_cast<index::ScalarIndex<std::string>&>(
-                        segment_->chunk_scalar_index<std::string>(
-                            field_id, current_chunk_id));
+            return [&]() mutable -> const number {
+                if (current_chunk_pos >= active_count_) {
+                    return std::nullopt;
                 }
-                auto raw = indexing.Reverse_Lookup(current_chunk_pos);
-                current_chunk_pos++;
+                auto raw = indexing.Reverse_Lookup(current_chunk_pos++);
                 if (!raw.has_value()) {
                     return std::nullopt;
                 }
@@ -260,15 +244,16 @@ PhyCompareFilterExpr::ExecCompareExprDispatcher(OpType op) {
                                   right_current_chunk_id_,
                                   right_current_chunk_pos_);
         for (int i = 0; i < real_batch_size; ++i) {
-            if (!left().has_value() || !right().has_value()) {
+            auto left_value = left(), right_value = right();
+            if (!left_value.has_value() || !right_value.has_value()) {
                 res[i] = false;
                 valid_res[i] = false;
                 continue;
             }
             res[i] =
                 boost::apply_visitor(milvus::query::Relational<decltype(op)>{},
-                                     left().value(),
-                                     right().value());
+                                     left_value.value(),
+                                     right_value.value());
         }
         return res_vec;
     } else {
