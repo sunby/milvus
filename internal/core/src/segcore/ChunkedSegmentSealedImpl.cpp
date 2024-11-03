@@ -776,11 +776,13 @@ ChunkedSegmentSealedImpl::get_chunk_buffer(FieldId field_id,
         if (field_data->IsNullable()) {
             valid_data.reserve(length);
             for (int i = 0; i < length; i++) {
-                valid_data.push_back(field_data->IsValid(start_offset + i));
+                valid_data.push_back(
+                    field_data->IsValid(chunk_id, start_offset + i));
             }
         }
-        return std::make_pair(field_data->GetBatchBuffer(start_offset, length),
-                              valid_data);
+        return std::make_pair(
+            field_data->GetBatchBuffer(chunk_id, start_offset, length),
+            valid_data);
     }
     PanicInfo(ErrorCode::UnexpectedError,
               "get_chunk_buffer only used for  variable column field");
@@ -1201,8 +1203,9 @@ ChunkedSegmentSealedImpl::search_pk(const PkType& pk,
                     [](const int64_t& elem, const int64_t& value) {
                         return elem < value;
                     });
+                auto num_rows_until_chunk = pk_column->GetNumRowsUntilChunk(i);
                 for (; it != src + chunk_row_num && *it == target; it++) {
-                    auto offset = it - src;
+                    auto offset = it - src + num_rows_until_chunk;
                     if (insert_record_.timestamps_[offset] <= timestamp) {
                         pk_offsets.emplace_back(offset);
                     }
@@ -1220,8 +1223,10 @@ ChunkedSegmentSealedImpl::search_pk(const PkType& pk,
             for (int i = 0; i < num_chunk; ++i) {
                 auto views = var_column->StringViews(i).first;
                 auto it = std::lower_bound(views.begin(), views.end(), target);
+                auto num_rows_until_chunk = pk_column->GetNumRowsUntilChunk(i);
                 for (; it != views.end() && *it == target; it++) {
-                    auto offset = std::distance(views.begin(), it);
+                    auto offset =
+                        std::distance(views.begin(), it) + num_rows_until_chunk;
                     if (insert_record_.timestamps_[offset] <= timestamp) {
                         pk_offsets.emplace_back(offset);
                     }
