@@ -1269,8 +1269,9 @@ ChunkedSegmentSealedImpl::search_pk(const PkType& pk,
                     [](const int64_t& elem, const int64_t& value) {
                         return elem < value;
                     });
+                auto num_rows_until_chunk = pk_column->GetNumRowsUntilChunk(i);
                 for (; it != src + chunk_row_num && *it == target; it++) {
-                    auto offset = it - src;
+                    auto offset = it - src + num_rows_until_chunk;
                     if (offset < insert_barrier) {
                         pk_offsets.emplace_back(offset);
                     }
@@ -1290,8 +1291,10 @@ ChunkedSegmentSealedImpl::search_pk(const PkType& pk,
             for (int i = 0; i < num_chunk; ++i) {
                 auto views = var_column->StringViews(i).first;
                 auto it = std::lower_bound(views.begin(), views.end(), target);
+                auto num_rows_until_chunk = pk_column->GetNumRowsUntilChunk(i);
                 for (; it != views.end() && *it == target; it++) {
-                    auto offset = std::distance(views.begin(), it);
+                    auto offset =
+                        std::distance(views.begin(), it) + num_rows_until_chunk;
                     if (offset < insert_barrier) {
                         pk_offsets.emplace_back(offset);
                     }
