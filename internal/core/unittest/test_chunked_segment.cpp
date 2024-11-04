@@ -23,6 +23,7 @@
 #include "expr/ITypeExpr.h"
 #include "knowhere/comp/index_param.h"
 #include "mmap/ChunkedColumn.h"
+#include "mmap/Types.h"
 #include "query/ExecPlanNodeVisitor.h"
 #include "query/SearchOnSealed.h"
 #include "segcore/SegcoreConfig.h"
@@ -134,55 +135,68 @@ TEST(test_chunk_segment, TestTermExpr) {
                                      false,
                                      false,
                                      true);
-    // generate test data
     size_t test_data_count = 1000;
-    std::vector<int64_t> test_data(test_data_count);
-    std::iota(test_data.begin(), test_data.end(), 0);
-    auto builder = std::make_shared<arrow::Int64Builder>();
-    auto status = builder->AppendValues(test_data.begin(), test_data.end());
-    ASSERT_TRUE(status.ok());
-    auto res = builder->Finish();
-    ASSERT_TRUE(res.ok());
-    std::shared_ptr<arrow::Array> arrow_int64;
-    arrow_int64 = res.ValueOrDie();
 
     auto arrow_i64_field = arrow::field("int64", arrow::int64());
     auto arrow_pk_field = arrow::field("pk", arrow::int64());
     auto arrow_ts_field = arrow::field("ts", arrow::int64());
     std::vector<std::shared_ptr<arrow::Field>> arrow_fields = {
         arrow_i64_field, arrow_pk_field, arrow_ts_field};
+
     std::vector<FieldId> field_ids = {int64_fid, pk_fid, TimestampFieldID};
 
-    for (int i = 0; i < arrow_fields.size(); i++) {
-        auto f = arrow_fields[i];
-        auto fid = field_ids[i];
-        auto arrow_schema =
-            std::make_shared<arrow::Schema>(arrow::FieldVector(1, f));
-        auto record_batch = arrow::RecordBatch::Make(
-            arrow_schema, arrow_int64->length(), {arrow_int64});
+    int start_id = 1;
+    int chunk_num = 2;
 
-        auto res2 = arrow::RecordBatchReader::Make({record_batch});
-        ASSERT_TRUE(res2.ok());
-        auto arrow_reader = res2.ValueOrDie();
-        res2 = arrow::RecordBatchReader::Make({record_batch});
-        ASSERT_TRUE(res2.ok());
-        auto arrow_reader2 = res2.ValueOrDie();
-
+    std::vector<FieldDataInfo> field_infos;
+    for (auto fid : field_ids) {
         FieldDataInfo field_info;
         field_info.field_id = fid.get();
-        field_info.row_count = test_data_count * 2;
-        field_info.arrow_reader_channel->push(
-            std::make_shared<ArrowDataWrapper>(arrow_reader, nullptr, nullptr));
-        field_info.arrow_reader_channel->push(
-            std::make_shared<ArrowDataWrapper>(
-                arrow_reader2, nullptr, nullptr));
-        field_info.arrow_reader_channel->close();
-        segment->LoadFieldData(fid, field_info);
+        field_info.row_count = test_data_count * chunk_num;
+        field_infos.push_back(field_info);
+    }
+
+    // generate data
+    for (int chunk_id = 0; chunk_id < chunk_num;
+         chunk_id++, start_id += test_data_count) {
+        std::vector<int64_t> test_data(test_data_count);
+        std::iota(test_data.begin(), test_data.end(), start_id);
+
+        auto builder = std::make_shared<arrow::Int64Builder>();
+        auto status = builder->AppendValues(test_data.begin(), test_data.end());
+        ASSERT_TRUE(status.ok());
+        auto res = builder->Finish();
+        ASSERT_TRUE(res.ok());
+        std::shared_ptr<arrow::Array> arrow_int64;
+        arrow_int64 = res.ValueOrDie();
+
+        for (int i = 0; i < arrow_fields.size(); i++) {
+            auto f = arrow_fields[i];
+            auto fid = field_ids[i];
+            auto arrow_schema =
+                std::make_shared<arrow::Schema>(arrow::FieldVector(1, f));
+            auto record_batch = arrow::RecordBatch::Make(
+                arrow_schema, arrow_int64->length(), {arrow_int64});
+
+            auto res2 = arrow::RecordBatchReader::Make({record_batch});
+            ASSERT_TRUE(res2.ok());
+            auto arrow_reader = res2.ValueOrDie();
+
+            field_infos[i].arrow_reader_channel->push(
+                std::make_shared<ArrowDataWrapper>(
+                    arrow_reader, nullptr, nullptr));
+        }
+    }
+
+    // load
+    for (int i = 0; i < field_infos.size(); i++) {
+        field_infos[i].arrow_reader_channel->close();
+        segment->LoadFieldData(field_ids[i], field_infos[i]);
     }
 
     // query int64 expr
     std::vector<proto::plan::GenericValue> filter_data;
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 1; i <= 10; ++i) {
         proto::plan::GenericValue v;
         v.set_int64_val(i);
         filter_data.push_back(v);
@@ -193,8 +207,8 @@ TEST(test_chunk_segment, TestTermExpr) {
     auto plan = std::make_shared<plan::FilterBitsNode>(DEFAULT_PLANNODE_ID,
                                                        term_filter_expr);
     final = query::ExecuteQueryExpr(
-        plan, segment.get(), 2 * test_data_count, MAX_TIMESTAMP);
-    ASSERT_EQ(20, final.count());
+        plan, segment.get(), chunk_num * test_data_count, MAX_TIMESTAMP);
+    ASSERT_EQ(10, final.count());
 
     // query pk expr
     auto pk_term_filter_expr = std::make_shared<expr::TermFilterExpr>(
@@ -202,6 +216,19 @@ TEST(test_chunk_segment, TestTermExpr) {
     plan = std::make_shared<plan::FilterBitsNode>(DEFAULT_PLANNODE_ID,
                                                   pk_term_filter_expr);
     final = query::ExecuteQueryExpr(
-        plan, segment.get(), 2 * test_data_count, MAX_TIMESTAMP);
-    ASSERT_EQ(20, final.count());
+        plan, segment.get(), chunk_num * test_data_count, MAX_TIMESTAMP);
+    ASSERT_EQ(10, final.count());
+
+    // query pk in second chunk
+    std::vector<proto::plan::GenericValue> filter_data2;
+    proto::plan::GenericValue v;
+    v.set_int64_val(test_data_count + 1);
+    filter_data2.push_back(v);
+    pk_term_filter_expr = std::make_shared<expr::TermFilterExpr>(
+        expr::ColumnInfo(pk_fid, DataType::INT64), filter_data2);
+    plan = std::make_shared<plan::FilterBitsNode>(DEFAULT_PLANNODE_ID,
+                                                  pk_term_filter_expr);
+    final = query::ExecuteQueryExpr(
+        plan, segment.get(), chunk_num * test_data_count, MAX_TIMESTAMP);
+    ASSERT_EQ(1, final.count());
 }
