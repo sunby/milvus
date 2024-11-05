@@ -117,11 +117,19 @@ AsyncSearch(CTraceContext c_trace,
     auto phg_ptr = reinterpret_cast<const milvus::query::PlaceholderGroup*>(
         c_placeholder_group);
 
+    std::chrono::high_resolution_clock::time_point before_start_time =
+        std::chrono::high_resolution_clock::now();
     auto future = milvus::futures::Future<milvus::SearchResult>::async(
         milvus::futures::getGlobalCPUExecutor(),
         milvus::futures::ExecutePriority::HIGH,
-        [c_trace, segment, plan, phg_ptr, timestamp](
+        [c_trace, segment, plan, phg_ptr, timestamp, before_start_time](
             milvus::futures::CancellationToken cancel_token) {
+            std::chrono::high_resolution_clock::time_point start_time =
+                std::chrono::high_resolution_clock::now();
+            milvus::monitor::debug_search_latency_before_start.Observe(
+                std::chrono::duration<double, std::micro>(start_time -
+                                                          before_start_time)
+                    .count());
             // save trace context into search_info
             auto& trace_ctx = plan->plan_node_->search_info_.trace_ctx_;
             trace_ctx.traceID = c_trace.traceID;

@@ -196,24 +196,36 @@ DEFINE_PROMETHEUS_HISTOGRAM_WITH_BUCKETS(
     scalarProportionLabels,
     ratioBuckets)
 
-std::map<std::string, std::string> xxlabels{{"type", "index_latency"}};
+std::map<std::string, std::string> labels1{{"type", "index1_latency"}};
+std::map<std::string, std::string> labels2{{"type", "index2_latency"}};
+std::map<std::string, std::string> labels3{{"type", "brute_force_latency"}};
+std::map<std::string, std::string> labels4{{"type", "gen_dataset_latency"}};
+std::map<std::string, std::string> labels5{{"type", "search_latency"}};
+std::map<std::string, std::string> labels6{{"type", "before_start_latency"}};
+std::map<std::string, std::string> labels7{{"type", "segcore_latency"}};
 DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(
     debug_search_latency, "[cpp]debug latency(us) of search on segment")
 DEFINE_PROMETHEUS_HISTOGRAM(debug_search_latency_index1,
                             debug_search_latency,
-                            xxlabels)
+                            labels1)
 DEFINE_PROMETHEUS_HISTOGRAM(debug_search_latency_index2,
                             debug_search_latency,
-                            xxlabels)
+                            labels2)
 DEFINE_PROMETHEUS_HISTOGRAM(debug_search_latency_brute_force,
                             debug_search_latency,
-                            xxlabels)
+                            labels3)
 DEFINE_PROMETHEUS_HISTOGRAM(debug_search_latency_index2_gen_dataset,
                             debug_search_latency,
-                            xxlabels)
+                            labels4)
 DEFINE_PROMETHEUS_HISTOGRAM(debug_search_latency_index2_search,
                             debug_search_latency,
-                            xxlabels)
+                            labels5)
+DEFINE_PROMETHEUS_HISTOGRAM(debug_search_latency_before_start,
+                            debug_search_latency,
+                            labels6)
+DEFINE_PROMETHEUS_HISTOGRAM(debug_search_latency_segcore_search,
+                            debug_search_latency,
+                            labels7)
 // mmap metrics
 std::map<std::string, std::string> mmapAllocatedSpaceAnonLabel = {
     {"type", "anon"}};
