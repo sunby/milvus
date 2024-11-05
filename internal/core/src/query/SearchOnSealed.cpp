@@ -18,6 +18,7 @@
 #include "common/QueryInfo.h"
 #include "common/Types.h"
 #include "mmap/Column.h"
+#include "monitor/prometheus_client.h"
 #include "query/SearchBruteForce.h"
 #include "query/SearchOnSealed.h"
 #include "query/helper.h"
@@ -33,6 +34,8 @@ SearchOnSealedIndex(const Schema& schema,
                     int64_t num_queries,
                     const BitsetView& bitset,
                     SearchResult& search_result) {
+    std::chrono::high_resolution_clock::time_point start_time =
+        std::chrono::high_resolution_clock::now();
     auto topK = search_info.topk_;
     auto round_decimal = search_info.round_decimal_;
 
@@ -53,6 +56,13 @@ SearchOnSealedIndex(const Schema& schema,
 
     auto dataset = knowhere::GenDataSet(num_queries, dim, query_data);
     dataset->SetIsSparse(is_sparse);
+    std::chrono::high_resolution_clock::time_point gen_dataset_time =
+        std::chrono::high_resolution_clock::now();
+
+    monitor::debug_search_latency_index2_gen_dataset.Observe(
+        std::chrono::duration<double, std::micro>(gen_dataset_time - start_time)
+            .count());
+
     auto vec_index =
         dynamic_cast<index::VectorIndex*>(field_indexing->indexing_.get());
     if (!milvus::exec::PrepareVectorIteratorsFromIndex(search_info,
@@ -75,6 +85,12 @@ SearchOnSealedIndex(const Schema& schema,
     }
     search_result.total_nq_ = num_queries;
     search_result.unity_topK_ = topK;
+    std::chrono::high_resolution_clock::time_point end_time =
+        std::chrono::high_resolution_clock::now();
+
+    monitor::debug_search_latency_index2_search.Observe(
+        std::chrono::duration<double, std::micro>(end_time - gen_dataset_time)
+            .count());
 }
 
 void

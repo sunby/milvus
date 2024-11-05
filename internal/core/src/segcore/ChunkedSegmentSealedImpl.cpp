@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -45,6 +46,7 @@
 #include "mmap/Utils.h"
 #include "mmap/Types.h"
 #include "log/Log.h"
+#include "monitor/prometheus_client.h"
 #include "pb/schema.pb.h"
 #include "query/ScalarIndex.h"
 #include "query/SearchBruteForce.h"
@@ -901,6 +903,9 @@ ChunkedSegmentSealedImpl::vector_search(SearchInfo& search_info,
 
     AssertInfo(field_meta.is_vector(),
                "The meta type of vector field is not vector type");
+
+    std::chrono::high_resolution_clock::time_point start_time =
+        std::chrono::high_resolution_clock::now();
     if (get_bit(binlog_index_bitset_, field_id)) {
         AssertInfo(
             vec_binlog_config_.find(field_id) != vec_binlog_config_.end(),
@@ -918,6 +923,12 @@ ChunkedSegmentSealedImpl::vector_search(SearchInfo& search_info,
                                    query_count,
                                    bitset,
                                    output);
+        std::chrono::high_resolution_clock::time_point end_time =
+            std::chrono::high_resolution_clock::now();
+        monitor::debug_search_latency_index1.Observe(
+            std::chrono::duration<double, std::micro>(end_time - start_time)
+                .count());
+
         milvus::tracer::AddEvent(
             "finish_searching_vector_temperate_binlog_index");
     } else if (get_bit(index_ready_bitset_, field_id)) {
@@ -931,6 +942,11 @@ ChunkedSegmentSealedImpl::vector_search(SearchInfo& search_info,
                                    query_count,
                                    bitset,
                                    output);
+        std::chrono::high_resolution_clock::time_point end_time =
+            std::chrono::high_resolution_clock::now();
+        monitor::debug_search_latency_index2.Observe(
+            std::chrono::duration<double, std::micro>(end_time - start_time)
+                .count());
         milvus::tracer::AddEvent("finish_searching_vector_index");
     } else {
         AssertInfo(
@@ -947,6 +963,11 @@ ChunkedSegmentSealedImpl::vector_search(SearchInfo& search_info,
                               row_count,
                               bitset,
                               output);
+        std::chrono::high_resolution_clock::time_point end_time =
+            std::chrono::high_resolution_clock::now();
+        monitor::debug_search_latency_brute_force.Observe(
+            std::chrono::duration<double, std::micro>(end_time - start_time)
+                .count());
         milvus::tracer::AddEvent("finish_searching_vector_data");
     }
 }

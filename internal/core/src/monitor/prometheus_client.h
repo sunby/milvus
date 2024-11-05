@@ -135,4 +135,11 @@ DECLARE_PROMETHEUS_HISTOGRAM(internal_core_search_latency_vector);
 DECLARE_PROMETHEUS_HISTOGRAM(internal_core_search_latency_groupby);
 DECLARE_PROMETHEUS_HISTOGRAM(internal_core_search_latency_scalar_proportion);
 
+DECLARE_PROMETHEUS_HISTOGRAM_FAMILY(debug_search_latency);
+DECLARE_PROMETHEUS_HISTOGRAM(debug_search_latency_index1);
+DECLARE_PROMETHEUS_HISTOGRAM(debug_search_latency_index2);
+DECLARE_PROMETHEUS_HISTOGRAM(debug_search_latency_brute_force);
+DECLARE_PROMETHEUS_HISTOGRAM(debug_search_latency_index2_gen_dataset);
+DECLARE_PROMETHEUS_HISTOGRAM(debug_search_latency_index2_search);
+
 }  // namespace milvus::monitor

@@ -196,6 +196,24 @@ DEFINE_PROMETHEUS_HISTOGRAM_WITH_BUCKETS(
     scalarProportionLabels,
     ratioBuckets)
 
+std::map<std::string, std::string> xxlabels{{"type", "index_latency"}};
+DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(
+    debug_search_latency, "[cpp]debug latency(us) of search on segment")
+DEFINE_PROMETHEUS_HISTOGRAM(debug_search_latency_index1,
+                            debug_search_latency,
+                            xxlabels)
+DEFINE_PROMETHEUS_HISTOGRAM(debug_search_latency_index2,
+                            debug_search_latency,
+                            xxlabels)
+DEFINE_PROMETHEUS_HISTOGRAM(debug_search_latency_brute_force,
+                            debug_search_latency,
+                            xxlabels)
+DEFINE_PROMETHEUS_HISTOGRAM(debug_search_latency_index2_gen_dataset,
+                            debug_search_latency,
+                            xxlabels)
+DEFINE_PROMETHEUS_HISTOGRAM(debug_search_latency_index2_search,
+                            debug_search_latency,
+                            xxlabels)
 // mmap metrics
 std::map<std::string, std::string> mmapAllocatedSpaceAnonLabel = {
     {"type", "anon"}};
@@ -223,4 +241,5 @@ DEFINE_PROMETHEUS_GAUGE(internal_mmap_in_used_space_bytes_anon,
 DEFINE_PROMETHEUS_GAUGE(internal_mmap_in_used_space_bytes_file,
                         internal_mmap_in_used_space_bytes,
                         mmapAllocatedSpaceFileLabel)
+
 }  // namespace milvus::monitor
