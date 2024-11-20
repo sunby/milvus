@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -29,6 +30,7 @@
 #include "Utils.h"
 #include "Types.h"
 #include "common/Array.h"
+#include "common/Common.h"
 #include "common/Consts.h"
 #include "common/EasyAssert.h"
 #include "common/FieldData.h"
@@ -1345,7 +1347,15 @@ SegmentSealedImpl::bulk_subscript_ptr_impl(
     auto field = reinterpret_cast<const SingleChunkVariableColumn<S>*>(column);
     for (int64_t i = 0; i < count; ++i) {
         auto offset = seg_offsets[i];
-        dst->at(i) = std::move(T(field->RawAt(offset)));
+        std::string_view t = field->RawAt(offset);
+        std::chrono::high_resolution_clock::time_point start =
+            std::chrono::high_resolution_clock::now();
+        dst->at(i) = std::move(T(t));
+        std::chrono::high_resolution_clock::time_point end =
+            std::chrono::high_resolution_clock::now();
+        COPY_STR_D +=
+            std::chrono::duration_cast<std::chrono::microseconds>(end - start)
+                .count();
     }
 }
 

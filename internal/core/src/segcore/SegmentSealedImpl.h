@@ -240,7 +240,7 @@ class SegmentSealedImpl : public SegmentSealed {
         return insert_record_.timestamps_;
     }
 
- private:
+ public:
     template <typename S, typename T = S>
     static void
     bulk_subscript_impl(const void* src_raw,

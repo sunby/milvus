@@ -11,26 +11,36 @@
 
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <boost/filesystem/operations.hpp>
+#include <chrono>
 #include <cstdint>
 #include "arrow/table_builder.h"
 #include "arrow/type_fwd.h"
 #include "common/BitsetView.h"
+#include "common/ChunkWriter.h"
+#include "common/Common.h"
 #include "common/Consts.h"
 #include "common/FieldDataInterface.h"
+#include "common/FieldMeta.h"
+#include "common/File.h"
 #include "common/QueryInfo.h"
 #include "common/Schema.h"
 #include "common/Types.h"
 #include "expr/ITypeExpr.h"
+#include "gtest/gtest.h"
 #include "index/IndexFactory.h"
 #include "index/IndexInfo.h"
 #include "index/Meta.h"
 #include "knowhere/comp/index_param.h"
 #include "mmap/ChunkedColumn.h"
+#include "mmap/Column.h"
 #include "mmap/Types.h"
+#include "mmap/Utils.h"
 #include "pb/plan.pb.h"
 #include "pb/schema.pb.h"
 #include "query/ExecPlanNodeVisitor.h"
 #include "query/SearchOnSealed.h"
+#include "segcore/ChunkedSegmentSealedImpl.h"
 #include "segcore/SegcoreConfig.h"
 #include "segcore/SegmentSealed.h"
 #include "segcore/SegmentSealedImpl.h"
@@ -39,7 +49,9 @@
 #include <memory>
 #include <numeric>
 #include <string>
+#include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 struct DeferRelease {
@@ -368,4 +380,179 @@ TEST_F(TestChunkSegment, TestCompareExpr) {
     final = query::ExecuteQueryExpr(
         plan, segment.get(), chunk_num * test_data_count, MAX_TIMESTAMP);
     ASSERT_EQ(chunk_num * test_data_count, final.count());
+}
+
+class TestRetrievePerf1
+    : public ::testing::TestWithParam<std::tuple<int, int, bool>> {};
+INSTANTIATE_TEST_SUITE_P(PerfParam1,
+                         TestRetrievePerf1,
+                         testing::Combine(testing::Values(20, 100, 1000),
+                                          testing::Values(50, 200, 2000, 65536),
+                                          testing::Values(true, false)));
+TEST_P(TestRetrievePerf1, StringPerf) {
+    int chunk_num = std::get<0>(GetParam());
+    int test_data_count = 100000 / chunk_num;
+    auto str_builder = std::make_shared<arrow::StringBuilder>();
+    int str_size = std::get<1>(GetParam());
+    for (int i = 0; i < test_data_count; i++) {
+        auto status = str_builder->Append(std::string(str_size, 'a'));
+        ASSERT_TRUE(status.ok());
+    }
+    std::shared_ptr<arrow::Array> arrow_str;
+    auto status = str_builder->Finish(&arrow_str);
+    ASSERT_TRUE(status.ok());
+
+    auto arrow_str_field = arrow::field("string1", arrow::int64());
+    auto arrow_schema =
+        std::make_shared<arrow::Schema>(arrow::FieldVector(1, arrow_str_field));
+
+    auto schema = std::make_shared<Schema>();
+    auto pk_fid = schema->AddDebugField("pk", DataType::INT64, true);
+    auto str_fid = schema->AddDebugField("string1", DataType::VARCHAR, true);
+    schema->AddField(FieldName("ts"), TimestampFieldID, DataType::INT64, true);
+    schema->set_primary_field_id(pk_fid);
+    auto segment =
+        segcore::CreateSealedSegment(schema,
+                                     nullptr,
+                                     -1,
+                                     segcore::SegcoreConfig::default_config(),
+                                     false,
+                                     true,
+                                     true);
+    FieldDataInfo field_info;
+    field_info.field_id = str_fid.get();
+    field_info.row_count = test_data_count * chunk_num;
+    for (int i = 0; i < chunk_num; i++) {
+        auto record_batch = arrow::RecordBatch::Make(
+            arrow_schema, arrow_str->length(), {arrow_str});
+        auto reader =
+            arrow::RecordBatchReader::Make({record_batch}).ValueOrDie();
+
+        field_info.arrow_reader_channel->push(
+            std::make_shared<ArrowDataWrapper>(reader, nullptr, nullptr));
+    }
+    field_info.arrow_reader_channel->close();
+
+    bool is_mmap = std::get<2>(GetParam());
+    if (is_mmap) {
+        auto temp_dir = boost::filesystem::temp_directory_path() /
+                        boost::filesystem::unique_path() /
+                        fmt::format("{}-{}", str_size, test_data_count);
+        boost::filesystem::create_directories(temp_dir);
+        field_info.mmap_dir_path = temp_dir.native();
+        segment->MapFieldData(str_fid, field_info);
+    } else {
+        segment->LoadFieldData(str_fid, field_info);
+    }
+
+    std::vector<int64_t> segment_offsets;
+    for (int i = 0; i < 100; i++) {
+        segment_offsets.push_back(i * 256 + 128);
+    }
+
+    std::chrono::high_resolution_clock::time_point start =
+        std::chrono::high_resolution_clock::now();
+    segment->bulk_subscript(
+        str_fid, segment_offsets.data(), segment_offsets.size());
+    std::chrono::high_resolution_clock::time_point end =
+        std::chrono::high_resolution_clock::now();
+    std::cout << fmt::format(
+                     "chunk num: {}, str size: {}, mmap: {}, time cost: {}, "
+                     "segment off: {}, copy_duration: {}",
+                     chunk_num,
+                     str_size,
+                     is_mmap,
+                     std::chrono::duration_cast<std::chrono::microseconds>(
+                         end - start)
+                         .count(),
+                     segment_offsets.size(),
+                     COPY_STR_D)
+              << std::endl;
+    COPY_STR_D = 0;
+}
+
+class TestRetrievePerf2
+    : public ::testing::TestWithParam<std::tuple<int, int>> {};
+INSTANTIATE_TEST_SUITE_P(PerfParam2,
+                         TestRetrievePerf2,
+                         testing::Combine(testing::Values(50, 200, 2000, 65536),
+                                          testing::Values(true, false)));
+TEST_P(TestRetrievePerf2, StringPerf) {
+    int test_data_count = 100000;
+    auto str_builder = std::make_shared<arrow::StringBuilder>();
+    int str_size = std::get<0>(GetParam());
+    for (int i = 0; i < test_data_count / 10; i++) {
+        auto status = str_builder->Append(std::string(str_size, 'a'));
+        if (!status.ok()) {
+            std::cout << status.message() << std::endl;
+        }
+        ASSERT_TRUE(status.ok());
+    }
+    std::shared_ptr<arrow::Array> arrow_str;
+    auto status = str_builder->Finish(&arrow_str);
+    ASSERT_TRUE(status.ok());
+
+    auto schema = std::make_shared<Schema>();
+    auto pk_fid = schema->AddDebugField("pk", DataType::INT64, true);
+    auto str_fid = schema->AddDebugField("string1", DataType::VARCHAR, true);
+    schema->AddField(FieldName("ts"), TimestampFieldID, DataType::INT64, true);
+    schema->set_primary_field_id(pk_fid);
+    auto segment =
+        segcore::CreateSealedSegment(schema,
+                                     nullptr,
+                                     -1,
+                                     segcore::SegcoreConfig::default_config(),
+                                     false,
+                                     true,
+                                     false);
+
+    FieldDataInfo field_info;
+    field_info.field_id = str_fid.get();
+    field_info.row_count = test_data_count;
+
+    for (int i = 0; i < 10; ++i) {
+        auto fdata =
+            std::make_shared<FieldData<std::string>>(DataType::VARCHAR, true);
+        fdata->FillFieldData(
+            std::dynamic_pointer_cast<arrow::StringArray>(arrow_str));
+        field_info.channel->push(fdata);
+    }
+    field_info.channel->close();
+
+    bool is_mmap = std::get<1>(GetParam());
+    if (is_mmap) {
+        auto temp_dir = boost::filesystem::temp_directory_path() /
+                        boost::filesystem::unique_path() /
+                        fmt::format("{}", str_size);
+        boost::filesystem::create_directories(temp_dir);
+        field_info.mmap_dir_path = temp_dir.native();
+        segment->MapFieldData(str_fid, field_info);
+    } else {
+        segment->LoadFieldData(str_fid, field_info);
+    }
+
+    std::vector<int64_t> segment_offsets;
+    for (int i = 0; i < 100; i++) {
+        segment_offsets.push_back(is_mmap ? i * 256 + 128 : i * 32 + 16);
+    }
+
+    std::chrono::high_resolution_clock::time_point start =
+        std::chrono::high_resolution_clock::now();
+    segment->bulk_subscript(
+        str_fid, segment_offsets.data(), segment_offsets.size());
+    std::chrono::high_resolution_clock::time_point end =
+        std::chrono::high_resolution_clock::now();
+    std::cout << fmt::format(
+                     "str size: {}, time cost: {}, is mmap: {}, segment off: "
+                     "{}, copy "
+                     "duration: {}",
+                     str_size,
+                     std::chrono::duration_cast<std::chrono::microseconds>(
+                         end - start)
+                         .count(),
+                     is_mmap,
+                     segment_offsets.size(),
+                     COPY_STR_D)
+              << std::endl;
+    COPY_STR_D = 0;
 }
