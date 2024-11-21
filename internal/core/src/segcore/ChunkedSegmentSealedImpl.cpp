@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -45,6 +46,7 @@
 #include "mmap/Utils.h"
 #include "mmap/Types.h"
 #include "log/Log.h"
+#include "monitor/prometheus_client.h"
 #include "pb/schema.pb.h"
 #include "query/ScalarIndex.h"
 #include "query/SearchBruteForce.h"
@@ -1437,11 +1439,21 @@ ChunkedSegmentSealedImpl::bulk_subscript_ptr_impl(
     const int64_t* seg_offsets,
     int64_t count,
     google::protobuf::RepeatedPtrField<T>* dst) {
+    std::chrono::high_resolution_clock::time_point start_time =
+        std::chrono::high_resolution_clock::now();
     auto field = reinterpret_cast<const ChunkedVariableColumn<S>*>(column);
     for (int64_t i = 0; i < count; ++i) {
         auto offset = seg_offsets[i];
         dst->at(i) = std::move(T(field->RawAt(offset)));
     }
+    std::chrono::high_resolution_clock::time_point end_time =
+        std::chrono::high_resolution_clock::now();
+
+    auto d = std::chrono::duration_cast<std::chrono::microseconds>(end_time -
+                                                                   start_time)
+                 .count();
+    double dd = double(d) / count;
+    monitor::retrieve_raw_latency_chunk.Observe(dd);
 }
 
 template <typename T>

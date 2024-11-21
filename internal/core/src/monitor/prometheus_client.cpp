@@ -196,6 +196,17 @@ DEFINE_PROMETHEUS_HISTOGRAM_WITH_BUCKETS(
     scalarProportionLabels,
     ratioBuckets)
 
+std::map<std::string, std::string> xxlabel{{"type", "chunk_latency"}};
+std::map<std::string, std::string> yylabel{{"type", "single_latency"}};
+DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(
+    retrieve_raw_latency, "[cpp]latency(us) of retrieve raw on segment")
+DEFINE_PROMETHEUS_HISTOGRAM(retrieve_raw_latency_chunk,
+                            retrieve_raw_latency,
+                            xxlabel)
+DEFINE_PROMETHEUS_HISTOGRAM(retrieve_raw_latency_single,
+                            retrieve_raw_latency,
+                            yylabel)
+
 // mmap metrics
 std::map<std::string, std::string> mmapAllocatedSpaceAnonLabel = {
     {"type", "anon"}};
