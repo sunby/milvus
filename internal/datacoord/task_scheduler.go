@@ -243,6 +243,9 @@ func (s *taskScheduler) process(taskID UniqueID) bool {
 		// 0. pre check task
 		skip := task.PreCheck(s.ctx, s)
 		if skip {
+			if err := task.SetJobInfo(s.meta); err != nil {
+				log.Ctx(s.ctx).Warn("update task info failed", zap.Error(err))
+			}
 			return true
 		}
 
