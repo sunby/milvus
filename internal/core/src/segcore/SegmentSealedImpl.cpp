@@ -621,11 +621,11 @@ SegmentSealedImpl::MapFieldData(const FieldId field_id, FieldDataInfo& data) {
         update_row_count(num_rows);
     }
 
-    auto ok = unlink(filepath.c_str());
-    AssertInfo(ok == 0,
-               fmt::format("failed to unlink mmap data file {}, err: {}",
-                           filepath.c_str(),
-                           strerror(errno)));
+    // auto ok = unlink(filepath.c_str());
+    // AssertInfo(ok == 0,
+    //            fmt::format("failed to unlink mmap data file {}, err: {}",
+    //                        filepath.c_str(),
+    //                        strerror(errno)));
 
     // set pks to offset
     // no need pk
