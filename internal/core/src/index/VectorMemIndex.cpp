@@ -621,11 +621,11 @@ void VectorMemIndex<T>::LoadFromFile(const Config& config) {
     auto dim = index_.Dim();
     this->SetDim(index_.Dim());
 
-    auto ok = unlink(filepath->data());
-    AssertInfo(ok == 0,
-               "failed to unlink mmap index file {}: {}",
-               filepath.value(),
-               strerror(errno));
+    // auto ok = unlink(filepath->data());
+    // AssertInfo(ok == 0,
+    //            "failed to unlink mmap index file {}: {}",
+    //            filepath.value(),
+    //            strerror(errno));
     LOG_INFO(
         "load vector index done, mmap_file_path:{}, download_duration:{}, "
         "write_files_duration:{}, deserialize_duration:{}",

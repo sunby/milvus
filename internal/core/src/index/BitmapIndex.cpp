@@ -508,7 +508,7 @@ BitmapIndex<T>::MMapIndexData(const std::string& file_name,
     }
 
     mmap_size_ = file_offset;
-    unlink(file_name.c_str());
+    // unlink(file_name.c_str());
 
     char* ptr = mmap_data_;
     for (const auto& [key, value] : bitmaps) {

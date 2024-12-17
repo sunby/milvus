@@ -214,7 +214,7 @@ StringIndexMarisa::LoadWithoutAssemble(const BinarySet& set,
         trie_.read(file.Descriptor());
     }
     // make sure the file would be removed after we unmap & close it
-    unlink(file_name.c_str());
+    // unlink(file_name.c_str());
 
     auto str_ids = set.GetByName(MARISA_STR_IDS);
     auto str_ids_len = str_ids->size;
