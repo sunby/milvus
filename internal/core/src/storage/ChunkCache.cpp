@@ -89,6 +89,7 @@ ChunkCache::Read(const std::string& filepath,
             //            "failed to unlink mmap data file {}, err: {}",
             //            path.c_str(),
             //            strerror(errno));
+            file.FFlush();
         } else {
             chunk =
                 create_chunk(field_meta, dim, field_data->GetReader()->reader);
