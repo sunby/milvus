@@ -31,6 +31,7 @@ class File {
     ~File() {
         if (fs_ != nullptr) {
             fclose(fs_);
+            close(fd_);
         }
     }
 
@@ -89,6 +90,7 @@ class File {
     void
     Close() {
         fclose(fs_);
+        close(fd_);
         fs_ = nullptr;
         fd_ = -1;
     }
