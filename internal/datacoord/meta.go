@@ -2015,7 +2015,6 @@ func (m *meta) SaveStatsResultSegment(oldSegmentID int64, result *workerpb.Stats
 		zap.Int64("partitionID", result.GetPartitionID()),
 		zap.Int64("old segmentID", oldSegmentID),
 		zap.Int64("target segmentID", result.GetSegmentID()),
-		zap.Any("stats result", result),
 	)
 
 	metricMutation := &segMetricMutation{stateChange: make(map[string]map[string]map[string]int)}
@@ -2073,7 +2072,7 @@ func (m *meta) SaveStatsResultSegment(oldSegmentID int64, result *workerpb.Stats
 		segment.DroppedAt = uint64(time.Now().UnixNano())
 	}
 
-	log.Info("meta update: prepare for complete stats mutation - complete", zap.Int64("num rows", result.GetNumRows()))
+	log.Info("meta update: prepare for complete stats mutation - complete", zap.Int64("num rows", result.GetNumRows()), zap.Any("bm25", result.GetBm25Logs()))
 	if err := m.catalog.AlterSegments(m.ctx, []*datapb.SegmentInfo{cloned.SegmentInfo, segment.SegmentInfo}, metastore.BinlogsIncrement{Segment: segment.SegmentInfo}); err != nil {
 		log.Warn("fail to alter segments and new segment", zap.Error(err))
 		return nil, err
