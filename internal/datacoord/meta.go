@@ -2014,7 +2014,9 @@ func (m *meta) SaveStatsResultSegment(oldSegmentID int64, result *workerpb.Stats
 	log := log.Ctx(m.ctx).With(zap.Int64("collectionID", result.GetCollectionID()),
 		zap.Int64("partitionID", result.GetPartitionID()),
 		zap.Int64("old segmentID", oldSegmentID),
-		zap.Int64("target segmentID", result.GetSegmentID()))
+		zap.Int64("target segmentID", result.GetSegmentID()),
+		zap.Any("stats result", result),
+	)
 
 	metricMutation := &segMetricMutation{stateChange: make(map[string]map[string]map[string]int)}
 

@@ -64,6 +64,7 @@ func newStatsTask(taskID int64, segmentID, targetSegmentID int64, subJobType ind
 
 func (st *statsTask) setResult(result *workerpb.StatsResult) {
 	st.taskInfo = result
+	log.Info("[xxx] stats task result", zap.Any("result", result))
 }
 
 func (st *statsTask) GetTaskID() int64 {

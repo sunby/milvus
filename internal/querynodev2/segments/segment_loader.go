@@ -569,6 +569,7 @@ func (loader *segmentLoader) LoadBM25Stats(ctx context.Context, collectionID int
 		log.Info("loading bm25 stats for remote...", zap.Int64("collectionID", collectionID), zap.Int64("segment", segmentID))
 		logpaths := loader.filterBM25Stats(loadInfo.Bm25Logs)
 		err := loader.loadBm25Stats(ctx, segmentID, stats, logpaths)
+		log.Info("[xxx] logpaths", zap.Any("logpaths", logpaths), zap.Any("stats", stats))
 		if err != nil {
 			log.Warn("load remote segment bm25 stats failed",
 				zap.Int64("segmentID", segmentID),
@@ -841,7 +842,9 @@ func (loader *segmentLoader) LoadSegment(ctx context.Context,
 	)
 	log.Info("start loading segment files",
 		zap.Int64("rowNum", loadInfo.GetNumOfRows()),
-		zap.String("segmentType", segment.Type().String()))
+		zap.String("segmentType", segment.Type().String()),
+		zap.Any("bm25", loadInfo.Bm25Logs),
+	)
 
 	collection := loader.manager.Collection.Get(segment.Collection())
 	if collection == nil {
