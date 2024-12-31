@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	sio "io"
+	"runtime"
 	"sort"
 	"strconv"
 	"time"
@@ -178,7 +179,13 @@ func (st *statsTask) sortSegment(ctx context.Context) ([]*datapb.FieldBinlog, er
 	)
 
 	downloadStart := time.Now()
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	s1 := int64(m.HeapInuse)
 	values, err := st.downloadData(ctx, numRows, writer.GetPkID(), bm25FieldIds)
+	runtime.ReadMemStats(&m)
+	s2 := int64(m.HeapInuse)
+	log.Info("download data", zap.Int64("taskID", st.req.GetTaskID()), zap.Int64("heapInuse", s2-s1))
 	if err != nil {
 		log.Ctx(ctx).Warn("download data failed", zap.Int64("taskID", st.req.GetTaskID()), zap.Error(err))
 		return nil, err
@@ -189,10 +196,19 @@ func (st *statsTask) sortSegment(ctx context.Context) ([]*datapb.FieldBinlog, er
 	sort.Slice(values, func(i, j int) bool {
 		return values[i].PK.LT(values[j].PK)
 	})
+
+	runtime.ReadMemStats(&m)
+	s3 := int64(m.HeapInuse)
+	log.Info("sort data", zap.Int64("taskID", st.req.GetTaskID()), zap.Int64("heapInuse", s3-s2))
 	sortTimeCost += time.Since(sortStart)
 
 	for i, v := range values {
+		runtime.ReadMemStats(&m)
+		s4 := int64(m.HeapInuse)
 		err := writer.Write(v)
+		runtime.ReadMemStats(&m)
+		s5 := int64(m.HeapInuse)
+		log.Info("write data", zap.Int64("taskID", st.req.GetTaskID()), zap.Int64("heapInuse", s5-s4), zap.Int64("diff", s5-s3))
 		if err != nil {
 			log.Ctx(ctx).Warn("write value wrong, failed to writer row", zap.Int64("taskID", st.req.GetTaskID()), zap.Error(err))
 			return nil, err
