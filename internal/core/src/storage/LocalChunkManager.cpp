@@ -217,6 +217,7 @@ LocalChunkManager::RemoveDir(const std::string& dir) {
     boost::filesystem::path dirPath(dir);
     boost::system::error_code err;
     boost::filesystem::remove_all(dirPath, err);
+    LOG_INFO("[xxx_debug] remove dir: {}", dir);
     if (err) {
         boost::filesystem::directory_iterator it(dirPath);
         std::vector<std::string> paths;

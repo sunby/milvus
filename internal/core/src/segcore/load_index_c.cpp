@@ -430,6 +430,8 @@ CleanLoadedIndex(CLoadIndexInfo c_load_index_info) {
             milvus::storage::GenIndexPathPrefix(local_chunk_manager,
                                                 load_index_info->index_build_id,
                                                 load_index_info->index_version);
+        LOG_INFO("[xxx_debug] CleanLoadedIndex, index_file_path_prefix: {}",
+                 index_file_path_prefix);
         local_chunk_manager->RemoveDir(index_file_path_prefix);
         auto status = CStatus();
         status.error_code = milvus::Success;
