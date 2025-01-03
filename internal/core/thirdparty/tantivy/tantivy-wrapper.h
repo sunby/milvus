@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "common/EasyAssert.h"
+#include "log/Log.h"
 #include "tantivy-binding.h"
 #include "rust-binding.h"
 #include "rust-array.h"
@@ -346,6 +347,7 @@ struct TantivyIndexWrapper {
             return;
         }
 
+        LOG_INFO("[xxx_debug] TantivyIndexWrapper.finish: {}", path_);
         auto res = RustResultWrapper(tantivy_finish_index(writer_));
         AssertInfo(res.result_->success,
                    "failed to finish index: {}",
@@ -357,6 +359,7 @@ struct TantivyIndexWrapper {
     inline void
     commit() {
         if (writer_ != nullptr) {
+            LOG_INFO("[xxx_debug] TantivyIndexWrapper.commit: {}", path_);
             auto res = RustResultWrapper(tantivy_commit_index(writer_));
             AssertInfo(res.result_->success,
                        "failed to commit index: {}",
@@ -597,10 +600,12 @@ struct TantivyIndexWrapper {
     void
     free() {
         if (writer_ != nullptr) {
+            LOG_INFO("[xxx_debug] TantivyIndexWrapper.free writer: {}", path_);
             tantivy_free_index_writer(writer_);
         }
 
         if (reader_ != nullptr) {
+            LOG_INFO("[xxx_debug] TantivyIndexWrapper.free reader: {}", path_);
             tantivy_free_index_reader(reader_);
         }
     }
