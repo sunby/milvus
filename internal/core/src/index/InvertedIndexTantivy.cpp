@@ -103,6 +103,9 @@ InvertedIndexTantivy<T>::InvertedIndexTantivy(
 
 template <typename T>
 InvertedIndexTantivy<T>::~InvertedIndexTantivy() {
+    LOG_INFO(
+        "[xxx_debug] InvertedIndexTantivy::~InvertedIndexTantivy, path: {}",
+        path_);
     auto local_chunk_manager =
         storage::LocalChunkManagerSingleton::GetInstance().GetChunkManager();
     auto prefix = path_;
