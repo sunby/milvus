@@ -51,6 +51,10 @@ class BitmapIndex : public ScalarIndex<T> {
         const storage::FileManagerContext& file_manager_context =
             storage::FileManagerContext());
 
+    BitmapIndex(const std::string& nested_path,
+                const storage::FileManagerContext& file_manager_context =
+                    storage::FileManagerContext());
+
     ~BitmapIndex() {
         if (is_mmap_) {
             UnmapIndexData();
@@ -173,6 +177,9 @@ class BitmapIndex : public ScalarIndex<T> {
     void
     BuildArrayField(const std::vector<FieldDataPtr>& datas);
 
+    void
+    BuildJSONField(const std::vector<FieldDataPtr>& datas);
+
     size_t
     GetIndexDataSize();
 
@@ -264,6 +271,9 @@ class BitmapIndex : public ScalarIndex<T> {
 
     // generate valid_bitset to speed up NotIn and IsNull and IsNotNull operate
     TargetBitmap valid_bitset_;
+
+    // json index path
+    std::string nested_path_;
 };
 
 }  // namespace index

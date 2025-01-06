@@ -51,6 +51,14 @@ BitmapIndex<T>::BitmapIndex(
 }
 
 template <typename T>
+BitmapIndex<T>::BitmapIndex(
+    const std::string& nested_path,
+    const storage::FileManagerContext& file_manager_context)
+    : BitmapIndex<T>(file_manager_context) {
+    nested_path_ = nested_path;
+}
+
+template <typename T>
 void
 BitmapIndex<T>::UnmapIndexData() {
     if (mmap_data_ != nullptr && mmap_data_ != MAP_FAILED) {
@@ -191,6 +199,42 @@ BitmapIndex<T>::BuildArrayField(const std::vector<FieldDataPtr>& field_datas) {
                 valid_bitset_.set(offset);
             }
             offset++;
+        }
+    }
+}
+
+template <typename T>
+void
+BitmapIndex<T>::BuildJSONField(const std::vector<FieldDataPtr>& field_datas) {
+    using GetType =
+        std::conditional_t<std::is_same_v<std::string, T>, std::string_view, T>;
+
+    int64_t offset = 0;
+    for (const auto& data : field_datas) {
+        auto n = data->get_num_rows();
+        for (int64_t i = 0; i < n; ++i) {
+            auto json_column = static_cast<const Json*>(data->RawValue(i));
+            if (this->schema_.nullable() && !data->is_valid(i)) {
+                continue;
+            }
+            valid_bitset_.set(i);
+            value_result<GetType> res = json_column->at<GetType>(nested_path_);
+            auto err = res.error();
+            if (err != simdjson::SUCCESS) {
+                AssertInfo(err == simdjson::INCORRECT_TYPE ||
+                               err == simdjson::NO_SUCH_FIELD,
+                           "Failed to parse json, err: {}",
+                           err);
+                offset++;
+                continue;
+            }
+            if constexpr (std::is_same_v<GetType, std::string_view>) {
+                auto value = std::string(res.value());
+                data_[value].add(offset);
+            } else {
+                auto value = res.value();
+                data_[value].add(offset);
+            }
         }
     }
 }

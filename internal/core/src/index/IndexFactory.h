@@ -27,6 +27,7 @@
 #include "index/ScalarIndex.h"
 #include "index/VectorIndex.h"
 #include "index/IndexInfo.h"
+#include "pb/schema.pb.h"
 #include "storage/Types.h"
 #include "storage/FileManager.h"
 #include "index/StringIndexMarisa.h"
@@ -110,6 +111,14 @@ class IndexFactory {
                     const std::string& nested_path,
                     const storage::FileManagerContext& file_manager_context =
                         storage::FileManagerContext());
+
+    template <typename T>
+    IndexBasePtr
+    CreateJsonIndexByType(
+        IndexType index_type,
+        const std::string& nested_path,
+        const storage::FileManagerContext& file_manager_context =
+            storage::FileManagerContext());
 
     IndexBasePtr
     CreateScalarIndex(const CreateIndexInfo& create_index_info,

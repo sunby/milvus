@@ -21,8 +21,7 @@ namespace milvus::index {
 template <typename T>
 class JsonInvertedIndex : public index::InvertedIndexTantivy<T> {
  public:
-    JsonInvertedIndex(const proto::schema::DataType cast_type,
-                      const std::string& nested_path,
+    JsonInvertedIndex(const std::string& nested_path,
                       const storage::FileManagerContext& ctx)
         : nested_path_(nested_path) {
         this->schema_ = ctx.fieldDataMeta.field_schema;
@@ -39,7 +38,20 @@ class JsonInvertedIndex : public index::InvertedIndexTantivy<T> {
             "/tmp/milvus/inverted-index/";
         this->path_ = std::string(TMP_INVERTED_INDEX_PREFIX) + prefix;
 
-        this->d_type_ = index::get_tantivy_data_type(cast_type);
+        if constexpr (std::is_same_v<bool, T>) {
+            this->d_type_ = TantivyDataType::Bool;
+        } else if constexpr (std::is_same_v<int8_t, T> ||
+                             std::is_same_v<int16_t, T> ||
+                             std::is_same_v<int32_t, T> ||
+                             std::is_same_v<int64_t, T>) {
+            this->d_type_ = TantivyDataType::I64;
+        } else if constexpr (std::is_same_v<float, T> ||
+                             std::is_same_v<double, T>) {
+            this->d_type_ = TantivyDataType::F64;
+        } else {
+            this->d_type_ = TantivyDataType::Keyword;
+        }
+
         boost::filesystem::create_directories(this->path_);
         std::string field_name = std::to_string(
             this->disk_file_manager_->GetFieldDataMeta().field_id);

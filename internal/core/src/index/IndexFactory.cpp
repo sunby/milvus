@@ -20,6 +20,7 @@
 #include "common/EasyAssert.h"
 #include "common/FieldDataInterface.h"
 #include "common/Types.h"
+#include "index/Index.h"
 #include "index/VectorMemIndex.h"
 #include "index/Utils.h"
 #include "index/Meta.h"
@@ -373,32 +374,41 @@ IndexFactory::CreateJsonIndex(
                "Invalid index type for json index");
     switch (cast_dtype) {
         case DataType::BOOL:
-            return std::make_unique<index::JsonInvertedIndex<bool>>(
-                proto::schema::DataType::Bool,
-                nested_path,
-                file_manager_context);
+            return CreateJsonIndexByType<bool>(
+                index_type, nested_path, file_manager_context);
         case milvus::DataType::INT8:
         case milvus::DataType::INT16:
         case milvus::DataType::INT32:
         case DataType::INT64:
-            return std::make_unique<index::JsonInvertedIndex<int64_t>>(
-                proto::schema::DataType::Int64,
-                nested_path,
-                file_manager_context);
+            return CreateJsonIndexByType<int64_t>(
+                index_type, nested_path, file_manager_context);
         case DataType::FLOAT:
         case DataType::DOUBLE:
-            return std::make_unique<index::JsonInvertedIndex<double>>(
-                proto::schema::DataType::Double,
-                nested_path,
-                file_manager_context);
+            return CreateJsonIndexByType<double>(
+                index_type, nested_path, file_manager_context);
         case DataType::STRING:
         case DataType::VARCHAR:
-            return std::make_unique<index::JsonInvertedIndex<std::string>>(
-                proto::schema::DataType::String,
-                nested_path,
-                file_manager_context);
+            return CreateJsonIndexByType<std::string>(
+                index_type, nested_path, file_manager_context);
         default:
             PanicInfo(DataTypeInvalid, "Invalid data type:{}", cast_dtype);
+    }
+}
+
+template <typename T>
+IndexBasePtr
+IndexFactory::CreateJsonIndexByType(
+    IndexType index_type,
+    const std::string& nested_path,
+    const storage::FileManagerContext& file_manager_context) {
+    if (index_type == INVERTED_INDEX_TYPE) {
+        return std::make_unique<JsonInvertedIndex<T>>(nested_path,
+                                                      file_manager_context);
+    } else if (index_type == BITMAP_INDEX_TYPE) {
+        return std::make_unique<BitmapIndex<T>>(nested_path,
+                                                file_manager_context);
+    } else {
+        PanicInfo(Unsupported, "Unsupported index type for json index");
     }
 }
 
