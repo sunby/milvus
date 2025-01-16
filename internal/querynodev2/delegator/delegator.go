@@ -787,6 +787,7 @@ func (sd *shardDelegator) waitTSafe(ctx context.Context, ts uint64) (uint64, err
 			if !sd.Serviceable() {
 				return 0, merr.WrapErrChannelNotAvailable(sd.vchannelName, "delegator closed during wait tsafe")
 			}
+			log.Info("wait tSafe done", zap.Uint64("tSafe", sd.latestTsafe.Load()), zap.String("channel", sd.vchannelName))
 			return sd.latestTsafe.Load(), nil
 		}
 	}

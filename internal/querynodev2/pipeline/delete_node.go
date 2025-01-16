@@ -77,6 +77,7 @@ func (dNode *deleteNode) Operate(in Msg) Msg {
 	}
 
 	// update tSafe
+	log.Info("update tSafe", zap.Uint64("tSafe", nodeMsg.timeRange.timestampMax), zap.String("channel", dNode.channel))
 	dNode.delegator.UpdateTSafe(nodeMsg.timeRange.timestampMax)
 	return nil
 }

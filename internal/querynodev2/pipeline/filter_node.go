@@ -96,6 +96,7 @@ func (fNode *filterNode) Operate(in Msg) Msg {
 				zap.Error(err),
 			)
 		} else {
+			log.Info("valid message", zap.String("channel", fNode.channel), zap.Int64("ts", int64(streamMsgPack.EndTs)))
 			out.append(msg)
 		}
 	}
