@@ -14,6 +14,8 @@
 #include <memory>
 #include <limits>
 
+#include "boost/stacktrace.hpp"
+#include "boost/stacktrace/stacktrace_fwd.hpp"
 #include "pb/cgo_msg.pb.h"
 #include "pb/index_cgo_msg.pb.h"
 
@@ -328,6 +330,9 @@ Delete(CSegmentInterface c_segment,
             segment->Delete(reserved_offset, size, pks.get(), timestamps);
         return milvus::SuccessCStatus();
     } catch (std::exception& e) {
+        boost::stacktrace::stacktrace trace =
+            boost::stacktrace::stacktrace::from_current_exception();
+        std::cout << "stacktrace: " << trace << std::endl;
         return milvus::FailureCStatus(&e);
     }
 }
