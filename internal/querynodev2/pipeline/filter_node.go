@@ -96,12 +96,12 @@ func (fNode *filterNode) Operate(in Msg) Msg {
 				zap.Error(err),
 			)
 		} else {
-			log.Info("valid message", zap.String("channel", fNode.channel), zap.Int64("ts", int64(streamMsgPack.EndTs)))
 			out.append(msg)
 		}
 	}
 	fNode.delegator.TryCleanExcludedSegments(streamMsgPack.EndTs)
 	metrics.QueryNodeWaitProcessingMsgCount.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.InsertLabel).Inc()
+	log.Info("valid message", zap.String("channel", fNode.channel), zap.Int64("ts", int64(streamMsgPack.EndTs)))
 	return out
 }
 
