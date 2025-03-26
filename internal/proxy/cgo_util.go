@@ -20,6 +20,7 @@ package proxy
 #cgo pkg-config: milvus_core
 #include "segcore/check_vec_index_c.h"
 #include <stdlib.h>
+#include "segcore/mallctl_c.h"
 */
 import "C"
 
@@ -73,4 +74,8 @@ func CheckVecIndexWithDataTypeExist(name string, dType schemapb.DataType) bool {
 	}).Await()
 
 	return result
+}
+
+func PrintJemallocStats() {
+	C.print_jemalloc_stats()
 }

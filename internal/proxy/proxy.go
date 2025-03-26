@@ -402,6 +402,13 @@ func (node *Proxy) sendChannelsTimeTickLoop() {
 
 // Start starts a proxy node.
 func (node *Proxy) Start() error {
+	go func() {
+		ticker := time.NewTicker(time.Second * 5)
+		defer ticker.Stop()
+		for range ticker.C {
+			PrintJemallocStats()
+		}
+	}()
 	log := log.Ctx(node.ctx)
 	if err := node.sched.Start(); err != nil {
 		log.Warn("failed to start task scheduler", zap.String("role", typeutil.ProxyRole), zap.Error(err))

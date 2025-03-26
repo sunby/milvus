@@ -91,3 +91,7 @@ endif()
 target_link_libraries(milvus_core ${LINK_TARGETS})
 
 install(TARGETS milvus_core DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+
+add_executable(mallctl mallctl.cpp)
+target_link_libraries(mallctl ${LINK_TARGETS})
+install(TARGETS mallctl DESTINATION "${CMAKE_INSTALL_BINDIR}")
