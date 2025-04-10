@@ -1302,7 +1302,7 @@ func (v *ParserVisitor) VisitIsNotNull(ctx *parser.IsNotNullContext) interface{}
 		return err
 	}
 
-	if len(column.NestedPath) != 0 {
+	if len(column.NestedPath) != 0 && column.DataType == schemapb.DataType_JSON {
 		// convert json not null expr to exists expr, eg: json['a'] is not null -> exists json['a']
 		expr := &planpb.Expr{
 			Expr: &planpb.Expr_ExistsExpr{
@@ -1342,7 +1342,7 @@ func (v *ParserVisitor) VisitIsNull(ctx *parser.IsNullContext) interface{} {
 		return err
 	}
 
-	if len(column.NestedPath) != 0 {
+	if len(column.NestedPath) != 0 && column.DataType == schemapb.DataType_JSON {
 		// convert json is null expr to not exists expr, eg: json['a'] is null -> not exists json['a']
 		expr := &planpb.Expr{
 			Expr: &planpb.Expr_ExistsExpr{
