@@ -47,8 +47,11 @@ ZonemapIndex<T>::MakeZonemapIndexFromParquetMetadata(
     ParquetFileMetadatas metadatas, int column_id, bool sorted) {
     using cid_t = cachinglayer::cid_t;
     using DType = typename ToParquetDType<T>::type;
+    // block_id (cid) must be sequential and match row group index for correct lookup.
+    // if cid-row_group_idx mapping changes in the future, we need to change here
     cid_t block_id = 0;
     auto index = std::make_shared<ZonemapIndex<T>>(sorted);
+
     for (auto& metadata : metadatas) {
         auto num_row_groups = metadata->num_row_groups();
         for (auto i = 0; i < num_row_groups; i++, block_id++) {
