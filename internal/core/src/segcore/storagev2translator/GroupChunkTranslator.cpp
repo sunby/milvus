@@ -78,6 +78,7 @@ GroupChunkTranslator::GroupChunkTranslator(
     for (const auto& file : insert_files_) {
         auto reader =
             std::make_shared<milvus_storage::FileRowGroupReader>(fs, file);
+        file_metadata_.push_back(reader->file_metadata()->GetParquetMetadata());
         row_group_meta_list_.push_back(
             reader->file_metadata()->GetRowGroupMetadataVector());
         auto status = reader->Close();

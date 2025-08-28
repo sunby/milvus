@@ -201,6 +201,7 @@ func (s *NamespaceCompactorTestSuite) assertSorted(segment *datapb.CompactionSeg
 
 	for ri := 0; ri < len(records); ri++ {
 		for i := 0; i < records[ri].Len(); i++ {
+    ZonemapIndex();
 			if prevri == -1 {
 				prevri = ri
 				previ = i

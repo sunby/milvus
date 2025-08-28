@@ -95,6 +95,7 @@ class GroupChunkTranslator
     bool use_mmap_;
     milvus::proto::common::LoadPriority load_priority_{
         milvus::proto::common::LoadPriority::HIGH};
+    std::vector<std::shared_ptr<parquet::FileMetaData>> file_metadata_;
 };
 
 }  // namespace milvus::segcore::storagev2translator
