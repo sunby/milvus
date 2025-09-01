@@ -2160,6 +2160,7 @@ func (m *meta) SaveStatsResultSegment(oldSegmentID int64, result *workerpb.Stats
 
 	m.segments.SetSegment(oldSegmentID, cloned)
 	m.segments.SetSegment(result.GetSegmentID(), segment)
+	log.Info("save stats result segment", zap.Any("segment", segment))
 
 	return metricMutation, nil
 }
