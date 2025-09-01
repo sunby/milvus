@@ -322,7 +322,7 @@ func (st *statsTask) QueryResult(ctx context.Context, client types.IndexNodeClie
 				result.GetState() == indexpb.JobState_JobStateFailed {
 				log.Ctx(ctx).Info("query stats task result success", zap.Int64("taskID", st.GetTaskID()),
 					zap.Int64("segmentID", st.segmentID), zap.String("result state", result.GetState().String()),
-					zap.String("failReason", result.GetFailReason()))
+					zap.String("failReason", result.GetFailReason()), zap.Any("statsResult", result))
 				st.setResult(result)
 			} else if result.GetState() == indexpb.JobState_JobStateNone {
 				log.Ctx(ctx).Info("query stats task result success", zap.Int64("taskID", st.GetTaskID()),
@@ -365,6 +365,7 @@ func (st *statsTask) SetJobInfo(meta *meta) error {
 		case indexpb.StatsSubJob_Sort:
 			// first update segment, failed state cannot generate new segment
 			var metricMutation *segMetricMutation
+			log.Info("save sort stats result", zap.Any("statsResult", st.taskInfo), zap.Int64("segmentID", st.segmentID))
 			metricMutation, err = meta.SaveStatsResultSegment(st.segmentID, st.taskInfo)
 			if err != nil {
 				log.Warn("save sort stats result failed", zap.Int64("taskID", st.taskID),
@@ -378,6 +379,7 @@ func (st *statsTask) SetJobInfo(meta *meta) error {
 			default:
 			}
 		case indexpb.StatsSubJob_TextIndexJob:
+			log.Info("update text index stats result", zap.Any("statsResult", st.taskInfo), zap.Int64("segmentID", st.segmentID))
 			err = meta.UpdateSegment(st.taskInfo.GetSegmentID(), SetTextIndexLogs(st.taskInfo.GetTextStatsLogs()))
 			if err != nil {
 				log.Warn("save text index stats result failed", zap.Int64("taskID", st.taskID),

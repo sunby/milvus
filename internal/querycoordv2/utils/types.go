@@ -92,6 +92,7 @@ func PackSegmentLoadInfo(segment *datapb.SegmentInfo, channelCheckpoint *msgpb.M
 		TextStatsLogs:    segment.GetTextStatsLogs(),
 		JsonKeyStatsLogs: segment.GetJsonKeyStats(),
 	}
+	log.Info("pack segment load info", zap.Any("segment", segment), zap.Any("loadInfo", loadInfo))
 	return loadInfo
 }
 
