@@ -43,12 +43,12 @@ SegmentInternalInterface::FillPrimaryKeys(const query::Plan* plan,
     auto pk_type = get_schema()[pk_field_id].get_data_type();
     if (type() == SegmentType::Sealed && IsStringDataType(pk_type)) {
         results.pk_type_ = DataType::VARCHAR;
-        for (auto& offset : results.seg_offsets_) {
+        for (auto i = 0; i < size; i++) {
             auto [chunk_id, chunk_offset] =
-                get_chunk_by_offset(pk_field_id, offset);
+                get_chunk_by_offset(pk_field_id, results.seg_offsets_[i]);
             auto [string_views, valid_data] = chunk_string_views_by_offsets(
                 pk_field_id, chunk_id, {static_cast<int>(chunk_offset)});
-            results.primary_keys_.emplace_back(std::string(string_views[0]));
+            results.primary_keys_[i] = std::string(string_views[0]);
         }
     } else {
         auto field_data =
