@@ -811,27 +811,27 @@ PhyTermFilterExpr::ExecVisitorImplForIndex() {
     }
 
     if (!arg_inited_) {
-        arg_set_ =
-            std::make_shared<FlatVectorElement<IndexInnerType>>(expr_->vals_);
+        std::vector<IndexInnerType> vals;
+        for (auto& val : expr_->vals_) {
+            if constexpr (std::is_same_v<T, double>) {
+                if (val.has_int64_val()) {
+                    // only json field will cast int to double because other fields are casted in proxy
+                    vals.emplace_back(static_cast<double>(val.int64_val()));
+                    continue;
+                }
+            }
+
+            // Generic overflow handling for all types
+            bool overflowed = false;
+            auto converted_val =
+                GetValueFromProtoWithOverflow<T>(val, overflowed);
+            if (!overflowed) {
+                vals.emplace_back(converted_val);
+            }
+        }
+        arg_set_ = std::make_shared<FlatVectorElement<IndexInnerType>>(vals);
         arg_inited_ = true;
     }
-    // std::vector<IndexInnerType> vals;
-    // for (auto& val : expr_->vals_) {
-    //     if constexpr (std::is_same_v<T, double>) {
-    //         if (val.has_int64_val()) {
-    //             // only json field will cast int to double because other fields are casted in proxy
-    //             vals.emplace_back(static_cast<double>(val.int64_val()));
-    //             continue;
-    //         }
-    //     }
-
-    //     // Generic overflow handling for all types
-    //     bool overflowed = false;
-    //     auto converted_val = GetValueFromProtoWithOverflow<T>(val, overflowed);
-    //     if (!overflowed) {
-    //         vals.emplace_back(converted_val);
-    //     }
-    // }
     auto execute_sub_batch = [](Index* index_ptr,
                                 const std::vector<IndexInnerType>& vals) {
         TermIndexFunc<T> func;
