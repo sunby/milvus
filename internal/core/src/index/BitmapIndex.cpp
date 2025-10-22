@@ -24,11 +24,11 @@
 
 #include "common/File.h"
 #include "common/Slice.h"
-#include "common/Common.h"
+#include "common/Common.h"  // NOLINT(misc-unused-headers)
 #include "index/Meta.h"
 #include "index/ScalarIndex.h"
 #include "index/Utils.h"
-#include "storage/Util.h"
+#include "storage/Util.h"  // NOLINT(misc-unused-headers)
 #include "query/Utils.h"
 
 #include "storage/FileWriter.h"
@@ -372,7 +372,7 @@ void
 BitmapIndex<T>::BuildOffsetCache() {
     if (is_mmap_) {
         mmap_offsets_cache_.resize(total_num_rows_);
-        for (auto it = bitmap_info_map_.begin(); it != bitmap_info_map_.end();
+        for (auto it = bitmap_info_map_.cbegin(); it != bitmap_info_map_.cend();
              ++it) {
             for (const auto& v : it->second) {
                 mmap_offsets_cache_[v] = it;
@@ -551,6 +551,8 @@ BitmapIndex<T>::LoadWithoutAssemble(const BinarySet& binary_set,
         BuildOffsetCache();
     }
 
+    SortKeys();
+
     auto file_index_meta = file_manager_->GetIndexMeta();
     LOG_INFO(
         "load bitmap index with cardinality = {}, num_rows = {} for segment_id "
@@ -562,6 +564,43 @@ BitmapIndex<T>::LoadWithoutAssemble(const BinarySet& binary_set,
         is_mmap_);
 
     is_built_ = true;
+}
+
+template <typename T>
+void
+BitmapIndex<T>::SortKeys() {
+    if (is_mmap_) {
+        for (auto it = bitmap_info_map_.cbegin(); it != bitmap_info_map_.cend();
+             ++it) {
+            sorted_keys_mmap_mode_.push_back(it);
+        }
+        std::sort(sorted_keys_mmap_mode_.begin(),
+                  sorted_keys_mmap_mode_.end(),
+                  [](const auto& lhs, const auto& rhs) {
+                      return lhs->first < rhs->first;
+                  });
+    } else {
+        if (build_mode_ == BitmapIndexBuildMode::ROARING) {
+            for (auto it = data_.cbegin(); it != data_.cend(); ++it) {
+                sorted_keys_roaring_mode_.push_back(it);
+            }
+            std::sort(sorted_keys_roaring_mode_.begin(),
+                      sorted_keys_roaring_mode_.end(),
+                      [](const auto& lhs, const auto& rhs) {
+                          return lhs->first < rhs->first;
+                      });
+        } else {
+            for (auto it = bitsets_.cbegin(); it != bitsets_.cend(); ++it) {
+                sorted_keys_bitset_mode_.push_back(it);
+            }
+            std::sort(sorted_keys_bitset_mode_.begin(),
+                      sorted_keys_bitset_mode_.end(),
+                      [](const auto& lhs, const auto& rhs) {
+                          return lhs->first < rhs->first;
+                      });
+        }
+    }
+    LOG_INFO("sort keys for bitmap index");
 }
 
 template <typename T>
@@ -693,43 +732,43 @@ BitmapIndex<T>::RangeForBitset(const T value, const OpType op) {
     if (ShouldSkip(value, value, op)) {
         return res;
     }
-    auto lb = bitsets_.begin();
-    auto ub = bitsets_.end();
+    auto lb = sorted_keys_bitset_mode_.begin();
+    auto ub = sorted_keys_bitset_mode_.end();
 
     switch (op) {
         case OpType::LessThan: {
-            ub = std::lower_bound(bitsets_.begin(),
-                                  bitsets_.end(),
-                                  std::make_pair(value, TargetBitmap()),
-                                  [](const auto& lhs, const auto& rhs) {
-                                      return lhs.first < rhs.first;
+            ub = std::lower_bound(sorted_keys_bitset_mode_.begin(),
+                                  sorted_keys_bitset_mode_.end(),
+                                  value,
+                                  [](const auto& it, const auto& key) {
+                                      return it->first < key;
                                   });
             break;
         }
         case OpType::LessEqual: {
-            ub = std::upper_bound(bitsets_.begin(),
-                                  bitsets_.end(),
-                                  std::make_pair(value, TargetBitmap()),
-                                  [](const auto& lhs, const auto& rhs) {
-                                      return lhs.first < rhs.first;
+            ub = std::upper_bound(sorted_keys_bitset_mode_.begin(),
+                                  sorted_keys_bitset_mode_.end(),
+                                  value,
+                                  [](const auto& key, const auto& it) {
+                                      return key < it->first;
                                   });
             break;
         }
         case OpType::GreaterThan: {
-            lb = std::upper_bound(bitsets_.begin(),
-                                  bitsets_.end(),
-                                  std::make_pair(value, TargetBitmap()),
-                                  [](const auto& lhs, const auto& rhs) {
-                                      return lhs.first < rhs.first;
+            lb = std::upper_bound(sorted_keys_bitset_mode_.begin(),
+                                  sorted_keys_bitset_mode_.end(),
+                                  value,
+                                  [](const auto& key, const auto& it) {
+                                      return key < it->first;
                                   });
             break;
         }
         case OpType::GreaterEqual: {
-            lb = std::lower_bound(bitsets_.begin(),
-                                  bitsets_.end(),
-                                  std::make_pair(value, TargetBitmap()),
-                                  [](const auto& lhs, const auto& rhs) {
-                                      return lhs.first < rhs.first;
+            lb = std::lower_bound(sorted_keys_bitset_mode_.begin(),
+                                  sorted_keys_bitset_mode_.end(),
+                                  value,
+                                  [](const auto& it, const auto& key) {
+                                      return it->first < key;
                                   });
             break;
         }
@@ -740,7 +779,7 @@ BitmapIndex<T>::RangeForBitset(const T value, const OpType op) {
     }
 
     for (; lb != ub; lb++) {
-        res |= lb->second;
+        res |= (*lb)->second;
     }
     return res;
 }
@@ -765,43 +804,43 @@ BitmapIndex<T>::RangeForMmap(const T value, const OpType op) {
     if (ShouldSkip(value, value, op)) {
         return res;
     }
-    auto lb = bitmap_info_map_.begin();
-    auto ub = bitmap_info_map_.end();
+    auto lb = sorted_keys_mmap_mode_.begin();
+    auto ub = sorted_keys_mmap_mode_.end();
 
     switch (op) {
         case OpType::LessThan: {
-            ub = std::lower_bound(bitmap_info_map_.begin(),
-                                  bitmap_info_map_.end(),
-                                  std::make_pair(value, TargetBitmap()),
-                                  [](const auto& lhs, const auto& rhs) {
-                                      return lhs.first < rhs.first;
+            ub = std::lower_bound(sorted_keys_mmap_mode_.begin(),
+                                  sorted_keys_mmap_mode_.end(),
+                                  value,
+                                  [](const auto& it, const auto& key) {
+                                      return it->first < key;
                                   });
             break;
         }
         case OpType::LessEqual: {
-            ub = std::upper_bound(bitmap_info_map_.begin(),
-                                  bitmap_info_map_.end(),
-                                  std::make_pair(value, TargetBitmap()),
-                                  [](const auto& lhs, const auto& rhs) {
-                                      return lhs.first < rhs.first;
+            ub = std::upper_bound(sorted_keys_mmap_mode_.begin(),
+                                  sorted_keys_mmap_mode_.end(),
+                                  value,
+                                  [](const auto& key, const auto& it) {
+                                      return key < it->first;
                                   });
             break;
         }
         case OpType::GreaterThan: {
-            lb = std::upper_bound(bitmap_info_map_.begin(),
-                                  bitmap_info_map_.end(),
-                                  std::make_pair(value, TargetBitmap()),
-                                  [](const auto& lhs, const auto& rhs) {
-                                      return lhs.first < rhs.first;
+            lb = std::upper_bound(sorted_keys_mmap_mode_.begin(),
+                                  sorted_keys_mmap_mode_.end(),
+                                  value,
+                                  [](const auto& key, const auto& it) {
+                                      return key < it->first;
                                   });
             break;
         }
         case OpType::GreaterEqual: {
-            lb = std::lower_bound(bitmap_info_map_.begin(),
-                                  bitmap_info_map_.end(),
-                                  std::make_pair(value, TargetBitmap()),
-                                  [](const auto& lhs, const auto& rhs) {
-                                      return lhs.first < rhs.first;
+            lb = std::lower_bound(sorted_keys_mmap_mode_.begin(),
+                                  sorted_keys_mmap_mode_.end(),
+                                  value,
+                                  [](const auto& it, const auto& key) {
+                                      return it->first < key;
                                   });
             break;
         }
@@ -812,7 +851,7 @@ BitmapIndex<T>::RangeForMmap(const T value, const OpType op) {
     }
 
     for (; lb != ub; lb++) {
-        for (const auto& v : lb->second) {
+        for (const auto& v : (*lb)->second) {
             res.set(v);
         }
     }
@@ -827,42 +866,42 @@ BitmapIndex<T>::RangeForRoaring(const T value, const OpType op) {
     if (ShouldSkip(value, value, op)) {
         return res;
     }
-    auto lb = data_.begin();
-    auto ub = data_.end();
+    auto lb = sorted_keys_roaring_mode_.begin();
+    auto ub = sorted_keys_roaring_mode_.end();
     switch (op) {
         case OpType::LessThan: {
-            ub = std::lower_bound(data_.begin(),
-                                  data_.end(),
-                                  std::make_pair(value, TargetBitmap()),
-                                  [](const auto& lhs, const auto& rhs) {
-                                      return lhs.first < rhs.first;
+            ub = std::lower_bound(sorted_keys_roaring_mode_.begin(),
+                                  sorted_keys_roaring_mode_.end(),
+                                  value,
+                                  [](const auto& it, const auto& key) {
+                                      return it->first < key;
                                   });
             break;
         }
         case OpType::LessEqual: {
-            ub = std::upper_bound(data_.begin(),
-                                  data_.end(),
-                                  std::make_pair(value, TargetBitmap()),
-                                  [](const auto& lhs, const auto& rhs) {
-                                      return lhs.first < rhs.first;
+            ub = std::upper_bound(sorted_keys_roaring_mode_.begin(),
+                                  sorted_keys_roaring_mode_.end(),
+                                  value,
+                                  [](const auto& key, const auto& it) {
+                                      return key < it->first;
                                   });
             break;
         }
         case OpType::GreaterThan: {
-            lb = std::upper_bound(data_.begin(),
-                                  data_.end(),
-                                  std::make_pair(value, TargetBitmap()),
-                                  [](const auto& lhs, const auto& rhs) {
-                                      return lhs.first < rhs.first;
+            lb = std::upper_bound(sorted_keys_roaring_mode_.begin(),
+                                  sorted_keys_roaring_mode_.end(),
+                                  value,
+                                  [](const auto& key, const auto& it) {
+                                      return key < it->first;
                                   });
             break;
         }
         case OpType::GreaterEqual: {
-            lb = std::lower_bound(data_.begin(),
-                                  data_.end(),
-                                  std::make_pair(value, TargetBitmap()),
-                                  [](const auto& lhs, const auto& rhs) {
-                                      return lhs.first < rhs.first;
+            lb = std::lower_bound(sorted_keys_roaring_mode_.begin(),
+                                  sorted_keys_roaring_mode_.end(),
+                                  value,
+                                  [](const auto& it, const auto& key) {
+                                      return it->first < key;
                                   });
             break;
         }
@@ -873,7 +912,7 @@ BitmapIndex<T>::RangeForRoaring(const T value, const OpType op) {
     }
 
     for (; lb != ub; lb++) {
-        for (const auto& v : lb->second) {
+        for (const auto& v : (*lb)->second) {
             res.set(v);
         }
     }
@@ -896,43 +935,39 @@ BitmapIndex<T>::RangeForBitset(const T lower_value,
         return res;
     }
 
-    auto lb = bitsets_.begin();
-    auto ub = bitsets_.end();
+    auto lb = sorted_keys_bitset_mode_.begin();
+    auto ub = sorted_keys_bitset_mode_.end();
 
     if (lb_inclusive) {
-        lb = std::lower_bound(bitsets_.begin(),
-                              bitsets_.end(),
-                              std::make_pair(lower_value, TargetBitmap()),
-                              [](const auto& lhs, const auto& rhs) {
-                                  return lhs.first < rhs.first;
-                              });
+        lb = std::lower_bound(
+            sorted_keys_bitset_mode_.begin(),
+            sorted_keys_bitset_mode_.end(),
+            lower_value,
+            [](const auto& it, const auto& key) { return it->first < key; });
     } else {
-        lb = std::upper_bound(bitsets_.begin(),
-                              bitsets_.end(),
-                              std::make_pair(lower_value, TargetBitmap()),
-                              [](const auto& lhs, const auto& rhs) {
-                                  return lhs.first < rhs.first;
-                              });
+        lb = std::upper_bound(
+            sorted_keys_bitset_mode_.begin(),
+            sorted_keys_bitset_mode_.end(),
+            lower_value,
+            [](const auto& key, const auto& it) { return key < it->first; });
     }
 
     if (ub_inclusive) {
-        ub = std::upper_bound(bitsets_.begin(),
-                              bitsets_.end(),
-                              std::make_pair(upper_value, TargetBitmap()),
-                              [](const auto& lhs, const auto& rhs) {
-                                  return lhs.first < rhs.first;
-                              });
+        ub = std::upper_bound(
+            sorted_keys_bitset_mode_.begin(),
+            sorted_keys_bitset_mode_.end(),
+            upper_value,
+            [](const auto& key, const auto& it) { return key < it->first; });
     } else {
-        ub = std::lower_bound(bitsets_.begin(),
-                              bitsets_.end(),
-                              std::make_pair(upper_value, TargetBitmap()),
-                              [](const auto& lhs, const auto& rhs) {
-                                  return lhs.first < rhs.first;
-                              });
+        ub = std::lower_bound(
+            sorted_keys_bitset_mode_.begin(),
+            sorted_keys_bitset_mode_.end(),
+            upper_value,
+            [](const auto& it, const auto& key) { return it->first < key; });
     }
 
     for (; lb != ub; lb++) {
-        res |= lb->second;
+        res |= (*lb)->second;
     }
     return res;
 }
@@ -972,43 +1007,39 @@ BitmapIndex<T>::RangeForMmap(const T lower_value,
         return res;
     }
 
-    auto lb = bitmap_info_map_.begin();
-    auto ub = bitmap_info_map_.end();
+    auto lb = sorted_keys_mmap_mode_.begin();
+    auto ub = sorted_keys_mmap_mode_.end();
 
     if (lb_inclusive) {
-        lb = std::lower_bound(bitmap_info_map_.begin(),
-                              bitmap_info_map_.end(),
-                              std::make_pair(lower_value, TargetBitmap()),
-                              [](const auto& lhs, const auto& rhs) {
-                                  return lhs.first < rhs.first;
-                              });
+        lb = std::lower_bound(
+            sorted_keys_mmap_mode_.begin(),
+            sorted_keys_mmap_mode_.end(),
+            lower_value,
+            [](const auto& it, const auto& key) { return it->first < key; });
     } else {
-        lb = std::upper_bound(bitmap_info_map_.begin(),
-                              bitmap_info_map_.end(),
-                              std::make_pair(lower_value, TargetBitmap()),
-                              [](const auto& lhs, const auto& rhs) {
-                                  return lhs.first < rhs.first;
-                              });
+        lb = std::upper_bound(
+            sorted_keys_mmap_mode_.begin(),
+            sorted_keys_mmap_mode_.end(),
+            lower_value,
+            [](const auto& key, const auto& it) { return key < it->first; });
     }
 
     if (ub_inclusive) {
-        ub = std::upper_bound(bitmap_info_map_.begin(),
-                              bitmap_info_map_.end(),
-                              std::make_pair(upper_value, TargetBitmap()),
-                              [](const auto& lhs, const auto& rhs) {
-                                  return lhs.first < rhs.first;
-                              });
+        ub = std::upper_bound(
+            sorted_keys_mmap_mode_.begin(),
+            sorted_keys_mmap_mode_.end(),
+            upper_value,
+            [](const auto& key, const auto& it) { return key < it->first; });
     } else {
-        ub = std::lower_bound(bitmap_info_map_.begin(),
-                              bitmap_info_map_.end(),
-                              std::make_pair(upper_value, TargetBitmap()),
-                              [](const auto& lhs, const auto& rhs) {
-                                  return lhs.first < rhs.first;
-                              });
+        ub = std::lower_bound(
+            sorted_keys_mmap_mode_.begin(),
+            sorted_keys_mmap_mode_.end(),
+            upper_value,
+            [](const auto& it, const auto& key) { return it->first < key; });
     }
 
     for (; lb != ub; lb++) {
-        for (const auto& v : lb->second) {
+        for (const auto& v : (*lb)->second) {
             res.set(v);
         }
     }
@@ -1031,43 +1062,39 @@ BitmapIndex<T>::RangeForRoaring(const T lower_value,
         return res;
     }
 
-    auto lb = data_.begin();
-    auto ub = data_.end();
+    auto lb = sorted_keys_roaring_mode_.begin();
+    auto ub = sorted_keys_roaring_mode_.end();
 
     if (lb_inclusive) {
-        lb = std::lower_bound(data_.begin(),
-                              data_.end(),
-                              std::make_pair(lower_value, TargetBitmap()),
-                              [](const auto& lhs, const auto& rhs) {
-                                  return lhs.first < rhs.first;
-                              });
+        lb = std::lower_bound(
+            sorted_keys_roaring_mode_.begin(),
+            sorted_keys_roaring_mode_.end(),
+            lower_value,
+            [](const auto& it, const auto& key) { return it->first < key; });
     } else {
-        lb = std::upper_bound(data_.begin(),
-                              data_.end(),
-                              std::make_pair(lower_value, TargetBitmap()),
-                              [](const auto& lhs, const auto& rhs) {
-                                  return lhs.first < rhs.first;
-                              });
+        lb = std::upper_bound(
+            sorted_keys_roaring_mode_.begin(),
+            sorted_keys_roaring_mode_.end(),
+            lower_value,
+            [](const auto& key, const auto& it) { return key < it->first; });
     }
 
     if (ub_inclusive) {
-        ub = std::upper_bound(data_.begin(),
-                              data_.end(),
-                              std::make_pair(upper_value, TargetBitmap()),
-                              [](const auto& lhs, const auto& rhs) {
-                                  return lhs.first < rhs.first;
-                              });
+        ub = std::upper_bound(
+            sorted_keys_roaring_mode_.begin(),
+            sorted_keys_roaring_mode_.end(),
+            upper_value,
+            [](const auto& key, const auto& it) { return key < it->first; });
     } else {
-        ub = std::lower_bound(data_.begin(),
-                              data_.end(),
-                              std::make_pair(upper_value, TargetBitmap()),
-                              [](const auto& lhs, const auto& rhs) {
-                                  return lhs.first < rhs.first;
-                              });
+        ub = std::lower_bound(
+            sorted_keys_roaring_mode_.begin(),
+            sorted_keys_roaring_mode_.end(),
+            upper_value,
+            [](const auto& it, const auto& key) { return it->first < key; });
     }
 
     for (; lb != ub; lb++) {
-        for (const auto& v : lb->second) {
+        for (const auto& v : (*lb)->second) {
             res.set(v);
         }
     }
@@ -1177,8 +1204,8 @@ BitmapIndex<T>::ShouldSkip(const T lower_value,
 
     if (is_mmap_) {
         if (!bitmap_info_map_.empty()) {
-            auto lower_bound = bitmap_info_map_.begin()->first;
-            auto upper_bound = bitmap_info_map_.rbegin()->first;
+            auto lower_bound = sorted_keys_mmap_mode_.front()->first;
+            auto upper_bound = sorted_keys_mmap_mode_.back()->first;
             bool should_skip = skip(op, lower_bound, upper_bound);
             return should_skip;
         }
@@ -1186,15 +1213,15 @@ BitmapIndex<T>::ShouldSkip(const T lower_value,
 
     if (build_mode_ == BitmapIndexBuildMode::ROARING) {
         if (!data_.empty()) {
-            auto lower_bound = data_.begin()->first;
-            auto upper_bound = data_.rbegin()->first;
+            auto lower_bound = sorted_keys_roaring_mode_.front()->first;
+            auto upper_bound = sorted_keys_roaring_mode_.back()->first;
             bool should_skip = skip(op, lower_bound, upper_bound);
             return should_skip;
         }
     } else {
         if (!bitsets_.empty()) {
-            auto lower_bound = bitsets_.begin()->first;
-            auto upper_bound = bitsets_.rbegin()->first;
+            auto lower_bound = sorted_keys_bitset_mode_.front()->first;
+            auto upper_bound = sorted_keys_bitset_mode_.back()->first;
             bool should_skip = skip(op, lower_bound, upper_bound);
             return should_skip;
         }

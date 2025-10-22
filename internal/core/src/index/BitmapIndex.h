@@ -257,26 +257,38 @@ class BitmapIndex : public ScalarIndex<T> {
     void
     UnmapIndexData();
 
+    void
+    SortKeys();
+
  public:
     bool is_built_{false};
     BitmapIndexBuildMode build_mode_;
-    std::map<T, roaring::Roaring> data_;
-    std::map<T, TargetBitmap> bitsets_;
+    std::unordered_map<T, roaring::Roaring> data_;
+    std::unordered_map<T, TargetBitmap> bitsets_;
     bool is_mmap_{false};
     char* mmap_data_;
     int64_t mmap_size_;
-    std::map<T, roaring::Roaring> bitmap_info_map_;
+    std::unordered_map<T, roaring::Roaring> bitmap_info_map_;
     size_t total_num_rows_{0};
     proto::schema::FieldSchema schema_;
     bool use_offset_cache_{false};
-    std::vector<typename std::map<T, roaring::Roaring>::iterator>
+    std::vector<
+        typename std::unordered_map<T, roaring::Roaring>::const_iterator>
         data_offsets_cache_;
-    std::vector<typename std::map<T, TargetBitmap>::iterator>
+    std::vector<typename std::unordered_map<T, TargetBitmap>::const_iterator>
         bitsets_offsets_cache_;
-    std::vector<typename std::map<T, roaring::Roaring>::iterator>
+    std::vector<
+        typename std::unordered_map<T, roaring::Roaring>::const_iterator>
         mmap_offsets_cache_;
     std::shared_ptr<storage::MemFileManagerImpl> file_manager_;
-
+    std::vector<
+        typename std::unordered_map<T, roaring::Roaring>::const_iterator>
+        sorted_keys_roaring_mode_;
+    std::vector<typename std::unordered_map<T, TargetBitmap>::const_iterator>
+        sorted_keys_bitset_mode_;
+    std::vector<
+        typename std::unordered_map<T, roaring::Roaring>::const_iterator>
+        sorted_keys_mmap_mode_;
     // generate valid_bitset to speed up NotIn and IsNull and IsNotNull operate
     TargetBitmap valid_bitset_;
 };
