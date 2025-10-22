@@ -302,13 +302,6 @@ BitmapIndex<T>::Upload(const Config& config) {
 template <typename T>
 void
 BitmapIndex<T>::Load(const BinarySet& binary_set, const Config& config) {
-    if (config.contains("bitset_length")) {
-        auto bitset_length =
-            GetValueFromConfig<int64_t>(config, "bitset_length");
-        DEFAULT_BITMAP_INDEX_BUILD_MODE_BOUND = bitset_length.value();
-        LOG_INFO("load bitmap index with bitset mode and bitset length = {}",
-                 DEFAULT_BITMAP_INDEX_BUILD_MODE_BOUND);
-    }
     milvus::Assemble(const_cast<BinarySet&>(binary_set));
     LoadWithoutAssemble(binary_set, config);
 }
