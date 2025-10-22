@@ -302,6 +302,13 @@ BitmapIndex<T>::Upload(const Config& config) {
 template <typename T>
 void
 BitmapIndex<T>::Load(const BinarySet& binary_set, const Config& config) {
+    if (config.contains("bitset_length")) {
+        auto bitset_length =
+            GetValueFromConfig<int64_t>(config, "bitset_length");
+        DEFAULT_BITMAP_INDEX_BUILD_MODE_BOUND = bitset_length.value();
+        LOG_INFO("load bitmap index with bitset mode and bitset length = {}",
+                 DEFAULT_BITMAP_INDEX_BUILD_MODE_BOUND);
+    }
     milvus::Assemble(const_cast<BinarySet&>(binary_set));
     LoadWithoutAssemble(binary_set, config);
 }
@@ -639,17 +646,26 @@ BitmapIndex<T>::In(const size_t n, const T* values) {
         for (size_t i = 0; i < n; ++i) {
             auto val = values[i];
             auto it = data_.find(val);
-            if (it != data_.end()) {
-                for (const auto& v : it->second) {
-                    res.set(v);
-                }
-            }
+            // if (it != data_.end()) {
+            //     for (const auto& v : it->second) {
+            //         res.set(v);
+            //     }
+            // }
+            auto rr = it->second;
+            rr.iterate(
+                [](uint32_t v, void* p) -> bool {
+                    auto res = static_cast<TargetBitmap*>(p);
+                    res->set(v);
+                    return true;
+                },
+                &res);
         }
     } else {
         for (size_t i = 0; i < n; ++i) {
             auto val = values[i];
-            if (bitsets_.find(val) != bitsets_.end()) {
-                res |= bitsets_.at(val);
+            auto it = bitsets_.find(val);
+            if (it != bitsets_.end()) {
+                res |= it->second;
             }
         }
     }
