@@ -644,14 +644,16 @@ BitmapIndex<T>::In(const size_t n, const T* values) {
             //         res.set(v);
             //     }
             // }
-            auto rr = it->second;
-            rr.iterate(
-                [](uint32_t v, void* p) -> bool {
-                    auto res = static_cast<TargetBitmap*>(p);
-                    res->set(v);
-                    return true;
-                },
-                &res);
+            if (it != data_.end()) {
+                auto rr = it->second;
+                rr.iterate(
+                    [](uint32_t v, void* p) -> bool {
+                        auto res = static_cast<TargetBitmap*>(p);
+                        res->set(v);
+                        return true;
+                    },
+                    &res);
+            }
         }
     } else {
         for (size_t i = 0; i < n; ++i) {
