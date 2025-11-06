@@ -19,6 +19,7 @@ package proxy
 import (
 	"context"
 	"math"
+	"slices"
 	"sync"
 	"time"
 
@@ -97,6 +98,7 @@ func (b *LookAsideBalancer) RegisterNodeInfo(nodeInfos []nodeInfo) {
 }
 
 func (b *LookAsideBalancer) SelectNode(ctx context.Context, availableNodes []int64, nq int64) (int64, error) {
+	slices.Sort(availableNodes)
 	targetNode := int64(-1)
 	defer func() {
 		if targetNode != -1 {

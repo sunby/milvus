@@ -17,6 +17,7 @@ package proxy
 
 import (
 	"context"
+	"slices"
 
 	"go.uber.org/atomic"
 
@@ -39,6 +40,7 @@ func (b *RoundRobinBalancer) SelectNode(ctx context.Context, availableNodes []in
 		return -1, merr.ErrNodeNotAvailable
 	}
 
+	slices.Sort(availableNodes)
 	idx := b.idx.Inc()
 	return availableNodes[int(idx)%len(availableNodes)], nil
 }
