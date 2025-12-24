@@ -36,6 +36,7 @@ BAND: '&';
 BOR: '|';
 BXOR: '^';
 BNOT: '~';
+BACKSLASH: '\\';
 
 AND: '&&' | 'AND';
 OR: '||' | 'OR';
@@ -49,7 +50,29 @@ CLOSE_BRACE: '}';
 
 IDENTIFIER: (LETTER | '_') (LETTER | DIGIT | '_')*;
 
-fragment DIGIT: [0-9];
-fragment LETTER: [a-zA-Z];
+INTEGER_VALUE: DIGIT+;
 
-WS : [ \t\r\n\f]+ -> channel(HIDDEN) ;
+DECIMAL_VALUE:
+	INTEGER_VALUE '.' INTEGER_VALUE?
+	| '.' INTEGER_VALUE
+	| INTEGER_VALUE ('.' DIGIT*)? EXPONENT
+	| '.' INTEGER_VALUE EXPONENT;
+
+OCTAL_VALUE: '0' OCTAL_DIGIT+;
+
+HEXADECIMAL_VALUE: '0' 'X' HEXADECIMAL_DIGIT+;
+
+BINARY_VALUE: '0' 'B' BINARY_DIGIT+;
+
+SINGLE_QUOTED_STRING: '\'' (~'\'')* '\'';
+
+DOUBLE_QUOTED_STRING: '"' (~'"')* '"';
+
+fragment DIGIT: [0-9];
+fragment OCTAL_DIGIT: [0-7];
+fragment HEXADECIMAL_DIGIT: [0-9a-fA-F];
+fragment BINARY_DIGIT: [0-1];
+fragment LETTER: [a-zA-Z];
+fragment EXPONENT: 'E' [+-]? DIGIT+;
+
+WS: [ \t\r\n\f]+ -> channel(HIDDEN);
