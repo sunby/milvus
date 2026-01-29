@@ -2050,6 +2050,8 @@ type proxyConfig struct {
 	QueryNodePoolingSize   ParamItem `refreshable:"false"`
 
 	HybridSearchRequeryPolicy ParamItem `refreshable:"true"`
+
+	MetaCacheGCTimeInterval ParamItem `refreshable:"true"`
 }
 
 func (p *proxyConfig) init(base *BaseTable) {
@@ -2571,6 +2573,15 @@ Disabled if the value is less or equal to 0.`,
 		Export:       true,
 	}
 	p.QueryNodePoolingSize.Init(base.mgr)
+
+	p.MetaCacheGCTimeInterval = ParamItem{
+		Key:          "proxy.metaCacheGCTimeInterval",
+		Version:      "2.7.0",
+		Doc:          "the time interval for meta cache GC, in seconds",
+		DefaultValue: "300",
+		Export:       true,
+	}
+	p.MetaCacheGCTimeInterval.Init(base.mgr)
 }
 
 // /////////////////////////////////////////////////////////////////////////////
@@ -2677,6 +2688,8 @@ type queryCoordConfig struct {
 	UpdateTargetNeedSegmentDataReady ParamItem `refreshable:"true"`
 
 	AutoWarmupForNonPKIsolationCollection ParamItem `refreshable:"false"`
+
+	EnableSQNServeSegments ParamItem `refreshable:"true"`
 }
 
 func (p *queryCoordConfig) init(base *BaseTable) {
@@ -3383,6 +3396,15 @@ Set to 0 to disable the penalty period.`,
 		Export:       false,
 	}
 	p.AutoWarmupForNonPKIsolationCollection.Init(base.mgr)
+
+	p.EnableSQNServeSegments = ParamItem{
+		Key:          "queryCoord.enableSQNServeSegments",
+		Version:      "2.6.0",
+		DefaultValue: "false",
+		Doc:          "whether to allow streaming query nodes to serve historical segments",
+		Export:       true,
+	}
+	p.EnableSQNServeSegments.Init(base.mgr)
 }
 
 // /////////////////////////////////////////////////////////////////////////////

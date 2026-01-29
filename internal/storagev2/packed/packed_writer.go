@@ -105,7 +105,6 @@ func NewPackedWriter(filePaths []string, schema *arrow.Schema, bufferSize int64,
 			use_custom_part_upload: true,
 			max_connections:        C.uint32_t(storageConfig.GetMaxConnections()),
 			tls_min_version:        C.CString(tlsMinVersionForStorage(storageConfig.GetSslTlsMinVersion())),
-			use_crc32c_checksum:    C.bool(storageConfig.GetUseCrc32CChecksum()),
 		}
 		defer C.free(unsafe.Pointer(cStorageConfig.address))
 		defer C.free(unsafe.Pointer(cStorageConfig.bucket_name))
@@ -167,11 +166,15 @@ func (pw *PackedWriter) Close() error {
 }
 
 func (pw *PackedWriter) CloseAndTell(numGroups int) ([]int64, error) {
-	if numGroups <= 0 {
-		return nil, errors.New("numGroups must be greater than 0")
-	}
 	sizes := make([]int64, numGroups)
-	status := C.CloseAndTell(pw.cPackedWriter, (*C.int64_t)(unsafe.Pointer(&sizes[0])), C.size_t(numGroups))
+	if numGroups == 0 {
+		status := C.CloseWriter(pw.cPackedWriter)
+		if err := ConsumeCStatusIntoError(&status); err != nil {
+			return nil, err
+		}
+		return sizes, nil
+	}
+	status := C.CloseWriterAndTell(pw.cPackedWriter, (*C.int64_t)(unsafe.Pointer(&sizes[0])), C.int64_t(numGroups))
 	if err := ConsumeCStatusIntoError(&status); err != nil {
 		return nil, err
 	}
