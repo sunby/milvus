@@ -8,6 +8,6 @@ import (
 )
 
 type Lifecycle interface {
-	EnsureGrowingSegment(ctx context.Context, meta *streamingpb.SegmentAssignmentMeta) error
+	EnsureGrowingSegment(ctx context.Context, meta *streamingpb.SegmentAssignmentMeta, schemaVersion int32) error
 	CommitL1Segment(ctx context.Context, meta *streamingpb.SegmentAssignmentMeta) (*viewpb.DataVersion, error)
 }

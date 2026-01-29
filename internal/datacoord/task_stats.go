@@ -565,7 +565,16 @@ func (st *statsTask) SetJobInfo(ctx context.Context, result *workerpb.StatsResul
 		if st.GetSubJobType() == indexpb.StatsSubJob_Sort {
 			segID = st.GetTargetSegmentID()
 		}
-		if updateErr := st.meta.UpdateSegmentsInfo(ctx, UpdateManifest(segID, manifest)); updateErr != nil {
+		mutations := map[int64][]MutateFunc{
+			segID: {func(seg *datapb.SegmentInfo) bool {
+				if manifest == "" || seg.ManifestPath == manifest {
+					return false
+				}
+				seg.ManifestPath = manifest
+				return true
+			}},
+		}
+		if updateErr := st.meta.UpdateSegmentsInfo(ctx, mutations); updateErr != nil {
 			mlog.Warn(ctx, "failed to update manifest after stats task",
 				mlog.FieldTaskID(st.GetTaskID()),
 				mlog.FieldSegmentID(segID),

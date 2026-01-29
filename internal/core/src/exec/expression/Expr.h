@@ -31,6 +31,7 @@
 #include "common/FieldDataInterface.h"
 #include "common/Json.h"
 #include "common/OpContext.h"
+#include "common/RequestTrace.h"
 #include "common/Types.h"
 #include "exec/expression/EvalCtx.h"
 #include "exec/expression/ExprCacheHelper.h"
@@ -2666,6 +2667,19 @@ class SegmentExpr : public Expr {
     }
 
  public:
+    void
+    SetTraceID(std::string trace_id) {
+        trace_id_ = std::move(trace_id);
+    }
+
+    std::string
+    TraceID() const {
+        if (!trace_id_.empty()) {
+            return trace_id_;
+        }
+        return milvus::tracer::GetRequestTraceID();
+    }
+
     bool
     CanUseNestedIndex() const override {
         EnsureExecPathDetermined();
@@ -3041,6 +3055,7 @@ class SegmentExpr : public Expr {
     // request; iterative readers that never requested prefetch stay lazy.
     bool raw_data_prefetch_deferred_{false};
     size_t raw_data_prefetch_start_chunk_{0};
+    std::string trace_id_;
     // Scalar index is pinned lazily by EnsurePinnedIndex(). Pre-pin
     // existence checks (HasCompatibleScalarIndex) query segment metadata
     // directly, so expressions on short-circuit paths (TextIndex, PkIndex,
