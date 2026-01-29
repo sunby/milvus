@@ -30,8 +30,8 @@ func NewSegmentLifecycleWriter(coord types.MixCoordClient, serverID int64) Lifec
 	}
 }
 
-func (w *segmentLifecycleWriter) EnsureGrowingSegment(ctx context.Context, meta *streamingpb.SegmentAssignmentMeta) error {
-	req := buildEnsureGrowingSegmentRequest(meta)
+func (w *segmentLifecycleWriter) EnsureGrowingSegment(ctx context.Context, meta *streamingpb.SegmentAssignmentMeta, schemaVersion int32) error {
+	req := buildEnsureGrowingSegmentRequest(meta, schemaVersion)
 	return retry.Do(ctx, func() error {
 		resp, err := w.coord.AllocSegment(ctx, req)
 		return merr.CheckRPCCall(resp, err)
@@ -70,7 +70,7 @@ func dataVersionFromStatus(extraInfo map[string]string) *viewpb.DataVersion {
 	}
 }
 
-func buildEnsureGrowingSegmentRequest(meta *streamingpb.SegmentAssignmentMeta) *datapb.AllocSegmentRequest {
+func buildEnsureGrowingSegmentRequest(meta *streamingpb.SegmentAssignmentMeta, schemaVersion int32) *datapb.AllocSegmentRequest {
 	return &datapb.AllocSegmentRequest{
 		CollectionId:         meta.GetCollectionId(),
 		PartitionId:          meta.GetPartitionId(),
@@ -78,6 +78,7 @@ func buildEnsureGrowingSegmentRequest(meta *streamingpb.SegmentAssignmentMeta) *
 		Vchannel:             meta.GetVchannel(),
 		StorageVersion:       meta.GetStorageVersion(),
 		IsCreatedByStreaming: true,
+		SchemaVersion:        schemaVersion,
 	}
 }
 
