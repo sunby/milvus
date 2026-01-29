@@ -96,7 +96,7 @@ func initSQPool() {
 
 func initDynamicPool() {
 	dynOnce.Do(func() {
-		size := hardware.GetCPUNum()
+		size := hardware.GetCPUNum() * 100
 		pool := conc.NewPool[any](
 			size,
 			conc.WithPreAlloc(false),

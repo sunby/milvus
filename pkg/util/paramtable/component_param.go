@@ -2833,6 +2833,8 @@ type queryCoordConfig struct {
 	UpdateTargetNeedSegmentDataReady ParamItem `refreshable:"true"`
 
 	AutoWarmupForNonPKIsolationCollection ParamItem `refreshable:"false"`
+
+	EnableSQNServeSegments ParamItem `refreshable:"true"`
 }
 
 func (p *queryCoordConfig) init(base *BaseTable) {
@@ -3539,6 +3541,15 @@ Set to 0 to disable the penalty period.`,
 		Export:       false,
 	}
 	p.AutoWarmupForNonPKIsolationCollection.Init(base.mgr)
+
+	p.EnableSQNServeSegments = ParamItem{
+		Key:          "queryCoord.enableSQNServeSegments",
+		Version:      "2.6.0",
+		DefaultValue: "false",
+		Doc:          "whether to allow streaming query nodes to serve historical segments",
+		Export:       true,
+	}
+	p.EnableSQNServeSegments.Init(base.mgr)
 }
 
 // /////////////////////////////////////////////////////////////////////////////
