@@ -252,6 +252,11 @@ class SegmentInterface {
     virtual int64_t
     get_segment_id() const = 0;
 
+    virtual int64_t
+    get_partition_id() const {
+        return -1;
+    }
+
     virtual SegmentType
     type() const = 0;
 

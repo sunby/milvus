@@ -202,7 +202,7 @@ func (pw *PackedWriter) CloseAndTell(numGroups int) ([]int64, error) {
 	sizes := make([]int64, numGroups)
 	cPackedWriter := pw.cPackedWriter
 	pw.cPackedWriter = nil
-	status := C.CloseAndTell(cPackedWriter, (*C.int64_t)(unsafe.Pointer(&sizes[0])), C.size_t(numGroups))
+	status := C.CloseWriterAndTell(cPackedWriter, (*C.int64_t)(unsafe.Pointer(&sizes[0])), C.int64_t(numGroups))
 	if err := ConsumeCStatusIntoError(&status); err != nil {
 		return nil, err
 	}

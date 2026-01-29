@@ -1224,6 +1224,7 @@ type requeryOperator struct {
 	rlsPredicate     *planpb.Expr
 	outputFieldNames []string
 
+	requestID          int64
 	timestamp          uint64
 	dbName             string
 	collectionName     string
@@ -1285,6 +1286,7 @@ func newRequeryOperator(t *SearchTask, _ map[string]any) (operator, error) {
 		traceCtx:           t.TraceCtx(),
 		rlsPredicate:       t.rlsPredicate,
 		outputFieldNames:   outputFieldNames.Collect(),
+		requestID:          t.ID(),
 		timestamp:          t.BeginTs(),
 		dbName:             dbName,
 		collectionName:     collectionName,
@@ -1324,6 +1326,15 @@ func (op *requeryOperator) requery(ctx context.Context, span trace.Span, ids *sc
 	if op.collectionID > 0 {
 		queryParams = []*commonpb.KeyValuePair{{Key: CollectionID, Value: strconv.FormatInt(op.collectionID, 10)}}
 	}
+	t1 := time.Now()
+	defer func() {
+		cost := time.Since(t1)
+		mlog.Info(ctx, "[sss] requery",
+			mlog.Int64("requestID", op.requestID),
+			mlog.Stringer("traceID", trace.SpanFromContext(ctx).SpanContext().TraceID()),
+			mlog.Int64s("partitionIDs", op.partitionIDs),
+			mlog.Duration("duration", cost))
+	}()
 	queryReq := &milvuspb.QueryRequest{
 		Base: &commonpb.MsgBase{
 			MsgType:   commonpb.MsgType_Retrieve,

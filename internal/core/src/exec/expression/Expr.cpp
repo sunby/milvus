@@ -499,6 +499,11 @@ CompileExpression(const expr::TypedExprPtr& expr,
     // non-pinned paths) to this expression. Runs for the whole compiled tree
     // because CompileExpression is recursive over inputs.
     result->SetSnapshot(context->get_read_snapshot().get());
+    if (auto segment_expr = std::dynamic_pointer_cast<SegmentExpr>(result)) {
+        auto search_info = context->get_search_info();
+        segment_expr->SetTraceID(
+            milvus::tracer::GetTraceIDAsHexStr(&search_info.trace_ctx_));
+    }
     return result;
 }
 
@@ -950,12 +955,12 @@ OptimizeCompiledExprs(ExecContext* context, const std::vector<ExprPtr>& exprs) {
         std::chrono::high_resolution_clock::now();
     for (const auto& expr : exprs) {
         if (expr->name() == "PhyConjunctFilterExpr") {
-            LOG_DEBUG("before reoder filter expression: {}", expr->ToString());
+            // LOG_DEBUG("before reoder filter expression: {}", expr->ToString());
             auto conjunct_expr =
                 std::static_pointer_cast<PhyConjunctFilterExpr>(expr);
             bool has_heavy_operation = false;
             ReorderConjunctExpr(conjunct_expr, context, has_heavy_operation);
-            LOG_DEBUG("after reorder filter expression: {}", expr->ToString());
+            // LOG_DEBUG("after reorder filter expression: {}", expr->ToString());
         }
     }
     std::chrono::high_resolution_clock::time_point end =
