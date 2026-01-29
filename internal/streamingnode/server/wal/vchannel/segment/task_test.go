@@ -26,8 +26,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
+	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/streamingpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
+	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
+	"github.com/milvus-io/milvus/pkg/v3/streaming/walimpls/impls/walimplstest"
 	"github.com/milvus-io/milvus/pkg/v3/util/nodescheduler"
 )
 
@@ -65,6 +68,133 @@ func TestSegmentTaskDoesNotInterpretCanceledContext(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	require.True(t, errors.Is(err, nodescheduler.ErrDelay))
 	assert.False(t, task.Done())
+}
+
+func TestCreateSegmentDefersEnsureGrowingSegment(t *testing.T) {
+	mutable := message.NewCreateSegmentMessageBuilderV2().
+		WithVChannel("v1").
+		WithHeader(&message.CreateSegmentMessageHeader{
+			CollectionId: 1,
+			PartitionId:  10,
+			SegmentId:    100,
+			Level:        datapb.SegmentLevel_L1,
+		}).
+		WithBody(&message.CreateSegmentMessageBody{}).
+		MustBuildMutable()
+	msg := message.MustAsImmutableCreateSegmentMessageV2(
+		mutable.WithTimeTick(10).IntoImmutableMessage(walimplstest.NewTestMessageID(1)),
+	)
+	segment := NewSegmentViewFromCreateSegmentMessage(msg, &schemapb.CollectionSchema{Version: 7}, runtimeConfig{metaAndData: true})
+
+	result := segment.ObserveCreateSegmentMessageV2(context.Background(), msg)
+
+	assert.Nil(t, result.Data)
+	assert.Empty(t, segment.pendingTasks)
+	assert.False(t, segment.dataCoordSegmentEnsured)
+}
+
+func TestFlushL1BufferEnsuresSegmentBeforeObjectWrite(t *testing.T) {
+	recorder := &segmentTaskRecorder{}
+	segment := newDeferredTestSegment(recorder)
+	segment.pendingFlushChunks = []writeOnlyInsertBuffer{{
+		fromTimeTick: 11,
+		toTimeTick:   20,
+		rows:         1,
+	}}
+	task := &flushL1BufferTask{
+		segmentTaskBase: segmentTaskBase{segment: segment},
+		timetick:        20,
+	}
+
+	require.NoError(t, task.Execute(context.Background()))
+
+	assert.Equal(t, []string{"ensure", "write"}, recorder.events)
+	assert.Equal(t, []int32{7}, recorder.schemaVersions)
+	assert.Equal(t, uint64(20), segment.AssignmentMeta().GetDataCheckpointTimeTick())
+
+	segment.mu.Lock()
+	segment.pendingFlushChunks = append(segment.pendingFlushChunks, writeOnlyInsertBuffer{
+		fromTimeTick: 21,
+		toTimeTick:   30,
+		rows:         1,
+	})
+	segment.mu.Unlock()
+	second := &flushL1BufferTask{
+		segmentTaskBase: segmentTaskBase{segment: segment},
+		timetick:        30,
+	}
+
+	require.NoError(t, second.Execute(context.Background()))
+	assert.Equal(t, []string{"ensure", "write", "write"}, recorder.events)
+}
+
+func TestCommitL1SegmentEnsuresEmptySegmentBeforeCommit(t *testing.T) {
+	recorder := &segmentTaskRecorder{}
+	segment := newDeferredTestSegment(recorder)
+	task := &commitL1SegmentTask{
+		segmentTaskBase: segmentTaskBase{segment: segment},
+		timetick:        30,
+	}
+
+	require.NoError(t, task.Execute(context.Background()))
+
+	assert.Equal(t, []string{"ensure", "commit"}, recorder.events)
+	assert.Equal(t, []int32{7}, recorder.schemaVersions)
+	assert.Equal(t, uint64(30), segment.AssignmentMeta().GetDataCheckpointTimeTick())
+}
+
+func TestEnsureFailureStopsFlushBeforeObjectWrite(t *testing.T) {
+	recorder := &segmentTaskRecorder{ensureErr: assert.AnError}
+	segment := newDeferredTestSegment(recorder)
+	segment.pendingFlushChunks = []writeOnlyInsertBuffer{{toTimeTick: 20}}
+	task := &flushL1BufferTask{
+		segmentTaskBase: segmentTaskBase{segment: segment},
+		timetick:        20,
+	}
+
+	err := task.Execute(context.Background())
+
+	require.ErrorIs(t, err, assert.AnError)
+	assert.Equal(t, []string{"ensure"}, recorder.events)
+	assert.False(t, segment.dataCoordSegmentEnsured)
+	assert.Zero(t, segment.AssignmentMeta().GetDataCheckpointTimeTick())
+}
+
+func TestFlushRetryDoesNotReallocateAfterEnsure(t *testing.T) {
+	recorder := &segmentTaskRecorder{writeErr: assert.AnError}
+	segment := newDeferredTestSegment(recorder)
+	segment.pendingFlushChunks = []writeOnlyInsertBuffer{{toTimeTick: 20}}
+	task := &flushL1BufferTask{
+		segmentTaskBase: segmentTaskBase{segment: segment},
+		timetick:        20,
+	}
+
+	require.ErrorIs(t, task.Execute(context.Background()), assert.AnError)
+	recorder.writeErr = nil
+	require.NoError(t, task.Execute(context.Background()))
+
+	assert.Equal(t, []string{"ensure", "write", "write"}, recorder.events)
+	assert.Equal(t, []int32{7}, recorder.schemaVersions)
+}
+
+func TestRecoveredSegmentInfersEnsureFromDataCheckpoint(t *testing.T) {
+	recorder := &segmentTaskRecorder{}
+	meta := newDeferredTestSegmentMeta()
+	meta.DataCheckpointTimeTick = meta.GetStat().GetCreateSegmentTimeTick()
+	segment := NewSegmentViewFromMeta(
+		meta,
+		&schemapb.CollectionSchema{Version: 7},
+		runtimeConfig{lifecycle: recorder, packWriter: recorder, metaAndData: true},
+	)
+	task := &commitL1SegmentTask{
+		segmentTaskBase: segmentTaskBase{segment: segment},
+		timetick:        30,
+	}
+
+	require.NoError(t, task.Execute(context.Background()))
+
+	assert.Equal(t, []string{"commit"}, recorder.events)
+	assert.Empty(t, recorder.schemaVersions)
 }
 
 func TestStaleFinalCommitTaskSkipsAfterDataVersionAdvances(t *testing.T) {
@@ -158,15 +288,22 @@ func (t *testSegmentTask) Execute(ctx context.Context) error {
 }
 
 type segmentTaskRecorder struct {
+	events           []string
+	schemaVersions   []int32
 	commitSegmentIDs []int64
 	commitVersions   []*viewpb.DataVersion
+	ensureErr        error
+	writeErr         error
 }
 
-func (r *segmentTaskRecorder) EnsureGrowingSegment(context.Context, *streamingpb.SegmentAssignmentMeta) error {
-	return nil
+func (r *segmentTaskRecorder) EnsureGrowingSegment(_ context.Context, _ *streamingpb.SegmentAssignmentMeta, schemaVersion int32) error {
+	r.events = append(r.events, "ensure")
+	r.schemaVersions = append(r.schemaVersions, schemaVersion)
+	return r.ensureErr
 }
 
 func (r *segmentTaskRecorder) CommitL1Segment(_ context.Context, meta *streamingpb.SegmentAssignmentMeta) (*viewpb.DataVersion, error) {
+	r.events = append(r.events, "commit")
 	r.commitSegmentIDs = append(r.commitSegmentIDs, meta.GetSegmentId())
 	if len(r.commitVersions) == 0 {
 		return &viewpb.DataVersion{StreamingVersion: 1}, nil
@@ -174,6 +311,38 @@ func (r *segmentTaskRecorder) CommitL1Segment(_ context.Context, meta *streaming
 	version := r.commitVersions[0]
 	r.commitVersions = r.commitVersions[1:]
 	return version, nil
+}
+
+func (r *segmentTaskRecorder) FlushInsertBuffer(context.Context, *flushPack) (*flushResult, error) {
+	r.events = append(r.events, "write")
+	if r.writeErr != nil {
+		return nil, r.writeErr
+	}
+	return &flushResult{PersistedStorage: &streamingpb.L1SegmentPersistedStorage{}}, nil
+}
+
+func newDeferredTestSegment(recorder *segmentTaskRecorder) *SegmentView {
+	return NewSegmentViewFromMeta(
+		newDeferredTestSegmentMeta(),
+		&schemapb.CollectionSchema{Version: 7},
+		runtimeConfig{lifecycle: recorder, packWriter: recorder, metaAndData: true},
+	)
+}
+
+func newDeferredTestSegmentMeta() *streamingpb.SegmentAssignmentMeta {
+	return &streamingpb.SegmentAssignmentMeta{
+		CollectionId:       1,
+		PartitionId:        10,
+		SegmentId:          100,
+		Vchannel:           "v1",
+		State:              streamingpb.SegmentAssignmentState_SEGMENT_ASSIGNMENT_STATE_GROWING,
+		CheckpointTimeTick: 10,
+		PersistedStorage:   &streamingpb.L1SegmentPersistedStorage{},
+		Stat: &streamingpb.SegmentAssignmentStat{
+			CreateSegmentTimeTick: 10,
+			Level:                 datapb.SegmentLevel_L1,
+		},
+	}
 }
 
 func newFinalCommitTestSegment(recorder *segmentTaskRecorder, segmentID int64) *SegmentView {
@@ -195,4 +364,18 @@ func newFinalCommitTestMeta(segmentID int64) *streamingpb.SegmentAssignmentMeta 
 		PersistedStorage:   &streamingpb.L1SegmentPersistedStorage{},
 		Stat:               &streamingpb.SegmentAssignmentStat{CreateSegmentTimeTick: 10},
 	}
+}
+
+func TestBuildEnsureGrowingSegmentRequestUsesSchemaVersion(t *testing.T) {
+	meta := &streamingpb.SegmentAssignmentMeta{
+		CollectionId:   1,
+		PartitionId:    10,
+		SegmentId:      100,
+		Vchannel:       "v1",
+		StorageVersion: 3,
+	}
+
+	req := buildEnsureGrowingSegmentRequest(meta, 7)
+
+	assert.Equal(t, int32(7), req.GetSchemaVersion())
 }

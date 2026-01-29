@@ -338,7 +338,7 @@ func Test_garbageCollector_scan(t *testing.T) {
 		segment.Statslogs = []*datapb.FieldBinlog{getFieldBinlogPaths(0, stats[0])}
 		segment.Deltalogs = []*datapb.FieldBinlog{getFieldBinlogPaths(0, delta[0])}
 
-		meta.DropSegment(context.TODO(), segment.ID)
+		meta.DropSegment(context.TODO(), segment)
 		err = meta.AddSegment(context.TODO(), segment)
 		require.NoError(t, err)
 
@@ -667,7 +667,7 @@ func createMetaForRecycleUnusedSegIndexes(catalog metastore.DataCoordCatalog) *m
 		ctx:         ctx,
 		catalog:     catalog,
 		collections: nil,
-		segments:    NewSegmentsInfo(),
+		segments:    NewCachedSegmentsInfo(),
 		indexMeta: &indexMeta{
 			catalog:          catalog,
 			segmentIndexes:   segIndexes,
@@ -714,7 +714,7 @@ func createMetaForRecycleUnusedSegIndexes(catalog metastore.DataCoordCatalog) *m
 	})
 
 	for id, segment := range segments {
-		meta.segments.SetSegment(id, segment)
+		meta.segments.SetSegment(id, segment, 0)
 	}
 	meta.snapshotMeta = &snapshotMeta{}
 	return meta
@@ -998,7 +998,7 @@ func createMetaTableForRecycleUnusedIndexFiles(catalog *datacoord.Catalog) *meta
 		ctx:         ctx,
 		catalog:     catalog,
 		collections: nil,
-		segments:    NewSegmentsInfo(),
+		segments:    NewCachedSegmentsInfo(),
 		indexMeta: &indexMeta{
 			catalog:        catalog,
 			segmentIndexes: segIndexes,
@@ -1057,7 +1057,7 @@ func createMetaTableForRecycleUnusedIndexFiles(catalog *datacoord.Catalog) *meta
 		WriteHandoff:        false,
 	})
 	for id, segment := range segments {
-		meta.segments.SetSegment(id, segment)
+		meta.segments.SetSegment(id, segment, 0)
 	}
 
 	return meta
@@ -1812,7 +1812,7 @@ func TestGarbageCollector_clearETCD(t *testing.T) {
 	m := &meta{
 		catalog:      catalog,
 		channelCPs:   channelCPs,
-		segments:     NewSegmentsInfo(),
+		segments:     NewCachedSegmentsInfo(),
 		snapshotMeta: &snapshotMeta{},
 		indexMeta: &indexMeta{
 			keyLock:          lock.NewKeyLock[UniqueID](),
@@ -1878,7 +1878,7 @@ func TestGarbageCollector_clearETCD(t *testing.T) {
 	})
 
 	for id, segment := range segments {
-		m.segments.SetSegment(id, segment)
+		m.segments.SetSegment(id, segment, 0)
 	}
 
 	for segID, segment := range map[UniqueID]*SegmentInfo{
@@ -2082,7 +2082,7 @@ func TestGarbageCollector_clearETCD(t *testing.T) {
 			},
 		},
 	} {
-		m.segments.SetSegment(segID, segment)
+		m.segments.SetSegment(segID, segment, 0)
 	}
 
 	cm := &mocks.ChunkManager{}
@@ -2645,9 +2645,7 @@ func TestGarbageCollector_recycleDroppedSegments_SnapshotReference(t *testing.T)
 	meta := &meta{
 		catalog:      catalog,
 		snapshotMeta: smMeta,
-		segments: &SegmentsInfo{
-			segments: make(map[int64]*SegmentInfo),
-		},
+		segments: NewCachedSegmentsInfo(),
 		channelCPs: newChannelCps(),
 	}
 
@@ -2683,8 +2681,8 @@ func TestGarbageCollector_recycleDroppedSegments_SnapshotReference(t *testing.T)
 		},
 	}
 
-	meta.segments.segments[1001] = droppedSegment1
-	meta.segments.segments[1002] = droppedSegment2
+	meta.segments.SetSegment(1001, droppedSegment1, 0)
+	meta.segments.SetSegment(1002, droppedSegment2, 0)
 
 	// Setup mocks
 	mock1 := mockey.Mock(meta.GetSnapshotMeta).Return(smMeta).Build()
@@ -3202,9 +3200,7 @@ func TestGarbageCollector_recycleUnusedSegIndexes_SnapshotReference(t *testing.T
 		catalog:      catalog,
 		snapshotMeta: smMeta,
 		indexMeta:    idxMeta,
-		segments: &SegmentsInfo{
-			segments: make(map[int64]*SegmentInfo),
-		},
+		segments: NewCachedSegmentsInfo(),
 		channelCPs: newChannelCps(),
 	}
 

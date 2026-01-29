@@ -48,21 +48,22 @@ func NewSegmentView(
 		flushPolicy = newDefaultWriteOnlyFlushPolicy()
 	}
 	return &SegmentView{
-		meta:                  meta,
-		persistedMetaTimeTick: persistedMetaTimeTick,
-		persistedDataTimeTick: persistedDataTimeTick,
-		dirty:                 dirty,
-		lifecycle:             config.lifecycle,
-		packWriter:            config.packWriter,
-		runtime:               config.runtime,
-		pending:               pending,
-		flushPolicy:           flushPolicy,
-		onDataUpdated:         config.onDataUpdated,
-		onSegmentSealed:       config.onSegmentSealed,
-		schema:                schema,
-		finalCommitDone:       finalCommitDoneFromMeta(meta),
-		metaAndData:           config.metaAndData,
-		commitL1Limiter:       config.commitL1Limiter,
+		meta:                    meta,
+		persistedMetaTimeTick:   persistedMetaTimeTick,
+		persistedDataTimeTick:   persistedDataTimeTick,
+		dirty:                   dirty,
+		lifecycle:               config.lifecycle,
+		packWriter:              config.packWriter,
+		runtime:                 config.runtime,
+		pending:                 pending,
+		flushPolicy:             flushPolicy,
+		onDataUpdated:           config.onDataUpdated,
+		onSegmentSealed:         config.onSegmentSealed,
+		schema:                  schema,
+		dataCoordSegmentEnsured: meta.GetDataCheckpointTimeTick() >= meta.GetStat().GetCreateSegmentTimeTick(),
+		finalCommitDone:         finalCommitDoneFromMeta(meta),
+		metaAndData:             config.metaAndData,
+		commitL1Limiter:         config.commitL1Limiter,
 	}
 }
 
@@ -163,8 +164,11 @@ type SegmentView struct {
 	onDataUpdated      func()      // notifies checkpoint manager when data barrier may advance.
 	onSegmentSealed    func(walview.SegmentSealedEvent)
 	schema             *schemapb.CollectionSchema // schema used to encode pending insert data.
-	metaAndData        bool                       // false during meta-only replay; true when data tasks may run.
-	commitL1Limiter    *commitL1Limiter
+	// dataCoordSegmentEnsured is process-local. Recovery infers it from the
+	// persisted data checkpoint, which advances only after an ensured data task.
+	dataCoordSegmentEnsured bool
+	metaAndData             bool // false during meta-only replay; true when data tasks may run.
+	commitL1Limiter         *commitL1Limiter
 }
 
 // ViewOption configures a segment-level recovery view.
@@ -232,25 +236,35 @@ func (s *SegmentView) HasDirty() bool {
 	return s.dirty
 }
 
-func (s *SegmentView) ObserveCreateSegmentMessageV2(_ context.Context, msg message.ImmutableCreateSegmentMessageV2) moduleapi.ObserveResult {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *SegmentView) ObserveCreateSegmentMessageV2(_ context.Context, _ message.ImmutableCreateSegmentMessageV2) moduleapi.ObserveResult {
+	// Segment creation is intentionally deferred until the first data flush or
+	// final commit. The persisted Segment View is enough to replay an idle
+	// CreateSegment after recovery without creating an empty DataCoord segment.
+	return moduleapi.ObserveResult{}
+}
 
-	result := moduleapi.ObserveResult{}
-	if s.shouldSkipReplayLocked(msg.TimeTick()) {
-		return result
+func (s *SegmentView) EnsureGrowingSegment(ctx context.Context) error {
+	s.mu.Lock()
+	if s.dataCoordSegmentEnsured {
+		s.mu.Unlock()
+		return nil
 	}
-	if !s.metaAndData {
-		return result
+	meta := proto.Clone(s.meta).(*streamingpb.SegmentAssignmentMeta)
+	schemaVersion := int32(0)
+	if s.schema != nil {
+		schemaVersion = s.schema.GetVersion()
 	}
-	timetick := msg.TimeTick()
-	if timetick <= s.meta.GetDataCheckpointTimeTick() {
-		return result
+	lifecycle := s.lifecycle
+	s.mu.Unlock()
+
+	if err := lifecycle.EnsureGrowingSegment(ctx, meta, schemaVersion); err != nil {
+		return err
 	}
-	task := s.newEnsureGrowingSegmentTaskLocked(timetick)
-	result.Data = s.dataBarrier()
-	s.runtime.Scheduler.Submit(task)
-	return result
+
+	s.mu.Lock()
+	s.dataCoordSegmentEnsured = true
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *SegmentView) ObserveInsertMessageV1(

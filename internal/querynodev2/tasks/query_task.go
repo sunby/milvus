@@ -8,12 +8,14 @@ import (
 	"github.com/samber/lo"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
 	"github.com/milvus-io/milvus/internal/util/searchutil/scheduler"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/planpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
@@ -95,10 +97,28 @@ func (t *QueryTask) PreExecute() error {
 		username).
 		Observe(inQueueDurationMS)
 
+	logger := mlog.With(
+		zap.Int64("collectionID", t.collection.ID()),
+		zap.String("scope", t.req.GetScope().String()),
+		zap.String("queryLabel", queryLabel),
+		zap.Int("segmentNum", len(t.req.GetSegmentIDs())),
+		zap.Int64s("segmentIDs", t.req.GetSegmentIDs()))
+	logger.Info(t.ctx, "[sss][www] qn scheduler task start",
+		zap.Duration("queueDuration", inQueueDuration))
+	logger.Info(t.ctx, "[sss] query task pre execute",
+		zap.Duration("queueDuration", inQueueDuration))
+
 	// Unmarshal the origin plan
+	stageStart := time.Now()
 	if err := proto.Unmarshal(t.req.Req.GetSerializedExprPlan(), t.plan); err != nil {
+		logger.Warn(t.ctx, "[sss] query task pre execute failed",
+			zap.Duration("duration", time.Since(stageStart)),
+			zap.Error(err))
 		return err
 	}
+	logger.Info(t.ctx, "[sss] query task pre execute done",
+		zap.Duration("duration", time.Since(stageStart)),
+		zap.Duration("queueDuration", inQueueDuration))
 
 	return nil
 }
@@ -117,6 +137,14 @@ func (t *QueryTask) ExecuteOnSegments(selected []segments.Segment) error {
 }
 
 func (t *QueryTask) execute(selected []segments.Segment) error {
+	logger := mlog.With(
+		zap.Int64("collectionID", t.collection.ID()),
+		zap.String("scope", t.req.GetScope().String()),
+		zap.String("queryLabel", contextutil.GetQueryLabel(t.ctx)),
+		zap.Int("segmentNum", len(t.req.GetSegmentIDs())),
+		zap.Int64s("segmentIDs", t.req.GetSegmentIDs()))
+	executeStart := time.Now()
+	logger.Info(t.ctx, "[sss] query task execute start")
 	if t.scheduleSpan != nil {
 		t.scheduleSpan.End()
 	}
@@ -124,10 +152,18 @@ func (t *QueryTask) execute(selected []segments.Segment) error {
 
 	retrievePlan, err := t.collection.NewRetrievePlan(t.req)
 	if err != nil {
+		logger.Warn(t.ctx, "[sss] query task build retrieve plan failed",
+			zap.Duration("duration", time.Since(stageStart)),
+			zap.Error(err))
 		return err
 	}
+	logger.Info(t.ctx, "[sss] query task build retrieve plan done",
+		zap.Duration("duration", time.Since(stageStart)),
+		zap.Bool("planShouldIgnoreNonPk", retrievePlan.ShouldIgnoreNonPk()))
 	defer retrievePlan.Delete()
 
+	stageStart = time.Now()
+	logger.Info(t.ctx, "[sss] query task retrieve start")
 	var (
 		results        []segments.RetrieveSegmentResult
 		pinnedSegments []segments.Segment
@@ -142,10 +178,20 @@ func (t *QueryTask) execute(selected []segments.Segment) error {
 		defer t.segmentManager.Segment.Unpin(pinnedSegments)
 	}
 	if err != nil {
+		logger.Warn(t.ctx, "[sss] query task retrieve failed",
+			zap.Duration("duration", time.Since(stageStart)),
+			zap.Int("pinnedSegmentNum", len(pinnedSegments)),
+			zap.Error(err))
 		return err
 	}
+	logger.Info(t.ctx, "[sss] query task retrieve done",
+		zap.Duration("duration", time.Since(stageStart)),
+		zap.Int("resultNum", len(results)),
+		zap.Int("pinnedSegmentNum", len(pinnedSegments)))
 
 	beforeReduce := time.Now()
+	logger.Info(t.ctx, "[sss] query task reduce start",
+		zap.Int("resultNum", len(results)))
 
 	reduceResults := make([]*segcorepb.RetrieveResults, 0, len(results))
 	querySegments := make([]segments.Segment, 0, len(results))
@@ -164,8 +210,13 @@ func (t *QueryTask) execute(selected []segments.Segment) error {
 		metrics.ReduceSegments,
 		metrics.BatchReduce).Observe(float64(time.Since(beforeReduce).Microseconds()) / 1000.0)
 	if err != nil {
+		logger.Warn(t.ctx, "[sss] query task reduce failed",
+			zap.Duration("duration", time.Since(beforeReduce)),
+			zap.Error(err))
 		return err
 	}
+	logger.Info(t.ctx, "[sss] query task reduce done",
+		zap.Duration("duration", time.Since(beforeReduce)))
 
 	relatedDataSize := lo.Reduce(querySegments, func(acc int64, seg segments.Segment, _ int) int64 {
 		return acc + segments.GetSegmentRelatedDataSize(seg)
@@ -189,6 +240,9 @@ func (t *QueryTask) execute(selected []segments.Segment) error {
 		ElementLevel:       reducedResult.GetElementLevel(),
 		ElementIndices:     convertSegcoreElementIndicesToInternal(reducedResult.GetElementIndices()),
 	}
+	logger.Info(t.ctx, "[sss] query task execute done",
+		zap.Duration("duration", time.Since(executeStart)),
+		zap.Int64("allRetrieveCount", reducedResult.GetAllRetrieveCount()))
 	return nil
 }
 

@@ -38,27 +38,6 @@ func (t *segmentTaskBase) execute(ctx context.Context, fn func(context.Context) 
 	return errors.Mark(err, nodescheduler.ErrDelay)
 }
 
-type ensureGrowingSegmentTask struct {
-	segmentTaskBase
-	timetick uint64
-}
-
-func (t *ensureGrowingSegmentTask) Execute(ctx context.Context) error {
-	return t.execute(ctx, func(ctx context.Context) error {
-		segment := t.segment
-		meta := segment.AssignmentMeta()
-		if err := segment.lifecycle.EnsureGrowingSegment(ctx, meta); err != nil {
-			return err
-		}
-
-		segment.mu.Lock()
-		segment.MarkPendingDataDurable(t.timetick)
-		segment.mu.Unlock()
-		segment.NotifyDataUpdated()
-		return nil
-	})
-}
-
 type flushL1BufferTask struct {
 	segmentTaskBase
 	timetick uint64
@@ -66,6 +45,9 @@ type flushL1BufferTask struct {
 
 func (t *flushL1BufferTask) Execute(ctx context.Context) error {
 	return t.execute(ctx, func(ctx context.Context) error {
+		if err := t.segment.EnsureGrowingSegment(ctx); err != nil {
+			return err
+		}
 		return t.segment.FlushInsertChunk(ctx, t.timetick)
 	})
 }
@@ -84,6 +66,9 @@ func (t *commitL1SegmentTask) Execute(ctx context.Context) error {
 		segment.mu.Unlock()
 		if finalCommitDone {
 			return nil
+		}
+		if err := segment.EnsureGrowingSegment(ctx); err != nil {
+			return err
 		}
 		if limiter := segment.commitL1Limiter; limiter != nil {
 			release, err := limiter.Acquire(ctx)
@@ -112,15 +97,6 @@ func (t *commitL1SegmentTask) Execute(ctx context.Context) error {
 		}
 		return nil
 	})
-}
-
-func (s *SegmentView) newEnsureGrowingSegmentTaskLocked(timetick uint64) segmentTask {
-	task := &ensureGrowingSegmentTask{
-		segmentTaskBase: s.newSegmentTaskBaseLocked(),
-		timetick:        timetick,
-	}
-	s.pendingTasks = append(s.pendingTasks, task)
-	return task
 }
 
 func (s *SegmentView) newFlushL1BufferTaskLocked() segmentTask {

@@ -459,7 +459,7 @@ func (s *WriteBufferSuite) TestEvictBuffer() {
 			wb.buffers = make(map[int64]*segmentBuffer)
 		}()
 
-		wb.EvictBuffer(GetOldestBufferPolicy(1))
+		wb.EvictOldestBuffers(1)
 	})
 
 	s.Run("trigger_sync", func() {
@@ -483,6 +483,9 @@ func (s *WriteBufferSuite) TestEvictBuffer() {
 		wb.mut.Lock()
 		wb.buffers[2] = buf1
 		wb.buffers[3] = buf2
+		// Also update the heap
+		wb.bufferHeap.Update(2, buf1.MinTimestamp())
+		wb.bufferHeap.Update(3, buf2.MinTimestamp())
 		wb.checkpoint = &msgpb.MsgPosition{Timestamp: 100}
 		wb.mut.Unlock()
 
@@ -501,7 +504,7 @@ func (s *WriteBufferSuite) TestEvictBuffer() {
 			defer s.wb.mut.Unlock()
 			s.wb.buffers = make(map[int64]*segmentBuffer)
 		}()
-		wb.EvictBuffer(GetOldestBufferPolicy(1))
+		wb.EvictOldestBuffers(1)
 	})
 
 	s.Run("sync_submit_outside_lock", func() {

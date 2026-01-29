@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cockroachdb/errors"
 	"golang.org/x/exp/maps"
@@ -56,6 +57,8 @@ type Catalog struct {
 	ChunkManagerRootPath string
 	metaRootpath         string
 }
+
+const segmentIndexPaginationSize = 10000
 
 func NewCatalog(MetaKv kv.MetaKv, chunkManagerRootPath string, metaRootpath string) *Catalog {
 	return &Catalog{
@@ -293,15 +296,69 @@ func (kc *Catalog) AlterSegments(ctx context.Context, segments []*datapb.Segment
 	if len(segments) == 0 {
 		return nil
 	}
-	kvs, removals, err := kc.buildAlterSegmentsKvs(ctx, segments, binlogs)
-	if err != nil {
-		return err
-	}
-	return kc.saveSegmentAndBinlogKVs(ctx, kvs, removals)
-}
 
-func (kc *Catalog) saveSegmentAndBinlogKVs(ctx context.Context, kvs map[string]string, removals []string) error {
-	if err := kc.SaveByBatch(ctx, kvs); err != nil {
+	start := time.Now()
+	kvs := make(map[string]string)
+	for _, segment := range segments {
+		// we don't persist binlog fields, but instead store binlogs as independent kvs
+		cloned := proto.Clone(segment).(*datapb.SegmentInfo)
+		resetBinlogFields(cloned)
+
+		rowCount := segmentutil.CalcRowCountFromBinLog(segment)
+		if rowCount > 0 && cloned.GetNumOfRows() != rowCount {
+			cloned.NumOfRows = rowCount
+		}
+
+		if segment.GetState() == commonpb.SegmentState_Dropped {
+			binlogs, err := kc.handleDroppedSegment(ctx, segment)
+			if err != nil {
+				return err
+			}
+			maps.Copy(kvs, binlogs)
+		}
+
+		k, v, err := buildSegmentKv(cloned)
+		if err != nil {
+			return err
+		}
+		kvs[k] = v
+	}
+	buildSegmentKvsDur := time.Since(start)
+
+	var removals []string
+	stageStart := time.Now()
+	for _, b := range binlogs {
+		segment := b.Segment
+
+		binlogKvs, err := buildBinlogKvsWithLogID(
+			segment.GetCollectionID(),
+			segment.GetPartitionID(),
+			segment.GetID(),
+			b.GetUpdateBinlogs(),
+			b.GetUpdateDeltalogs(),
+			b.GetUpdateStatslogs(),
+			b.GetUpdateBm25Statslogs())
+		if err != nil {
+			return err
+		}
+
+		maps.Copy(kvs, binlogKvs)
+
+		for _, fid := range b.DroppedBinlogFieldIDs {
+			removals = append(removals,
+				buildFieldBinlogPath(
+					segment.GetCollectionID(),
+					segment.GetPartitionID(),
+					segment.GetID(),
+					fid))
+		}
+	}
+	buildBinlogKvsDur := time.Since(stageStart)
+
+	stageStart = time.Now()
+	err := kc.SaveByBatch(ctx, kvs)
+	saveByBatchDur := time.Since(stageStart)
+	if err != nil {
 		return err
 	}
 	// Explicit removal is required: AlterSegments persists binlogs as
@@ -315,6 +372,15 @@ func (kc *Catalog) saveSegmentAndBinlogKVs(ctx context.Context, kvs map[string]s
 			return err
 		}
 	}
+	log.Ctx(ctx).Info("[AlterSegments] done",
+		zap.Duration("total", time.Since(start)),
+		zap.Duration("buildSegmentKvs", buildSegmentKvsDur),
+		zap.Duration("buildBinlogKvs", buildBinlogKvsDur),
+		zap.Duration("saveByBatch", saveByBatchDur),
+		zap.Int("kvCount", len(kvs)),
+		zap.Int("segmentCount", len(segments)),
+		zap.Int("binlogIncrementCount", len(binlogs)),
+	)
 	return nil
 }
 
@@ -745,7 +811,7 @@ func (kc *Catalog) CreateSegmentIndex(ctx context.Context, segIdx *model.Segment
 	return nil
 }
 
-func (kc *Catalog) ListSegmentIndexes(ctx context.Context, collectionID int64) ([]*model.SegmentIndex, error) {
+func (kc *Catalog) listSegmentIndexesWithPrefix(ctx context.Context, prefix string) ([]*model.SegmentIndex, error) {
 	segIndexes := make([]*model.SegmentIndex, 0)
 	applyFn := func(key []byte, value []byte) error {
 		segmentIndexInfo := &indexpb.SegmentIndex{}
@@ -759,13 +825,24 @@ func (kc *Catalog) ListSegmentIndexes(ctx context.Context, collectionID int64) (
 		return nil
 	}
 
-	prefix := buildSegmentIndexCollectionPrefix(collectionID)
-	err := kc.MetaKv.WalkWithPrefix(ctx, prefix, kc.paginationSize, applyFn)
+	paginationSize := kc.paginationSize
+	if paginationSize <= 0 || paginationSize > segmentIndexPaginationSize {
+		paginationSize = segmentIndexPaginationSize
+	}
+	err := kc.MetaKv.WalkWithPrefix(ctx, prefix, paginationSize, applyFn)
 	if err != nil {
 		return nil, err
 	}
 
 	return segIndexes, nil
+}
+
+func (kc *Catalog) ListSegmentIndexes(ctx context.Context, collectionID int64) ([]*model.SegmentIndex, error) {
+	return kc.listSegmentIndexesWithPrefix(ctx, buildSegmentIndexCollectionPrefix(collectionID))
+}
+
+func (kc *Catalog) ListPartitionSegmentIndexes(ctx context.Context, collectionID, partitionID int64) ([]*model.SegmentIndex, error) {
+	return kc.listSegmentIndexesWithPrefix(ctx, buildSegmentIndexPartitionPrefix(collectionID, partitionID))
 }
 
 func (kc *Catalog) AlterSegmentIndexes(ctx context.Context, segIdxes []*model.SegmentIndex) error {

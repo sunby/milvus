@@ -245,7 +245,8 @@ func TestLastExpireReset(t *testing.T) {
 			},
 		},
 	}, nil)
-	meta, err := newMeta(context.TODO(), catalog, nil, broker)
+	broker.EXPECT().ShowPartitionsInternal(mock.Anything, collID).Return([]int64{}, nil)
+	meta, err := newMeta(context.TODO(), catalog, nil, broker, newTestSegmentPersist())
 	assert.Nil(t, err)
 	// add collection
 	channelName := "c1"
@@ -264,8 +265,8 @@ func TestLastExpireReset(t *testing.T) {
 	// assign segments, set max segment to only 1MB, equalling to 10485 rows
 	var bigRows, smallRows int64 = 10000, 1000
 	segmentManager, _ := newSegmentManager(meta, mockAllocator)
-	initSegment.State = commonpb.SegmentState_Dropped
-	meta.segments.SetSegment(1, initSegment)
+	initSegment.SegmentInfo.State = commonpb.SegmentState_Dropped
+	meta.segments.SetSegment(1, initSegment, 0)
 	allocs, _ := segmentManager.AllocSegment(context.Background(), collID, 0, channelName, bigRows, storage.StorageV1)
 	segmentID1, expire1 := allocs[0].SegmentID, allocs[0].ExpireTime
 	time.Sleep(100 * time.Millisecond)
@@ -299,7 +300,7 @@ func TestLastExpireReset(t *testing.T) {
 	newMetaKV := etcdkv.NewEtcdKV(newEtcdCli, rootPath)
 	defer newMetaKV.RemoveWithPrefix(ctx, "")
 	newCatalog := datacoord.NewCatalog(newMetaKV, "", "")
-	restartedMeta, err := newMeta(context.TODO(), newCatalog, nil, broker)
+	restartedMeta, err := newMeta(context.TODO(), newCatalog, nil, broker, newTestSegmentPersist())
 	restartedMeta.AddCollection(&collectionInfo{ID: collID, Schema: schema})
 	assert.Nil(t, err)
 	newSegmentManager, _ := newSegmentManager(restartedMeta, mockAllocator)
@@ -598,7 +599,7 @@ func TestTryToSealSegment(t *testing.T) {
 		err = segmentManager.tryToSealSegment(context.TODO(), ts, "c1")
 		assert.NoError(t, err)
 
-		for _, seg := range segmentManager.meta.segments.segments {
+		for _, seg := range segmentManager.meta.segments.GetSegments() {
 			if seg.GetStartPosition() != nil {
 				assert.Equal(t, commonpb.SegmentState_Sealed, seg.GetState())
 			}
@@ -625,7 +626,7 @@ func TestTryToSealSegment(t *testing.T) {
 		err = segmentManager.tryToSealSegment(context.TODO(), ts, "c1")
 		assert.NoError(t, err)
 
-		for _, seg := range segmentManager.meta.segments.segments {
+		for _, seg := range segmentManager.meta.segments.GetSegments() {
 			assert.Equal(t, commonpb.SegmentState_Sealed, seg.GetState())
 		}
 	})
@@ -652,7 +653,7 @@ func TestTryToSealSegment(t *testing.T) {
 		err = segmentManager.tryToSealSegment(context.TODO(), ts, "c1")
 		assert.NoError(t, err)
 
-		for _, seg := range segmentManager.meta.segments.segments {
+		for _, seg := range segmentManager.meta.segments.GetSegments() {
 			assert.Equal(t, commonpb.SegmentState_Sealed, seg.GetState())
 		}
 	})
@@ -679,7 +680,7 @@ func TestTryToSealSegment(t *testing.T) {
 		{
 			err = segmentManager.tryToSealSegment(context.TODO(), ts, "c1")
 			assert.NoError(t, err)
-			segments := segmentManager.meta.segments.segments
+			segments := segmentManager.meta.segments.GetSegments()
 			assert.Equal(t, 1, len(segments))
 			for _, seg := range segments {
 				assert.Equal(t, commonpb.SegmentState_Growing, seg.GetState())
@@ -689,7 +690,7 @@ func TestTryToSealSegment(t *testing.T) {
 		// Not trigger seal
 		{
 			segmentManager.segmentSealPolicies = []SegmentSealPolicy{sealL1SegmentByLifetime()}
-			segments := segmentManager.meta.segments.segments
+			segments := segmentManager.meta.segments.GetSegments()
 			assert.Equal(t, 1, len(segments))
 			for _, seg := range segments {
 				seg.Statslogs = []*datapb.FieldBinlog{
@@ -705,7 +706,7 @@ func TestTryToSealSegment(t *testing.T) {
 				}
 				err = segmentManager.tryToSealSegment(context.TODO(), ts, "c1")
 				assert.NoError(t, err)
-				seg = segmentManager.meta.segments.segments[seg.ID]
+				seg = segmentManager.meta.segments.GetSegment(seg.ID)
 				assert.Equal(t, commonpb.SegmentState_Growing, seg.GetState())
 			}
 		}
@@ -713,7 +714,7 @@ func TestTryToSealSegment(t *testing.T) {
 		// Trigger seal
 		{
 			segmentManager.segmentSealPolicies = []SegmentSealPolicy{sealL1SegmentByBinlogFileNumber(2)}
-			segments := segmentManager.meta.segments.segments
+			segments := segmentManager.meta.segments.GetSegments()
 			assert.Equal(t, 1, len(segments))
 			for _, seg := range segments {
 				seg.Binlogs = []*datapb.FieldBinlog{
@@ -733,7 +734,7 @@ func TestTryToSealSegment(t *testing.T) {
 				}
 				err = segmentManager.tryToSealSegment(context.TODO(), ts, "c1")
 				assert.NoError(t, err)
-				seg = segmentManager.meta.segments.segments[seg.ID]
+				seg = segmentManager.meta.segments.GetSegment(seg.ID)
 				assert.Equal(t, commonpb.SegmentState_Sealed, seg.GetState())
 			}
 		}
@@ -745,7 +746,7 @@ func TestTryToSealSegment(t *testing.T) {
 		catalog := datacoord.NewCatalog(memoryKV, "", "")
 		broker := broker.NewMockBroker(t)
 		broker.EXPECT().ShowCollectionIDs(mock.Anything).Return(nil, nil)
-		meta, err := newMeta(context.TODO(), catalog, nil, broker)
+		meta, err := newMeta(context.TODO(), catalog, nil, broker, newTestSegmentPersist())
 		assert.NoError(t, err)
 
 		schema := newTestSchema()
@@ -776,7 +777,7 @@ func TestTryToSealSegment(t *testing.T) {
 		catalog := datacoord.NewCatalog(memoryKV, "", "")
 		broker := broker.NewMockBroker(t)
 		broker.EXPECT().ShowCollectionIDs(mock.Anything).Return(nil, nil)
-		meta, err := newMeta(context.TODO(), catalog, nil, broker)
+		meta, err := newMeta(context.TODO(), catalog, nil, broker, newTestSegmentPersist())
 		assert.NoError(t, err)
 
 		schema := newTestSchema()
@@ -864,26 +865,24 @@ func TestSegmentManager_DropSegmentsOfChannel(t *testing.T) {
 			"test drop segments",
 			fields{
 				meta: &meta{
-					segments: &SegmentsInfo{
-						segments: map[int64]*SegmentInfo{
-							1: {
-								SegmentInfo: &datapb.SegmentInfo{
-									ID:            1,
-									PartitionID:   partitionID,
-									InsertChannel: "ch1",
-									State:         commonpb.SegmentState_Sealed,
-								},
-							},
-							2: {
-								SegmentInfo: &datapb.SegmentInfo{
-									ID:            2,
-									PartitionID:   partitionID,
-									InsertChannel: "ch2",
-									State:         commonpb.SegmentState_Growing,
-								},
+					segments: newTestCachedSegmentsInfo(map[int64]*SegmentInfo{
+						1: {
+							SegmentInfo: &datapb.SegmentInfo{
+								ID:            1,
+								PartitionID:   partitionID,
+								InsertChannel: "ch1",
+								State:         commonpb.SegmentState_Sealed,
 							},
 						},
-					},
+						2: {
+							SegmentInfo: &datapb.SegmentInfo{
+								ID:            2,
+								PartitionID:   partitionID,
+								InsertChannel: "ch2",
+								State:         commonpb.SegmentState_Growing,
+							},
+						},
+					}),
 				},
 				segments: []UniqueID{1, 2},
 			},
@@ -896,26 +895,24 @@ func TestSegmentManager_DropSegmentsOfChannel(t *testing.T) {
 			"test drop segments with dropped segment",
 			fields{
 				meta: &meta{
-					segments: &SegmentsInfo{
-						segments: map[int64]*SegmentInfo{
-							1: {
-								SegmentInfo: &datapb.SegmentInfo{
-									ID:            1,
-									PartitionID:   partitionID,
-									InsertChannel: "ch1",
-									State:         commonpb.SegmentState_Sealed,
-								},
-							},
-							2: {
-								SegmentInfo: &datapb.SegmentInfo{
-									ID:            2,
-									PartitionID:   partitionID,
-									InsertChannel: "ch2",
-									State:         commonpb.SegmentState_Growing,
-								},
+					segments: newTestCachedSegmentsInfo(map[int64]*SegmentInfo{
+						1: {
+							SegmentInfo: &datapb.SegmentInfo{
+								ID:            1,
+								PartitionID:   partitionID,
+								InsertChannel: "ch1",
+								State:         commonpb.SegmentState_Sealed,
 							},
 						},
-					},
+						2: {
+							SegmentInfo: &datapb.SegmentInfo{
+								ID:            2,
+								PartitionID:   partitionID,
+								InsertChannel: "ch2",
+								State:         commonpb.SegmentState_Growing,
+							},
+						},
+					}),
 				},
 				segments: []UniqueID{1, 2, 3},
 			},
@@ -1018,23 +1015,12 @@ func TestSegmentManager_CleanZeroSealedSegmentsOfChannel(t *testing.T) {
 	newMetaFunc := func() *meta {
 		return &meta{
 			catalog: mockCatalog,
-			segments: &SegmentsInfo{
-				segments: map[int64]*SegmentInfo{
-					1: seg1,
-					2: seg2,
-					3: seg3,
-					4: seg4,
-				},
-				secondaryIndexes: segmentInfoIndexes{
-					coll2Segments: map[UniqueID]map[UniqueID]*SegmentInfo{
-						0: {1: seg1, 2: seg2, 3: seg3, 4: seg4},
-					},
-					channel2Segments: map[string]map[UniqueID]*SegmentInfo{
-						"ch1": {1: seg1, 2: seg2, 3: seg3},
-						"ch2": {4: seg4},
-					},
-				},
-			},
+			segments: newTestCachedSegmentsInfo(map[int64]*SegmentInfo{
+				1: seg1,
+				2: seg2,
+				3: seg3,
+				4: seg4,
+			}),
 		}
 	}
 
