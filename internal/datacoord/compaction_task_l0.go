@@ -28,6 +28,7 @@ import (
 	"github.com/milvus-io/milvus/internal/compaction"
 	"github.com/milvus-io/milvus/internal/datacoord/allocator"
 	"github.com/milvus-io/milvus/internal/datacoord/session"
+	"github.com/milvus-io/milvus/internal/metastore/kv/binlog"
 	"github.com/milvus-io/milvus/internal/storagev2/packed"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
@@ -465,22 +466,52 @@ func buildL0V3DeltaLogEntries(segmentID int64, deltalogs []*datapb.FieldBinlog) 
 	return entries, nil
 }
 
-func (t *l0CompactionTask) saveSegmentMeta(outputSegs []*datapb.CompactionSegment) error {
-	var operators []UpdateOperator
-	storageConfig := compaction.CreateStorageConfig()
+func compressL0CompactionBinlogs(outputSegs []*datapb.CompactionSegment) error {
 	for _, seg := range outputSegs {
-		if len(seg.GetDeltalogs()) > 0 {
-			operators = append(operators, AddL0DeltalogsAndUpdateManifestOperator(
-				seg.GetSegmentID(),
-				seg.GetDeltalogs(),
-				storageConfig,
-				t.committedV3Manifests,
-			))
+		if seg.GetManifest() == "" {
+			if err := binlog.CompressCompactionBinlogs([]*datapb.CompactionSegment{seg}); err != nil {
+				return err
+			}
+			continue
 		}
+		for _, fieldBinlog := range seg.GetDeltalogs() {
+			for _, binlog := range fieldBinlog.GetBinlogs() {
+				binlog.LogPath = ""
+			}
+		}
+	}
+	return nil
+}
+
+func (t *l0CompactionTask) saveSegmentMeta(outputSegs []*datapb.CompactionSegment) error {
+	if err := t.commitV3ManifestDeltas(context.TODO(), outputSegs); err != nil {
+		return err
+	}
+	if err := compressL0CompactionBinlogs(outputSegs); err != nil {
+		return err
+	}
+
+	mutations := map[int64][]MutateFunc{}
+	for _, seg := range outputSegs {
+		deltalogs := seg.GetDeltalogs() // capture
+		manifest := seg.GetManifest()   // capture
+		mutations[seg.GetSegmentID()] = []MutateFunc{func(s *datapb.SegmentInfo) bool {
+			if manifest != "" {
+				s.ManifestPath = manifest
+			} else {
+				s.Deltalogs = mergeFieldBinlogs(s.GetDeltalogs(), deltalogs)
+			}
+			return true
+		}}
 	}
 
 	for _, segID := range t.GetTaskProto().InputSegments {
-		operators = append(operators, UpdateStatusOperator(segID, commonpb.SegmentState_Dropped), UpdateCompactedOperator(segID))
+		mutations[segID] = []MutateFunc{func(s *datapb.SegmentInfo) bool {
+			s.State = commonpb.SegmentState_Dropped
+			s.DroppedAt = uint64(time.Now().UnixNano())
+			s.Compacted = true
+			return true
+		}}
 	}
 
 	mlog.Info(context.TODO(), "meta update: update segments info for level zero compaction",
@@ -488,7 +519,7 @@ func (t *l0CompactionTask) saveSegmentMeta(outputSegs []*datapb.CompactionSegmen
 	)
 
 	ctx := context.TODO()
-	if err := t.meta.UpdateSegmentsInfo(ctx, operators...); err != nil {
+	if err := t.meta.UpdateSegmentsInfo(ctx, mutations); err != nil {
 		return err
 	}
 	t.publishDataViewAfterL0Compact(ctx)

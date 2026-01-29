@@ -271,15 +271,15 @@ func (m *collectionManager) updateMetric() {
 }
 
 func (m *collectionManager) Ref(collectionID int64, count uint32) bool {
-	m.mut.Lock()
-	defer m.mut.Unlock()
-
-	if collection, ok := m.collections[collectionID]; ok {
-		collection.Ref(count)
-		return true
+	m.mut.RLock()
+	collection, ok := m.collections[collectionID]
+	m.mut.RUnlock()
+	if !ok {
+		return false
 	}
 
-	return false
+	collection.Ref(count)
+	return true
 }
 
 func (m *collectionManager) Unref(collectionID int64, count uint32) bool {
@@ -336,6 +336,8 @@ type Collection struct {
 	loadFields typeutil.Set[int64]
 
 	refCount *atomic.Uint32
+
+	indexHash atomic.Uint32
 }
 
 // GetDBName returns the database name of collection.
