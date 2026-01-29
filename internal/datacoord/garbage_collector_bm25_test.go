@@ -76,10 +76,10 @@ func TestGarbageCollectorBM25OrphanFiles(t *testing.T) {
 					{LogID: 1000}, {LogID: 1}, {LogID: 1002, LogPath: key("100/10/200/101/777")},
 				}}},
 			}}
-			mt := &meta{segments: &SegmentsInfo{segments: map[int64]*SegmentInfo{
+			mt := &meta{segments: newTestSegmentsInfo(map[int64]*SegmentInfo{
 				200: segment,
 				300: {SegmentInfo: &datapb.SegmentInfo{ID: 300, CollectionID: 100, PartitionID: 10, StorageVersion: storage.StorageV3}},
-			}}, snapshotMeta: &snapshotMeta{}}
+			}), snapshotMeta: &snapshotMeta{}}
 			blocked := mockey.Mock((*snapshotMeta).IsSegmentGCBlocked).To(
 				func(_ *snapshotMeta, _ int64, segmentID int64) bool { return segmentID == 205 },
 			).Build()

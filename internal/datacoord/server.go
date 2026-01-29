@@ -648,10 +648,22 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 		return nil
 	}
 	catalog := datacoord.NewCatalog(s.kv, chunkManager.RootPath(), s.metaRootPath)
+	// Segments are kept as full records in an optimistic store next to the
+	// catalog keys; every segment write is a compare-and-swap. Without a
+	// meta store client (a server assembled by unit tests) segments stay in
+	// the catalog.
+	marshaler := &SegmentInfoMarshaler{}
+	var segmentPersist OptimisticTxnPersist[string, *datapb.SegmentInfo]
+	switch {
+	case Params.MetaStoreCfg.MetaStoreType.GetValue() == util.MetaStoreTypeTiKV && s.tikvCli != nil:
+		segmentPersist = NewOptimisticTxnTiKVPersist[string, *datapb.SegmentInfo](s.tikvCli, marshaler)
+	case Params.MetaStoreCfg.MetaStoreType.GetValue() != util.MetaStoreTypeTiKV && s.etcdCli != nil:
+		segmentPersist = NewOptimisticTxnEtcdPersist[string, *datapb.SegmentInfo](s.etcdCli, marshaler)
+	}
 	var recoveredMeta *meta
 	reloadEtcdFn := func() error {
 		var err error
-		recoveredMeta, err = newMeta(s.ctx, catalog, chunkManager, s.broker)
+		recoveredMeta, err = newMetaWithPersist(s.ctx, catalog, chunkManager, s.broker, segmentPersist, s.metaRootPath)
 		if err == nil {
 			recoveredMeta.preparationSchema = coordinatorPreparationSchema
 		}

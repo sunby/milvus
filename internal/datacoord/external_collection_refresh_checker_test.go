@@ -1303,7 +1303,7 @@ func TestExternalCollectionRefreshChecker_IndexWait(t *testing.T) {
 			mockey.Mock((*meta).SelectSegments).To(
 				func(m *meta, ctx context.Context, filters ...SegmentFilter) []*SegmentInfo {
 					out := make([]*SegmentInfo, 0)
-					for _, s := range m.segments.segments {
+					for _, s := range m.segments.snapshotMap() {
 						keep := true
 						for _, f := range filters {
 							if ff, ok := f.(SegmentFilterFunc); ok && !ff(s) {

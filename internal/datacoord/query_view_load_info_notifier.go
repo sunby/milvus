@@ -45,7 +45,7 @@ func (m *meta) notifyQueryViewSegments(collectionID int64, segmentIDs ...int64) 
 }
 
 // notifyQueryViewSegmentUpdates runs after catalog and in-memory publication,
-// outside segMu, so subscribers can read the complete committed snapshot.
+// outside the segment writer locks, so subscribers can read the complete committed snapshot.
 func (m *meta) notifyQueryViewSegmentUpdates(segments []*SegmentInfo) {
 	byCollection := make(map[int64][]int64)
 	for _, segment := range segments {

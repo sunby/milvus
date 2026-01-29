@@ -69,22 +69,20 @@ func (s *indexTaskSuite) SetupSuite() {
 	catalog := catalogmocks.NewDataCoordCatalog(s.T())
 	catalog.EXPECT().AlterSegmentIndexes(mock.Anything, mock.Anything).Return(nil).Maybe()
 	s.mt = &meta{
-		segments: &SegmentsInfo{
-			segments: map[int64]*SegmentInfo{
-				s.segID: {
-					SegmentInfo: &datapb.SegmentInfo{
-						ID:            s.segID,
-						CollectionID:  s.collID,
-						PartitionID:   s.partID,
-						InsertChannel: "ch1",
-						NumOfRows:     65535,
-						State:         commonpb.SegmentState_Flushed,
-						MaxRowNum:     65535,
-						Level:         datapb.SegmentLevel_L2,
-					},
+		segments: newTestSegmentsInfo(map[int64]*SegmentInfo{
+			s.segID: {
+				SegmentInfo: &datapb.SegmentInfo{
+					ID:            s.segID,
+					CollectionID:  s.collID,
+					PartitionID:   s.partID,
+					InsertChannel: "ch1",
+					NumOfRows:     65535,
+					State:         commonpb.SegmentState_Flushed,
+					MaxRowNum:     65535,
+					Level:         datapb.SegmentLevel_L2,
 				},
 			},
-		},
+		}),
 		indexMeta: createIndexMetaWithSegment(catalog, s.collID, s.partID, s.segID, s.indexID, s.fieldID, s.taskID),
 	}
 }
@@ -175,7 +173,7 @@ func (s *indexTaskSuite) TestCreateTaskOnWorker() {
 			IndexState:   commonpb.IndexState_Unissued,
 			NumRows:      65535,
 		})
-		s.mt.segments.segments[s.segID].State = commonpb.SegmentState_Dropped
+		s.mt.segments.GetSegment(s.segID).State = commonpb.SegmentState_Dropped
 		cluster := session.NewMockCluster(s.T())
 		it.CreateTaskOnWorker(1, cluster)
 		// The task must reach a terminal state in meta, otherwise GC keeps the
@@ -188,7 +186,7 @@ func (s *indexTaskSuite) TestCreateTaskOnWorker() {
 	})
 
 	s.Run("index not exist", func() {
-		s.mt.segments.segments[s.segID].State = commonpb.SegmentState_Flushed
+		s.mt.segments.GetSegment(s.segID).State = commonpb.SegmentState_Flushed
 		s.mt.indexMeta.indexes[s.collID][s.indexID].IsDeleted = true
 		defer func() {
 			s.mt.indexMeta.indexes[s.collID][s.indexID].IsDeleted = false
@@ -323,29 +321,27 @@ func (s *indexTaskSuite) TestCreateTaskOnWorkerVectorArrayMaxSimRequiresEnoughVe
 			catalog.EXPECT().AlterSegmentIndexes(mock.Anything, mock.Anything).Return(nil).Maybe()
 
 			mt := &meta{
-				segments: &SegmentsInfo{
-					segments: map[int64]*SegmentInfo{
-						s.segID: {
-							SegmentInfo: &datapb.SegmentInfo{
-								ID:            s.segID,
-								CollectionID:  s.collID,
-								PartitionID:   s.partID,
-								InsertChannel: "ch1",
-								NumOfRows:     tc.numRows,
-								State:         commonpb.SegmentState_Flushed,
-								MaxRowNum:     tc.numRows,
-								Level:         datapb.SegmentLevel_L2,
-								Binlogs: []*datapb.FieldBinlog{{
-									FieldID: s.fieldID,
-									Binlogs: []*datapb.Binlog{{
-										EntriesNum: tc.numRows,
-										MemorySize: tc.numRows*4 + tc.innerVectorCount*elementBytes + 1,
-									}},
+				segments: newTestSegmentsInfo(map[int64]*SegmentInfo{
+					s.segID: {
+						SegmentInfo: &datapb.SegmentInfo{
+							ID:            s.segID,
+							CollectionID:  s.collID,
+							PartitionID:   s.partID,
+							InsertChannel: "ch1",
+							NumOfRows:     tc.numRows,
+							State:         commonpb.SegmentState_Flushed,
+							MaxRowNum:     tc.numRows,
+							Level:         datapb.SegmentLevel_L2,
+							Binlogs: []*datapb.FieldBinlog{{
+								FieldID: s.fieldID,
+								Binlogs: []*datapb.Binlog{{
+									EntriesNum: tc.numRows,
+									MemorySize: tc.numRows*4 + tc.innerVectorCount*elementBytes + 1,
 								}},
-							},
+							}},
 						},
 					},
-				},
+				}),
 				indexMeta: createIndexMetaWithSegment(catalog, s.collID, s.partID, s.segID, s.indexID, s.fieldID, s.taskID),
 			}
 			mt.indexMeta.indexes[s.collID][s.indexID].IndexParams = []*commonpb.KeyValuePair{
@@ -402,22 +398,20 @@ func (s *indexTaskSuite) TestCreateTaskOnWorkerVectorArrayEstimateFailureMarksFa
 	catalog.EXPECT().AlterSegmentIndexes(mock.Anything, mock.Anything).Return(nil)
 
 	mt := &meta{
-		segments: &SegmentsInfo{
-			segments: map[int64]*SegmentInfo{
-				s.segID: {
-					SegmentInfo: &datapb.SegmentInfo{
-						ID:            s.segID,
-						CollectionID:  s.collID,
-						PartitionID:   s.partID,
-						InsertChannel: "ch1",
-						NumOfRows:     enoughRows,
-						State:         commonpb.SegmentState_Flushed,
-						MaxRowNum:     enoughRows,
-						Level:         datapb.SegmentLevel_L2,
-					},
+		segments: newTestSegmentsInfo(map[int64]*SegmentInfo{
+			s.segID: {
+				SegmentInfo: &datapb.SegmentInfo{
+					ID:            s.segID,
+					CollectionID:  s.collID,
+					PartitionID:   s.partID,
+					InsertChannel: "ch1",
+					NumOfRows:     enoughRows,
+					State:         commonpb.SegmentState_Flushed,
+					MaxRowNum:     enoughRows,
+					Level:         datapb.SegmentLevel_L2,
 				},
 			},
-		},
+		}),
 		indexMeta: createIndexMetaWithSegment(catalog, s.collID, s.partID, s.segID, s.indexID, s.fieldID, s.taskID),
 	}
 	mt.indexMeta.indexes[s.collID][s.indexID].IndexParams = []*commonpb.KeyValuePair{
@@ -466,23 +460,21 @@ func (s *indexTaskSuite) TestCreateTaskOnWorkerVectorArrayMissingBinlogOnStaleSc
 	catalog.EXPECT().AlterSegmentIndexes(mock.Anything, mock.Anything).Return(nil)
 
 	mt := &meta{
-		segments: &SegmentsInfo{
-			segments: map[int64]*SegmentInfo{
-				s.segID: {
-					SegmentInfo: &datapb.SegmentInfo{
-						ID:            s.segID,
-						CollectionID:  s.collID,
-						PartitionID:   s.partID,
-						InsertChannel: "ch1",
-						NumOfRows:     enoughRows,
-						State:         commonpb.SegmentState_Flushed,
-						MaxRowNum:     enoughRows,
-						Level:         datapb.SegmentLevel_L2,
-						SchemaVersion: 0,
-					},
+		segments: newTestSegmentsInfo(map[int64]*SegmentInfo{
+			s.segID: {
+				SegmentInfo: &datapb.SegmentInfo{
+					ID:            s.segID,
+					CollectionID:  s.collID,
+					PartitionID:   s.partID,
+					InsertChannel: "ch1",
+					NumOfRows:     enoughRows,
+					State:         commonpb.SegmentState_Flushed,
+					MaxRowNum:     enoughRows,
+					Level:         datapb.SegmentLevel_L2,
+					SchemaVersion: 0,
 				},
 			},
-		},
+		}),
 		indexMeta: createIndexMetaWithSegment(catalog, s.collID, s.partID, s.segID, s.indexID, s.fieldID, s.taskID),
 	}
 	recorder := newQueryViewLoadInfoNotificationRecorder()
@@ -537,27 +529,25 @@ func (s *indexTaskSuite) TestCreateTaskOnWorkerVectorArrayManifestBackedProceeds
 	catalog.EXPECT().AlterSegmentIndexes(mock.Anything, mock.Anything).Return(nil)
 
 	mt := &meta{
-		segments: &SegmentsInfo{
-			segments: map[int64]*SegmentInfo{
-				s.segID: {
-					SegmentInfo: &datapb.SegmentInfo{
-						ID:            s.segID,
-						CollectionID:  s.collID,
-						PartitionID:   s.partID,
-						InsertChannel: "ch1",
-						NumOfRows:     enoughRows,
-						State:         commonpb.SegmentState_Flushed,
-						MaxRowNum:     enoughRows,
-						Level:         datapb.SegmentLevel_L2,
-						SchemaVersion: 1,
-						// Recovered StorageV3 segment: empty in-memory Binlogs, but the
-						// manifest is authoritative and the worker build reads it.
-						StorageVersion: storage.StorageV3,
-						ManifestPath:   "files/manifest/1/1",
-					},
+		segments: newTestSegmentsInfo(map[int64]*SegmentInfo{
+			s.segID: {
+				SegmentInfo: &datapb.SegmentInfo{
+					ID:            s.segID,
+					CollectionID:  s.collID,
+					PartitionID:   s.partID,
+					InsertChannel: "ch1",
+					NumOfRows:     enoughRows,
+					State:         commonpb.SegmentState_Flushed,
+					MaxRowNum:     enoughRows,
+					Level:         datapb.SegmentLevel_L2,
+					SchemaVersion: 1,
+					// Recovered StorageV3 segment: empty in-memory Binlogs, but the
+					// manifest is authoritative and the worker build reads it.
+					StorageVersion: storage.StorageV3,
+					ManifestPath:   "files/manifest/1/1",
 				},
 			},
-		},
+		}),
 		indexMeta: createIndexMetaWithSegment(catalog, s.collID, s.partID, s.segID, s.indexID, s.fieldID, s.taskID),
 	}
 	mt.indexMeta.indexes[s.collID][s.indexID].IndexParams = []*commonpb.KeyValuePair{
@@ -835,19 +825,17 @@ func (s *indexTaskSuite) TestQueryTaskOnWorker() {
 // state into the shared suite meta.
 func (s *indexTaskSuite) newInProgressTaskWithMeta(catalog *catalogmocks.DataCoordCatalog) (*indexBuildTask, *meta) {
 	mt := &meta{
-		segments: &SegmentsInfo{
-			segments: map[int64]*SegmentInfo{
-				s.segID: {
-					SegmentInfo: &datapb.SegmentInfo{
-						ID:           s.segID,
-						CollectionID: s.collID,
-						PartitionID:  s.partID,
-						NumOfRows:    65535,
-						State:        commonpb.SegmentState_Flushed,
-					},
+		segments: newTestSegmentsInfo(map[int64]*SegmentInfo{
+			s.segID: {
+				SegmentInfo: &datapb.SegmentInfo{
+					ID:           s.segID,
+					CollectionID: s.collID,
+					PartitionID:  s.partID,
+					NumOfRows:    65535,
+					State:        commonpb.SegmentState_Flushed,
 				},
 			},
-		},
+		}),
 		indexMeta: createIndexMetaWithSegment(catalog, s.collID, s.partID, s.segID, s.indexID, s.fieldID, s.taskID),
 	}
 	// Mutate the stored record in place: GetIndexJob returns a clone.
@@ -888,7 +876,7 @@ func (s *indexTaskSuite) TestQueryTaskOnWorkerAbortsWhenTargetDropped() {
 		catalog := catalogmocks.NewDataCoordCatalog(s.T())
 		catalog.EXPECT().AlterSegmentIndexes(mock.Anything, mock.Anything).Return(nil)
 		it, mt := s.newInProgressTaskWithMeta(catalog)
-		mt.segments.segments[s.segID].State = commonpb.SegmentState_Dropped
+		mt.segments.GetSegment(s.segID).State = commonpb.SegmentState_Dropped
 
 		cluster := session.NewMockCluster(s.T())
 		cluster.EXPECT().DropIndex(int64(1), s.taskID).Return(nil)
@@ -903,7 +891,7 @@ func (s *indexTaskSuite) TestQueryTaskOnWorkerAbortsWhenTargetDropped() {
 		catalog := catalogmocks.NewDataCoordCatalog(s.T())
 		catalog.EXPECT().AlterSegmentIndexes(mock.Anything, mock.Anything).Return(nil)
 		it, mt := s.newInProgressTaskWithMeta(catalog)
-		delete(mt.segments.segments, s.segID)
+		mt.segments.DropSegment(s.segID)
 
 		cluster := session.NewMockCluster(s.T())
 		cluster.EXPECT().DropIndex(int64(1), s.taskID).Return(nil)
@@ -1040,8 +1028,8 @@ func (s *indexTaskSuite) TestCreateTaskOnWorkerNullableVectorEffectiveRows() {
 		return newIndexBuildTask(t, 1, s.mt, newHandler(), cm, newIndexEngineVersionManager())
 	}
 
-	s.mt.segments.segments[s.segID].State = commonpb.SegmentState_Flushed
-	defer func() { s.mt.segments.segments[s.segID].Stats = nil }()
+	s.mt.segments.GetSegment(s.segID).State = commonpb.SegmentState_Flushed
+	defer func() { s.mt.segments.GetSegment(s.segID).Stats = nil }()
 
 	cases := []struct {
 		name       string
@@ -1070,7 +1058,7 @@ func (s *indexTaskSuite) TestCreateTaskOnWorkerNullableVectorEffectiveRows() {
 	}
 	for _, tc := range cases {
 		s.Run(tc.name, func() {
-			s.mt.segments.segments[s.segID].Stats = &datapb.Statistics{
+			s.mt.segments.GetSegment(s.segID).Stats = &datapb.Statistics{
 				NullCounts: tc.nullCounts,
 			}
 			catalogMock := catalogmocks.NewDataCoordCatalog(s.T())

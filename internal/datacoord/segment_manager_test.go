@@ -163,7 +163,7 @@ func TestAllocSegment(t *testing.T) {
 		assert.EqualValues(t, 1, len(allocations1))
 		segments, ok := segmentManager.channel2Growing.Get(vchannel)
 		assert.True(t, ok)
-		assert.EqualValues(t, 1, segments.Len())
+		assert.EqualValues(t, 1, len(segments.Collect()))
 
 		err = meta.SetState(context.TODO(), allocations1[0].SegmentID, commonpb.SegmentState_Dropped)
 		assert.NoError(t, err)
@@ -174,7 +174,7 @@ func TestAllocSegment(t *testing.T) {
 		// clear old healthy and alloc new
 		segments, ok = segmentManager.channel2Growing.Get(vchannel)
 		assert.True(t, ok)
-		assert.EqualValues(t, 1, segments.Len())
+		assert.EqualValues(t, 1, len(segments.Collect()))
 		assert.NotEqual(t, allocations1[0].SegmentID, allocations2[0].SegmentID)
 	})
 }
@@ -377,10 +377,10 @@ func TestLoadSegmentsFromMeta(t *testing.T) {
 	assert.NoError(t, err)
 	growing, ok := segmentManager.channel2Growing.Get(vchannel)
 	assert.True(t, ok)
-	assert.EqualValues(t, 1, growing.Len())
+	assert.EqualValues(t, 1, len(growing.Collect()))
 	sealed, ok := segmentManager.channel2Sealed.Get(vchannel)
 	assert.True(t, ok)
-	assert.EqualValues(t, 1, sealed.Len())
+	assert.EqualValues(t, 1, len(sealed.Collect()))
 }
 
 func TestSaveSegmentsToMeta(t *testing.T) {
@@ -598,7 +598,7 @@ func TestTryToSealSegment(t *testing.T) {
 		err = segmentManager.tryToSealSegment(context.TODO(), ts, "c1")
 		assert.NoError(t, err)
 
-		for _, seg := range segmentManager.meta.segments.segments {
+		for _, seg := range segmentManager.meta.segments.snapshotMap() {
 			if seg.GetStartPosition() != nil {
 				assert.Equal(t, commonpb.SegmentState_Sealed, seg.GetState())
 			}
@@ -625,7 +625,7 @@ func TestTryToSealSegment(t *testing.T) {
 		err = segmentManager.tryToSealSegment(context.TODO(), ts, "c1")
 		assert.NoError(t, err)
 
-		for _, seg := range segmentManager.meta.segments.segments {
+		for _, seg := range segmentManager.meta.segments.snapshotMap() {
 			assert.Equal(t, commonpb.SegmentState_Sealed, seg.GetState())
 		}
 	})
@@ -652,7 +652,7 @@ func TestTryToSealSegment(t *testing.T) {
 		err = segmentManager.tryToSealSegment(context.TODO(), ts, "c1")
 		assert.NoError(t, err)
 
-		for _, seg := range segmentManager.meta.segments.segments {
+		for _, seg := range segmentManager.meta.segments.snapshotMap() {
 			assert.Equal(t, commonpb.SegmentState_Sealed, seg.GetState())
 		}
 	})
@@ -679,7 +679,7 @@ func TestTryToSealSegment(t *testing.T) {
 		{
 			err = segmentManager.tryToSealSegment(context.TODO(), ts, "c1")
 			assert.NoError(t, err)
-			segments := segmentManager.meta.segments.segments
+			segments := segmentManager.meta.segments.snapshotMap()
 			assert.Equal(t, 1, len(segments))
 			for _, seg := range segments {
 				assert.Equal(t, commonpb.SegmentState_Growing, seg.GetState())
@@ -689,7 +689,7 @@ func TestTryToSealSegment(t *testing.T) {
 		// Not trigger seal
 		{
 			segmentManager.segmentSealPolicies = []SegmentSealPolicy{sealL1SegmentByLifetime()}
-			segments := segmentManager.meta.segments.segments
+			segments := segmentManager.meta.segments.snapshotMap()
 			assert.Equal(t, 1, len(segments))
 			for _, seg := range segments {
 				seg.Statslogs = []*datapb.FieldBinlog{
@@ -705,7 +705,7 @@ func TestTryToSealSegment(t *testing.T) {
 				}
 				err = segmentManager.tryToSealSegment(context.TODO(), ts, "c1")
 				assert.NoError(t, err)
-				seg = segmentManager.meta.segments.segments[seg.ID]
+				seg = segmentManager.meta.segments.GetSegment(seg.ID)
 				assert.Equal(t, commonpb.SegmentState_Growing, seg.GetState())
 			}
 		}
@@ -713,7 +713,7 @@ func TestTryToSealSegment(t *testing.T) {
 		// Trigger seal
 		{
 			segmentManager.segmentSealPolicies = []SegmentSealPolicy{sealL1SegmentByBinlogFileNumber(2)}
-			segments := segmentManager.meta.segments.segments
+			segments := segmentManager.meta.segments.snapshotMap()
 			assert.Equal(t, 1, len(segments))
 			for _, seg := range segments {
 				seg.Binlogs = []*datapb.FieldBinlog{
@@ -733,7 +733,7 @@ func TestTryToSealSegment(t *testing.T) {
 				}
 				err = segmentManager.tryToSealSegment(context.TODO(), ts, "c1")
 				assert.NoError(t, err)
-				seg = segmentManager.meta.segments.segments[seg.ID]
+				seg = segmentManager.meta.segments.GetSegment(seg.ID)
 				assert.Equal(t, commonpb.SegmentState_Sealed, seg.GetState())
 			}
 		}
@@ -864,26 +864,24 @@ func TestSegmentManager_DropSegmentsOfChannel(t *testing.T) {
 			"test drop segments",
 			fields{
 				meta: &meta{
-					segments: &SegmentsInfo{
-						segments: map[int64]*SegmentInfo{
-							1: {
-								SegmentInfo: &datapb.SegmentInfo{
-									ID:            1,
-									PartitionID:   partitionID,
-									InsertChannel: "ch1",
-									State:         commonpb.SegmentState_Sealed,
-								},
-							},
-							2: {
-								SegmentInfo: &datapb.SegmentInfo{
-									ID:            2,
-									PartitionID:   partitionID,
-									InsertChannel: "ch2",
-									State:         commonpb.SegmentState_Growing,
-								},
+					segments: newTestSegmentsInfo(map[int64]*SegmentInfo{
+						1: {
+							SegmentInfo: &datapb.SegmentInfo{
+								ID:            1,
+								PartitionID:   partitionID,
+								InsertChannel: "ch1",
+								State:         commonpb.SegmentState_Sealed,
 							},
 						},
-					},
+						2: {
+							SegmentInfo: &datapb.SegmentInfo{
+								ID:            2,
+								PartitionID:   partitionID,
+								InsertChannel: "ch2",
+								State:         commonpb.SegmentState_Growing,
+							},
+						},
+					}),
 				},
 				segments: []UniqueID{1, 2},
 			},
@@ -896,26 +894,24 @@ func TestSegmentManager_DropSegmentsOfChannel(t *testing.T) {
 			"test drop segments with dropped segment",
 			fields{
 				meta: &meta{
-					segments: &SegmentsInfo{
-						segments: map[int64]*SegmentInfo{
-							1: {
-								SegmentInfo: &datapb.SegmentInfo{
-									ID:            1,
-									PartitionID:   partitionID,
-									InsertChannel: "ch1",
-									State:         commonpb.SegmentState_Sealed,
-								},
-							},
-							2: {
-								SegmentInfo: &datapb.SegmentInfo{
-									ID:            2,
-									PartitionID:   partitionID,
-									InsertChannel: "ch2",
-									State:         commonpb.SegmentState_Growing,
-								},
+					segments: newTestSegmentsInfo(map[int64]*SegmentInfo{
+						1: {
+							SegmentInfo: &datapb.SegmentInfo{
+								ID:            1,
+								PartitionID:   partitionID,
+								InsertChannel: "ch1",
+								State:         commonpb.SegmentState_Sealed,
 							},
 						},
-					},
+						2: {
+							SegmentInfo: &datapb.SegmentInfo{
+								ID:            2,
+								PartitionID:   partitionID,
+								InsertChannel: "ch2",
+								State:         commonpb.SegmentState_Growing,
+							},
+						},
+					}),
 				},
 				segments: []UniqueID{1, 2, 3},
 			},
@@ -930,8 +926,8 @@ func TestSegmentManager_DropSegmentsOfChannel(t *testing.T) {
 			s := &SegmentManager{
 				meta:            tt.fields.meta,
 				channelLock:     lock.NewKeyLock[string](),
-				channel2Growing: typeutil.NewConcurrentMap[string, typeutil.UniqueSet](),
-				channel2Sealed:  typeutil.NewConcurrentMap[string, typeutil.UniqueSet](),
+				channel2Growing: typeutil.NewConcurrentMap[string, *typeutil.ConcurrentSet[int64]](),
+				channel2Sealed:  typeutil.NewConcurrentMap[string, *typeutil.ConcurrentSet[int64]](),
 			}
 			for _, segmentID := range tt.fields.segments {
 				segmentInfo := tt.fields.meta.GetSegment(context.Background(), segmentID)
@@ -940,20 +936,20 @@ func TestSegmentManager_DropSegmentsOfChannel(t *testing.T) {
 					channel = segmentInfo.GetInsertChannel()
 				}
 				if segmentInfo == nil || segmentInfo.GetState() == commonpb.SegmentState_Growing {
-					growing, _ := s.channel2Growing.GetOrInsert(channel, typeutil.NewUniqueSet())
+					growing, _ := s.channel2Growing.GetOrInsert(channel, typeutil.NewConcurrentSet[int64]())
 					growing.Insert(segmentID)
 				} else if segmentInfo.GetState() == commonpb.SegmentState_Sealed {
-					sealed, _ := s.channel2Sealed.GetOrInsert(channel, typeutil.NewUniqueSet())
+					sealed, _ := s.channel2Sealed.GetOrInsert(channel, typeutil.NewConcurrentSet[int64]())
 					sealed.Insert(segmentID)
 				}
 			}
 			s.DropSegmentsOfChannel(context.TODO(), tt.args.channel)
 			all := make([]int64, 0)
-			s.channel2Sealed.Range(func(_ string, segments typeutil.UniqueSet) bool {
+			s.channel2Sealed.Range(func(_ string, segments *typeutil.ConcurrentSet[int64]) bool {
 				all = append(all, segments.Collect()...)
 				return true
 			})
-			s.channel2Growing.Range(func(_ string, segments typeutil.UniqueSet) bool {
+			s.channel2Growing.Range(func(_ string, segments *typeutil.ConcurrentSet[int64]) bool {
 				all = append(all, segments.Collect()...)
 				return true
 			})
@@ -1019,23 +1015,12 @@ func TestSegmentManager_CleanZeroSealedSegmentsOfChannel(t *testing.T) {
 	newMetaFunc := func() *meta {
 		return &meta{
 			catalog: mockCatalog,
-			segments: &SegmentsInfo{
-				segments: map[int64]*SegmentInfo{
-					1: seg1,
-					2: seg2,
-					3: seg3,
-					4: seg4,
-				},
-				secondaryIndexes: segmentInfoIndexes{
-					coll2Segments: map[UniqueID]map[UniqueID]*SegmentInfo{
-						0: {1: seg1, 2: seg2, 3: seg3, 4: seg4},
-					},
-					channel2Segments: map[string]map[UniqueID]*SegmentInfo{
-						"ch1": {1: seg1, 2: seg2, 3: seg3},
-						"ch2": {4: seg4},
-					},
-				},
-			},
+			segments: newTestSegmentsInfo(map[int64]*SegmentInfo{
+				1: seg1,
+				2: seg2,
+				3: seg3,
+				4: seg4,
+			}),
 		}
 	}
 
@@ -1073,8 +1058,8 @@ func TestSegmentManager_CleanZeroSealedSegmentsOfChannel(t *testing.T) {
 			s := &SegmentManager{
 				meta:            tt.fields.meta,
 				channelLock:     lock.NewKeyLock[string](),
-				channel2Growing: typeutil.NewConcurrentMap[string, typeutil.UniqueSet](),
-				channel2Sealed:  typeutil.NewConcurrentMap[string, typeutil.UniqueSet](),
+				channel2Growing: typeutil.NewConcurrentMap[string, *typeutil.ConcurrentSet[int64]](),
+				channel2Sealed:  typeutil.NewConcurrentMap[string, *typeutil.ConcurrentSet[int64]](),
 			}
 			for _, segmentID := range tt.fields.segments {
 				segmentInfo := tt.fields.meta.GetSegment(context.TODO(), segmentID)
@@ -1083,20 +1068,20 @@ func TestSegmentManager_CleanZeroSealedSegmentsOfChannel(t *testing.T) {
 					channel = segmentInfo.GetInsertChannel()
 				}
 				if segmentInfo == nil || segmentInfo.GetState() == commonpb.SegmentState_Growing {
-					growing, _ := s.channel2Growing.GetOrInsert(channel, typeutil.NewUniqueSet())
+					growing, _ := s.channel2Growing.GetOrInsert(channel, typeutil.NewConcurrentSet[int64]())
 					growing.Insert(segmentID)
 				} else if segmentInfo.GetState() == commonpb.SegmentState_Sealed {
-					sealed, _ := s.channel2Sealed.GetOrInsert(channel, typeutil.NewUniqueSet())
+					sealed, _ := s.channel2Sealed.GetOrInsert(channel, typeutil.NewConcurrentSet[int64]())
 					sealed.Insert(segmentID)
 				}
 			}
 			s.CleanZeroSealedSegmentsOfChannel(context.TODO(), tt.args.channel, tt.args.cpTs)
 			all := make([]int64, 0)
-			s.channel2Sealed.Range(func(_ string, segments typeutil.UniqueSet) bool {
+			s.channel2Sealed.Range(func(_ string, segments *typeutil.ConcurrentSet[int64]) bool {
 				all = append(all, segments.Collect()...)
 				return true
 			})
-			s.channel2Growing.Range(func(_ string, segments typeutil.UniqueSet) bool {
+			s.channel2Growing.Range(func(_ string, segments *typeutil.ConcurrentSet[int64]) bool {
 				all = append(all, segments.Collect()...)
 				return true
 			})

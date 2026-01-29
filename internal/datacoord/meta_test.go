@@ -547,9 +547,9 @@ func (suite *MetaBasicSuite) TestCompleteCompactionMutation() {
 			suite.NotEmpty(seg.GetDroppedAt())
 
 			suite.EqualValues(segID, seg.GetID())
-			suite.ElementsMatch(latestSegments.segments[segID].GetBinlogs(), seg.GetBinlogs())
-			suite.ElementsMatch(latestSegments.segments[segID].GetStatslogs(), seg.GetStatslogs())
-			suite.ElementsMatch(latestSegments.segments[segID].GetDeltalogs(), seg.GetDeltalogs())
+			suite.ElementsMatch(latestSegments.GetSegment(segID).GetBinlogs(), seg.GetBinlogs())
+			suite.ElementsMatch(latestSegments.GetSegment(segID).GetStatslogs(), seg.GetStatslogs())
+			suite.ElementsMatch(latestSegments.GetSegment(segID).GetDeltalogs(), seg.GetDeltalogs())
 		}
 
 		// check mutation metrics
@@ -622,9 +622,9 @@ func (suite *MetaBasicSuite) TestCompleteCompactionMutation() {
 			suite.NotEmpty(seg.GetDroppedAt())
 
 			suite.EqualValues(segID, seg.GetID())
-			suite.ElementsMatch(latestSegments.segments[segID].GetBinlogs(), seg.GetBinlogs())
-			suite.ElementsMatch(latestSegments.segments[segID].GetStatslogs(), seg.GetStatslogs())
-			suite.ElementsMatch(latestSegments.segments[segID].GetDeltalogs(), seg.GetDeltalogs())
+			suite.ElementsMatch(latestSegments.GetSegment(segID).GetBinlogs(), seg.GetBinlogs())
+			suite.ElementsMatch(latestSegments.GetSegment(segID).GetStatslogs(), seg.GetStatslogs())
+			suite.ElementsMatch(latestSegments.GetSegment(segID).GetDeltalogs(), seg.GetDeltalogs())
 		}
 
 		// check mutation metrics
@@ -640,8 +640,8 @@ func (suite *MetaBasicSuite) TestCompleteCompactionMutation() {
 
 	suite.Run("mixed schema version mix compaction uses task schema version", func() {
 		latestSegments := getLatestSegments()
-		latestSegments.segments[1].SchemaVersion = 2
-		latestSegments.segments[2].SchemaVersion = 3
+		latestSegments.GetSegment(1).SchemaVersion = 2
+		latestSegments.GetSegment(2).SchemaVersion = 3
 		compactToSeg := &datapb.CompactionSegment{
 			SegmentID:           5,
 			InsertLogs:          []*datapb.FieldBinlog{getFieldBinlogIDs(0, 50000)},
@@ -5527,49 +5527,31 @@ func Test_meta_GetSegmentsWithChannel(t *testing.T) {
 		},
 	))
 
+	ids := func(segments []*SegmentInfo) []int64 {
+		return lo.Map(segments, func(s *SegmentInfo, _ int) int64 { return s.ID })
+	}
 	m.segments.DropSegment(3)
-	_, ok := m.segments.secondaryIndexes.coll2Segments[2]
-	assert.False(t, ok)
-	assert.Equal(t, 1, len(m.segments.secondaryIndexes.coll2Segments))
-	assert.Equal(t, 2, len(m.segments.secondaryIndexes.channel2Segments))
-
-	segments, ok := m.segments.secondaryIndexes.channel2Segments["h1"]
-	assert.True(t, ok)
-	assert.Equal(t, 1, len(segments))
-	assert.Equal(t, int64(1), segments[1].ID)
-	segments, ok = m.segments.secondaryIndexes.channel2Segments["h2"]
-	assert.True(t, ok)
-	assert.Equal(t, 1, len(segments))
-	assert.Equal(t, int64(2), segments[2].ID)
+	assert.Empty(t, m.segments.GetSegmentsBySelector(WithCollection(2)))
+	assert.ElementsMatch(t, []int64{1, 2}, ids(m.segments.GetSegmentsBySelector(WithCollection(1))))
+	assert.ElementsMatch(t, []int64{1}, ids(m.segments.GetSegmentsByChannel("h1")))
+	assert.ElementsMatch(t, []int64{2}, ids(m.segments.GetSegmentsByChannel("h2")))
 
 	m.segments.DropSegment(2)
-	segments, ok = m.segments.secondaryIndexes.coll2Segments[1]
-	assert.True(t, ok)
-	assert.Equal(t, 1, len(segments))
-	assert.Equal(t, int64(1), segments[1].ID)
-	assert.Equal(t, 1, len(m.segments.secondaryIndexes.coll2Segments))
-	assert.Equal(t, 1, len(m.segments.secondaryIndexes.channel2Segments))
-
-	segments, ok = m.segments.secondaryIndexes.channel2Segments["h1"]
-	assert.True(t, ok)
-	assert.Equal(t, 1, len(segments))
-	assert.Equal(t, int64(1), segments[1].ID)
-	_, ok = m.segments.secondaryIndexes.channel2Segments["h2"]
-	assert.False(t, ok)
+	assert.ElementsMatch(t, []int64{1}, ids(m.segments.GetSegmentsBySelector(WithCollection(1))))
+	assert.ElementsMatch(t, []int64{1}, ids(m.segments.GetSegmentsByChannel("h1")))
+	assert.Empty(t, m.segments.GetSegmentsByChannel("h2"))
 }
 
 func TestMeta_HasSegments(t *testing.T) {
 	m := &meta{
-		segments: &SegmentsInfo{
-			segments: map[UniqueID]*SegmentInfo{
-				1: {
-					SegmentInfo: &datapb.SegmentInfo{
-						ID:        1,
-						NumOfRows: 100,
-					},
+		segments: newTestSegmentsInfo(map[UniqueID]*SegmentInfo{
+			1: {
+				SegmentInfo: &datapb.SegmentInfo{
+					ID:        1,
+					NumOfRows: 100,
 				},
 			},
-		},
+		}),
 	}
 
 	has, err := m.HasSegments([]UniqueID{1})
@@ -5583,22 +5565,20 @@ func TestMeta_HasSegments(t *testing.T) {
 
 func TestMeta_GetAllSegments(t *testing.T) {
 	m := &meta{
-		segments: &SegmentsInfo{
-			segments: map[UniqueID]*SegmentInfo{
-				1: {
-					SegmentInfo: &datapb.SegmentInfo{
-						ID:    1,
-						State: commonpb.SegmentState_Growing,
-					},
-				},
-				2: {
-					SegmentInfo: &datapb.SegmentInfo{
-						ID:    2,
-						State: commonpb.SegmentState_Dropped,
-					},
+		segments: newTestSegmentsInfo(map[UniqueID]*SegmentInfo{
+			1: {
+				SegmentInfo: &datapb.SegmentInfo{
+					ID:    1,
+					State: commonpb.SegmentState_Growing,
 				},
 			},
-		},
+			2: {
+				SegmentInfo: &datapb.SegmentInfo{
+					ID:    2,
+					State: commonpb.SegmentState_Dropped,
+				},
+			},
+		}),
 	}
 
 	seg1 := m.GetHealthySegment(context.TODO(), 1)
@@ -6001,34 +5981,32 @@ func Test_meta_ReloadCollectionsFromRootcoords(t *testing.T) {
 func TestMeta_GetSegmentsJSON(t *testing.T) {
 	// Create a mock meta object
 	m := &meta{
-		segments: &SegmentsInfo{
-			segments: map[int64]*SegmentInfo{
-				1: {
-					SegmentInfo: &datapb.SegmentInfo{
-						ID:            1,
-						CollectionID:  1,
-						PartitionID:   1,
-						InsertChannel: "channel1",
-						NumOfRows:     100,
-						State:         commonpb.SegmentState_Growing,
-						MaxRowNum:     1000,
-						Compacted:     false,
-					},
-				},
-				2: {
-					SegmentInfo: &datapb.SegmentInfo{
-						ID:            2,
-						CollectionID:  2,
-						PartitionID:   2,
-						InsertChannel: "channel2",
-						NumOfRows:     200,
-						State:         commonpb.SegmentState_Sealed,
-						MaxRowNum:     2000,
-						Compacted:     true,
-					},
+		segments: newTestSegmentsInfo(map[int64]*SegmentInfo{
+			1: {
+				SegmentInfo: &datapb.SegmentInfo{
+					ID:            1,
+					CollectionID:  1,
+					PartitionID:   1,
+					InsertChannel: "channel1",
+					NumOfRows:     100,
+					State:         commonpb.SegmentState_Growing,
+					MaxRowNum:     1000,
+					Compacted:     false,
 				},
 			},
-		},
+			2: {
+				SegmentInfo: &datapb.SegmentInfo{
+					ID:            2,
+					CollectionID:  2,
+					PartitionID:   2,
+					InsertChannel: "channel2",
+					NumOfRows:     200,
+					State:         commonpb.SegmentState_Sealed,
+					MaxRowNum:     2000,
+					Compacted:     true,
+				},
+			},
+		}),
 	}
 
 	segments := m.getSegmentsMetrics(0)

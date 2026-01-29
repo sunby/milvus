@@ -2326,13 +2326,13 @@ func TestGetChannelRecoveryInfo(t *testing.T) {
 	s.meta = &meta{
 		segments: NewSegmentsInfo(),
 	}
-	s.meta.segments.segments[1] = NewSegmentInfo(&datapb.SegmentInfo{
+	s.meta.segments.SetSegment(1, NewSegmentInfo(&datapb.SegmentInfo{
 		ID:                   1,
 		CollectionID:         0,
 		PartitionID:          0,
 		State:                commonpb.SegmentState_Growing,
 		IsCreatedByStreaming: false,
-	})
+	}))
 
 	assert.NoError(t, err)
 	resp, err = s.GetChannelRecoveryInfo(ctx, &datapb.GetChannelRecoveryInfoRequest{
