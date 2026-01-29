@@ -18,6 +18,7 @@ package querycoordv2
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/cockroachdb/errors"
@@ -44,6 +45,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/utils"
 	"github.com/milvus-io/milvus/internal/util/proxyutil"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
+	"github.com/milvus-io/milvus/internal/util/streamingutil"
 	"github.com/milvus-io/milvus/pkg/v3/kv"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
@@ -63,6 +65,7 @@ type OpsServiceSuite struct {
 	dist           *meta.DistributionManager
 	meta           *meta.Meta
 	targetMgr      *meta.TargetManager
+	metaStore      metacache.MetaStore // shared by Meta and TargetManager
 	broker         *meta.MockBroker
 	targetObserver *observers.TargetObserver
 	cluster        *session.MockCluster
@@ -102,9 +105,10 @@ func (suite *OpsServiceSuite) SetupTest() {
 	suite.store = querycoord.NewCatalog(suite.kv)
 	suite.dist = meta.NewDistributionManager(suite.nodeMgr)
 	suite.nodeMgr = session.NewNodeManager()
-	suite.meta = meta.NewMeta(params.RandomIncrementIDAllocator(), suite.store, suite.nodeMgr, metacache.NewMetaStore(nil))
+	suite.metaStore = metacache.NewMetaStore(nil)
+	suite.meta = meta.NewMeta(params.RandomIncrementIDAllocator(), suite.store, suite.nodeMgr, suite.metaStore)
 	suite.broker = meta.NewMockBroker(suite.T())
-	suite.targetMgr = meta.NewTargetManager(suite.broker, suite.meta, metacache.NewMetaStore(nil))
+	suite.targetMgr = meta.NewTargetManager(suite.broker, suite.meta, suite.metaStore)
 	suite.targetObserver = observers.NewTargetObserver(
 		suite.meta,
 		suite.targetMgr,
@@ -720,6 +724,88 @@ func (suite *OpsServiceSuite) TestTransferSegment() {
 		SourceNodeID: nodes[0],
 		TransferAll:  true,
 		ToAllNodes:   true,
+	})
+	suite.NoError(err)
+	suite.True(merr.Ok(resp))
+}
+
+func (suite *OpsServiceSuite) TestTransferSegmentToSQN() {
+	ctx := context.Background()
+
+	oldValue, existed := os.LookupEnv(streamingutil.MilvusStreamingServiceEnabled)
+	suite.Require().NoError(os.Setenv(streamingutil.MilvusStreamingServiceEnabled, "1"))
+	suite.Require().NoError(paramtable.Get().Save(paramtable.Get().QueryCoordCfg.EnableSQNServeSegments.Key, "true"))
+	defer func() {
+		suite.NoError(paramtable.Get().Reset(paramtable.Get().QueryCoordCfg.EnableSQNServeSegments.Key))
+		if existed {
+			suite.NoError(os.Setenv(streamingutil.MilvusStreamingServiceEnabled, oldValue))
+		} else {
+			suite.NoError(os.Unsetenv(streamingutil.MilvusStreamingServiceEnabled))
+		}
+	}()
+
+	balance.InitGlobalBalancerFactory(suite.taskScheduler, suite.nodeMgr, suite.dist, suite.targetMgr)
+
+	for _, nodeID := range []int64{1, 2, 11} {
+		suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
+			NodeID:   nodeID,
+			Address:  "localhost",
+			Hostname: "localhost",
+		}))
+		suite.meta.ResourceManager.HandleNodeUp(ctx, nodeID)
+	}
+
+	collectionID := int64(1)
+	partitionID := int64(1)
+	replicaID := int64(1)
+	suite.meta.ReplicaManager.Put(ctx, meta.NewReplica(&querypb.Replica{
+		ID:            replicaID,
+		CollectionID:  collectionID,
+		Nodes:         []int64{1, 2},
+		RwSqNodes:     []int64{11},
+		ResourceGroup: meta.DefaultResourceGroupName,
+	}))
+	suite.meta.PutCollection(ctx, utils.CreateTestCollection(collectionID, 1), utils.CreateTestPartition(partitionID, collectionID))
+
+	segments := []*datapb.SegmentInfo{
+		{
+			ID:            1,
+			CollectionID:  collectionID,
+			PartitionID:   partitionID,
+			InsertChannel: "channel-1",
+			NumOfRows:     1,
+		},
+	}
+	channels := []*datapb.VchannelInfo{
+		{
+			CollectionID: collectionID,
+			ChannelName:  "channel-1",
+		},
+	}
+
+	// The target reads its segments from the shared store.
+	suite.metaStore.PutSegment(segments[0])
+	suite.broker.EXPECT().GetRecoveryInfoV2(mock.Anything, collectionID).Return(channels, segments, nil)
+	suite.targetMgr.UpdateCollectionNextTarget(ctx, collectionID)
+	suite.targetMgr.UpdateCollectionCurrentTarget(ctx, collectionID)
+	suite.dist.SegmentDistManager.Update(1, &meta.Segment{
+		SegmentInfo: segments[0],
+		Node:        1,
+	})
+
+	suite.taskScheduler.ExpectedCalls = nil
+	suite.taskScheduler.EXPECT().GetChannelTaskDelta(mock.Anything, mock.Anything).Return(0).Maybe()
+	suite.taskScheduler.EXPECT().Add(mock.Anything).RunAndReturn(func(t task.Task) error {
+		actions := t.Actions()
+		suite.Len(actions, 2)
+		suite.EqualValues(11, actions[0].Node())
+		return nil
+	})
+
+	resp, err := suite.server.TransferSegment(ctx, &querypb.TransferSegmentRequest{
+		SourceNodeID: 1,
+		TargetNodeID: 11,
+		SegmentID:    1,
 	})
 	suite.NoError(err)
 	suite.True(merr.Ok(resp))
