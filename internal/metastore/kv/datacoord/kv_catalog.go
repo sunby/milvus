@@ -40,6 +40,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
+	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util"
 	"github.com/milvus-io/milvus/pkg/v3/util/etcd"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
@@ -296,7 +297,10 @@ func (kc *Catalog) AlterSegments(ctx context.Context, segments []*datapb.Segment
 	if err != nil {
 		return err
 	}
+	return kc.saveSegmentAndBinlogKVs(ctx, kvs, removals)
+}
 
+func (kc *Catalog) saveSegmentAndBinlogKVs(ctx context.Context, kvs map[string]string, removals []string) error {
 	if err := kc.SaveByBatch(ctx, kvs); err != nil {
 		return err
 	}
@@ -383,6 +387,23 @@ func (kc *Catalog) buildAlterSegmentsKvs(ctx context.Context, segments []*datapb
 	}
 
 	return kvs, removals, nil
+}
+
+func (kc *Catalog) AlterSegmentsAndSaveDataView(ctx context.Context, segments []*datapb.SegmentInfo, collectionID int64, view *viewpb.DataViewOfCollection, binlogs ...metastore.BinlogsIncrement) error {
+	kvs, removals, err := kc.buildAlterSegmentsKvs(ctx, segments, binlogs)
+	if err != nil {
+		return err
+	}
+	if view != nil {
+		version := view.GetDataVersion()
+		key := buildDataViewKey(collectionID, version.GetStreamingVersion(), version.GetCompactVersion())
+		value, err := proto.Marshal(view)
+		if err != nil {
+			return err
+		}
+		kvs[key] = string(value)
+	}
+	return kc.saveSegmentAndBinlogKVs(ctx, kvs, removals)
 }
 
 func (kc *Catalog) handleDroppedSegment(ctx context.Context, segment *datapb.SegmentInfo) (kvs map[string]string, err error) {
@@ -1254,4 +1275,53 @@ func (kc *Catalog) ListSnapshots(ctx context.Context) ([]*datapb.SnapshotInfo, e
 		return nil, err
 	}
 	return snapshots, nil
+}
+
+func (kc *Catalog) SaveDataView(ctx context.Context, collectionID int64, view *viewpb.DataViewOfCollection) error {
+	version := view.GetDataVersion()
+	key := buildDataViewKey(collectionID, version.GetStreamingVersion(), version.GetCompactVersion())
+	value, err := proto.Marshal(view)
+	if err != nil {
+		return err
+	}
+	return kc.MetaKv.Save(ctx, key, string(value))
+}
+
+func (kc *Catalog) ListDataViews(ctx context.Context) (map[int64][]*viewpb.DataViewOfCollection, error) {
+	views := make(map[int64][]*viewpb.DataViewOfCollection)
+	applyFn := func(key []byte, value []byte) error {
+		parts := strings.Split(string(key), "/")
+		if len(parts) < 3 {
+			log.Ctx(ctx).Warn("invalid data view key format", zap.String("key", string(key)))
+			return fmt.Errorf("invalid data view key format: %s", string(key))
+		}
+		collectionID, err := strconv.ParseInt(parts[len(parts)-3], 10, 64)
+		if err != nil {
+			log.Ctx(ctx).Warn("failed to parse collectionID from data view key",
+				zap.String("key", string(key)), zap.Error(err))
+			return err
+		}
+		view := &viewpb.DataViewOfCollection{}
+		if err := proto.Unmarshal(value, view); err != nil {
+			log.Ctx(ctx).Warn("failed to unmarshal DataViewOfCollection",
+				zap.String("key", string(key)), zap.Error(err))
+			return err
+		}
+		views[collectionID] = append(views[collectionID], view)
+		return nil
+	}
+	if err := kc.MetaKv.WalkWithPrefix(ctx, DataViewPrefix, kc.paginationSize, applyFn); err != nil {
+		return nil, err
+	}
+	return views, nil
+}
+
+func (kc *Catalog) DropDataView(ctx context.Context, collectionID int64, version *viewpb.DataVersion) error {
+	key := buildDataViewKey(collectionID, version.GetStreamingVersion(), version.GetCompactVersion())
+	return kc.MetaKv.Remove(ctx, key)
+}
+
+func (kc *Catalog) DropDataViewsByCollection(ctx context.Context, collectionID int64) error {
+	prefix := buildDataViewCollectionPrefix(collectionID)
+	return kc.MetaKv.RemoveWithPrefix(ctx, prefix)
 }
