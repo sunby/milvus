@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"go.uber.org/zap"
 
@@ -121,16 +120,25 @@ type txnOp[K comparable, V any] struct {
 // ============================================================
 
 type etcdPersist[K string, V any] struct {
-	cli       *clientv3.Client
-	marshaler Marshaler[V]
+	cli            *clientv3.Client
+	marshaler      Marshaler[V]
+	maxOpsPerTxn   int // max etcd ops (cmps + puts) per transaction; each write op costs 2
 }
 
-func NewOptimisticTxnEtcdPersist[K string, V any](cli *clientv3.Client, marshaler Marshaler[V]) OptimisticTxnPersist[K, V] {
-	return &etcdPersist[K, V]{cli: cli, marshaler: marshaler}
+// NewOptimisticTxnEtcdPersist creates an etcd-backed persist layer.
+// maxOpsPerTxn is the etcd max-txn-ops limit (e.g. paramtable MaxEtcdTxnNum, default 64).
+// Each write operation uses 2 etcd ops (1 cmp + 1 put/delete), so effective batch
+// size is maxOpsPerTxn/2. If maxOpsPerTxn <= 0, defaults to 128.
+func NewOptimisticTxnEtcdPersist[K string, V any](cli *clientv3.Client, marshaler Marshaler[V], maxOpsPerTxn ...int) OptimisticTxnPersist[K, V] {
+	limit := 128
+	if len(maxOpsPerTxn) > 0 && maxOpsPerTxn[0] > 0 {
+		limit = maxOpsPerTxn[0]
+	}
+	return &etcdPersist[K, V]{cli: cli, marshaler: marshaler, maxOpsPerTxn: limit}
 }
 
 func (p *etcdPersist[K, V]) Txn(ctx context.Context) Txn[K, V] {
-	return &etcdTxn[K, V]{ctx: ctx, persist: p}
+	return &etcdTxn[K, V]{ctx: ctx, persist: p, maxWriteOps: p.maxOpsPerTxn / 2}
 }
 
 func (p *etcdPersist[K, V]) Scan(ctx context.Context, prefix K) ([]K, []V, []int64, error) {
@@ -168,9 +176,10 @@ func (p *etcdPersist[K, V]) Scan(ctx context.Context, prefix K) ([]K, []V, []int
 }
 
 type etcdTxn[K string, V any] struct {
-	ctx     context.Context
-	persist *etcdPersist[K, V]
-	ops     []txnOp[K, V]
+	ctx         context.Context
+	persist     *etcdPersist[K, V]
+	ops         []txnOp[K, V]
+	maxWriteOps int // max written ops per etcd txn (= maxOpsPerTxn / 2)
 }
 
 func (t *etcdTxn[K, V]) Insert(key K, value V) {
@@ -192,18 +201,56 @@ func (t *etcdTxn[K, V]) Delete(key K) {
 func (t *etcdTxn[K, V]) Commit() ([]TxnResult[V], error) {
 	results := make([]TxnResult[V], len(t.ops))
 
-	commitStart := time.Now()
-	retryCount := 0
+	// Phase 1: read existing values and prepare per-op write plans.
+	type writePlan struct {
+		opIndex int // index into t.ops / results
+		cmp     clientv3.Cmp
+		etcdOp  clientv3.Op
+		hasCmp  bool
+	}
+	plans, err := t.prepareWritePlans(results)
+	if err != nil {
+		return nil, err
+	}
+	if len(plans) == 0 {
+		return results, nil // all skipped
+	}
+
+	// Phase 2: commit in batches respecting maxWriteOps.
+	batchSize := t.maxWriteOps
+	if batchSize <= 0 {
+		batchSize = 64
+	}
+	for start := 0; start < len(plans); start += batchSize {
+		end := start + batchSize
+		if end > len(plans) {
+			end = len(plans)
+		}
+		batch := plans[start:end]
+
+		if err := t.commitBatch(batch, results); err != nil {
+			return nil, err
+		}
+	}
+
+	return results, nil
+}
+
+// writePlan holds the prepared etcd operations for a single op.
+type writePlan struct {
+	opIndex int
+	cmp     clientv3.Cmp
+	etcdOp  clientv3.Op
+	hasCmp  bool
+}
+
+// prepareWritePlans reads current values from etcd and builds write plans.
+// Ops that are skipped (shouldWrite=false) have their results populated directly.
+func (t *etcdTxn[K, V]) prepareWritePlans(results []TxnResult[V]) ([]writePlan, error) {
+	var plans []writePlan
 
 	err := retry.Do(t.ctx, func() error {
-		retryCount++
-		cmps := make([]clientv3.Cmp, 0, len(t.ops))
-		putOps := make([]clientv3.Op, 0, len(t.ops))
-		// track which ops produce a write (for assigning version after commit)
-		written := make([]bool, len(t.ops))
-
-		// Phase 1: read existing values from etcd
-		getStart := time.Now()
+		plans = plans[:0] // reset on retry
 		for i, op := range t.ops {
 			keyStr := string(op.key)
 			resp, err := t.persist.cli.Get(t.ctx, keyStr, clientv3.WithSerializable())
@@ -217,14 +264,17 @@ func (t *etcdTxn[K, V]) Commit() ([]TxnResult[V], error) {
 				if exists {
 					return retry.Unrecoverable(fmt.Errorf("%w: %s", ErrKeyAlreadyExists, keyStr))
 				}
-				cmps = append(cmps, clientv3.Compare(clientv3.CreateRevision(keyStr), "=", 0))
 				valBytes, err := t.persist.marshaler.Marshal(op.value)
 				if err != nil {
 					return retry.Unrecoverable(err)
 				}
-				putOps = append(putOps, clientv3.OpPut(keyStr, string(valBytes)))
+				plans = append(plans, writePlan{
+					opIndex: i,
+					cmp:     clientv3.Compare(clientv3.CreateRevision(keyStr), "=", 0),
+					etcdOp:  clientv3.OpPut(keyStr, string(valBytes)),
+					hasCmp:  true,
+				})
 				results[i].Value = op.value
-				written[i] = true
 
 			case opUpdate:
 				if !exists {
@@ -237,17 +287,19 @@ func (t *etcdTxn[K, V]) Commit() ([]TxnResult[V], error) {
 				newV, shouldWrite := op.updateFunc(existing)
 				if !shouldWrite {
 					results[i] = TxnResult[V]{Value: existing, Version: resp.Kvs[0].ModRevision}
-					written[i] = false
 					continue
 				}
-				cmps = append(cmps, clientv3.Compare(clientv3.ModRevision(keyStr), "=", resp.Kvs[0].ModRevision))
 				valBytes, err := t.persist.marshaler.Marshal(newV)
 				if err != nil {
 					return retry.Unrecoverable(err)
 				}
-				putOps = append(putOps, clientv3.OpPut(keyStr, string(valBytes)))
+				plans = append(plans, writePlan{
+					opIndex: i,
+					cmp:     clientv3.Compare(clientv3.ModRevision(keyStr), "=", resp.Kvs[0].ModRevision),
+					etcdOp:  clientv3.OpPut(keyStr, string(valBytes)),
+					hasCmp:  true,
+				})
 				results[i].Value = newV
-				written[i] = true
 
 			case opUpsert:
 				if exists {
@@ -258,72 +310,42 @@ func (t *etcdTxn[K, V]) Commit() ([]TxnResult[V], error) {
 					newV, shouldWrite := op.updateFunc(existing)
 					if !shouldWrite {
 						results[i] = TxnResult[V]{Value: existing, Version: resp.Kvs[0].ModRevision}
-						written[i] = false
 						continue
 					}
-					cmps = append(cmps, clientv3.Compare(clientv3.ModRevision(keyStr), "=", resp.Kvs[0].ModRevision))
 					valBytes, err := t.persist.marshaler.Marshal(newV)
 					if err != nil {
 						return retry.Unrecoverable(err)
 					}
-					putOps = append(putOps, clientv3.OpPut(keyStr, string(valBytes)))
+					plans = append(plans, writePlan{
+						opIndex: i,
+						cmp:     clientv3.Compare(clientv3.ModRevision(keyStr), "=", resp.Kvs[0].ModRevision),
+						etcdOp:  clientv3.OpPut(keyStr, string(valBytes)),
+						hasCmp:  true,
+					})
 					results[i].Value = newV
 				} else {
 					valBytes, err := t.persist.marshaler.Marshal(op.value)
 					if err != nil {
 						return retry.Unrecoverable(err)
 					}
-					putOps = append(putOps, clientv3.OpPut(keyStr, string(valBytes)))
+					plans = append(plans, writePlan{
+						opIndex: i,
+						etcdOp:  clientv3.OpPut(keyStr, string(valBytes)),
+						hasCmp:  false,
+					})
 					results[i].Value = op.value
 				}
-				written[i] = true
 
 			case opDelete:
 				if !exists {
 					return retry.Unrecoverable(fmt.Errorf("%w: %s", ErrKeyNotFound, keyStr))
 				}
-				cmps = append(cmps, clientv3.Compare(clientv3.ModRevision(keyStr), "=", resp.Kvs[0].ModRevision))
-				putOps = append(putOps, clientv3.OpDelete(keyStr))
-				written[i] = true // version needed for cache tombstone
-			}
-		}
-		getDur := time.Since(getStart)
-
-		if len(putOps) == 0 {
-			return nil // all skipped
-		}
-
-		// Phase 2: commit the transaction
-		txnStart := time.Now()
-		var txnResp *clientv3.TxnResponse
-		var err error
-		if len(cmps) == 0 {
-			txnResp, err = t.persist.cli.Txn(t.ctx).Then(putOps...).Commit()
-		} else {
-			txnResp, err = t.persist.cli.Txn(t.ctx).If(cmps...).Then(putOps...).Commit()
-		}
-		txnDur := time.Since(txnStart)
-
-		totalDur := time.Since(commitStart)
-		if totalDur > 40*time.Millisecond {
-			log.Ctx(t.ctx).Info("etcdTxn.Commit slow",
-				zap.Duration("total", totalDur),
-				zap.Duration("etcdGet", getDur),
-				zap.Duration("etcdTxn", txnDur),
-				zap.Int("numOps", len(t.ops)),
-				zap.Int("numPuts", len(putOps)),
-				zap.Int("retryCount", retryCount))
-		}
-
-		if err != nil {
-			return err
-		}
-		if !txnResp.Succeeded {
-			return fmt.Errorf("CAS failed, concurrent modification")
-		}
-		for i := range t.ops {
-			if written[i] {
-				results[i].Version = txnResp.Header.Revision
+				plans = append(plans, writePlan{
+					opIndex: i,
+					cmp:     clientv3.Compare(clientv3.ModRevision(keyStr), "=", resp.Kvs[0].ModRevision),
+					etcdOp:  clientv3.OpDelete(keyStr),
+					hasCmp:  true,
+				})
 			}
 		}
 		return nil
@@ -332,7 +354,39 @@ func (t *etcdTxn[K, V]) Commit() ([]TxnResult[V], error) {
 	if err != nil {
 		return nil, err
 	}
-	return results, nil
+	return plans, nil
+}
+
+// commitBatch commits a batch of write plans as a single etcd transaction with CAS.
+func (t *etcdTxn[K, V]) commitBatch(batch []writePlan, results []TxnResult[V]) error {
+	return retry.Do(t.ctx, func() error {
+		cmps := make([]clientv3.Cmp, 0, len(batch))
+		ops := make([]clientv3.Op, 0, len(batch))
+		for _, p := range batch {
+			if p.hasCmp {
+				cmps = append(cmps, p.cmp)
+			}
+			ops = append(ops, p.etcdOp)
+		}
+
+		var txnResp *clientv3.TxnResponse
+		var err error
+		if len(cmps) == 0 {
+			txnResp, err = t.persist.cli.Txn(t.ctx).Then(ops...).Commit()
+		} else {
+			txnResp, err = t.persist.cli.Txn(t.ctx).If(cmps...).Then(ops...).Commit()
+		}
+		if err != nil {
+			return err
+		}
+		if !txnResp.Succeeded {
+			return fmt.Errorf("CAS failed, concurrent modification")
+		}
+		for _, p := range batch {
+			results[p.opIndex].Version = txnResp.Header.Revision
+		}
+		return nil
+	}, retry.AttemptAlways())
 }
 
 // ============================================================
