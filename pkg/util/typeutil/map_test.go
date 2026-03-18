@@ -1,8 +1,11 @@
 package typeutil
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -151,4 +154,121 @@ func (suite *MapUtilSuite) TestConcurrentMap() {
 
 func TestMapUtil(t *testing.T) {
 	suite.Run(t, new(MapUtilSuite))
+}
+
+func TestConcurrentMap_CompareAndSwap(t *testing.T) {
+	t.Run("swap succeeds when old value matches", func(t *testing.T) {
+		m := NewConcurrentMap[string, int]()
+		m.Insert("key1", 10)
+
+		swapped := m.CompareAndSwap("key1", 10, 20)
+		assert.True(t, swapped)
+
+		v, ok := m.Get("key1")
+		assert.True(t, ok)
+		assert.Equal(t, 20, v)
+	})
+
+	t.Run("swap fails when old value does not match", func(t *testing.T) {
+		m := NewConcurrentMap[string, int]()
+		m.Insert("key1", 10)
+
+		swapped := m.CompareAndSwap("key1", 999, 20)
+		assert.False(t, swapped)
+
+		// Value should remain unchanged.
+		v, ok := m.Get("key1")
+		assert.True(t, ok)
+		assert.Equal(t, 10, v)
+	})
+
+	t.Run("swap fails when key does not exist", func(t *testing.T) {
+		m := NewConcurrentMap[string, int]()
+
+		swapped := m.CompareAndSwap("missing", 0, 1)
+		assert.False(t, swapped)
+	})
+}
+
+func TestConcurrentMap_CompareAndDelete(t *testing.T) {
+	t.Run("delete succeeds when old value matches", func(t *testing.T) {
+		m := NewConcurrentMap[string, int]()
+		m.Insert("key1", 10)
+
+		deleted := m.CompareAndDelete("key1", 10)
+		assert.True(t, deleted)
+
+		_, ok := m.Get("key1")
+		assert.False(t, ok)
+	})
+
+	t.Run("delete fails when old value does not match", func(t *testing.T) {
+		m := NewConcurrentMap[string, int]()
+		m.Insert("key1", 10)
+
+		deleted := m.CompareAndDelete("key1", 999)
+		assert.False(t, deleted)
+
+		// Value should remain unchanged.
+		v, ok := m.Get("key1")
+		assert.True(t, ok)
+		assert.Equal(t, 10, v)
+	})
+
+	t.Run("delete fails when key does not exist", func(t *testing.T) {
+		m := NewConcurrentMap[string, int]()
+
+		deleted := m.CompareAndDelete("missing", 0)
+		assert.False(t, deleted)
+	})
+}
+
+func TestConcurrentMap_CompareAndSwap_Concurrent(t *testing.T) {
+	m := NewConcurrentMap[string, int]()
+	m.Insert("counter", 0)
+
+	const goroutines = 100
+	successCount := int64(0)
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	// Each goroutine tries to swap 0 -> 1. Exactly one should succeed.
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			if m.CompareAndSwap("counter", 0, 1) {
+				atomic.AddInt64(&successCount, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, int64(1), successCount)
+	v, _ := m.Get("counter")
+	assert.Equal(t, 1, v)
+}
+
+func TestConcurrentMap_CompareAndDelete_Concurrent(t *testing.T) {
+	m := NewConcurrentMap[int, string]()
+	m.Insert(42, "hello")
+
+	const goroutines = 100
+	successCount := int64(0)
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	// Each goroutine tries to compare-and-delete. Exactly one should succeed.
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			if m.CompareAndDelete(42, "hello") {
+				atomic.AddInt64(&successCount, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, int64(1), successCount)
+	_, ok := m.Get(42)
+	assert.False(t, ok)
 }
