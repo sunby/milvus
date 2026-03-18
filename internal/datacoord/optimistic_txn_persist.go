@@ -126,15 +126,11 @@ type etcdPersist[K string, V any] struct {
 }
 
 // NewOptimisticTxnEtcdPersist creates an etcd-backed persist layer.
-// maxOpsPerTxn is the etcd max-txn-ops limit (e.g. paramtable MaxEtcdTxnNum, default 64).
+// maxOpsPerTxn is the etcd max-txn-ops limit (e.g. paramtable MaxEtcdTxnNum).
 // Each write operation uses 2 etcd ops (1 cmp + 1 put/delete), so effective batch
-// size is maxOpsPerTxn/2. If maxOpsPerTxn <= 0, defaults to 128.
-func NewOptimisticTxnEtcdPersist[K string, V any](cli *clientv3.Client, marshaler Marshaler[V], maxOpsPerTxn ...int) OptimisticTxnPersist[K, V] {
-	limit := 128
-	if len(maxOpsPerTxn) > 0 && maxOpsPerTxn[0] > 0 {
-		limit = maxOpsPerTxn[0]
-	}
-	return &etcdPersist[K, V]{cli: cli, marshaler: marshaler, maxOpsPerTxn: limit}
+// size is maxOpsPerTxn/2.
+func NewOptimisticTxnEtcdPersist[K string, V any](cli *clientv3.Client, marshaler Marshaler[V], maxOpsPerTxn int) OptimisticTxnPersist[K, V] {
+	return &etcdPersist[K, V]{cli: cli, marshaler: marshaler, maxOpsPerTxn: maxOpsPerTxn}
 }
 
 func (p *etcdPersist[K, V]) Txn(ctx context.Context) Txn[K, V] {
