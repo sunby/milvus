@@ -56,12 +56,12 @@ func (s *BackfillCompactionPolicySuite) SetupTest() {
 	segments := genSegmentsForMeta(s.testLabel)
 	mockCatalog := mocks.NewDataCoordCatalog(s.T())
 	meta := &meta{
-		segments:    NewSegmentsInfo(),
+		segments:    NewCachedSegmentsInfo(),
 		collections: typeutil.NewConcurrentMap[UniqueID, *collectionInfo](),
 		catalog:     mockCatalog,
 	}
 	for id, segment := range segments {
-		meta.segments.SetSegment(id, segment)
+		meta.segments.SetSegment(id, segment, 0)
 	}
 
 	s.mockAlloc = newMockAllocator(s.T())
@@ -202,7 +202,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerWithCollectionNoBackfill() {
 			},
 		},
 	}
-	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment)
+	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment, 0)
 
 	events, err := s.backfillPolicy.Trigger(ctx)
 	s.NoError(err)
@@ -258,7 +258,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerWithCompactingSegment() {
 		},
 	}
 	segment.isCompacting = true // Mark as compacting
-	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment)
+	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment, 0)
 
 	events, err := s.backfillPolicy.Trigger(ctx)
 	s.NoError(err)
@@ -314,7 +314,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerWithImportingSegment() {
 			},
 		},
 	}
-	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment)
+	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment, 0)
 
 	events, err := s.backfillPolicy.Trigger(ctx)
 	s.NoError(err)
@@ -370,7 +370,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerWithInvisibleSegment() {
 			},
 		},
 	}
-	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment)
+	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment, 0)
 
 	events, err := s.backfillPolicy.Trigger(ctx)
 	s.NoError(err)
@@ -425,7 +425,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerWithUnhealthySegment() {
 			},
 		},
 	}
-	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment)
+	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment, 0)
 
 	// AllocID should NOT be called: unhealthy segment is filtered before physical backfill.
 	events, err := s.backfillPolicy.Trigger(ctx)
@@ -481,7 +481,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerWithNonFlushedSegment() {
 			},
 		},
 	}
-	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment)
+	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment, 0)
 
 	// AllocID should NOT be called: non-flushed segment is filtered before physical backfill.
 	events, err := s.backfillPolicy.Trigger(ctx)
@@ -608,7 +608,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerWithOutdatedSchemaVersion() {
 			},
 		},
 	}
-	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment)
+	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment, 0)
 
 	// Setup allocator mock
 	s.mockAlloc.EXPECT().AllocID(mock.Anything).Return(int64(1), nil)
@@ -680,7 +680,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerInlineNoPhysicalBackfill() {
 			},
 		},
 	}
-	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment)
+	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment, 0)
 
 	// AllocID must NOT be called: DoPhysicalBackfill=false produces only an
 	// inline-executable view (meta-only). TriggerInline handles it; Trigger() skips it.
@@ -750,7 +750,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerInlineMetadataOnlyWithAutoCom
 			},
 		},
 	}
-	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment)
+	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment, 0)
 
 	events, err := s.backfillPolicy.TriggerInline(ctx)
 	s.NoError(err)
@@ -820,7 +820,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerPhysicalBackfillWithAutoCompa
 			},
 		},
 	}
-	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment)
+	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment, 0)
 
 	// AllocID should be called: physical backfill proceeds even with auto compaction disabled
 	s.mockAlloc.EXPECT().AllocID(mock.Anything).Return(int64(1), nil)
@@ -872,7 +872,7 @@ func (s *BackfillCompactionPolicySuite) TestSchemaFrozenAtScanTime() {
 			},
 		},
 	}
-	s.backfillPolicy.meta.segments.SetSegment(int64(201), segment)
+	s.backfillPolicy.meta.segments.SetSegment(int64(201), segment, 0)
 	s.mockAlloc.EXPECT().AllocID(mock.Anything).Return(int64(1), nil)
 
 	events, err := s.backfillPolicy.Trigger(ctx)
@@ -932,7 +932,7 @@ func (s *BackfillCompactionPolicySuite) TestMultipleMissingFunctionsSkipped() {
 			},
 		},
 	}
-	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment)
+	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment, 0)
 
 	events, err := s.backfillPolicy.Trigger(ctx)
 	s.NoError(err)
@@ -982,7 +982,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerInlineSelfHeal() {
 			},
 		},
 	}
-	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment)
+	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment, 0)
 
 	// TriggerInline must emit an inline-executable self-heal view (no AllocID call).
 	events, err := s.backfillPolicy.TriggerInline(ctx)

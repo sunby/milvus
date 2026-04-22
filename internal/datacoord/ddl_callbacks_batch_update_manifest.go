@@ -21,18 +21,33 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/internal/storagev2/packed"
 	"github.com/milvus-io/milvus/pkg/v2/log"
 	"github.com/milvus-io/milvus/pkg/v2/streaming/util/message"
 )
 
 func (c *DDLCallbacks) batchUpdateManifestV2AckCallback(ctx context.Context, result message.BroadcastResultBatchUpdateManifestMessageV2) error {
 	body := result.Message.MustBody()
-	var operators []UpdateOperator
+	mutations := make(map[int64][]SegmentOperator, len(body.GetItems()))
 	for _, item := range body.GetItems() {
-		operators = append(operators, UpdateManifestVersion(item.GetSegmentId(), item.GetManifestVersion()))
+		manifestVersion := item.GetManifestVersion()
+		mutations[item.GetSegmentId()] = []SegmentOperator{func(seg *SegmentInfo) (BinlogIncrement, bool) {
+			if seg.GetManifestPath() == "" {
+				return BinlogIncrement{}, false
+			}
+			basePath, currentVer, err := packed.UnmarshalManifestPath(seg.GetManifestPath())
+			if err != nil {
+				return BinlogIncrement{}, false
+			}
+			if currentVer == manifestVersion {
+				return BinlogIncrement{}, false
+			}
+			seg.ManifestPath = packed.MarshalManifestPath(basePath, manifestVersion)
+			return BinlogIncrement{}, true
+		}}
 	}
-	if len(operators) > 0 {
-		if err := c.meta.UpdateSegmentsInfo(ctx, operators...); err != nil {
+	if len(mutations) > 0 {
+		if err := c.meta.UpdateSegmentsInfo(ctx, mutations); err != nil {
 			log.Ctx(ctx).Warn("batch update manifest version failed", zap.Error(err))
 			return err
 		}

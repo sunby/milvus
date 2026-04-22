@@ -18,64 +18,70 @@ package datacoord
 
 import "github.com/milvus-io/milvus/pkg/v2/proto/datapb"
 
-// SegmentOperator is function type to update segment info.
-type SegmentOperator func(segment *SegmentInfo) bool
+// SegmentOperator mutates a segment in place and reports:
+//   - the binlog fields it changed (if any) so the caller can rewrite the
+//     matching side-prefix KVs;
+//   - whether the write should proceed at all.
+//
+// Return (BinlogIncrement{}, true) for state-only mutations.
+// Return (_, false) to skip the write for this segment.
+type SegmentOperator func(segment *SegmentInfo) (BinlogIncrement, bool)
 
 func SetMaxRowCount(maxRow int64) SegmentOperator {
-	return func(segment *SegmentInfo) bool {
+	return func(segment *SegmentInfo) (BinlogIncrement, bool) {
 		if segment.MaxRowNum == maxRow {
-			return false
+			return BinlogIncrement{}, false
 		}
 		segment.MaxRowNum = maxRow
-		return true
+		return BinlogIncrement{}, true
 	}
 }
 
 func SetTextIndexLogs(textIndexLogs map[int64]*datapb.TextIndexStats) SegmentOperator {
-	return func(segment *SegmentInfo) bool {
+	return func(segment *SegmentInfo) (BinlogIncrement, bool) {
 		if segment.TextStatsLogs == nil {
 			segment.TextStatsLogs = make(map[int64]*datapb.TextIndexStats)
 		}
 		for field, logs := range textIndexLogs {
 			segment.TextStatsLogs[field] = logs
 		}
-		return true
+		return BinlogIncrement{}, true
 	}
 }
 
 func SetStatslogs(statslogs []*datapb.FieldBinlog) SegmentOperator {
-	return func(segment *SegmentInfo) bool {
+	return func(segment *SegmentInfo) (BinlogIncrement, bool) {
 		segment.Statslogs = statslogs
-		return true
+		return BinlogIncrement{Statslogs: statslogs}, true
 	}
 }
 
 func SetBm25Statslogs(bm25Statslogs []*datapb.FieldBinlog) SegmentOperator {
-	return func(segment *SegmentInfo) bool {
+	return func(segment *SegmentInfo) (BinlogIncrement, bool) {
 		segment.Bm25Statslogs = bm25Statslogs
-		return true
+		return BinlogIncrement{Bm25Statslogs: bm25Statslogs}, true
 	}
 }
 
 func SetJSONKeyIndexLogs(jsonKeyIndexLogs map[int64]*datapb.JsonKeyStats) SegmentOperator {
-	return func(segment *SegmentInfo) bool {
+	return func(segment *SegmentInfo) (BinlogIncrement, bool) {
 		if segment.JsonKeyStats == nil {
 			segment.JsonKeyStats = make(map[int64]*datapb.JsonKeyStats)
 		}
 		for field, logs := range jsonKeyIndexLogs {
 			segment.JsonKeyStats[field] = logs
 		}
-		return true
+		return BinlogIncrement{}, true
 	}
 }
 
 func SetSchemaVersion(schemaVersion int32) SegmentOperator {
-	return func(segment *SegmentInfo) bool {
+	return func(segment *SegmentInfo) (BinlogIncrement, bool) {
 		if segment.GetSchemaVersion() == schemaVersion {
-			return false
+			return BinlogIncrement{}, false
 		}
 		segment.SchemaVersion = schemaVersion
-		return true
+		return BinlogIncrement{}, true
 	}
 }
 
