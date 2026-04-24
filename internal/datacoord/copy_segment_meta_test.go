@@ -873,7 +873,6 @@ func (s *CopySegmentMetaSuite) TestCopySegmentTasks_Operations() {
 	s.Len(tasks.listTasks(), 1)
 }
 
-
 // TestUpdateJobStateAndReleaseRef_NotFound verifies that updating a non-existent
 // job is a no-op and does not error.
 func (s *CopySegmentMetaSuite) TestUpdateJobStateAndReleaseRef_NotFound() {
@@ -930,6 +929,7 @@ func TestUpdateJobStateAndReleaseRef_UnpinsOnTerminal(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, 1, unpinCalls, "Double terminal transition must not double-unpin")
 }
+
 func TestUpdateJobStateAndReleaseRef_SkipsUnpinForLegacyJob(t *testing.T) {
 	catalog := mocks.NewDataCoordCatalog(t)
 	catalog.EXPECT().SaveCopySegmentJob(mock.Anything, mock.Anything).Return(nil).Maybe()
@@ -968,6 +968,7 @@ func TestUpdateJobStateAndReleaseRef_SkipsUnpinForLegacyJob(t *testing.T) {
 	assert.NoError(t, err)
 	assert.False(t, unpinCalled, "UnpinSnapshot must not be called for legacy job (PinId=0)")
 }
+
 func TestUpdateJobStateAndReleaseRef_UnpinErrorSwallowed(t *testing.T) {
 	catalog := mocks.NewDataCoordCatalog(t)
 	catalog.EXPECT().SaveCopySegmentJob(mock.Anything, mock.Anything).Return(nil).Maybe()

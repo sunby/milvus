@@ -148,7 +148,6 @@ func buildSegmentAndBinlogsKvs(segment *datapb.SegmentInfo) (map[string]string, 
 	return kvs, nil
 }
 
-
 func buildBinlogKvs(collectionID, partitionID, segmentID typeutil.UniqueID, binlogs, deltalogs, statslogs, bm25logs []*datapb.FieldBinlog) (map[string]string, error) {
 	kv := make(map[string]string)
 

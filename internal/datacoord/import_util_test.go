@@ -790,7 +790,7 @@ func TestImportUtil_GetImportProgress(t *testing.T) {
 	// importing state, segmentImportedRows/totalRows = 1
 	for _, segID := range []int64{10, 20, 11, 12, 21, 22} {
 		err = meta.UpdateSegmentsInfo(context.TODO(), map[int64][]SegmentOperator{
-			segID: []SegmentOperator{func(seg *SegmentInfo) (BinlogIncrement, bool) {
+			segID: {func(seg *SegmentInfo) (BinlogIncrement, bool) {
 				seg.NumOfRows = 100
 				seg.MaxRowNum = 100
 				return BinlogIncrement{}, true

@@ -179,7 +179,7 @@ func TestIndexInspector_isExternalCollection(t *testing.T) {
 	versionManager := newIndexEngineVersionManager()
 
 	m := &meta{
-		segments: NewCachedSegmentsInfo(),
+		segments:    NewCachedSegmentsInfo(),
 		collections: typeutil.NewConcurrentMap[UniqueID, *collectionInfo](),
 		indexMeta: &indexMeta{
 			keyLock:          lock.NewKeyLock[UniqueID](),
@@ -239,7 +239,7 @@ func TestIndexInspector_CreateIndexesForSegment_ExternalUnsorted(t *testing.T) {
 	catalog := mocks2.NewDataCoordCatalog(t)
 
 	m := &meta{
-		segments: NewCachedSegmentsInfo(),
+		segments:    NewCachedSegmentsInfo(),
 		collections: typeutil.NewConcurrentMap[UniqueID, *collectionInfo](),
 		indexMeta: &indexMeta{
 			keyLock:          lock.NewKeyLock[UniqueID](),

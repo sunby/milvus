@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/milvus-io/milvus/pkg/v2/util/paramtable"
-	"github.com/milvus-io/milvus/pkg/v2/util/retry"
 	"github.com/tikv/client-go/v2/txnkv"
 	"github.com/tikv/client-go/v2/txnkv/transaction"
 	clientv3 "go.etcd.io/etcd/client/v3"
+
+	"github.com/milvus-io/milvus/pkg/v2/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v2/util/retry"
 )
 
 var (
@@ -271,7 +272,8 @@ func (p *tikvPersist) Txn(ctx context.Context) Txn {
 
 func (p *tikvPersist) captureCommitTS(txn interface {
 	SetCommitCallback(func(string, error))
-}) *uint64 {
+},
+) *uint64 {
 	var cts uint64
 	txn.SetCommitCallback(func(info string, err error) {
 		if err != nil || info == "" {
@@ -419,7 +421,6 @@ func (t *tikvTxn) Commit() ([]TxnResult, error) {
 		}
 		return err
 	}, retry.AttemptAlways())
-
 	if err != nil {
 		return nil, err
 	}

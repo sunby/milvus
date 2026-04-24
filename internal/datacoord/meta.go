@@ -1186,7 +1186,7 @@ func (m *meta) UpdateDropChannelSegmentInfo(ctx context.Context, channel string,
 				fieldBinlogs.Binlogs = append(fieldBinlogs.Binlogs, tBinlogs.Binlogs...)
 			}
 		}
-		clone.SegmentInfo.Binlogs = currBinlogs
+		clone.Binlogs = currBinlogs
 
 		currStatsLogs := clone.GetStatslogs()
 		for _, tStatsLogs := range mergeData.GetStatslogs() {
@@ -1197,16 +1197,16 @@ func (m *meta) UpdateDropChannelSegmentInfo(ctx context.Context, channel string,
 				fieldStatsLog.Binlogs = append(fieldStatsLog.Binlogs, tStatsLogs.Binlogs...)
 			}
 		}
-		clone.SegmentInfo.Statslogs = currStatsLogs
+		clone.Statslogs = currStatsLogs
 
-		clone.SegmentInfo.Deltalogs = append(clone.GetDeltalogs(), mergeData.GetDeltalogs()...)
+		clone.Deltalogs = append(clone.GetDeltalogs(), mergeData.GetDeltalogs()...)
 		if mergeData.GetStartPosition() != nil {
-			clone.SegmentInfo.StartPosition = mergeData.GetStartPosition()
+			clone.StartPosition = mergeData.GetStartPosition()
 		}
 		if mergeData.GetDmlPosition() != nil {
-			clone.SegmentInfo.DmlPosition = mergeData.GetDmlPosition()
+			clone.DmlPosition = mergeData.GetDmlPosition()
 		}
-		clone.SegmentInfo.NumOfRows = mergeData.GetNumOfRows()
+		clone.NumOfRows = mergeData.GetNumOfRows()
 	}
 
 	type pending struct {
@@ -1364,12 +1364,10 @@ func (m *meta) GetFlushingSegments() []*SegmentInfo {
 
 // SelectSegments select segments with selector
 func (m *meta) SelectSegments(ctx context.Context, filters ...SegmentFilter) []*SegmentInfo {
-
 	return m.segments.GetSegmentsBySelector(filters...)
 }
 
 func (m *meta) GetRealSegmentsForChannel(channel string) []*SegmentInfo {
-
 	return m.segments.GetRealSegmentsForChannel(channel)
 }
 
@@ -1393,14 +1391,12 @@ func (m *meta) AddAllocation(segmentID UniqueID, allocation *Allocation) error {
 }
 
 func (m *meta) SetRowCount(segmentID UniqueID, rowCount int64) {
-
 	m.segments.SetRowCount(segmentID, rowCount)
 }
 
 // SetAllocations set Segment allocations, will overwrite ALL original allocations
 // Note that allocations is not persisted in KV store
 func (m *meta) SetAllocations(segmentID UniqueID, allocations []*Allocation) {
-
 	m.segments.SetAllocations(segmentID, allocations)
 }
 
@@ -1413,26 +1409,22 @@ func (m *meta) SetLastExpire(segmentID UniqueID, lastExpire uint64) {
 // SetLastFlushTime set LastFlushTime for segment with provided `segmentID`
 // Note that lastFlushTime is not persisted in KV store
 func (m *meta) SetLastFlushTime(segmentID UniqueID, t time.Time) {
-
 	m.segments.SetFlushTime(segmentID, t)
 }
 
 // SetLastWrittenTime set LastWrittenTime for segment with provided `segmentID`
 // Note that lastWrittenTime is not persisted in KV store
 func (m *meta) SetLastWrittenTime(segmentID UniqueID) {
-
 	m.segments.SetLastWrittenTime(segmentID)
 }
 
 // SetSegmentCompacting sets compaction state for segment
 func (m *meta) SetSegmentCompacting(segmentID UniqueID, compacting bool) {
-
 	m.segments.SetIsCompacting(segmentID, compacting)
 }
 
 // IsSegmentCompacting check if segment is compacting
 func (m *meta) IsSegmentCompacting(segmentID UniqueID) bool {
-
 	seg := m.segments.GetSegment(segmentID)
 	if seg == nil {
 		return false
@@ -1444,7 +1436,6 @@ func (m *meta) IsSegmentCompacting(segmentID UniqueID) bool {
 // if true, set them compacting and return true
 // if false, skip setting and
 func (m *meta) CheckAndSetSegmentsCompacting(ctx context.Context, segmentIDs []UniqueID) (exist, canDo bool) {
-
 	var hasCompacting bool
 	exist = true
 	for _, segmentID := range segmentIDs {
@@ -1468,7 +1459,6 @@ func (m *meta) CheckAndSetSegmentsCompacting(ctx context.Context, segmentIDs []U
 }
 
 func (m *meta) SetSegmentsCompacting(ctx context.Context, segmentIDs []UniqueID, compacting bool) {
-
 	for _, segmentID := range segmentIDs {
 		m.segments.SetIsCompacting(segmentID, compacting)
 	}
@@ -1476,7 +1466,6 @@ func (m *meta) SetSegmentsCompacting(ctx context.Context, segmentIDs []UniqueID,
 
 // SetSegmentLevel sets level for segment
 func (m *meta) SetSegmentLevel(segmentID UniqueID, level datapb.SegmentLevel) {
-
 	m.segments.SetLevel(segmentID, level)
 }
 
@@ -1740,7 +1729,6 @@ func (m *meta) completeMixCompactionMutation(
 }
 
 func (m *meta) ValidateSegmentStateBeforeCompleteCompactionMutation(t *datapb.CompactionTask) error {
-
 	// Snapshot compaction protection exists to keep the sealed-segment list stable during
 	// backfill — if an L1/L2 segment gets merged away mid-backfill, the backfill breaks.
 	// L0 segments are transient delete-log carriers, not part of that stable list, and
@@ -1798,7 +1786,6 @@ func (m *meta) ValidateSegmentStateBeforeCompleteCompactionMutation(t *datapb.Co
 }
 
 func (m *meta) CompleteCompactionMutation(ctx context.Context, t *datapb.CompactionTask, result *datapb.CompactionPlanResult) ([]*SegmentInfo, *segMetricMutation, error) {
-
 	switch t.GetType() {
 	case datapb.CompactionType_MixCompaction:
 		return m.completeMixCompactionMutation(t, result)
@@ -1833,7 +1820,6 @@ func isSegmentHealthy(segment *SegmentInfo) bool {
 }
 
 func (m *meta) HasSegments(segIDs []UniqueID) (bool, error) {
-
 	for _, segID := range segIDs {
 		if m.segments.GetSegment(segID) == nil {
 			return false, fmt.Errorf("segment is not exist with ID = %d", segID)
@@ -1844,7 +1830,6 @@ func (m *meta) HasSegments(segIDs []UniqueID) (bool, error) {
 
 // GetCompactionTo returns the segment info of the segment to be compacted to.
 func (m *meta) GetCompactionTo(segmentID int64) ([]*SegmentInfo, bool) {
-
 	return m.segments.GetCompactionTo(segmentID)
 }
 
@@ -2392,7 +2377,6 @@ func (m *meta) completeBackfillCompactionMutation(
 }
 
 func (m *meta) getSegmentsMetrics(collectionID int64) []*metricsinfo.Segment {
-
 	allSegments := m.segments.GetSegments()
 	segments := make([]*metricsinfo.Segment, 0, len(allSegments))
 	for _, s := range allSegments {
@@ -2418,7 +2402,6 @@ func (m *meta) getSegmentsMetrics(collectionID int64) []*metricsinfo.Segment {
 }
 
 func (m *meta) DropSegmentsOfPartition(ctx context.Context, partitionIDs []int64) error {
-
 	// Collect segments to drop (read-only from cache for key construction).
 	var segRefs []segKeyed
 	for _, seg := range m.segments.GetSegments() {
@@ -2537,7 +2520,6 @@ func (m *meta) GetFileResources(ctx context.Context, resourceIDs ...int64) ([]*i
 
 // TruncateChannelByTime drops segments of a channel that were updated before the flush timestamp
 func (m *meta) TruncateChannelByTime(ctx context.Context, vChannel string, flushTs uint64) error {
-
 	segments := m.segments.GetSegmentsBySelector(SegmentFilterFunc(isSegmentHealthy), WithChannel(vChannel))
 
 	// Collect segments to drop (read-only from cache for key construction and filtering).

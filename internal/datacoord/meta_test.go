@@ -1613,7 +1613,7 @@ func TestAlterSegmentsWithRecovery(t *testing.T) {
 	checkVersion(1, 1, 1, 1, 1)
 
 	err = meta.UpdateSegmentsInfo(context.TODO(), map[int64][]SegmentOperator{
-		1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+		1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 			seg.Binlogs = mergeFieldBinlogs(seg.GetBinlogs(), []*datapb.FieldBinlog{getFieldBinlogIDs(1, 10, 333)})
 			return true
 		})},
@@ -1622,7 +1622,7 @@ func TestAlterSegmentsWithRecovery(t *testing.T) {
 	checkVersion(2, 2, 1, 1, 1)
 
 	err = meta.UpdateSegmentsInfo(context.TODO(), map[int64][]SegmentOperator{
-		1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+		1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 			seg.Statslogs = mergeFieldBinlogs(seg.GetStatslogs(), []*datapb.FieldBinlog{getFieldBinlogIDs(1, 10, 333)})
 			return true
 		})},
@@ -1631,7 +1631,7 @@ func TestAlterSegmentsWithRecovery(t *testing.T) {
 	checkVersion(3, 2, 2, 1, 1)
 
 	err = meta.UpdateSegmentsInfo(context.TODO(), map[int64][]SegmentOperator{
-		1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+		1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 			seg.Deltalogs = mergeFieldBinlogs(seg.GetDeltalogs(), []*datapb.FieldBinlog{getFieldBinlogIDs(1, 10, 333)})
 			return true
 		})},
@@ -1640,7 +1640,7 @@ func TestAlterSegmentsWithRecovery(t *testing.T) {
 	checkVersion(4, 2, 2, 2, 1)
 
 	err = meta.UpdateSegmentsInfo(context.TODO(), map[int64][]SegmentOperator{
-		1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+		1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 			seg.Bm25Statslogs = mergeFieldBinlogs(seg.GetBm25Statslogs(), []*datapb.FieldBinlog{getFieldBinlogIDs(1, 10, 333)})
 			return true
 		})},
@@ -1649,7 +1649,7 @@ func TestAlterSegmentsWithRecovery(t *testing.T) {
 	checkVersion(5, 2, 2, 2, 2)
 
 	err = meta.UpdateSegmentsInfo(context.TODO(), map[int64][]SegmentOperator{
-		1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+		1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 			seg.Binlogs = mergeFieldBinlogs(seg.GetBinlogs(), []*datapb.FieldBinlog{getFieldBinlogIDs(1, 10, 333)})
 			seg.Statslogs = mergeFieldBinlogs(seg.GetStatslogs(), []*datapb.FieldBinlog{getFieldBinlogIDs(1, 10, 333)})
 			seg.Deltalogs = mergeFieldBinlogs(seg.GetDeltalogs(), []*datapb.FieldBinlog{getFieldBinlogIDs(1, 10, 333)})
@@ -1679,7 +1679,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					// UpdateStatusOperator
 					seg.State = commonpb.SegmentState_Growing
 					// AddBinlogsOperator
@@ -1740,7 +1740,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					seg.State = commonpb.SegmentState_Growing
 					// Replace binlogs (WithFullBinlogs style)
 					seg.Binlogs = mergeFieldBinlogs(nil, []*datapb.FieldBinlog{getFieldBinlogIDsWithEntry(1, 10, 333)})
@@ -1785,7 +1785,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					// Replace binlogs (WithFullBinlogs style)
 					seg.Binlogs = mergeFieldBinlogs(nil, []*datapb.FieldBinlog{getFieldBinlogIDsWithEntry(1, 10, 335, 337)})
 					seg.Statslogs = mergeFieldBinlogs(nil, []*datapb.FieldBinlog{getFieldBinlogIDs(1, 336)})
@@ -1827,7 +1827,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					seg.State = commonpb.SegmentState_Dropped
 					seg.DroppedAt = uint64(time.Now().UnixNano())
 					// Replace binlogs (WithFullBinlogs style)
@@ -1860,7 +1860,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					seg.Compacted = true
 					return true
 				})},
@@ -1880,7 +1880,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					seg.Compacted = true
 					return true
 				})},
@@ -1897,7 +1897,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					seg.State = commonpb.SegmentState_Flushing
 					return true
 				})},
@@ -1908,7 +1908,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					seg.Binlogs = mergeFieldBinlogs(seg.GetBinlogs(), nil)
 					seg.Statslogs = mergeFieldBinlogs(seg.GetStatslogs(), nil)
 					seg.Deltalogs = mergeFieldBinlogs(seg.GetDeltalogs(), nil)
@@ -1922,7 +1922,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					seg.StartPosition = &msgpb.MsgPosition{MsgID: []byte{1, 2, 3}}
 					return true
 				})},
@@ -1933,7 +1933,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					// CheckPoint
 					count := segmentutil.CalcRowCountFromBinLog(seg)
 					if count > 0 {
@@ -1948,7 +1948,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					seg.Binlogs = nil
 					seg.Statslogs = nil
 					seg.Deltalogs = nil
@@ -1962,7 +1962,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					seg.DmlPosition = nil
 					return true
 				})},
@@ -1973,7 +1973,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					seg.DmlPosition = &msgpb.MsgPosition{MsgID: []byte{1}}
 					return true
 				})},
@@ -1984,7 +1984,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					seg.NumOfRows = 0
 					seg.MaxRowNum = 0
 					return true
@@ -1996,7 +1996,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					seg.IsImporting = true
 					return true
 				})},
@@ -2007,7 +2007,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					seg.ManifestPath = "files/binlogs/1/2/1000/manifest_0"
 					return true
 				})},
@@ -2016,7 +2016,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		assert.NoError(t, err)
 
 		err = meta.UpdateSegmentsInfo(context.TODO(), map[int64][]SegmentOperator{
-			1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+			1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 				if seg.Level != datapb.SegmentLevel_L0 && seg.GetNumOfRows() == 0 &&
 					(seg.GetState() == commonpb.SegmentState_Flushing || seg.GetState() == commonpb.SegmentState_Flushed) {
 					seg.State = commonpb.SegmentState_Dropped
@@ -2035,7 +2035,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					seg.State = commonpb.SegmentState_Flushing
 					// UpdateAsDroppedIfEmptyWhenFlushing
 					if seg.Level != datapb.SegmentLevel_L0 && seg.GetNumOfRows() == 0 &&
@@ -2063,7 +2063,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					// Only apply checkpoint if matching segment ID
 					for _, cp := range []*datapb.CheckPoint{{SegmentID: 2, NumOfRows: 10}} {
 						if cp.SegmentID == seg.GetID() {
@@ -2108,7 +2108,7 @@ func TestUpdateSegmentsInfo(t *testing.T) {
 		err = meta.UpdateSegmentsInfo(
 			context.TODO(),
 			map[int64][]SegmentOperator{
-				1: []SegmentOperator{allBinlogs(func(seg *datapb.SegmentInfo) bool {
+				1: {allBinlogs(func(seg *datapb.SegmentInfo) bool {
 					seg.State = commonpb.SegmentState_Flushing
 					seg.Binlogs = mergeFieldBinlogs(seg.GetBinlogs(), []*datapb.FieldBinlog{getFieldBinlogIDs(1, 2)})
 					seg.Statslogs = mergeFieldBinlogs(seg.GetStatslogs(), []*datapb.FieldBinlog{getFieldBinlogIDs(1, 2)})
