@@ -178,7 +178,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerWithCollectionNoBackfill() {
 	s.backfillPolicy.meta.collections.Insert(collID, coll)
 
 	// Create segment with same schema version (no backfill needed)
-	segmentID := int64(101)
+	segmentID := int64(9101)
 	segment := &SegmentInfo{
 		SegmentInfo: &datapb.SegmentInfo{
 			ID:            segmentID,
@@ -233,7 +233,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerWithCompactingSegment() {
 	s.backfillPolicy.meta.collections.Insert(collID, coll)
 
 	// Create segment that is compacting (should be filtered out)
-	segmentID := int64(101)
+	segmentID := int64(9101)
 	segment := &SegmentInfo{
 		SegmentInfo: &datapb.SegmentInfo{
 			ID:            segmentID,
@@ -289,7 +289,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerWithImportingSegment() {
 	s.backfillPolicy.meta.collections.Insert(collID, coll)
 
 	// Create segment that is importing (should be filtered out)
-	segmentID := int64(101)
+	segmentID := int64(9101)
 	segment := &SegmentInfo{
 		SegmentInfo: &datapb.SegmentInfo{
 			ID:            segmentID,
@@ -345,7 +345,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerWithInvisibleSegment() {
 	s.backfillPolicy.meta.collections.Insert(collID, coll)
 
 	// Create segment that is invisible (should be filtered out)
-	segmentID := int64(101)
+	segmentID := int64(9101)
 	segment := &SegmentInfo{
 		SegmentInfo: &datapb.SegmentInfo{
 			ID:            segmentID,
@@ -401,7 +401,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerWithUnhealthySegment() {
 	s.backfillPolicy.meta.collections.Insert(collID, coll)
 
 	// Create segment that is not healthy (should be filtered out)
-	segmentID := int64(101)
+	segmentID := int64(9101)
 	segment := &SegmentInfo{
 		SegmentInfo: &datapb.SegmentInfo{
 			ID:            segmentID,
@@ -457,7 +457,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerWithNonFlushedSegment() {
 	s.backfillPolicy.meta.collections.Insert(collID, coll)
 
 	// Create segment that is not flushed (should be filtered out)
-	segmentID := int64(101)
+	segmentID := int64(9101)
 	segment := &SegmentInfo{
 		SegmentInfo: &datapb.SegmentInfo{
 			ID:            segmentID,
@@ -583,7 +583,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerWithOutdatedSchemaVersion() {
 	s.backfillPolicy.meta.collections.Insert(collID, coll)
 
 	// Create segment with outdated schema version 1, binlogs only have field 101 (missing 102)
-	segmentID := int64(101)
+	segmentID := int64(9101)
 	segment := &SegmentInfo{
 		SegmentInfo: &datapb.SegmentInfo{
 			ID:            segmentID,
@@ -656,7 +656,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerInlineNoPhysicalBackfill() {
 	s.backfillPolicy.meta.collections.Insert(collID, coll)
 
 	// Create segment with outdated schema version 1
-	segmentID := int64(101)
+	segmentID := int64(9101)
 	segment := &SegmentInfo{
 		SegmentInfo: &datapb.SegmentInfo{
 			ID:            segmentID,
@@ -726,7 +726,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerInlineMetadataOnlyWithAutoCom
 	}
 	s.backfillPolicy.meta.collections.Insert(collID, coll)
 
-	segmentID := int64(101)
+	segmentID := int64(9101)
 	segment := &SegmentInfo{
 		SegmentInfo: &datapb.SegmentInfo{
 			ID:            segmentID,
@@ -796,7 +796,7 @@ func (s *BackfillCompactionPolicySuite) TestTriggerPhysicalBackfillWithAutoCompa
 	}
 	s.backfillPolicy.meta.collections.Insert(collID, coll)
 
-	segmentID := int64(101)
+	segmentID := int64(9101)
 	segment := &SegmentInfo{
 		SegmentInfo: &datapb.SegmentInfo{
 			ID:            segmentID,
@@ -860,9 +860,10 @@ func (s *BackfillCompactionPolicySuite) TestSchemaFrozenAtScanTime() {
 		},
 	}
 	s.backfillPolicy.meta.collections.Insert(collID, &collectionInfo{ID: collID, Schema: schemaV1})
+	segmentID := int64(9201)
 	segment := &SegmentInfo{
 		SegmentInfo: &datapb.SegmentInfo{
-			ID: int64(201), CollectionID: collID, PartitionID: 10,
+			ID: segmentID, CollectionID: collID, PartitionID: 10,
 			InsertChannel: "ch-1", Level: datapb.SegmentLevel_L1,
 			State: commonpb.SegmentState_Flushed, NumOfRows: 100,
 			SchemaVersion: 0,
@@ -872,7 +873,7 @@ func (s *BackfillCompactionPolicySuite) TestSchemaFrozenAtScanTime() {
 			},
 		},
 	}
-	s.backfillPolicy.meta.segments.SetSegment(int64(201), segment, 0)
+	s.backfillPolicy.meta.segments.SetSegment(segmentID, segment, 0)
 	s.mockAlloc.EXPECT().AllocID(mock.Anything).Return(int64(1), nil)
 
 	events, err := s.backfillPolicy.Trigger(ctx)
@@ -919,7 +920,7 @@ func (s *BackfillCompactionPolicySuite) TestMultipleMissingFunctionsSkipped() {
 	s.backfillPolicy.meta.collections.Insert(collID, coll)
 
 	// Segment at version=0, missing both function output fields (102 and 103).
-	segmentID := int64(301)
+	segmentID := int64(9301)
 	segment := &SegmentInfo{
 		SegmentInfo: &datapb.SegmentInfo{
 			ID: segmentID, CollectionID: collID, PartitionID: 10,
