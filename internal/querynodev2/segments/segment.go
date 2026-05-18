@@ -360,6 +360,7 @@ func NewSegment(ctx context.Context,
 	loadInfo *querypb.SegmentLoadInfo,
 ) (Segment, error) {
 	log := log.Ctx(ctx)
+	newSegmentStart := time.Now()
 	/*
 		CStatus
 		NewSegment(CCollection collection, uint64_t segment_id, SegmentType seg_type, CSegmentInterface* newSegment);
@@ -368,10 +369,24 @@ func NewSegment(ctx context.Context,
 		return NewL0Segment(collection, segmentType, version, loadInfo)
 	}
 
+	logger := log.With(
+		zap.Int64("collectionID", loadInfo.GetCollectionID()),
+		zap.Int64("partitionID", loadInfo.GetPartitionID()),
+		zap.Int64("segmentID", loadInfo.GetSegmentID()),
+		zap.String("segmentType", segmentType.String()),
+		zap.String("level", loadInfo.GetLevel().String()),
+	)
+
+	newBaseSegmentStart := time.Now()
 	base, err := newBaseSegment(collection, segmentType, version, loadInfo)
 	if err != nil {
+		logger.Warn("[xxx] new base segment failed",
+			zap.Duration("newBaseSegmentDuration", time.Since(newBaseSegmentStart)),
+			zap.Duration("totalDuration", time.Since(newSegmentStart)),
+			zap.Error(err))
 		return nil, err
 	}
+	newBaseSegmentDuration := time.Since(newBaseSegmentStart)
 
 	var locker *state.LoadStateLock
 	switch segmentType {
@@ -383,18 +398,26 @@ func NewSegment(ctx context.Context,
 		return nil, fmt.Errorf("illegal segment type %d when create segment %d", segmentType, loadInfo.GetSegmentID())
 	}
 
-	logger := log.With(
-		zap.Int64("collectionID", loadInfo.GetCollectionID()),
-		zap.Int64("partitionID", loadInfo.GetPartitionID()),
-		zap.Int64("segmentID", loadInfo.GetSegmentID()),
-		zap.String("segmentType", segmentType.String()),
-		zap.String("level", loadInfo.GetLevel().String()),
-	)
-
 	var csegment segcore.CSegment
-	logger.Info("[xxx]submit create segment", zap.Any("pool running", GetDynamicPool().Running()), zap.Any("pool capacity", GetDynamicPool().Cap()))
-	if _, err := GetDynamicPool().Submit(func() (any, error) {
+	pool := GetDynamicPool()
+	submitTime := time.Now()
+	var workerStart time.Time
+	var createCSegmentDuration time.Duration
+	logger.Info("[xxx]submit create segment",
+		zap.Duration("newBaseSegmentDuration", newBaseSegmentDuration),
+		zap.Duration("elapsed", submitTime.Sub(newSegmentStart)),
+		zap.Any("pool running", pool.Running()),
+		zap.Any("pool capacity", pool.Cap()))
+	if _, err := pool.Submit(func() (any, error) {
+		workerStart = time.Now()
+		logger.Info("[xxx] create segment worker start",
+			zap.Duration("queueWait", workerStart.Sub(submitTime)),
+			zap.Duration("elapsed", workerStart.Sub(newSegmentStart)),
+			zap.Any("pool running", pool.Running()),
+			zap.Any("pool capacity", pool.Cap()))
+
 		var err error
+		createCSegmentStart := time.Now()
 		csegment, err = segcore.CreateCSegment(&segcore.CreateCSegmentRequest{
 			Collection:  collection.ccollection,
 			SegmentID:   loadInfo.GetSegmentID(),
@@ -402,12 +425,36 @@ func NewSegment(ctx context.Context,
 			IsSorted:    loadInfo.GetIsSorted(),
 			LoadInfo:    loadInfo,
 		})
+		createCSegmentDuration = time.Since(createCSegmentStart)
+		if err != nil {
+			logger.Warn("[xxx] CreateCSegment failed",
+				zap.Duration("createCSegmentDuration", createCSegmentDuration),
+				zap.Duration("workerDuration", time.Since(workerStart)),
+				zap.Error(err))
+			return nil, err
+		}
+
+		logger.Info("[xxx] CreateCSegment done",
+			zap.Duration("createCSegmentDuration", createCSegmentDuration),
+			zap.Duration("workerDuration", time.Since(workerStart)))
 		return nil, err
 	}).Await(); err != nil {
-		logger.Warn("create segment failed", zap.Error(err))
+		logger.Warn("create segment failed",
+			zap.Duration("poolTotalDuration", time.Since(submitTime)),
+			zap.Duration("totalDuration", time.Since(newSegmentStart)),
+			zap.Error(err))
 		return nil, err
 	}
-	logger.Info("[xxx] create segment done")
+	createSegmentDoneTime := time.Now()
+	createSegmentDoneFields := []zap.Field{
+		zap.Duration("poolTotalDuration", createSegmentDoneTime.Sub(submitTime)),
+		zap.Duration("createCSegmentDuration", createCSegmentDuration),
+		zap.Duration("elapsed", createSegmentDoneTime.Sub(newSegmentStart)),
+	}
+	if !workerStart.IsZero() {
+		createSegmentDoneFields = append(createSegmentDoneFields, zap.Duration("queueWait", workerStart.Sub(submitTime)))
+	}
+	logger.Info("[xxx] create segment done", createSegmentDoneFields...)
 
 	segment := &LocalSegment{
 		baseSegment:        base,
@@ -426,10 +473,18 @@ func NewSegment(ctx context.Context,
 		insertCount: atomic.NewInt64(0),
 	}
 
+	initializeSegmentStart := time.Now()
 	if err := segment.initializeSegment(); err != nil {
 		csegment.Release()
+		logger.Warn("[xxx] initialize segment failed",
+			zap.Duration("initializeSegmentDuration", time.Since(initializeSegmentStart)),
+			zap.Duration("totalDuration", time.Since(newSegmentStart)),
+			zap.Error(err))
 		return nil, err
 	}
+	logger.Info("[xxx] initialize segment done",
+		zap.Duration("initializeSegmentDuration", time.Since(initializeSegmentStart)),
+		zap.Duration("totalDuration", time.Since(newSegmentStart)))
 	return segment, nil
 }
 

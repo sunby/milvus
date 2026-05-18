@@ -336,6 +336,8 @@ AsyncSearch(CTraceContext c_trace,
          entity_ttl_physical_time_us,
          filter_only](folly::CancellationToken cancel_token) {
             // save trace context into search_info
+            LOG_INFO("[sss] start search segment: {}",
+                     segment->get_segment_id());
             auto& trace_ctx = plan->plan_node_->search_info_.trace_ctx_;
             trace_ctx.traceID = c_trace.traceID;
             trace_ctx.spanID = c_trace.spanID;

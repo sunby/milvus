@@ -233,7 +233,7 @@ PkIndexTranslator::PkIndexTranslator(
       meta_(milvus::cachinglayer::StorageType::MEMORY,
             milvus::cachinglayer::CellIdMappingMode::ALWAYS_ZERO,
             milvus::cachinglayer::CellDataType::OTHER,
-            CacheWarmupPolicy::CacheWarmupPolicy_Sync,
+            CacheWarmupPolicy::CacheWarmupPolicy_Disable,
             /* support_eviction */ true) {
 }
 

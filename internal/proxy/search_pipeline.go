@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/apache/arrow/go/v17/arrow/memory"
 	"github.com/samber/lo"
@@ -586,6 +587,13 @@ func (op *requeryOperator) run(ctx context.Context, span trace.Span, inputs ...a
 }
 
 func (op *requeryOperator) requery(ctx context.Context, span trace.Span, ids *schemapb.IDs, outputFields []string) (*milvuspb.QueryResults, segcore.StorageCost, error) {
+	t1 := time.Now()
+	defer func() {
+		cost := time.Since(t1)
+		log.Info("[sss] requery",
+			zap.Int64s("partitionIDs", op.partitionIDs),
+			zap.Duration("duration", cost))
+	}()
 	queryReq := &milvuspb.QueryRequest{
 		Base: &commonpb.MsgBase{
 			MsgType:   commonpb.MsgType_Retrieve,

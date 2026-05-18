@@ -114,6 +114,7 @@ std::vector<std::pair<milvus::cachinglayer::cid_t,
                       std::unique_ptr<milvus::index::IndexBase>>>
 SealedIndexTranslator::get_cells(milvus::OpContext* ctx,
                                  const std::vector<cid_t>& cids) {
+    const auto t1 = std::chrono::high_resolution_clock::now();
     int64_t segment_id = std::stoll(index_load_info_.segment_id);
 
     std::unique_ptr<milvus::index::IndexBase> index =
@@ -167,6 +168,13 @@ SealedIndexTranslator::get_cells(milvus::OpContext* ctx,
     std::vector<std::pair<cid_t, std::unique_ptr<milvus::index::IndexBase>>>
         result;
     result.emplace_back(std::make_pair(0, std::move(index)));
+    const auto t2 = std::chrono::high_resolution_clock::now();
+    double cost =
+        std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+    LOG_INFO("[sss] load index.  segment: {}, key: {}, cost: {}",
+             index_load_info_.segment_id,
+             index_key_,
+             cost);
     return result;
 }
 

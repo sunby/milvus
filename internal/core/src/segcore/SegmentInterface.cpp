@@ -52,6 +52,7 @@ void
 SegmentInternalInterface::FillPrimaryKeys(const query::Plan* plan,
                                           SearchResult& results,
                                           milvus::OpContext* op_ctx) const {
+    const auto t1 = std::chrono::high_resolution_clock::now();
     std::shared_lock lck(mutex_);
     AssertInfo(plan, "empty plan");
     auto size = results.distances_.size();
@@ -85,6 +86,11 @@ SegmentInternalInterface::FillPrimaryKeys(const query::Plan* plan,
         local_ctx.storage_usage.scanned_cold_bytes.load();
     results.search_storage_cost_.scanned_total_bytes +=
         local_ctx.storage_usage.scanned_total_bytes.load();
+    const auto t2 = std::chrono::high_resolution_clock::now();
+    double cost =
+        std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+    LOG_INFO(
+        "[sss] fill pks. segment: {}, duration: {}", get_segment_id(), cost);
 }
 
 void

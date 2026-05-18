@@ -11,8 +11,6 @@ services:
   pulsar:
     container_name: milvus-pulsar
     image: apachepulsar/pulsar:2.7.3
-    volumes:
-      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/pulsar:/pulsar/data
     environment:
       # bin/apply-config-from-env.py script will modify the configuration file based on the environment variables
       # nettyMaxFrameSizeBytes must be calculated from maxMessageSize + 10240 (padding)

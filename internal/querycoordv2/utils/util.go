@@ -95,45 +95,139 @@ func CheckSegmentDataReady(ctx context.Context, collectionID int64, distManager 
 		With(zap.Int64("collectionID", collectionID))
 
 	// Check whether segments are fully loaded
+	start := time.Now()
+	checkID := start.UnixNano()
 	segmentDist := targetMgr.GetSealedSegmentsByCollection(ctx, collectionID, scope)
+	targetSnapshotDuration := time.Since(start)
+	targetSegmentNum := len(segmentDist)
+	distSnapshotStart := time.Now()
+	distSegments := distManager.SegmentDistManager.GetByFilter(meta.WithCollectionID(collectionID))
+	distBySegmentID := make(map[int64][]*meta.Segment, len(distSegments))
+	for _, segment := range distSegments {
+		distBySegmentID[segment.GetID()] = append(distBySegmentID[segment.GetID()], segment)
+	}
+	distSnapshotDuration := time.Since(distSnapshotStart)
+	log.Info("check segment data ready start",
+		zap.Int64("checkID", checkID),
+		zap.Int32("scope", scope),
+		zap.Int("targetSegmentNum", targetSegmentNum),
+		zap.Int("distSegmentNum", len(distSegments)),
+		zap.Duration("targetSnapshotDuration", targetSnapshotDuration),
+		zap.Duration("distSnapshotDuration", distSnapshotDuration),
+	)
+	checkedSegmentNum := 0
+	lastProgress := time.Now()
 	for segmentID, segmentInfo := range segmentDist {
-		segments := distManager.SegmentDistManager.GetByFilter(meta.WithCollectionID(collectionID), meta.WithSegmentID(segmentID))
+		checkedSegmentNum++
+		if checkedSegmentNum%10000 == 0 || time.Since(lastProgress) > 5*time.Second {
+			log.RatedInfo(1, "check segment data ready progress",
+				zap.Int64("checkID", checkID),
+				zap.Int32("scope", scope),
+				zap.Int64("segmentID", segmentID),
+				zap.Int64("partitionID", segmentInfo.GetPartitionID()),
+				zap.String("insertChannel", segmentInfo.GetInsertChannel()),
+				zap.Int("checkedSegmentNum", checkedSegmentNum),
+				zap.Int("targetSegmentNum", targetSegmentNum),
+				zap.Duration("elapsed", time.Since(start)),
+			)
+			lastProgress = time.Now()
+		}
+
+		segments := distBySegmentID[segmentID]
 		if len(segments) == 0 {
-			log.RatedInfo(10, "segment is not available", zap.Int64("segmentID", segmentID))
+			log.Info("segment is not available",
+				zap.Int64("checkID", checkID),
+				zap.Int32("scope", scope),
+				zap.Int64("segmentID", segmentID),
+				zap.Int64("partitionID", segmentInfo.GetPartitionID()),
+				zap.String("insertChannel", segmentInfo.GetInsertChannel()),
+				zap.String("targetManifest", segmentInfo.GetManifestPath()),
+				zap.Int32("targetDataVersion", segmentInfo.GetDataVersion()),
+				zap.Int("checkedSegmentNum", checkedSegmentNum),
+				zap.Int("targetSegmentNum", targetSegmentNum),
+				zap.Int("distSegmentNum", len(segments)),
+				zap.Duration("elapsed", time.Since(start)),
+			)
 			return merr.WrapErrSegmentLack(segmentID)
 		}
 
 		for _, segment := range segments {
 			cmp, err := packed.CompareManifestPath(segment.ManifestPath, segmentInfo.GetManifestPath())
 			if err != nil {
-				log.RatedWarn(10, "segment manifest path not comparable",
+				log.Warn("segment manifest path not comparable",
+					zap.Int64("checkID", checkID),
+					zap.Int32("scope", scope),
 					zap.Int64("segmentID", segmentID),
+					zap.Int64("partitionID", segmentInfo.GetPartitionID()),
+					zap.String("insertChannel", segmentInfo.GetInsertChannel()),
+					zap.Int64("nodeID", segment.Node),
 					zap.String("distManifest", segment.ManifestPath),
 					zap.String("targetManifest", segmentInfo.GetManifestPath()),
+					dataVersionField("distDataVersion", segment.DataVersion),
+					zap.Int32("targetDataVersion", segmentInfo.GetDataVersion()),
+					zap.Int("checkedSegmentNum", checkedSegmentNum),
+					zap.Int("targetSegmentNum", targetSegmentNum),
+					zap.Duration("elapsed", time.Since(start)),
 					zap.Error(err))
 				return err
 			}
 			if cmp < 0 {
 				// dist manifest is older than target, segment data is not ready yet
-				log.RatedInfo(10, "segment manifest is outdated",
+				log.Info("segment manifest is outdated",
+					zap.Int64("checkID", checkID),
+					zap.Int32("scope", scope),
 					zap.Int64("segmentID", segmentID),
+					zap.Int64("partitionID", segmentInfo.GetPartitionID()),
+					zap.String("insertChannel", segmentInfo.GetInsertChannel()),
+					zap.Int64("nodeID", segment.Node),
 					zap.String("distManifest", segment.ManifestPath),
-					zap.String("targetManifest", segmentInfo.GetManifestPath()))
+					zap.String("targetManifest", segmentInfo.GetManifestPath()),
+					dataVersionField("distDataVersion", segment.DataVersion),
+					zap.Int32("targetDataVersion", segmentInfo.GetDataVersion()),
+					zap.Int("checkedSegmentNum", checkedSegmentNum),
+					zap.Int("targetSegmentNum", targetSegmentNum),
+					zap.Duration("elapsed", time.Since(start)))
 				return merr.WrapErrSegmentNotLoaded(segmentID)
 			}
 			// cmp >= 0: dist manifest is same or newer than target.
 			// Still check DataVersion for storage v2 binlog changes that don't move the manifest.
 			// Skip when the QueryNode did not report DataVersion (old node in mixed-version rollout).
 			if segment.DataVersion != nil && *segment.DataVersion < segmentInfo.GetDataVersion() {
-				log.RatedInfo(10, "segment data version is outdated",
+				log.Info("segment data version is outdated",
+					zap.Int64("checkID", checkID),
+					zap.Int32("scope", scope),
 					zap.Int64("segmentID", segmentID),
+					zap.Int64("partitionID", segmentInfo.GetPartitionID()),
+					zap.String("insertChannel", segmentInfo.GetInsertChannel()),
+					zap.Int64("nodeID", segment.Node),
+					zap.String("distManifest", segment.ManifestPath),
+					zap.String("targetManifest", segmentInfo.GetManifestPath()),
 					zap.Int32("distDataVersion", *segment.DataVersion),
-					zap.Int32("targetDataVersion", segmentInfo.GetDataVersion()))
+					zap.Int32("targetDataVersion", segmentInfo.GetDataVersion()),
+					zap.Int("checkedSegmentNum", checkedSegmentNum),
+					zap.Int("targetSegmentNum", targetSegmentNum),
+					zap.Duration("elapsed", time.Since(start)))
 				return merr.WrapErrSegmentNotLoaded(segmentID)
 			}
 		}
 	}
+	log.Info("check segment data ready done",
+		zap.Int64("checkID", checkID),
+		zap.Int32("scope", scope),
+		zap.Int("targetSegmentNum", targetSegmentNum),
+		zap.Int("distSegmentNum", len(distSegments)),
+		zap.Duration("targetSnapshotDuration", targetSnapshotDuration),
+		zap.Duration("distSnapshotDuration", distSnapshotDuration),
+		zap.Duration("duration", time.Since(start)),
+	)
 	return nil
+}
+
+func dataVersionField(key string, version *int32) zap.Field {
+	if version == nil {
+		return zap.String(key, "nil")
+	}
+	return zap.Int32(key, *version)
 }
 
 func checkLoadStatus(ctx context.Context, m *meta.Meta, collectionID int64, withUnserviceableShards bool) error {

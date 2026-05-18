@@ -18,8 +18,6 @@ services:
 
   pulsar:
     image: apachepulsar/pulsar:3.0.8
-    volumes:
-      - pulsar-data:/pulsar/data
     environment:
       # bin/apply-config-from-env.py script will modify the configuration file based on the environment variables
       # nettyMaxFrameSizeBytes must be calculated from maxMessageSize + 10240 (padding)
@@ -38,9 +36,6 @@ services:
     ports:
       - "6650:6650"
       - "18080:8080"
-
-volumes:
-  pulsar-data:
 
 networks:
   default:

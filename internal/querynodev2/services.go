@@ -732,6 +732,10 @@ func (node *QueryNode) GetSegmentInfo(ctx context.Context, in *querypb.GetSegmen
 // If req.FilterOnly is true, only executes filter and returns valid count per segment (Stage 1 of two-stage search).
 // If req.FilterOnly is false, performs normal vector search and returns search results.
 func (node *QueryNode) SearchSegments(ctx context.Context, req *querypb.SearchRequest) (*internalpb.SearchResults, error) {
+	log.Info("[sss] search segment", zap.Any("partition", req.Req.PartitionIDs))
+	defer func() {
+		log.Info("[sss] search segment done", zap.Any("partition", req.Req.PartitionIDs))
+	}()
 	channel := req.GetDmlChannels()[0]
 	log := log.Ctx(ctx).With(
 		zap.Int64("msgID", req.GetReq().GetBase().GetMsgID()),
@@ -814,6 +818,10 @@ func (node *QueryNode) SearchSegments(ctx context.Context, req *querypb.SearchRe
 
 // Search performs replica search tasks.
 func (node *QueryNode) Search(ctx context.Context, req *querypb.SearchRequest) (*internalpb.SearchResults, error) {
+	log.Info("[sss] search request", zap.Any("partition", req.Req.PartitionIDs))
+	defer func() {
+		log.Info("[sss] search request done", zap.Any("partition", req.Req.PartitionIDs))
+	}()
 	log := log.Ctx(ctx).With(
 		zap.Int64("collectionID", req.GetReq().GetCollectionID()),
 		zap.Strings("channels", req.GetDmlChannels()),

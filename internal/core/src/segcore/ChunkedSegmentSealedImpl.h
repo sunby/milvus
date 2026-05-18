@@ -166,6 +166,12 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
         return id_;
     }
 
+    int64_t
+    get_partition_id() const override {
+        auto load_info = std::atomic_load(&segment_load_info_);
+        return load_info == nullptr ? -1 : load_info->GetPartitionID();
+    }
+
     bool
     HasRawData(int64_t field_id) const override;
 

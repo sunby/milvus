@@ -21,6 +21,7 @@
 #include <optional>
 #include <queue>
 #include <ratio>
+#include <set>
 #include <type_traits>
 #include <vector>
 
@@ -34,6 +35,7 @@
 #include "common/Utils.h"
 #include "common/protobuf_utils.h"
 #include "fmt/core.h"
+#include "fmt/ranges.h"
 #include "folly/ScopeGuard.h"
 #include "glog/logging.h"
 #include "knowhere/comp/index_param.h"
@@ -84,6 +86,7 @@ ReduceHelper::Initialize() {
 
 void
 ReduceHelper::Reduce() {
+    const auto t1 = std::chrono::high_resolution_clock::now();
     auto global_refine_enable =
         plan_->plan_node_->search_info_.global_refine_enable_;
     AssertInfo(!(global_refine_enable &&
@@ -105,6 +108,25 @@ ReduceHelper::Reduce() {
     RefreshSearchResults();
     FillEntryData();
     GetTotalStorageCost();
+    const auto t2 = std::chrono::high_resolution_clock::now();
+    double cost =
+        std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+    std::set<int64_t> partition_ids;
+    for (auto* search_result : search_results_) {
+        if (search_result == nullptr || search_result->segment_ == nullptr) {
+            continue;
+        }
+        auto* segment = static_cast<SegmentInterface*>(search_result->segment_);
+        auto partition_id = segment->get_partition_id();
+        if (partition_id >= 0) {
+            partition_ids.insert(partition_id);
+        }
+    }
+    LOG_INFO(
+        "[sss] reduce helper reduce done. partitions: [{}], duration: {} "
+        "ms",
+        fmt::join(partition_ids, ","),
+        cost);
 }
 
 bool
