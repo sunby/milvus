@@ -55,9 +55,7 @@ func TestBroadcaster(t *testing.T) {
 		return ctx.Err()
 	})
 	balance.Register(mb)
-	registry.RegisterDropCollectionV1AckCallback(func(ctx context.Context, msg message.BroadcastResultDropCollectionMessageV1) error {
-		return nil
-	})
+	registerDropCollectionNoopCallbacks()
 
 	meta := mock_metastore.NewMockStreamingCoordCataLog(t)
 	meta.EXPECT().ListBroadcastTask(mock.Anything).
@@ -258,6 +256,14 @@ func TestBroadcastTaskNotCreatedOnStoppedBroadcaster(t *testing.T) {
 	nextGuards.Unlock()
 }
 
+func registerDropCollectionNoopCallbacks() {
+	registry.RegisterDropCollectionV1AckCallback(func(ctx context.Context, msg message.BroadcastResultDropCollectionMessageV1) error {
+		return nil
+	})
+	registry.RegisterDropCollectionV1AckOnceCallback(func(ctx context.Context, msg message.AckResultDropCollectionMessageV1) error {
+		return nil
+	})
+}
 func createNewBroadcastTask(broadcastID uint64, vchannels []string, rks ...message.ResourceKey) *streamingpb.BroadcastTask {
 	msg := createNewBroadcastMsg(vchannels).OverwriteBroadcastHeader(broadcastID, rks...)
 	pb := msg.IntoMessageProto()
@@ -860,9 +866,7 @@ func TestFixIncompleteBroadcastsForForcePromote(t *testing.T) {
 	t.Run("with_other_broadcast_tasks", func(t *testing.T) {
 		paramtable.Init()
 		registry.ResetRegistration()
-		registry.RegisterDropCollectionV1AckCallback(func(ctx context.Context, msg message.BroadcastResultDropCollectionMessageV1) error {
-			return nil
-		})
+		registerDropCollectionNoopCallbacks()
 
 		meta := mock_metastore.NewMockStreamingCoordCataLog(t)
 		meta.EXPECT().SaveBroadcastTask(mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
@@ -920,9 +924,7 @@ func TestFixIncompleteBroadcastsForForcePromote(t *testing.T) {
 	t.Run("append_failure_then_retry", func(t *testing.T) {
 		paramtable.Init()
 		registry.ResetRegistration()
-		registry.RegisterDropCollectionV1AckCallback(func(ctx context.Context, msg message.BroadcastResultDropCollectionMessageV1) error {
-			return nil
-		})
+		registerDropCollectionNoopCallbacks()
 
 		meta := mock_metastore.NewMockStreamingCoordCataLog(t)
 		meta.EXPECT().SaveBroadcastTask(mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
@@ -984,9 +986,7 @@ func TestFixIncompleteBroadcastsForForcePromote(t *testing.T) {
 	t.Run("blocks_until_tombstone", func(t *testing.T) {
 		paramtable.Init()
 		registry.ResetRegistration()
-		registry.RegisterDropCollectionV1AckCallback(func(ctx context.Context, msg message.BroadcastResultDropCollectionMessageV1) error {
-			return nil
-		})
+		registerDropCollectionNoopCallbacks()
 
 		meta := mock_metastore.NewMockStreamingCoordCataLog(t)
 		meta.EXPECT().SaveBroadcastTask(mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
@@ -1043,6 +1043,13 @@ func TestFixIncompleteBroadcastsForForcePromote(t *testing.T) {
 	t.Run("context_canceled_during_supplement", func(t *testing.T) {
 		paramtable.Init()
 		registry.ResetRegistration()
+		registry.RegisterDropCollectionV1AckCallback(func(ctx context.Context, msg message.BroadcastResultDropCollectionMessageV1) error {
+			return nil
+		})
+		registry.RegisterDropCollectionV1AckOnceCallback(func(ctx context.Context, msg message.AckResultDropCollectionMessageV1) error {
+			<-ctx.Done()
+			return ctx.Err()
+		})
 
 		meta := mock_metastore.NewMockStreamingCoordCataLog(t)
 		meta.EXPECT().SaveBroadcastTask(mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
