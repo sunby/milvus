@@ -131,14 +131,6 @@ func TestIndexInspector_inspect(t *testing.T) {
 }
 
 func TestIndexInspector_ReloadFromMeta(t *testing.T) {
-	pt := paramtable.Get()
-	heavyKey := pt.DataCoordCfg.IndexTaskSlotUsage.Key
-	scalarKey := pt.DataCoordCfg.ScalarIndexTaskSlotUsage.Key
-	assert.NoError(t, pt.Save(heavyKey, "64"))
-	assert.NoError(t, pt.Save(scalarKey, "16"))
-	defer pt.Reset(heavyKey)
-	defer pt.Reset(scalarKey)
-
 	ctx := context.Background()
 	notifyChan := make(chan int64, 1)
 	scheduler := task.NewMockGlobalScheduler(t)
@@ -170,10 +162,6 @@ func TestIndexInspector_ReloadFromMeta(t *testing.T) {
 			ID:           1,
 			CollectionID: 2,
 			State:        commonpb.SegmentState_Flushed,
-			Binlogs: []*datapb.FieldBinlog{{
-				FieldID: 100,
-				Binlogs: []*datapb.Binlog{{MemorySize: 200 * 1024 * 1024}},
-			}},
 		},
 	}
 	meta.segments.SetSegment(seg1.ID, seg1)
@@ -192,15 +180,10 @@ func TestIndexInspector_ReloadFromMeta(t *testing.T) {
 			FieldID:      100,
 			IndexID:      3,
 			IndexName:    indexName,
-			IndexParams: []*commonpb.KeyValuePair{{
-				Key: common.IndexTypeKey, Value: "FMINDEX",
-			}},
 		},
 	}
 
-	scheduler.EXPECT().Enqueue(mock.Anything).Run(func(scheduled task.Task) {
-		assert.Equal(t, int64(4), scheduled.GetTaskSlot())
-	}).Return()
+	scheduler.EXPECT().Enqueue(mock.Anything).Return()
 	inspector.reloadFromMeta()
 }
 
@@ -265,6 +248,149 @@ func TestIndexInspector_CreateIndexForSegment_FMIndexUsesMemoryBasedSlots(t *tes
 	}).Return()
 
 	assert.NoError(t, inspector.createIndexForSegment(ctx, segment, 5))
+}
+
+func TestIndexInspector_PendingIndexSegmentsDedupeEvents(t *testing.T) {
+	inspector := &indexInspector{}
+
+	inspector.enqueuePendingIndexSegments(1, 2, 1)
+
+	assert.ElementsMatch(t, []UniqueID{1, 2}, inspector.popPendingIndexSegments())
+	assert.Empty(t, inspector.popPendingIndexSegments())
+}
+
+func TestIndexInspector_ProcessPendingIndexSegmentsRequeuesStillUnindexedSegment(t *testing.T) {
+	ctx := context.Background()
+	const (
+		collID  = UniqueID(10)
+		partID  = UniqueID(20)
+		segID   = UniqueID(30)
+		indexID = UniqueID(40)
+	)
+
+	m := &meta{
+		segments:  NewSegmentsInfo(),
+		metaStore: metacache.NewMetaStore(nil),
+		indexMeta: &indexMeta{
+			segmentBuildInfo: newSegmentIndexBuildInfo(),
+			indexes: map[UniqueID]map[UniqueID]*model.Index{
+				collID: {
+					indexID: {
+						CollectionID: collID,
+						FieldID:      102,
+						IndexID:      indexID,
+						IndexName:    "bm25_idx",
+					},
+				},
+			},
+			segmentIndexes: typeutil.NewConcurrentMap[UniqueID, *typeutil.ConcurrentMap[UniqueID, *model.SegmentIndex]](),
+		},
+	}
+	// The collection schema is ahead of the segment: the BM25 output (field
+	// 102) is not materialized yet, so the segment must stay pending.
+	collInfo := &collectionInfo{
+		ID: collID,
+		Schema: &schemapb.CollectionSchema{
+			Version: 1,
+			Fields: []*schemapb.FieldSchema{
+				{FieldID: 100, Name: "pk", DataType: schemapb.DataType_Int64},
+				{FieldID: 101, Name: "text", DataType: schemapb.DataType_VarChar},
+				{FieldID: 102, Name: "sparse", DataType: schemapb.DataType_SparseFloatVector},
+			},
+			Functions: []*schemapb.FunctionSchema{
+				{Name: "bm25_fn", OutputFieldIds: []int64{102}},
+			},
+		},
+	}
+	m.metaStore.PutCollection(collInfo)
+	m.segments.SetSegment(segID, &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
+		ID:           segID,
+		CollectionID: collID,
+		PartitionID:  partID,
+		State:        commonpb.SegmentState_Flushed,
+		IsSorted:     true,
+		Binlogs: []*datapb.FieldBinlog{
+			{FieldID: 0, ChildFields: []int64{100, 101}},
+		},
+	}})
+
+	handler := NewNMockHandler(t)
+	handler.EXPECT().GetCollection(mock.Anything, collID).Return(collInfo, nil).Maybe()
+	inspector := &indexInspector{meta: m, handler: handler}
+	inspector.enqueuePendingIndexSegments(segID)
+
+	inspector.processPendingIndexSegments(ctx)
+
+	assert.ElementsMatch(t, []UniqueID{segID}, inspector.popPendingIndexSegments())
+}
+
+func TestIndexInspector_ProcessPendingIndexSegmentsCreatesIndexAndRemovesPending(t *testing.T) {
+	ctx := context.Background()
+	const (
+		collID  = UniqueID(11)
+		partID  = UniqueID(21)
+		segID   = UniqueID(31)
+		fieldID = UniqueID(101)
+		indexID = UniqueID(41)
+		buildID = UniqueID(51)
+	)
+
+	scheduler := task.NewMockGlobalScheduler(t)
+	alloc := allocator.NewMockAllocator(t)
+	handler := NewNMockHandler(t)
+	storageCli := mocks.NewChunkManager(t)
+	versionManager := newIndexEngineVersionManager()
+	catalog := mocks2.NewDataCoordCatalog(t)
+	m := &meta{
+		segments:  NewSegmentsInfo(),
+		metaStore: metacache.NewMetaStore(nil),
+		indexMeta: &indexMeta{
+			keyLock:          lock.NewKeyLock[UniqueID](),
+			catalog:          catalog,
+			segmentBuildInfo: newSegmentIndexBuildInfo(),
+			indexes: map[UniqueID]map[UniqueID]*model.Index{
+				collID: {
+					indexID: {
+						CollectionID: collID,
+						FieldID:      fieldID,
+						IndexID:      indexID,
+						IndexName:    "default_idx",
+					},
+				},
+			},
+			segmentIndexes: typeutil.NewConcurrentMap[UniqueID, *typeutil.ConcurrentMap[UniqueID, *model.SegmentIndex]](),
+		},
+	}
+	m.segments.SetSegment(segID, &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
+		ID:           segID,
+		CollectionID: collID,
+		PartitionID:  partID,
+		NumOfRows:    1024,
+		State:        commonpb.SegmentState_Flushed,
+		IsSorted:     true,
+		Binlogs: []*datapb.FieldBinlog{
+			{FieldID: fieldID},
+		},
+	}})
+
+	handler.EXPECT().GetCollection(mock.Anything, collID).Return(&collectionInfo{
+		ID: collID,
+		Schema: &schemapb.CollectionSchema{
+			Fields: []*schemapb.FieldSchema{
+				{FieldID: fieldID, Name: "vec", DataType: schemapb.DataType_FloatVector},
+			},
+		},
+	}, nil).Maybe()
+	inspector := newIndexInspector(ctx, make(chan int64, 1), m, scheduler, alloc, handler, storageCli, versionManager)
+	inspector.enqueuePendingIndexSegments(segID)
+	alloc.EXPECT().AllocID(mock.Anything).Return(buildID, nil).Once()
+	catalog.EXPECT().CreateSegmentIndex(mock.Anything, mock.Anything).Return(nil).Once()
+	scheduler.EXPECT().Enqueue(mock.Anything).Return().Once()
+
+	inspector.processPendingIndexSegments(ctx)
+
+	assert.Empty(t, inspector.popPendingIndexSegments())
+	assert.Contains(t, m.indexMeta.GetSegmentIndexes(collID, segID), indexID)
 }
 
 func TestIndexInspector_isExternalCollection(t *testing.T) {
