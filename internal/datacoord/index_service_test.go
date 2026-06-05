@@ -2755,6 +2755,7 @@ func TestMeta_GetHasUnindexTaskSegments(t *testing.T) {
 				InsertChannel: "",
 				NumOfRows:     1025,
 				State:         commonpb.SegmentState_Flushed,
+				IsSorted:      true,
 			},
 		},
 		segID + 1: {
