@@ -1006,12 +1006,8 @@ func (s *Server) postFlush(ctx context.Context, segmentID UniqueID) error {
 		case getStatsTaskChSingleton() <- segmentID:
 		default:
 		}
-	} else {
-		select {
-		case getBuildIndexChSingleton() <- segmentID:
-		default:
-		}
 	}
+	notifySegmentIndexBuild(segmentID)
 
 	// Insert / delta counts come from Statistics. Stats array is iterated
 	// because Statistics doesn't carry a per-segment stat-file count — V3
