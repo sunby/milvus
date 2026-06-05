@@ -390,13 +390,7 @@ func (t *bumpSchemaVersionTask) saveSegmentMeta(result *datapb.CompactionPlanRes
 		newSegmentIDs = lo.Map(newSegments, func(s *SegmentInfo, _ int) UniqueID { return s.GetID() })
 		metricMutation.commit()
 	}
-
-	for _, newSegID := range newSegmentIDs {
-		select {
-		case getBuildIndexChSingleton() <- newSegID:
-		default:
-		}
-	}
+	notifySegmentIndexBuild(newSegmentIDs...)
 
 	// The SegmentMeta mutation is committed (schema bump rewrites manifests);
 	// schedule an asynchronous DataView snapshot reconciliation so consumers
