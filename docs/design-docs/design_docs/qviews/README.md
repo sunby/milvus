@@ -280,11 +280,11 @@ design when that resource module is picked.
 | Coord | QueryView Manager | View state machine transitions, syncing view information to all Nodes |
 | Streaming Node | PChannel Query Resource Manager | Preparing vchannel resources from versioned load info, latest schema, SegmentModule views, TransformLog, and BM25 resource RPC |
 | Streaming Node | QueryView Manager | Listening for view state machine changes, checking prepared view resources, and publishing the required DataVersion watermark for SN-only eviction |
-| Streaming Node | Pure Delete Stream Manager | Acting as subscription server, publishing Delete data to QueryNodes. See [Pure Transform Subscription](pure_transform_subscription.md). |
+| Streaming Node | Pure Delete Stream Manager | Acting as subscription server, publishing Delete data to QueryNodes. See [TransformLog View Module](../wal/transform_log_view_module.md). |
 | Streaming Node | Growing Segment Manager | Incremental data management, maintaining Growing Segment lifecycle |
 | Query Node | QueryView Manager | Listening for view state machine changes, applying to Sealed Segments |
 | Query Node | Sealed Segment Manager | Historical data management, maintaining Sealed Segment lifecycle |
-| Query Node | Pure Delete Stream Manager | Acting as subscription client, applying Delete data to each Segment. See [Pure Transform Subscription](pure_transform_subscription.md). |
+| Query Node | Pure Delete Stream Manager | Acting as subscription client, applying Delete data to each Segment. See [TransformLog View Module](../wal/transform_log_view_module.md). |
 
 ### 11.3 SyncQueryView RPC
 
