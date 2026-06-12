@@ -474,6 +474,12 @@ message SegmentInfo {
   // instead of iterating Binlogs/Statslogs/Deltalogs for scheduling
   // decisions (compaction, load balancing, GC). See message Statistics.
   Statistics stats = 38;
+
+  // delete_apply_start_after_timetick is the exclusive lower bound for delete
+  // data that must be retained/applied when this segment is loaded.
+  // DataView derives shard-level delete_apply_start_after_timetick from this
+  // persisted segment metadata field.
+  uint64 delete_apply_start_after_timetick = 39;
 }
 
 // Statistics carries aggregate metrics for a segment so DataCoord can make
@@ -522,6 +528,7 @@ message Statistics {
   // the effective (non-null) row count for vector index build decisions
   // on nullable vector fields.
   map<int64, int64> null_counts = 13;
+
 }
 
 message SegmentStartPosition {
@@ -548,13 +555,13 @@ message SaveBinlogPathsRequest {
   repeated FieldBinlog field2Bm25logPaths = 16;
   bool with_full_binlogs = 17; // report with full data for verification.
   string manifest_path = 18; //
-
   // V3 stats live in the manifest, not in the statslogs FieldBinlog array,
   // so the writer ships the cumulative stats footprint here. The handler
   // overlays these onto the segment Statistics after computing insert/delta
   // from the cumulative arrays. Nil / zero for V2 flushes — V2 stats come
   // from req.Field2StatslogPaths via the iteration helper.
   Statistics stats = 19;
+  uint64 delete_apply_start_after_timetick = 20;
 }
 
 message CheckPoint {
@@ -1680,6 +1687,8 @@ message SegmentDescription {
   // Must be preserved across snapshot/restore so temporal protections
   // (GC, TTL, MVCC) are not lost on the restored segments.
   uint64 commit_timestamp = 18;
+  // Mirrors SegmentInfo.delete_apply_start_after_timetick.
+  uint64 delete_apply_start_after_timetick = 19;
 }
 
 message CollectionDescription {
