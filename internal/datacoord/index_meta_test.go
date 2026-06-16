@@ -1899,6 +1899,14 @@ func TestIndexMeta_GetUnIndexedSegmentIDsForIndexTask(t *testing.T) {
 					IndexID:      indexID + 2,
 				},
 			},
+			collID + 3: {
+				indexID + 3: {
+					CollectionID: collID + 3,
+					FieldID:      fieldID + 3,
+					IndexID:      indexID + 3,
+					IsDeleted:    true,
+				},
+			},
 		},
 	}
 	partial := typeutil.NewConcurrentMap[UniqueID, *model.SegmentIndex]()
@@ -1931,6 +1939,9 @@ func TestIndexMeta_GetUnIndexedSegmentIDsForIndexTask(t *testing.T) {
 	assert.False(t, unindexed.Contain(segWithCompleteIndex))
 
 	unindexed = m.GetUnIndexedSegmentIDsForIndexTask(collID+2, []UniqueID{segWithNoIndex})
+	assert.Empty(t, unindexed)
+
+	unindexed = m.GetUnIndexedSegmentIDsForIndexTask(collID+3, []UniqueID{segWithNoIndex})
 	assert.Empty(t, unindexed)
 }
 
