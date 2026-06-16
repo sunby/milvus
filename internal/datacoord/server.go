@@ -1015,13 +1015,15 @@ func (s *Server) postFlush(ctx context.Context, segmentID UniqueID) error {
 		return merr.WrapErrSegmentNotFound(segmentID, "segment not found, might be a faked segment, ignore post flush")
 	}
 
-	if enableSortCompaction() {
+	collection := s.meta.GetCollection(segment.GetCollectionID())
+	if enableSortCompaction() && (collection == nil || !collection.IsExternal()) {
 		select {
 		case getStatsTaskChSingleton() <- segmentID:
 		default:
 		}
+	} else {
+		notifySegmentIndexBuild(segmentID)
 	}
-	notifySegmentIndexBuild(segmentID)
 
 	// Insert / delta counts come from Statistics. Stats array is iterated
 	// because Statistics doesn't carry a per-segment stat-file count — V3
