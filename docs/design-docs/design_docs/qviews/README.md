@@ -254,12 +254,13 @@ sealed segment resource preparation design when that resource module is picked.
 
 Example: If view A is unreasonable and causes OOM on a node, it is marked as Unrecoverable, but view A still exists on the node and already-loaded resources are not rolled back. After Coord detects this, the Balancer generates a new view B and pushes both views for atomic modification (A Dropped, B Preparing). Resources in (A diff B) are released, resources in (B diff A) are loaded, and resources in A∩B are retained.
 
-TODO(snview/streamingnode_resource_manager.md): add the StreamingNode query
-runtime manager design when that resource module is picked.
-TODO(snview/growing_segment_runtime.md): add the StreamingNode growing segment
-runtime design when that resource module is picked.
-TODO(snview/idf_oracle_runtime.md): add the StreamingNode IDF oracle runtime
-design when that resource module is picked.
+For StreamingNode-side resource preparation boundaries, including versioned load
+info resolution and QueryView-triggered resource acquisition, see
+[StreamingNode Query Runtime Manager Design](snview/streamingnode_resource_manager.md).
+For StreamingNode growing-side runtime preparation and retention, see
+[StreamingNode Growing Segment Runtime Design](snview/growing_segment_runtime.md).
+For BM25 sealed resource discovery and vchannel-level IDF oracle maintenance on
+StreamingNode, see [StreamingNode IDF Oracle Runtime Design](snview/idf_oracle_runtime.md).
 
 ## 11. Coord and Node Interactions
 
