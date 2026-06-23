@@ -96,6 +96,7 @@ type ExpectedLoadConfig struct {
 	ExpectedSkipLoadDynamicField     bool
 	ExpectedPriority                 commonpb.LoadPriority
 	ExpectedUserSpecifiedReplicaMode bool
+	ExpectedForceSyncWarmup          bool
 }
 
 type CurrentLoadConfig struct {
@@ -121,6 +122,10 @@ func (c *CurrentLoadConfig) GetLoadFields() []int64 {
 
 func (c *CurrentLoadConfig) GetUserSpecifiedReplicaMode() bool {
 	return c.Collection.UserSpecifiedReplicaMode
+}
+
+func (c *CurrentLoadConfig) GetForceSyncWarmup() bool {
+	return c.Collection.ForceSyncWarmup
 }
 
 func (c *CurrentLoadConfig) GetReplicaNumber() map[string]int {
@@ -171,6 +176,7 @@ func (c *CurrentLoadConfig) IntoLoadConfigMessageHeader() *messagespb.AlterLoadC
 		RequiredFields:           c.Collection.GetRequiredFields(),
 		Replicas:                 replicas,
 		UserSpecifiedReplicaMode: c.GetUserSpecifiedReplicaMode(),
+		ForceSyncWarmup:          c.GetForceSyncWarmup(),
 	}
 }
 
@@ -197,6 +203,7 @@ func GenerateAlterLoadConfigMessage(ctx context.Context, req *AlterLoadConfigReq
 		RequiredFields:           qviews.ResolveRequiredFields(req.CollectionInfo.GetSchema(), nil),
 		Replicas:                 loadReplicaConfigs,
 		UserSpecifiedReplicaMode: req.Expected.ExpectedUserSpecifiedReplicaMode,
+		ForceSyncWarmup:          req.Expected.ExpectedForceSyncWarmup,
 	}
 	// Empty preload hints follow the bound schema. A dynamic-field exclusion
 	// is already resolved into the explicit field list by Proxy.

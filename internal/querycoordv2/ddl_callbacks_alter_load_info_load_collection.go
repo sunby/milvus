@@ -138,6 +138,7 @@ func (s *Server) broadcastAlterLoadConfigCollectionV2ForLoadCollection(ctx conte
 		SkipLoadDynamicField:     req.GetSkipLoadDynamicField(),
 		Priority:                 req.GetPriority(),
 		UserSpecifiedReplicaMode: userSpecifiedReplicaMode,
+		ForceSyncWarmup:          false,
 	})
 	if err != nil {
 		return err
@@ -228,6 +229,7 @@ type qviewsExpectedLoadConfig struct {
 	SkipLoadDynamicField     bool
 	Priority                 commonpb.LoadPriority
 	UserSpecifiedReplicaMode bool
+	ForceSyncWarmup          bool
 }
 
 func (s *Server) generateAlterLoadConfigMessageForLoadCollection(
@@ -248,6 +250,7 @@ func (s *Server) generateAlterLoadConfigMessageForLoadCollection(
 		RequiredFields:           loadmgr.RequiredFieldsForSchema(coll.GetSchema()),
 		Replicas:                 replicas,
 		UserSpecifiedReplicaMode: expected.UserSpecifiedReplicaMode,
+		ForceSyncWarmup:          expected.ForceSyncWarmup,
 	}
 	// Preserve the empty-hint representation for full loads; Proxy has already
 	// resolved a dynamic-field exclusion into explicit preload fields.
