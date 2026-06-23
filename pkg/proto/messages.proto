@@ -401,6 +401,7 @@ message AlterLoadConfigMessageHeader {
     bool skip_load_dynamic_field = 10;
     repeated LoadFieldConfig required_fields = 11; // Internal, explicit nonempty query field scope. Never inferred from preload hints.
     bool use_local_replica_config = 7; // when true, use local cluster-level replica config instead of the replicas field above.
+    bool force_sync_warmup = 12; // whether load should synchronously warm mmap/cache data.
 }
 
 // AlterLoadConfigMessageBody is the body of alter load config message.
