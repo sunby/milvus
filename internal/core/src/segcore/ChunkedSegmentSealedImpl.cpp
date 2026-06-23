@@ -10936,4 +10936,55 @@ ChunkedSegmentSealedImpl::prefetch_vector(milvus::OpContext* op_ctx,
         this->prefetch_chunks_locked(op_ctx, field_id);
     }
 }
+
+void
+ChunkedSegmentSealedImpl::Prewarm(
+    milvus::OpContext* op_ctx,
+    const std::vector<FieldId>& requested_field_ids) const {
+    std::vector<FieldId> field_ids = requested_field_ids;
+    if (field_ids.empty()) {
+        auto published = CapturePublishedState();
+        if (published != nullptr && published->schema != nullptr) {
+            field_ids.reserve(published->schema->get_fields().size());
+            for (const auto& field : published->schema->get_fields()) {
+                field_ids.push_back(field.first);
+            }
+        }
+    }
+
+    auto runtime = CaptureRuntimeResourceState();
+    for (auto field_id : field_ids) {
+        prefetch_chunks(op_ctx, field_id);
+
+        std::vector<index::CacheIndexBasePtr> index_slots;
+        auto vector_iter = runtime->vector_indexings.find(field_id);
+        if (vector_iter != runtime->vector_indexings.end() &&
+            vector_iter->second != nullptr) {
+            index_slots.push_back(vector_iter->second->indexing_);
+        }
+        auto scalar_iter = runtime->scalar_indexings.find(field_id);
+        if (scalar_iter != runtime->scalar_indexings.end()) {
+            index_slots.push_back(scalar_iter->second);
+        }
+        auto ngram_iter = runtime->ngram_indexings.find(field_id);
+        if (ngram_iter != runtime->ngram_indexings.end()) {
+            for (const auto& slot_entry : ngram_iter->second) {
+                index_slots.push_back(slot_entry.second);
+            }
+        }
+        for (const auto& index : runtime->json_indices) {
+            if (index.field_id == field_id) {
+                index_slots.push_back(index.index);
+            }
+        }
+
+        for (const auto& slot : index_slots) {
+            if (slot == nullptr) {
+                continue;
+            }
+            auto ca = SemiInlineGet(slot->PinCells(op_ctx, {0}));
+            (void)ca;
+        }
+    }
+}
 }  // namespace milvus::segcore
