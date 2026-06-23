@@ -79,6 +79,7 @@ func (s *Server) broadcastAlterLoadConfigCollectionV2ForLoadCollection(ctx conte
 		LoadFields:               req.GetLoadFields(),
 		Priority:                 req.GetPriority(),
 		UserSpecifiedReplicaMode: userSpecifiedReplicaMode,
+		ForceSyncWarmup:          false,
 	})
 	if err != nil {
 		return err
@@ -137,6 +138,7 @@ type qviewsExpectedLoadConfig struct {
 	LoadFields               []int64
 	Priority                 commonpb.LoadPriority
 	UserSpecifiedReplicaMode bool
+	ForceSyncWarmup          bool
 }
 
 func (s *Server) generateAlterLoadConfigMessageForLoadCollection(
@@ -156,6 +158,7 @@ func (s *Server) generateAlterLoadConfigMessageForLoadCollection(
 		LoadFields:               generateQViewsLoadFields(expected.LoadFields, expected.FieldIndexID),
 		Replicas:                 replicas,
 		UserSpecifiedReplicaMode: expected.UserSpecifiedReplicaMode,
+		ForceSyncWarmup:          expected.ForceSyncWarmup,
 	}
 	if proto.Equal(loadConfigIntoAlterLoadConfigHeader(current), header) {
 		return nil, nil
