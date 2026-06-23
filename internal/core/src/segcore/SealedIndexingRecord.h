@@ -25,5 +25,4 @@ struct SealedIndexingEntry {
 };
 
 using SealedIndexingEntryPtr = std::shared_ptr<SealedIndexingEntry>;
-
 }  // namespace milvus::segcore
