@@ -215,6 +215,11 @@ func (job *LoadCollectionJob) Execute() error {
 		return nil
 	}
 
+	currentPartitions := job.meta.GetPartitionsByCollection(job.ctx, req.GetCollectionId())
+	currentPartitionMap := lo.SliceToMap(currentPartitions, func(partition *meta.Partition) (int64, *meta.Partition) {
+		return partition.GetPartitionID(), partition
+	})
+	forceSyncWarmup := loadForceSyncWarmup(req, currentPartitionMap)
 	collection := &meta.Collection{
 		CollectionLoadInfo: &querypb.CollectionLoadInfo{
 			CollectionID:             req.GetCollectionId(),
@@ -225,22 +230,20 @@ func (job *LoadCollectionJob) Execute() error {
 			LoadFields:               fieldIDs,
 			DbID:                     req.GetDbId(),
 			UserSpecifiedReplicaMode: req.GetUserSpecifiedReplicaMode(),
+			ForceSyncWarmup:          forceSyncWarmup,
 		},
 		CreatedAt: time.Now(),
 		LoadSpan:  sp,
 		Schema:    collInfo.GetSchema(),
 	}
 	incomingPartitions := typeutil.NewSet(req.GetPartitionIds()...)
-	currentPartitions := job.meta.GetPartitionsByCollection(job.ctx, req.GetCollectionId())
-	currentPartitionMap := lo.SliceToMap(currentPartitions, func(partition *meta.Partition) (int64, *meta.Partition) {
-		return partition.GetPartitionID(), partition
-	})
 	partitions, newPartitionCount := buildPartitionsToPersist(
 		req.GetCollectionId(),
 		req.GetPartitionIds(),
 		currentPartitionMap,
 		replicaNumber,
 		fieldIndexIDs,
+		req.GetForceSyncWarmup(),
 	)
 	toReleasePartitions := make([]int64, 0)
 	for _, partition := range currentPartitions {
@@ -390,6 +393,12 @@ func (job *LoadCollectionJob) isIncrementalExpansion(req *messagespb.AlterLoadCo
 	if !maps.Equal(fieldIndexIDs, existing.GetFieldIndexID()) {
 		return false
 	}
+	currentPartitionMap := lo.SliceToMap(currentPartitions, func(partition *meta.Partition) (int64, *meta.Partition) {
+		return partition.GetPartitionID(), partition
+	})
+	if loadForceSyncWarmup(req, currentPartitionMap) != existing.GetForceSyncWarmup() {
+		return false
+	}
 
 	existingReplicas := job.meta.GetByCollection(job.ctx, req.GetCollectionId())
 	if len(newReplicas) < len(existingReplicas) {
@@ -456,12 +465,26 @@ func getLocalReplicaConfig(ctx context.Context, m *meta.Meta, collectionID int64
 	return req.generateReplicas(ctx)
 }
 
+// loadForceSyncWarmup is the collection-level force sync warmup a load
+// persists: the request's own flag, or a requested partition whose forced
+// warmup has not been cleared by a prewarm yet.
+func loadForceSyncWarmup(req *messagespb.AlterLoadConfigMessageHeader, currentPartitions map[int64]*meta.Partition) bool {
+	forceSyncWarmup := req.GetForceSyncWarmup()
+	for _, partitionID := range req.GetPartitionIds() {
+		if current, ok := currentPartitions[partitionID]; ok {
+			forceSyncWarmup = forceSyncWarmup || current.GetForceSyncWarmup()
+		}
+	}
+	return forceSyncWarmup
+}
+
 func buildPartitionsToPersist(
 	collectionID int64,
 	partitionIDs []int64,
 	currentPartitions map[int64]*meta.Partition,
 	replicaNumber int32,
 	fieldIndexIDs map[int64]int64,
+	requestForceSyncWarmup bool,
 ) ([]*meta.Partition, int) {
 	partitions := make([]*meta.Partition, 0, len(partitionIDs))
 	newPartitionCount := 0
@@ -472,11 +495,12 @@ func buildPartitionsToPersist(
 			newPartitionCount++
 			partitions = append(partitions, &meta.Partition{
 				PartitionLoadInfo: &querypb.PartitionLoadInfo{
-					CollectionID:  collectionID,
-					PartitionID:   partitionID,
-					ReplicaNumber: replicaNumber,
-					Status:        querypb.LoadStatus_Loading,
-					FieldIndexID:  fieldIndexIDs,
+					CollectionID:    collectionID,
+					PartitionID:     partitionID,
+					ReplicaNumber:   replicaNumber,
+					Status:          querypb.LoadStatus_Loading,
+					FieldIndexID:    fieldIndexIDs,
+					ForceSyncWarmup: requestForceSyncWarmup,
 				},
 				CreatedAt: time.Now(),
 			})

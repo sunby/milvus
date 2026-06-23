@@ -390,6 +390,7 @@ message AlterLoadConfigMessageHeader {
     optional bool load_all_fields = 9; // absent on legacy messages; preserve/infer loading intent.
     bool skip_load_dynamic_field = 10;
     bool use_local_replica_config = 7; // when true, use local cluster-level replica config instead of the replicas field above.
+    bool force_sync_warmup = 11; // whether load should synchronously warm mmap/cache data.
 }
 
 // AlterLoadConfigMessageBody is the body of alter load config message.

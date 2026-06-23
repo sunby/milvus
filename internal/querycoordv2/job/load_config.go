@@ -95,6 +95,7 @@ type ExpectedLoadConfig struct {
 	ExpectedSkipLoadDynamicField     bool
 	ExpectedPriority                 commonpb.LoadPriority
 	ExpectedUserSpecifiedReplicaMode bool
+	ExpectedForceSyncWarmup          bool
 }
 
 type CurrentLoadConfig struct {
@@ -120,6 +121,10 @@ func (c *CurrentLoadConfig) GetLoadFields() []int64 {
 
 func (c *CurrentLoadConfig) GetUserSpecifiedReplicaMode() bool {
 	return c.Collection.UserSpecifiedReplicaMode
+}
+
+func (c *CurrentLoadConfig) GetForceSyncWarmup() bool {
+	return c.Collection.ForceSyncWarmup
 }
 
 func (c *CurrentLoadConfig) GetReplicaNumber() map[string]int {
@@ -171,6 +176,7 @@ func (c *CurrentLoadConfig) IntoLoadConfigMessageHeader() *messagespb.AlterLoadC
 		SkipLoadDynamicField:     c.Collection.GetSkipLoadDynamicField(),
 		Replicas:                 replicas,
 		UserSpecifiedReplicaMode: c.GetUserSpecifiedReplicaMode(),
+		ForceSyncWarmup:          c.GetForceSyncWarmup(),
 	}
 }
 
@@ -198,6 +204,7 @@ func GenerateAlterLoadConfigMessage(ctx context.Context, req *AlterLoadConfigReq
 		SkipLoadDynamicField:     req.Expected.ExpectedSkipLoadDynamicField,
 		Replicas:                 loadReplicaConfigs,
 		UserSpecifiedReplicaMode: req.Expected.ExpectedUserSpecifiedReplicaMode,
+		ForceSyncWarmup:          req.Expected.ExpectedForceSyncWarmup,
 	}
 	if header.LoadAllFields == nil && req.Current.Collection != nil {
 		header.LoadAllFields = req.Current.Collection.LoadAllFields

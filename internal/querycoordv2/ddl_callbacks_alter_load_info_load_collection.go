@@ -138,6 +138,7 @@ func (s *Server) broadcastAlterLoadConfigCollectionV2ForLoadCollection(ctx conte
 		SkipLoadDynamicField:     req.GetSkipLoadDynamicField(),
 		Priority:                 req.GetPriority(),
 		UserSpecifiedReplicaMode: userSpecifiedReplicaMode,
+		ForceSyncWarmup:          false,
 	})
 	if err != nil {
 		return err
@@ -228,6 +229,7 @@ type qviewsExpectedLoadConfig struct {
 	SkipLoadDynamicField     bool
 	Priority                 commonpb.LoadPriority
 	UserSpecifiedReplicaMode bool
+	ForceSyncWarmup          bool
 }
 
 func (s *Server) generateAlterLoadConfigMessageForLoadCollection(
@@ -249,6 +251,7 @@ func (s *Server) generateAlterLoadConfigMessageForLoadCollection(
 		SkipLoadDynamicField:     expected.SkipLoadDynamicField,
 		Replicas:                 replicas,
 		UserSpecifiedReplicaMode: expected.UserSpecifiedReplicaMode,
+		ForceSyncWarmup:          expected.ForceSyncWarmup,
 	}
 	if header.LoadAllFields == nil && current != nil {
 		header.LoadAllFields, header.SkipLoadDynamicField = current.LoadAllFields, current.SkipLoadDynamicField
