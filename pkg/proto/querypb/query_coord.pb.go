@@ -1158,10 +1158,11 @@ type LoadPartitionsRequest struct {
 	FieldIndexID map[int64]int64 `protobuf:"bytes,7,rep,name=field_indexID,json=fieldIndexID,proto3" json:"field_indexID,omitempty" protobuf_key:"varint,1,opt,name=key,proto3" protobuf_val:"varint,2,opt,name=value,proto3"`
 	Refresh      bool            `protobuf:"varint,8,opt,name=refresh,proto3" json:"refresh,omitempty"`
 	// resource group names
-	ResourceGroups []string              `protobuf:"bytes,9,rep,name=resource_groups,json=resourceGroups,proto3" json:"resource_groups,omitempty"`
-	IndexInfoList  []*indexpb.IndexInfo  `protobuf:"bytes,10,rep,name=index_info_list,json=indexInfoList,proto3" json:"index_info_list,omitempty"`
-	LoadFields     []int64               `protobuf:"varint,11,rep,packed,name=load_fields,json=loadFields,proto3" json:"load_fields,omitempty"`
-	Priority       commonpb.LoadPriority `protobuf:"varint,12,opt,name=priority,proto3,enum=milvus.proto.common.LoadPriority" json:"priority,omitempty"`
+	ResourceGroups  []string              `protobuf:"bytes,9,rep,name=resource_groups,json=resourceGroups,proto3" json:"resource_groups,omitempty"`
+	IndexInfoList   []*indexpb.IndexInfo  `protobuf:"bytes,10,rep,name=index_info_list,json=indexInfoList,proto3" json:"index_info_list,omitempty"`
+	LoadFields      []int64               `protobuf:"varint,11,rep,packed,name=load_fields,json=loadFields,proto3" json:"load_fields,omitempty"`
+	Priority        commonpb.LoadPriority `protobuf:"varint,12,opt,name=priority,proto3,enum=milvus.proto.common.LoadPriority" json:"priority,omitempty"`
+	ForceSyncWarmup bool                  `protobuf:"varint,13,opt,name=force_sync_warmup,json=forceSyncWarmup,proto3" json:"force_sync_warmup,omitempty"`
 }
 
 func (x *LoadPartitionsRequest) Reset() {
@@ -1280,6 +1281,148 @@ func (x *LoadPartitionsRequest) GetPriority() commonpb.LoadPriority {
 	return commonpb.LoadPriority(0)
 }
 
+func (x *LoadPartitionsRequest) GetForceSyncWarmup() bool {
+	if x != nil {
+		return x.ForceSyncWarmup
+	}
+	return false
+}
+
+type PrewarmRequest struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Base            *commonpb.MsgBase          `protobuf:"bytes,1,opt,name=base,proto3" json:"base,omitempty"`
+	DbID            int64                      `protobuf:"varint,2,opt,name=dbID,proto3" json:"dbID,omitempty"`
+	CollectionID    int64                      `protobuf:"varint,3,opt,name=collectionID,proto3" json:"collectionID,omitempty"`
+	PartitionIDs    []int64                    `protobuf:"varint,4,rep,packed,name=partitionIDs,proto3" json:"partitionIDs,omitempty"`
+	Schema          *schemapb.CollectionSchema `protobuf:"bytes,5,opt,name=schema,proto3" json:"schema,omitempty"`
+	Namespace       *string                    `protobuf:"bytes,6,opt,name=namespace,proto3,oneof" json:"namespace,omitempty"`
+	FieldIDs        []int64                    `protobuf:"varint,7,rep,packed,name=fieldIDs,proto3" json:"fieldIDs,omitempty"`
+	SegmentIDs      []int64                    `protobuf:"varint,8,rep,packed,name=segmentIDs,proto3" json:"segmentIDs,omitempty"`
+	Priority        commonpb.LoadPriority      `protobuf:"varint,9,opt,name=priority,proto3,enum=milvus.proto.common.LoadPriority" json:"priority,omitempty"`
+	FieldIndexID    map[int64]int64            `protobuf:"bytes,10,rep,name=field_indexID,json=fieldIndexID,proto3" json:"field_indexID,omitempty" protobuf_key:"varint,1,opt,name=key,proto3" protobuf_val:"varint,2,opt,name=value,proto3"`
+	LoadFields      []int64                    `protobuf:"varint,11,rep,packed,name=load_fields,json=loadFields,proto3" json:"load_fields,omitempty"`
+	ForceSyncWarmup bool                       `protobuf:"varint,12,opt,name=force_sync_warmup,json=forceSyncWarmup,proto3" json:"force_sync_warmup,omitempty"`
+}
+
+func (x *PrewarmRequest) Reset() {
+	*x = PrewarmRequest{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_query_coord_proto_msgTypes[10]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *PrewarmRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PrewarmRequest) ProtoMessage() {}
+
+func (x *PrewarmRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_query_coord_proto_msgTypes[10]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PrewarmRequest.ProtoReflect.Descriptor instead.
+func (*PrewarmRequest) Descriptor() ([]byte, []int) {
+	return file_query_coord_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *PrewarmRequest) GetBase() *commonpb.MsgBase {
+	if x != nil {
+		return x.Base
+	}
+	return nil
+}
+
+func (x *PrewarmRequest) GetDbID() int64 {
+	if x != nil {
+		return x.DbID
+	}
+	return 0
+}
+
+func (x *PrewarmRequest) GetCollectionID() int64 {
+	if x != nil {
+		return x.CollectionID
+	}
+	return 0
+}
+
+func (x *PrewarmRequest) GetPartitionIDs() []int64 {
+	if x != nil {
+		return x.PartitionIDs
+	}
+	return nil
+}
+
+func (x *PrewarmRequest) GetSchema() *schemapb.CollectionSchema {
+	if x != nil {
+		return x.Schema
+	}
+	return nil
+}
+
+func (x *PrewarmRequest) GetNamespace() string {
+	if x != nil && x.Namespace != nil {
+		return *x.Namespace
+	}
+	return ""
+}
+
+func (x *PrewarmRequest) GetFieldIDs() []int64 {
+	if x != nil {
+		return x.FieldIDs
+	}
+	return nil
+}
+
+func (x *PrewarmRequest) GetSegmentIDs() []int64 {
+	if x != nil {
+		return x.SegmentIDs
+	}
+	return nil
+}
+
+func (x *PrewarmRequest) GetPriority() commonpb.LoadPriority {
+	if x != nil {
+		return x.Priority
+	}
+	return commonpb.LoadPriority(0)
+}
+
+func (x *PrewarmRequest) GetFieldIndexID() map[int64]int64 {
+	if x != nil {
+		return x.FieldIndexID
+	}
+	return nil
+}
+
+func (x *PrewarmRequest) GetLoadFields() []int64 {
+	if x != nil {
+		return x.LoadFields
+	}
+	return nil
+}
+
+func (x *PrewarmRequest) GetForceSyncWarmup() bool {
+	if x != nil {
+		return x.ForceSyncWarmup
+	}
+	return false
+}
+
 type ReleasePartitionsRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -1295,7 +1438,7 @@ type ReleasePartitionsRequest struct {
 func (x *ReleasePartitionsRequest) Reset() {
 	*x = ReleasePartitionsRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_query_coord_proto_msgTypes[10]
+		mi := &file_query_coord_proto_msgTypes[11]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1308,7 +1451,7 @@ func (x *ReleasePartitionsRequest) String() string {
 func (*ReleasePartitionsRequest) ProtoMessage() {}
 
 func (x *ReleasePartitionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_query_coord_proto_msgTypes[10]
+	mi := &file_query_coord_proto_msgTypes[11]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1321,7 +1464,7 @@ func (x *ReleasePartitionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleasePartitionsRequest.ProtoReflect.Descriptor instead.
 func (*ReleasePartitionsRequest) Descriptor() ([]byte, []int) {
-	return file_query_coord_proto_rawDescGZIP(), []int{10}
+	return file_query_coord_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ReleasePartitionsRequest) GetBase() *commonpb.MsgBase {
@@ -1373,7 +1516,7 @@ type GetPartitionStatesRequest struct {
 func (x *GetPartitionStatesRequest) Reset() {
 	*x = GetPartitionStatesRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_query_coord_proto_msgTypes[11]
+		mi := &file_query_coord_proto_msgTypes[12]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1386,7 +1529,7 @@ func (x *GetPartitionStatesRequest) String() string {
 func (*GetPartitionStatesRequest) ProtoMessage() {}
 
 func (x *GetPartitionStatesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_query_coord_proto_msgTypes[11]
+	mi := &file_query_coord_proto_msgTypes[12]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1399,7 +1542,7 @@ func (x *GetPartitionStatesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPartitionStatesRequest.ProtoReflect.Descriptor instead.
 func (*GetPartitionStatesRequest) Descriptor() ([]byte, []int) {
-	return file_query_coord_proto_rawDescGZIP(), []int{11}
+	return file_query_coord_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *GetPartitionStatesRequest) GetBase() *commonpb.MsgBase {
@@ -1442,7 +1585,7 @@ type GetPartitionStatesResponse struct {
 func (x *GetPartitionStatesResponse) Reset() {
 	*x = GetPartitionStatesResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_query_coord_proto_msgTypes[12]
+		mi := &file_query_coord_proto_msgTypes[13]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1455,7 +1598,7 @@ func (x *GetPartitionStatesResponse) String() string {
 func (*GetPartitionStatesResponse) ProtoMessage() {}
 
 func (x *GetPartitionStatesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_query_coord_proto_msgTypes[12]
+	mi := &file_query_coord_proto_msgTypes[13]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1468,7 +1611,7 @@ func (x *GetPartitionStatesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPartitionStatesResponse.ProtoReflect.Descriptor instead.
 func (*GetPartitionStatesResponse) Descriptor() ([]byte, []int) {
-	return file_query_coord_proto_rawDescGZIP(), []int{12}
+	return file_query_coord_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *GetPartitionStatesResponse) GetStatus() *commonpb.Status {
@@ -1498,7 +1641,7 @@ type GetSegmentInfoRequest struct {
 func (x *GetSegmentInfoRequest) Reset() {
 	*x = GetSegmentInfoRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_query_coord_proto_msgTypes[13]
+		mi := &file_query_coord_proto_msgTypes[14]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1511,7 +1654,7 @@ func (x *GetSegmentInfoRequest) String() string {
 func (*GetSegmentInfoRequest) ProtoMessage() {}
 
 func (x *GetSegmentInfoRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_query_coord_proto_msgTypes[13]
+	mi := &file_query_coord_proto_msgTypes[14]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1524,7 +1667,7 @@ func (x *GetSegmentInfoRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSegmentInfoRequest.ProtoReflect.Descriptor instead.
 func (*GetSegmentInfoRequest) Descriptor() ([]byte, []int) {
-	return file_query_coord_proto_rawDescGZIP(), []int{13}
+	return file_query_coord_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *GetSegmentInfoRequest) GetBase() *commonpb.MsgBase {
@@ -1560,7 +1703,7 @@ type GetSegmentInfoResponse struct {
 func (x *GetSegmentInfoResponse) Reset() {
 	*x = GetSegmentInfoResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_query_coord_proto_msgTypes[14]
+		mi := &file_query_coord_proto_msgTypes[15]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1573,7 +1716,7 @@ func (x *GetSegmentInfoResponse) String() string {
 func (*GetSegmentInfoResponse) ProtoMessage() {}
 
 func (x *GetSegmentInfoResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_query_coord_proto_msgTypes[14]
+	mi := &file_query_coord_proto_msgTypes[15]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1586,7 +1729,7 @@ func (x *GetSegmentInfoResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSegmentInfoResponse.ProtoReflect.Descriptor instead.
 func (*GetSegmentInfoResponse) Descriptor() ([]byte, []int) {
-	return file_query_coord_proto_rawDescGZIP(), []int{14}
+	return file_query_coord_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *GetSegmentInfoResponse) GetStatus() *commonpb.Status {
@@ -1616,7 +1759,7 @@ type GetQueryViewLoadInfoRequest struct {
 func (x *GetQueryViewLoadInfoRequest) Reset() {
 	*x = GetQueryViewLoadInfoRequest{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_query_coord_proto_msgTypes[15]
+		mi := &file_query_coord_proto_msgTypes[16]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -1682,7 +1825,7 @@ type GetQueryViewLoadInfoResponse struct {
 func (x *GetQueryViewLoadInfoResponse) Reset() {
 	*x = GetQueryViewLoadInfoResponse{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_query_coord_proto_msgTypes[16]
+		mi := &file_query_coord_proto_msgTypes[17]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -3284,20 +3427,21 @@ type LoadSegmentsRequest struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Base           *commonpb.MsgBase          `protobuf:"bytes,1,opt,name=base,proto3" json:"base,omitempty"`
-	DstNodeID      int64                      `protobuf:"varint,2,opt,name=dst_nodeID,json=dstNodeID,proto3" json:"dst_nodeID,omitempty"`
-	Infos          []*SegmentLoadInfo         `protobuf:"bytes,3,rep,name=infos,proto3" json:"infos,omitempty"`
-	Schema         *schemapb.CollectionSchema `protobuf:"bytes,4,opt,name=schema,proto3" json:"schema,omitempty"`
-	SourceNodeID   int64                      `protobuf:"varint,5,opt,name=source_nodeID,json=sourceNodeID,proto3" json:"source_nodeID,omitempty"`
-	CollectionID   int64                      `protobuf:"varint,6,opt,name=collectionID,proto3" json:"collectionID,omitempty"`
-	LoadMeta       *LoadMetaInfo              `protobuf:"bytes,7,opt,name=load_meta,json=loadMeta,proto3" json:"load_meta,omitempty"`
-	ReplicaID      int64                      `protobuf:"varint,8,opt,name=replicaID,proto3" json:"replicaID,omitempty"`
-	DeltaPositions []*msgpb.MsgPosition       `protobuf:"bytes,9,rep,name=delta_positions,json=deltaPositions,proto3" json:"delta_positions,omitempty"` // keep it for compatibility of rolling upgrade from 2.2.x to 2.3
-	Version        int64                      `protobuf:"varint,10,opt,name=version,proto3" json:"version,omitempty"`
-	NeedTransfer   bool                       `protobuf:"varint,11,opt,name=need_transfer,json=needTransfer,proto3" json:"need_transfer,omitempty"`
-	LoadScope      LoadScope                  `protobuf:"varint,12,opt,name=load_scope,json=loadScope,proto3,enum=milvus.proto.query.LoadScope" json:"load_scope,omitempty"`
-	IndexInfoList  []*indexpb.IndexInfo       `protobuf:"bytes,13,rep,name=index_info_list,json=indexInfoList,proto3" json:"index_info_list,omitempty"`
-	LazyLoad       bool                       `protobuf:"varint,14,opt,name=lazy_load,json=lazyLoad,proto3" json:"lazy_load,omitempty"`
+	Base            *commonpb.MsgBase          `protobuf:"bytes,1,opt,name=base,proto3" json:"base,omitempty"`
+	DstNodeID       int64                      `protobuf:"varint,2,opt,name=dst_nodeID,json=dstNodeID,proto3" json:"dst_nodeID,omitempty"`
+	Infos           []*SegmentLoadInfo         `protobuf:"bytes,3,rep,name=infos,proto3" json:"infos,omitempty"`
+	Schema          *schemapb.CollectionSchema `protobuf:"bytes,4,opt,name=schema,proto3" json:"schema,omitempty"`
+	SourceNodeID    int64                      `protobuf:"varint,5,opt,name=source_nodeID,json=sourceNodeID,proto3" json:"source_nodeID,omitempty"`
+	CollectionID    int64                      `protobuf:"varint,6,opt,name=collectionID,proto3" json:"collectionID,omitempty"`
+	LoadMeta        *LoadMetaInfo              `protobuf:"bytes,7,opt,name=load_meta,json=loadMeta,proto3" json:"load_meta,omitempty"`
+	ReplicaID       int64                      `protobuf:"varint,8,opt,name=replicaID,proto3" json:"replicaID,omitempty"`
+	DeltaPositions  []*msgpb.MsgPosition       `protobuf:"bytes,9,rep,name=delta_positions,json=deltaPositions,proto3" json:"delta_positions,omitempty"` // keep it for compatibility of rolling upgrade from 2.2.x to 2.3
+	Version         int64                      `protobuf:"varint,10,opt,name=version,proto3" json:"version,omitempty"`
+	NeedTransfer    bool                       `protobuf:"varint,11,opt,name=need_transfer,json=needTransfer,proto3" json:"need_transfer,omitempty"`
+	LoadScope       LoadScope                  `protobuf:"varint,12,opt,name=load_scope,json=loadScope,proto3,enum=milvus.proto.query.LoadScope" json:"load_scope,omitempty"`
+	IndexInfoList   []*indexpb.IndexInfo       `protobuf:"bytes,13,rep,name=index_info_list,json=indexInfoList,proto3" json:"index_info_list,omitempty"`
+	LazyLoad        bool                       `protobuf:"varint,14,opt,name=lazy_load,json=lazyLoad,proto3" json:"lazy_load,omitempty"`
+	ForceSyncWarmup bool                       `protobuf:"varint,15,opt,name=force_sync_warmup,json=forceSyncWarmup,proto3" json:"force_sync_warmup,omitempty"`
 }
 
 func (x *LoadSegmentsRequest) Reset() {
@@ -3426,6 +3570,13 @@ func (x *LoadSegmentsRequest) GetIndexInfoList() []*indexpb.IndexInfo {
 func (x *LoadSegmentsRequest) GetLazyLoad() bool {
 	if x != nil {
 		return x.LazyLoad
+	}
+	return false
+}
+
+func (x *LoadSegmentsRequest) GetForceSyncWarmup() bool {
+	if x != nil {
+		return x.ForceSyncWarmup
 	}
 	return false
 }
@@ -5571,6 +5722,7 @@ type CollectionLoadInfo struct {
 	LoadFields               []int64         `protobuf:"varint,8,rep,packed,name=load_fields,json=loadFields,proto3" json:"load_fields,omitempty"`
 	DbID                     int64           `protobuf:"varint,9,opt,name=dbID,proto3" json:"dbID,omitempty"`
 	UserSpecifiedReplicaMode bool            `protobuf:"varint,10,opt,name=user_specified_replica_mode,json=userSpecifiedReplicaMode,proto3" json:"user_specified_replica_mode,omitempty"`
+	ForceSyncWarmup          bool            `protobuf:"varint,11,opt,name=force_sync_warmup,json=forceSyncWarmup,proto3" json:"force_sync_warmup,omitempty"`
 }
 
 func (x *CollectionLoadInfo) Reset() {
@@ -5675,17 +5827,25 @@ func (x *CollectionLoadInfo) GetUserSpecifiedReplicaMode() bool {
 	return false
 }
 
+func (x *CollectionLoadInfo) GetForceSyncWarmup() bool {
+	if x != nil {
+		return x.ForceSyncWarmup
+	}
+	return false
+}
+
 type PartitionLoadInfo struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	CollectionID  int64           `protobuf:"varint,1,opt,name=collectionID,proto3" json:"collectionID,omitempty"`
-	PartitionID   int64           `protobuf:"varint,2,opt,name=partitionID,proto3" json:"partitionID,omitempty"`
-	ReplicaNumber int32           `protobuf:"varint,3,opt,name=replica_number,json=replicaNumber,proto3" json:"replica_number,omitempty"` // Deprecated: No longer used; kept for compatibility.
-	Status        LoadStatus      `protobuf:"varint,4,opt,name=status,proto3,enum=milvus.proto.query.LoadStatus" json:"status,omitempty"`
-	FieldIndexID  map[int64]int64 `protobuf:"bytes,5,rep,name=field_indexID,json=fieldIndexID,proto3" json:"field_indexID,omitempty" protobuf_key:"varint,1,opt,name=key,proto3" protobuf_val:"varint,2,opt,name=value,proto3"` // Deprecated: No longer used; kept for compatibility.
-	RecoverTimes  int32           `protobuf:"varint,7,opt,name=recover_times,json=recoverTimes,proto3" json:"recover_times,omitempty"`
+	CollectionID    int64           `protobuf:"varint,1,opt,name=collectionID,proto3" json:"collectionID,omitempty"`
+	PartitionID     int64           `protobuf:"varint,2,opt,name=partitionID,proto3" json:"partitionID,omitempty"`
+	ReplicaNumber   int32           `protobuf:"varint,3,opt,name=replica_number,json=replicaNumber,proto3" json:"replica_number,omitempty"` // Deprecated: No longer used; kept for compatibility.
+	Status          LoadStatus      `protobuf:"varint,4,opt,name=status,proto3,enum=milvus.proto.query.LoadStatus" json:"status,omitempty"`
+	FieldIndexID    map[int64]int64 `protobuf:"bytes,5,rep,name=field_indexID,json=fieldIndexID,proto3" json:"field_indexID,omitempty" protobuf_key:"varint,1,opt,name=key,proto3" protobuf_val:"varint,2,opt,name=value,proto3"` // Deprecated: No longer used; kept for compatibility.
+	RecoverTimes    int32           `protobuf:"varint,7,opt,name=recover_times,json=recoverTimes,proto3" json:"recover_times,omitempty"`
+	ForceSyncWarmup bool            `protobuf:"varint,8,opt,name=force_sync_warmup,json=forceSyncWarmup,proto3" json:"force_sync_warmup,omitempty"`
 }
 
 func (x *PartitionLoadInfo) Reset() {
@@ -5760,6 +5920,13 @@ func (x *PartitionLoadInfo) GetRecoverTimes() int32 {
 		return x.RecoverTimes
 	}
 	return 0
+}
+
+func (x *PartitionLoadInfo) GetForceSyncWarmup() bool {
+	if x != nil {
+		return x.ForceSyncWarmup
+	}
+	return false
 }
 
 type ChannelNodeInfo struct {
@@ -9610,7 +9777,7 @@ var file_query_coord_proto_rawDesc = []byte{
 	0x61, 0x64, 0x65, 0x72, 0x12, 0x33, 0x0a, 0x05, 0x73, 0x63, 0x6f, 0x70, 0x65, 0x18, 0x05, 0x20,
 	0x01, 0x28, 0x0e, 0x32, 0x1d, 0x2e, 0x6d, 0x69, 0x6c, 0x76, 0x75, 0x73, 0x2e, 0x70, 0x72, 0x6f,
 	0x74, 0x6f, 0x2e, 0x71, 0x75, 0x65, 0x72, 0x79, 0x2e, 0x44, 0x61, 0x74, 0x61, 0x53, 0x63, 0x6f,
-	0x70, 0x65, 0x52, 0x05, 0x73, 0x63, 0x6f, 0x70, 0x65, 0x22, 0x98, 0x05, 0x0a, 0x15, 0x4c, 0x6f,
+	0x70, 0x65, 0x52, 0x05, 0x73, 0x63, 0x6f, 0x70, 0x65, 0x22, 0xc4, 0x05, 0x0a, 0x15, 0x4c, 0x6f,
 	0x61, 0x64, 0x50, 0x61, 0x72, 0x74, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x73, 0x52, 0x65, 0x71, 0x75,
 	0x65, 0x73, 0x74, 0x12, 0x30, 0x0a, 0x04, 0x62, 0x61, 0x73, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28,
 	0x0b, 0x32, 0x1c, 0x2e, 0x6d, 0x69, 0x6c, 0x76, 0x75, 0x73, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f,
@@ -9648,50 +9815,32 @@ var file_query_coord_proto_rawDesc = []byte{
 	0x18, 0x0c, 0x20, 0x01, 0x28, 0x0e, 0x32, 0x21, 0x2e, 0x6d, 0x69, 0x6c, 0x76, 0x75, 0x73, 0x2e,
 	0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2e, 0x63, 0x6f, 0x6d, 0x6d, 0x6f, 0x6e, 0x2e, 0x4c, 0x6f, 0x61,
 	0x64, 0x50, 0x72, 0x69, 0x6f, 0x72, 0x69, 0x74, 0x79, 0x52, 0x08, 0x70, 0x72, 0x69, 0x6f, 0x72,
-	0x69, 0x74, 0x79, 0x1a, 0x3f, 0x0a, 0x11, 0x46, 0x69, 0x65, 0x6c, 0x64, 0x49, 0x6e, 0x64, 0x65,
-	0x78, 0x49, 0x44, 0x45, 0x6e, 0x74, 0x72, 0x79, 0x12, 0x10, 0x0a, 0x03, 0x6b, 0x65, 0x79, 0x18,
-	0x01, 0x20, 0x01, 0x28, 0x03, 0x52, 0x03, 0x6b, 0x65, 0x79, 0x12, 0x14, 0x0a, 0x05, 0x76, 0x61,
-	0x6c, 0x75, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x03, 0x52, 0x05, 0x76, 0x61, 0x6c, 0x75, 0x65,
-	0x3a, 0x02, 0x38, 0x01, 0x22, 0xc0, 0x01, 0x0a, 0x18, 0x52, 0x65, 0x6c, 0x65, 0x61, 0x73, 0x65,
-	0x50, 0x61, 0x72, 0x74, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x73, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73,
-	0x74, 0x12, 0x30, 0x0a, 0x04, 0x62, 0x61, 0x73, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0b, 0x32,
-	0x1c, 0x2e, 0x6d, 0x69, 0x6c, 0x76, 0x75, 0x73, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2e, 0x63,
-	0x6f, 0x6d, 0x6d, 0x6f, 0x6e, 0x2e, 0x4d, 0x73, 0x67, 0x42, 0x61, 0x73, 0x65, 0x52, 0x04, 0x62,
-	0x61, 0x73, 0x65, 0x12, 0x12, 0x0a, 0x04, 0x64, 0x62, 0x49, 0x44, 0x18, 0x02, 0x20, 0x01, 0x28,
-	0x03, 0x52, 0x04, 0x64, 0x62, 0x49, 0x44, 0x12, 0x22, 0x0a, 0x0c, 0x63, 0x6f, 0x6c, 0x6c, 0x65,
-	0x63, 0x74, 0x69, 0x6f, 0x6e, 0x49, 0x44, 0x18, 0x03, 0x20, 0x01, 0x28, 0x03, 0x52, 0x0c, 0x63,
-	0x6f, 0x6c, 0x6c, 0x65, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x49, 0x44, 0x12, 0x22, 0x0a, 0x0c, 0x70,
-	0x61, 0x72, 0x74, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x49, 0x44, 0x73, 0x18, 0x04, 0x20, 0x03, 0x28,
-	0x03, 0x52, 0x0c, 0x70, 0x61, 0x72, 0x74, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x49, 0x44, 0x73, 0x12,
-	0x16, 0x0a, 0x06, 0x6e, 0x6f, 0x64, 0x65, 0x49, 0x44, 0x18, 0x05, 0x20, 0x01, 0x28, 0x03, 0x52,
-	0x06, 0x6e, 0x6f, 0x64, 0x65, 0x49, 0x44, 0x22, 0xa9, 0x01, 0x0a, 0x19, 0x47, 0x65, 0x74, 0x50,
-	0x61, 0x72, 0x74, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x53, 0x74, 0x61, 0x74, 0x65, 0x73, 0x52, 0x65,
-	0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x30, 0x0a, 0x04, 0x62, 0x61, 0x73, 0x65, 0x18, 0x01, 0x20,
-	0x01, 0x28, 0x0b, 0x32, 0x1c, 0x2e, 0x6d, 0x69, 0x6c, 0x76, 0x75, 0x73, 0x2e, 0x70, 0x72, 0x6f,
-	0x74, 0x6f, 0x2e, 0x63, 0x6f, 0x6d, 0x6d, 0x6f, 0x6e, 0x2e, 0x4d, 0x73, 0x67, 0x42, 0x61, 0x73,
-	0x65, 0x52, 0x04, 0x62, 0x61, 0x73, 0x65, 0x12, 0x12, 0x0a, 0x04, 0x64, 0x62, 0x49, 0x44, 0x18,
-	0x02, 0x20, 0x01, 0x28, 0x03, 0x52, 0x04, 0x64, 0x62, 0x49, 0x44, 0x12, 0x22, 0x0a, 0x0c, 0x63,
-	0x6f, 0x6c, 0x6c, 0x65, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x49, 0x44, 0x18, 0x03, 0x20, 0x01, 0x28,
-	0x03, 0x52, 0x0c, 0x63, 0x6f, 0x6c, 0x6c, 0x65, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x49, 0x44, 0x12,
-	0x22, 0x0a, 0x0c, 0x70, 0x61, 0x72, 0x74, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x49, 0x44, 0x73, 0x18,
-	0x04, 0x20, 0x03, 0x28, 0x03, 0x52, 0x0c, 0x70, 0x61, 0x72, 0x74, 0x69, 0x74, 0x69, 0x6f, 0x6e,
-	0x49, 0x44, 0x73, 0x22, 0xad, 0x01, 0x0a, 0x1a, 0x47, 0x65, 0x74, 0x50, 0x61, 0x72, 0x74, 0x69,
-	0x74, 0x69, 0x6f, 0x6e, 0x53, 0x74, 0x61, 0x74, 0x65, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e,
-	0x73, 0x65, 0x12, 0x33, 0x0a, 0x06, 0x73, 0x74, 0x61, 0x74, 0x75, 0x73, 0x18, 0x01, 0x20, 0x01,
-	0x28, 0x0b, 0x32, 0x1b, 0x2e, 0x6d, 0x69, 0x6c, 0x76, 0x75, 0x73, 0x2e, 0x70, 0x72, 0x6f, 0x74,
-	0x6f, 0x2e, 0x63, 0x6f, 0x6d, 0x6d, 0x6f, 0x6e, 0x2e, 0x53, 0x74, 0x61, 0x74, 0x75, 0x73, 0x52,
-	0x06, 0x73, 0x74, 0x61, 0x74, 0x75, 0x73, 0x12, 0x5a, 0x0a, 0x16, 0x70, 0x61, 0x72, 0x74, 0x69,
-	0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x64, 0x65, 0x73, 0x63, 0x72, 0x69, 0x70, 0x74, 0x69, 0x6f, 0x6e,
-	0x73, 0x18, 0x02, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x23, 0x2e, 0x6d, 0x69, 0x6c, 0x76, 0x75, 0x73,
-	0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2e, 0x71, 0x75, 0x65, 0x72, 0x79, 0x2e, 0x50, 0x61, 0x72,
-	0x74, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x53, 0x74, 0x61, 0x74, 0x65, 0x73, 0x52, 0x15, 0x70, 0x61,
-	0x72, 0x74, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x44, 0x65, 0x73, 0x63, 0x72, 0x69, 0x70, 0x74, 0x69,
-	0x6f, 0x6e, 0x73, 0x22, 0x8d, 0x01, 0x0a, 0x15, 0x47, 0x65, 0x74, 0x53, 0x65, 0x67, 0x6d, 0x65,
-	0x6e, 0x74, 0x49, 0x6e, 0x66, 0x6f, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x30, 0x0a,
-	0x04, 0x62, 0x61, 0x73, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0b, 0x32, 0x1c, 0x2e, 0x6d, 0x69,
-	0x6c, 0x76, 0x75, 0x73, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2e, 0x63, 0x6f, 0x6d, 0x6d, 0x6f,
-	0x6e, 0x2e, 0x4d, 0x73, 0x67, 0x42, 0x61, 0x73, 0x65, 0x52, 0x04, 0x62, 0x61, 0x73, 0x65, 0x12,
-	0x1e, 0x0a, 0x0a, 0x73, 0x65, 0x67, 0x6d, 0x65, 0x6e, 0x74, 0x49, 0x44, 0x73, 0x18, 0x02, 0x20,
+	0x69, 0x74, 0x79, 0x12, 0x2a, 0x0a, 0x11, 0x66, 0x6f, 0x72, 0x63, 0x65, 0x5f, 0x73, 0x79, 0x6e,
+	0x63, 0x5f, 0x77, 0x61, 0x72, 0x6d, 0x75, 0x70, 0x18, 0x0d, 0x20, 0x01, 0x28, 0x08, 0x52, 0x0f,
+	0x66, 0x6f, 0x72, 0x63, 0x65, 0x53, 0x79, 0x6e, 0x63, 0x57, 0x61, 0x72, 0x6d, 0x75, 0x70, 0x1a,
+	0x3f, 0x0a, 0x11, 0x46, 0x69, 0x65, 0x6c, 0x64, 0x49, 0x6e, 0x64, 0x65, 0x78, 0x49, 0x44, 0x45,
+	0x6e, 0x74, 0x72, 0x79, 0x12, 0x10, 0x0a, 0x03, 0x6b, 0x65, 0x79, 0x18, 0x01, 0x20, 0x01, 0x28,
+	0x03, 0x52, 0x03, 0x6b, 0x65, 0x79, 0x12, 0x14, 0x0a, 0x05, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x18,
+	0x02, 0x20, 0x01, 0x28, 0x03, 0x52, 0x05, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x3a, 0x02, 0x38, 0x01,
+	0x22, 0xf2, 0x04, 0x0a, 0x0e, 0x50, 0x72, 0x65, 0x77, 0x61, 0x72, 0x6d, 0x52, 0x65, 0x71, 0x75,
+	0x65, 0x73, 0x74, 0x12, 0x30, 0x0a, 0x04, 0x62, 0x61, 0x73, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28,
+	0x0b, 0x32, 0x1c, 0x2e, 0x6d, 0x69, 0x6c, 0x76, 0x75, 0x73, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f,
+	0x2e, 0x63, 0x6f, 0x6d, 0x6d, 0x6f, 0x6e, 0x2e, 0x4d, 0x73, 0x67, 0x42, 0x61, 0x73, 0x65, 0x52,
+	0x04, 0x62, 0x61, 0x73, 0x65, 0x12, 0x12, 0x0a, 0x04, 0x64, 0x62, 0x49, 0x44, 0x18, 0x02, 0x20,
+	0x01, 0x28, 0x03, 0x52, 0x04, 0x64, 0x62, 0x49, 0x44, 0x12, 0x22, 0x0a, 0x0c, 0x63, 0x6f, 0x6c,
+	0x6c, 0x65, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x49, 0x44, 0x18, 0x03, 0x20, 0x01, 0x28, 0x03, 0x52,
+	0x0c, 0x63, 0x6f, 0x6c, 0x6c, 0x65, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x49, 0x44, 0x12, 0x22, 0x0a,
+	0x0c, 0x70, 0x61, 0x72, 0x74, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x49, 0x44, 0x73, 0x18, 0x04, 0x20,
+	0x03, 0x28, 0x03, 0x52, 0x0c, 0x70, 0x61, 0x72, 0x74, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x49, 0x44,
+	0x73, 0x12, 0x3d, 0x0a, 0x06, 0x73, 0x63, 0x68, 0x65, 0x6d, 0x61, 0x18, 0x05, 0x20, 0x01, 0x28,
+	0x0b, 0x32, 0x25, 0x2e, 0x6d, 0x69, 0x6c, 0x76, 0x75, 0x73, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f,
+	0x2e, 0x73, 0x63, 0x68, 0x65, 0x6d, 0x61, 0x2e, 0x43, 0x6f, 0x6c, 0x6c, 0x65, 0x63, 0x74, 0x69,
+	0x6f, 0x6e, 0x53, 0x63, 0x68, 0x65, 0x6d, 0x61, 0x52, 0x06, 0x73, 0x63, 0x68, 0x65, 0x6d, 0x61,
+	0x12, 0x21, 0x0a, 0x09, 0x6e, 0x61, 0x6d, 0x65, 0x73, 0x70, 0x61, 0x63, 0x65, 0x18, 0x06, 0x20,
+	0x01, 0x28, 0x09, 0x48, 0x00, 0x52, 0x09, 0x6e, 0x61, 0x6d, 0x65, 0x73, 0x70, 0x61, 0x63, 0x65,
+	0x88, 0x01, 0x01, 0x12, 0x1a, 0x0a, 0x08, 0x66, 0x69, 0x65, 0x6c, 0x64, 0x49, 0x44, 0x73, 0x18,
+	0x07, 0x20, 0x03, 0x28, 0x03, 0x52, 0x08, 0x66, 0x69, 0x65, 0x6c, 0x64, 0x49, 0x44, 0x73, 0x12,
+	0x1e, 0x0a, 0x0a, 0x73, 0x65, 0x67, 0x6d, 0x65, 0x6e, 0x74, 0x49, 0x44, 0x73, 0x18, 0x08, 0x20,
 	0x03, 0x28, 0x03, 0x52, 0x0a, 0x73, 0x65, 0x67, 0x6d, 0x65, 0x6e, 0x74, 0x49, 0x44, 0x73, 0x12,
 	0x22, 0x0a, 0x0c, 0x63, 0x6f, 0x6c, 0x6c, 0x65, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x49, 0x44, 0x18,
 	0x03, 0x20, 0x01, 0x28, 0x03, 0x52, 0x0c, 0x63, 0x6f, 0x6c, 0x6c, 0x65, 0x63, 0x74, 0x69, 0x6f,
@@ -12579,7 +12728,7 @@ func file_query_coord_proto_init() {
 			}
 		}
 		file_query_coord_proto_msgTypes[10].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*ReleasePartitionsRequest); i {
+			switch v := v.(*PrewarmRequest); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -12591,7 +12740,7 @@ func file_query_coord_proto_init() {
 			}
 		}
 		file_query_coord_proto_msgTypes[11].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*GetPartitionStatesRequest); i {
+			switch v := v.(*ReleasePartitionsRequest); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -12603,7 +12752,7 @@ func file_query_coord_proto_init() {
 			}
 		}
 		file_query_coord_proto_msgTypes[12].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*GetPartitionStatesResponse); i {
+			switch v := v.(*GetPartitionStatesRequest); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -12615,7 +12764,7 @@ func file_query_coord_proto_init() {
 			}
 		}
 		file_query_coord_proto_msgTypes[13].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*GetSegmentInfoRequest); i {
+			switch v := v.(*GetPartitionStatesResponse); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -12627,7 +12776,7 @@ func file_query_coord_proto_init() {
 			}
 		}
 		file_query_coord_proto_msgTypes[14].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*GetSegmentInfoResponse); i {
+			switch v := v.(*GetSegmentInfoRequest); i {
 			case 0:
 				return &v.state
 			case 1:
