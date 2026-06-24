@@ -514,6 +514,14 @@ func applyExternalCollectionSegmentUpdateAtFence(
 	// the updated/removed segments from SegmentMeta.
 	mt.recomputeDataView(ctx, collectionID)
 
+	if len(upsertSegmentMap) > 0 {
+		updatedSegmentIDs := make([]UniqueID, 0, len(upsertSegmentMap))
+		for segmentID := range upsertSegmentMap {
+			updatedSegmentIDs = append(updatedSegmentIDs, segmentID)
+		}
+		notifySegmentIndexBuild(updatedSegmentIDs...)
+	}
+
 	mlog.Info(ctx, "external collection segments updated successfully",
 		mlog.Int("updatedSegments", len(updatedSegments)),
 		mlog.Int("keptSegments", len(keptSegmentIDs)))
