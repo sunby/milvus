@@ -43,6 +43,7 @@ import (
 	"github.com/milvus-io/milvus/internal/streamingnode/client/handler/registry"
 	"github.com/milvus-io/milvus/internal/util/analyzer"
 	"github.com/milvus-io/milvus/internal/util/fileresource"
+	utilmetrics "github.com/milvus-io/milvus/internal/util/metrics"
 	"github.com/milvus-io/milvus/internal/util/searchutil/scheduler"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	streamingstatus "github.com/milvus-io/milvus/internal/util/streamingutil/status"
@@ -75,6 +76,25 @@ const legacyLoadScopeIndex = querypb.LoadScope(2)
 
 type segmentDetacher interface {
 	DetachStreaming(ctx context.Context, segmentID typeutil.UniqueID) int
+}
+
+var getCacheShardDiskUsageStats = utilmetrics.GetCacheShardDiskUsageStats
+
+func getCacheShardDiskUsageStatsProto() []*querypb.CacheShardDiskUsageStats {
+	stats := getCacheShardDiskUsageStats()
+	if len(stats) == 0 {
+		return nil
+	}
+
+	result := make([]*querypb.CacheShardDiskUsageStats, 0, len(stats))
+	for _, stat := range stats {
+		result = append(result, &querypb.CacheShardDiskUsageStats{
+			DataType:  stat.DataType,
+			Shard:     stat.Shard,
+			DiskBytes: stat.DiskBytes,
+		})
+	}
+	return result
 }
 
 // GetComponentStates returns information about whether the node is healthy
@@ -1417,14 +1437,22 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 
 	node.distDeltaTracker.mu.Lock()
 	lastModifyTs := node.getDistributionModifyTS()
-	if !hasDataDistributionChange(req, lastModifyTs) {
-		node.distDeltaTracker.mu.Unlock()
-		resp := &querypb.GetDataDistributionResponse{
-			Status:       merr.Success(),
-			NodeID:       node.GetNodeID(),
-			LastModifyTs: lastModifyTs,
+	cacheShardDiskUsageStats := getCacheShardDiskUsageStatsProto()
+	distributionChange := func() bool {
+		if req.GetLastUpdateTs() == 0 {
+			return true
 		}
-		return resp, nil
+
+		return req.GetLastUpdateTs() < lastModifyTs
+	}
+
+	if !distributionChange() {
+		return &querypb.GetDataDistributionResponse{
+			Status:                   merr.Success(),
+			NodeID:                   node.GetNodeID(),
+			LastModifyTs:             lastModifyTs,
+			CacheShardDiskUsageStats: cacheShardDiskUsageStats,
+		}, nil
 	}
 
 	fullReport := !node.distDeltaTracker.canBuildDelta(req)
@@ -1534,47 +1562,17 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 		}
 	}
 
-	channelVersionInfos := make([]*querypb.ChannelVersionInfo, 0, len(reportChannelNames))
-	leaderViews := make([]*querypb.LeaderView, 0, len(reportChannelNames))
-	for _, key := range reportChannelNames {
-		shardDelegator, ok := node.delegators.Get(key)
-		if !ok {
-			continue
-		}
-		channelVersionInfos = append(channelVersionInfos, &querypb.ChannelVersionInfo{
-			Channel:    key,
-			Collection: shardDelegator.Collection(),
-			Version:    shardDelegator.Version(),
-		})
-
-		sealed, growing := shardDelegator.GetSegmentInfo(false)
-		leaderView := buildLeaderView(key, shardDelegator, buildFullSegmentDist(sealed), growing)
-		leaderViews = append(leaderViews, leaderView)
-	}
-
-	node.distDeltaTracker.mu.Lock()
-	// Another report may have reset the marker set while this response was built.
-	if node.distDeltaTracker.deltaGeneration == reportDeltaGeneration {
-		node.distDeltaTracker.lastReportedTs = lastModifyTs
-	}
-	node.distDeltaTracker.mu.Unlock()
-
-	resp := &querypb.GetDataDistributionResponse{
-		Status:              merr.Success(),
-		NodeID:              node.GetNodeID(),
-		Segments:            segmentVersionInfos,
-		Channels:            channelVersionInfos,
-		LeaderViews:         leaderViews,
-		LastModifyTs:        lastModifyTs,
-		MemCapacityInMB:     float64(hardware.GetMemoryCount() / 1024 / 1024),
-		CpuNum:              int64(hardware.GetCPUNum()),
-		IsDelta:             !fullReport,
-		RemovedSegmentIds:   removedSegmentIDs,
-		RemovedChannelNames: removedChannelNames,
-		TotalSegmentCount:   int64(totalSegmentCount),
-		TotalChannelCount:   int64(totalChannelCount),
-	}
-	return resp, nil
+	return &querypb.GetDataDistributionResponse{
+		Status:                   merr.Success(),
+		NodeID:                   node.GetNodeID(),
+		Segments:                 segmentVersionInfos,
+		Channels:                 channelVersionInfos,
+		LeaderViews:              leaderViews,
+		LastModifyTs:             lastModifyTs,
+		MemCapacityInMB:          float64(hardware.GetMemoryCount() / 1024 / 1024),
+		CpuNum:                   int64(hardware.GetCPUNum()),
+		CacheShardDiskUsageStats: cacheShardDiskUsageStats,
+	}, nil
 }
 
 func leaderViewCatchingUpStreamingData(labels map[string]string, catchingUp bool) bool {
