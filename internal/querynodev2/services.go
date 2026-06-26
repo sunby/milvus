@@ -42,6 +42,7 @@ import (
 	"github.com/milvus-io/milvus/internal/streamingnode/client/handler/registry"
 	"github.com/milvus-io/milvus/internal/util/analyzer"
 	"github.com/milvus-io/milvus/internal/util/fileresource"
+	utilmetrics "github.com/milvus-io/milvus/internal/util/metrics"
 	"github.com/milvus-io/milvus/internal/util/searchutil/scheduler"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	streamingstatus "github.com/milvus-io/milvus/internal/util/streamingutil/status"
@@ -74,6 +75,25 @@ const legacyLoadScopeIndex = querypb.LoadScope(2)
 
 type segmentDetacher interface {
 	DetachStreaming(ctx context.Context, segmentID typeutil.UniqueID) int
+}
+
+var getCacheShardDiskUsageStats = utilmetrics.GetCacheShardDiskUsageStats
+
+func getCacheShardDiskUsageStatsProto() []*querypb.CacheShardDiskUsageStats {
+	stats := getCacheShardDiskUsageStats()
+	if len(stats) == 0 {
+		return nil
+	}
+
+	result := make([]*querypb.CacheShardDiskUsageStats, 0, len(stats))
+	for _, stat := range stats {
+		result = append(result, &querypb.CacheShardDiskUsageStats{
+			DataType:  stat.DataType,
+			Shard:     stat.Shard,
+			DiskBytes: stat.DiskBytes,
+		})
+	}
+	return result
 }
 
 // GetComponentStates returns information about whether the node is healthy
@@ -1419,14 +1439,17 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 	}
 	defer node.lifetime.Done()
 
+	// Cache disk usage is reported on every pull, including unchanged ones.
+	cacheShardDiskUsageStats := getCacheShardDiskUsageStatsProto()
 	node.distDeltaTracker.mu.Lock()
 	lastModifyTs := node.getDistributionModifyTS()
 	if !hasDataDistributionChange(req, lastModifyTs) {
 		node.distDeltaTracker.mu.Unlock()
 		resp := &querypb.GetDataDistributionResponse{
-			Status:       merr.Success(),
-			NodeID:       node.GetNodeID(),
-			LastModifyTs: lastModifyTs,
+			Status:                   merr.Success(),
+			NodeID:                   node.GetNodeID(),
+			LastModifyTs:             lastModifyTs,
+			CacheShardDiskUsageStats: cacheShardDiskUsageStats,
 		}
 		return resp, nil
 	}
@@ -1577,6 +1600,8 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 		RemovedChannelNames: removedChannelNames,
 		TotalSegmentCount:   int64(totalSegmentCount),
 		TotalChannelCount:   int64(totalChannelCount),
+
+		CacheShardDiskUsageStats: cacheShardDiskUsageStats,
 	}
 	return resp, nil
 }
