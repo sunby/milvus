@@ -7081,23 +7081,23 @@ func (_c *MilvusServiceServer_PinSnapshotData_Call) RunAndReturn(run func(contex
 }
 
 // Prewarm provides a mock function with given fields: _a0, _a1
-func (_m *MilvusServiceServer) Prewarm(_a0 context.Context, _a1 *milvuspb.PrewarmRequest) (*milvuspb.PrewarmResponse, error) {
+func (_m *MilvusServiceServer) Prewarm(_a0 context.Context, _a1 *milvuspb.PrewarmRequest) (*commonpb.Status, error) {
 	ret := _m.Called(_a0, _a1)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Prewarm")
 	}
 
-	var r0 *milvuspb.PrewarmResponse
+	var r0 *commonpb.Status
 	var r1 error
-	if rf, ok := ret.Get(0).(func(context.Context, *milvuspb.PrewarmRequest) (*milvuspb.PrewarmResponse, error)); ok {
+	if rf, ok := ret.Get(0).(func(context.Context, *milvuspb.PrewarmRequest) (*commonpb.Status, error)); ok {
 		return rf(_a0, _a1)
 	}
-	if rf, ok := ret.Get(0).(func(context.Context, *milvuspb.PrewarmRequest) *milvuspb.PrewarmResponse); ok {
+	if rf, ok := ret.Get(0).(func(context.Context, *milvuspb.PrewarmRequest) *commonpb.Status); ok {
 		r0 = rf(_a0, _a1)
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(*milvuspb.PrewarmResponse)
+			r0 = ret.Get(0).(*commonpb.Status)
 		}
 	}
 
@@ -7129,12 +7129,12 @@ func (_c *MilvusServiceServer_Prewarm_Call) Run(run func(_a0 context.Context, _a
 	return _c
 }
 
-func (_c *MilvusServiceServer_Prewarm_Call) Return(_a0 *milvuspb.PrewarmResponse, _a1 error) *MilvusServiceServer_Prewarm_Call {
+func (_c *MilvusServiceServer_Prewarm_Call) Return(_a0 *commonpb.Status, _a1 error) *MilvusServiceServer_Prewarm_Call {
 	_c.Call.Return(_a0, _a1)
 	return _c
 }
 
-func (_c *MilvusServiceServer_Prewarm_Call) RunAndReturn(run func(context.Context, *milvuspb.PrewarmRequest) (*milvuspb.PrewarmResponse, error)) *MilvusServiceServer_Prewarm_Call {
+func (_c *MilvusServiceServer_Prewarm_Call) RunAndReturn(run func(context.Context, *milvuspb.PrewarmRequest) (*commonpb.Status, error)) *MilvusServiceServer_Prewarm_Call {
 	_c.Call.Return(run)
 	return _c
 }
