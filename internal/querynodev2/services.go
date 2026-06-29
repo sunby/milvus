@@ -610,7 +610,6 @@ func (node *QueryNode) Prewarm(ctx context.Context, req *querypb.PrewarmRequest)
 		mlog.Int64("collectionID", req.GetCollectionID()),
 		mlog.Int64s("partitionIDs", req.GetPartitionIDs()),
 		mlog.Int64s("segmentIDs", req.GetSegmentIDs()),
-		mlog.Int64s("fieldIDs", req.GetFieldIDs()),
 	)
 	log.Info(ctx, "received prewarm request")
 
@@ -650,7 +649,7 @@ func (node *QueryNode) Prewarm(ctx context.Context, req *querypb.PrewarmRequest)
 	defer node.manager.Segment.Unpin(loadedSegments)
 
 	for _, segment := range loadedSegments {
-		if err := segment.Prewarm(ctx, req.GetFieldIDs()); err != nil {
+		if err := segment.Prewarm(ctx, nil); err != nil {
 			log.Warn(ctx, "failed to prewarm segment", mlog.FieldSegmentID(segment.ID()), mlog.Err(err))
 			return merr.Status(merr.Wrapf(err, "failed to prewarm segment %d", segment.ID())), nil
 		}
