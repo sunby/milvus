@@ -2786,6 +2786,8 @@ func GetRequestInfo(ctx context.Context, metaCache Cache, req proto.Message) (in
 	case *milvuspb.PrewarmRequest:
 		dbID, collToPartIDs := getCollectionID(metaCache, req.(reqCollName))
 		return dbID, collToPartIDs, internalpb.RateType_DDLPartition, 1, nil
+	case *milvuspb.DescribePrewarmTaskRequest:
+		return util.InvalidDBID, map[int64][]int64{}, internalpb.RateType_DDLPartition, 1, nil
 	case *milvuspb.ReleasePartitionsRequest:
 		dbID, collToPartIDs := getCollectionID(metaCache, req.(reqCollName))
 		return dbID, collToPartIDs, internalpb.RateType_DDLPartition, 1, nil
@@ -2864,6 +2866,14 @@ func GetFailedResponse(req any, err error) any {
 		return &milvuspb.QueryResults{
 			Status: merr.Status(err),
 		}
+	case *milvuspb.PrewarmRequest:
+		return &milvuspb.PrewarmResponse{
+			Status: merr.Status(err),
+		}
+	case *milvuspb.DescribePrewarmTaskRequest:
+		return &milvuspb.DescribePrewarmTaskResponse{
+			Status: merr.Status(err),
+		}
 	case *milvuspb.CreateCollectionRequest, *milvuspb.DropCollectionRequest,
 		*milvuspb.LoadCollectionRequest, *milvuspb.ReleaseCollectionRequest,
 		*milvuspb.CreatePartitionRequest, *milvuspb.DropPartitionRequest,
@@ -2875,10 +2885,6 @@ func GetFailedResponse(req any, err error) any {
 		*milvuspb.CreateSnapshotRequest, *milvuspb.DropSnapshotRequest,
 		*milvuspb.UnpinSnapshotDataRequest:
 		return merr.Status(err)
-	case *milvuspb.PrewarmRequest:
-		return &milvuspb.PrewarmResponse{
-			Status: merr.Status(err),
-		}
 	case *milvuspb.RestoreSnapshotRequest:
 		return &milvuspb.RestoreSnapshotResponse{
 			Status: merr.Status(err),
