@@ -4288,7 +4288,11 @@ func TestPrewarmTask_Execute(t *testing.T) {
 			assert.ObjectsAreEqual([]int64{partitionID}, req.GetPartitionIDs()) &&
 			req.GetReplicaNumber() == 2 &&
 			req.GetPriority() == commonpb.LoadPriority_LOW
-	})).Return(merr.Success(), nil).Once()
+	})).Return(&querypb.PrewarmResponse{
+		Status:    merr.Success(),
+		TaskID:    "prewarm_10001",
+		Namespace: &namespace,
+	}, nil).Once()
 
 	task := &prewarmTask{
 		PrewarmRequest: &milvuspb.PrewarmRequest{
@@ -4299,7 +4303,8 @@ func TestPrewarmTask_Execute(t *testing.T) {
 			ReplicaNumber:        2,
 			LoadFields:           []string{"vector"},
 			SkipLoadDynamicField: true,
-			LoadParams:           map[string]string{LoadPriorityName: "low"},
+			Priority:             "low",
+			TtlSeconds:           3600,
 		},
 		ctx:      ctx,
 		mixCoord: mixCoord,
@@ -4307,7 +4312,9 @@ func TestPrewarmTask_Execute(t *testing.T) {
 
 	err := task.Execute(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, commonpb.ErrorCode_Success, task.result.GetErrorCode())
+	assert.Equal(t, commonpb.ErrorCode_Success, task.result.GetStatus().GetErrorCode())
+	assert.Equal(t, "prewarm_10001", task.result.GetTaskID())
+	assert.Equal(t, namespace, task.result.GetNamespace())
 	assert.Equal(t, collectionID, task.collectionID)
 }
 
