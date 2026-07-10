@@ -23,9 +23,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/milvus-io/milvus/internal/util/dependency"
+	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/mq/common"
 	"github.com/milvus-io/milvus/pkg/v3/mq/msgstream"
@@ -73,6 +75,21 @@ func Test_NewInputNode(t *testing.T) {
 	assert.Equal(t, node.name, nodeName)
 	assert.Equal(t, node.maxQueueLength, maxQueueLength)
 	assert.Equal(t, node.maxParallelism, maxParallelism)
+}
+
+func TestNewInputNodeCachesDataNodeMetrics(t *testing.T) {
+	metrics.DataNodeConsumeMsgCount.Reset()
+	metrics.DataNodeConsumeTimeTickLag.Reset()
+
+	node := NewInputNode(nil, "input_node", 0, 100, typeutil.DataNodeRole, 7, 11, metrics.AllLabel)
+	assert.NotNil(t, node.consumeMsgCount)
+	assert.NotNil(t, node.consumeTimeTickLag)
+
+	node.consumeMsgCount.Inc()
+	node.consumeTimeTickLag.Set(123)
+
+	assert.Equal(t, float64(1), testutil.ToFloat64(metrics.DataNodeConsumeMsgCount.WithLabelValues("7", metrics.AllLabel, "11")))
+	assert.Equal(t, float64(123), testutil.ToFloat64(metrics.DataNodeConsumeTimeTickLag.WithLabelValues("7", metrics.AllLabel, "11")))
 }
 
 func Test_InputNodeSkipMode(t *testing.T) {

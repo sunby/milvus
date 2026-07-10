@@ -20,7 +20,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/suite"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -47,6 +47,7 @@ func (suite *StatsInterceptorSuite) TestUnaryRequestStatsInterceptor() {
 		info         *grpc.UnaryServerInfo
 		handler      grpc.UnaryHandler
 		expectLabels [][]string
+		skipMetric   bool
 	}
 
 	dbName := "default"
@@ -69,6 +70,20 @@ func (suite *StatsInterceptorSuite) TestUnaryRequestStatsInterceptor() {
 				{paramtable.GetStringNodeID(), "CreateCollection", metrics.TotalLabel, dbName, collection},
 				{paramtable.GetStringNodeID(), "CreateCollection", metrics.SuccessLabel, dbName, collection},
 			},
+		},
+		{
+			tag: "drop_collection",
+			req: &milvuspb.DropCollectionRequest{
+				DbName:         dbName,
+				CollectionName: collection,
+			},
+			info: &grpc.UnaryServerInfo{
+				FullMethod: milvuspb.MilvusService_DropCollection_FullMethodName,
+			},
+			handler: func(ctx context.Context, req any) (interface{}, error) {
+				return merr.Success(), nil
+			},
+			skipMetric: true,
 		},
 		{
 			tag: "service_internal",
@@ -128,11 +143,17 @@ func (suite *StatsInterceptorSuite) TestUnaryRequestStatsInterceptor() {
 
 	for _, tc := range cases {
 		suite.Run(tc.tag, func() {
+			metrics.ProxyFunctionCall.Reset()
+			defer metrics.ProxyFunctionCall.Reset()
+
 			UnaryRequestStatsInterceptor(ctx, tc.req, tc.info, tc.handler)
+			if tc.skipMetric {
+				suite.Equal(0, testutil.CollectAndCount(metrics.ProxyFunctionCall))
+				return
+			}
 			for _, labels := range tc.expectLabels {
 				suite.MetricsEqual(metrics.ProxyFunctionCall.WithLabelValues(labels...), 1)
 			}
-			metrics.ProxyFunctionCall.DeletePartialMatch(prometheus.Labels{})
 		})
 	}
 }

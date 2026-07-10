@@ -561,9 +561,6 @@ func (mt *MetaTable) getDatabaseByNameInternal(ctx context.Context, dbName strin
 }
 
 func (mt *MetaTable) AddCollection(ctx context.Context, coll *model.Collection) error {
-	mt.ddLock.Lock()
-	defer mt.ddLock.Unlock()
-
 	// Note:
 	// 1, idempotency check was already done outside;
 	// 2, no need to check time travel logic, since ts should always be the latest;
@@ -571,16 +568,28 @@ func (mt *MetaTable) AddCollection(ctx context.Context, coll *model.Collection) 
 		return merr.WrapErrServiceInternalMsg("collection state should be created, collection name: %s, collection id: %d, state: %s", coll.Name, coll.CollectionID, coll.State)
 	}
 
+	mt.ddLock.Lock()
+
 	// check if there's a collection meta with the same collection id.
 	// merge the collection meta together.
 	if _, ok := mt.collID2Meta[coll.CollectionID]; ok {
+		mt.ddLock.Unlock()
 		mlog.Info(ctx, "collection already created, skip add collection to meta table", mlog.Int64("collectionID", coll.CollectionID))
 		return nil
 	}
+	mt.ddLock.Unlock()
 
 	ctx1 := contextutil.WithTenantID(ctx, Params.CommonCfg.ClusterName.GetValue())
 	if err := mt.catalog.CreateCollection(ctx1, coll, coll.CreateTime); err != nil {
 		return err
+	}
+
+	mt.ddLock.Lock()
+	defer mt.ddLock.Unlock()
+
+	if _, ok := mt.collID2Meta[coll.CollectionID]; ok {
+		mlog.Info(ctx, "collection already created after catalog write, skip add collection to meta table", mlog.Int64("collectionID", coll.CollectionID))
+		return nil
 	}
 
 	mt.collID2Meta[coll.CollectionID] = coll.Clone()
@@ -1600,8 +1609,8 @@ func (mt *MetaTable) CheckIfAliasAlterable(ctx context.Context, dbName string, a
 }
 
 func (mt *MetaTable) DescribeAlias(ctx context.Context, dbName string, alias string, ts Timestamp) (string, error) {
-	mt.ddLock.Lock()
-	defer mt.ddLock.Unlock()
+	mt.ddLock.RLock()
+	defer mt.ddLock.RUnlock()
 
 	if dbName == "" {
 		mlog.Warn(ctx, "db name is empty", mlog.String("alias", alias))

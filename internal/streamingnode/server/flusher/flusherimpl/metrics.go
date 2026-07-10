@@ -2,6 +2,7 @@ package flusherimpl
 
 import (
 	"strconv"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -26,20 +27,22 @@ func newFlusherMetrics(pchannel types.PChannelInfo) *flusherMetrics {
 		metrics.WALChannelTermLabelName: strconv.FormatInt(pchannel.Term, 10),
 	}
 	m := &flusherMetrics{
-		constLabels: constLabels,
-		info:        metrics.WALFlusherInfo.MustCurryWith(constLabels),
-		timetick:    metrics.WALFlusherTimeTick.With(constLabels),
-		state:       flusherStateInRecovering,
+		constLabels:                 constLabels,
+		info:                        metrics.WALFlusherInfo.MustCurryWith(constLabels),
+		timetick:                    metrics.WALFlusherTimeTick.With(constLabels),
+		dropCollectionStageDuration: metrics.WALFlusherDropCollectionStageDurationSeconds.MustCurryWith(constLabels),
+		state:                       flusherStateInRecovering,
 	}
 	m.info.WithLabelValues(flusherStateInRecovering).Set(1)
 	return m
 }
 
 type flusherMetrics struct {
-	constLabels prometheus.Labels
-	info        *prometheus.GaugeVec
-	timetick    prometheus.Gauge
-	state       flusherState
+	constLabels                 prometheus.Labels
+	info                        *prometheus.GaugeVec
+	timetick                    prometheus.Gauge
+	dropCollectionStageDuration prometheus.ObserverVec
+	state                       flusherState
 }
 
 func (m *flusherMetrics) IntoState(state flusherState) {
@@ -52,7 +55,12 @@ func (m *flusherMetrics) ObserveMetrics(tickTime uint64) {
 	m.timetick.Set(tsoutil.PhysicalTimeSeconds(tickTime))
 }
 
+func (m *flusherMetrics) ObserveDropCollectionStage(stage string, duration time.Duration) {
+	m.dropCollectionStageDuration.WithLabelValues(stage).Observe(duration.Seconds())
+}
+
 func (m *flusherMetrics) Close() {
 	metrics.WALFlusherInfo.DeletePartialMatch(m.constLabels)
 	metrics.WALFlusherTimeTick.DeletePartialMatch(m.constLabels)
+	metrics.WALFlusherDropCollectionStageDurationSeconds.DeletePartialMatch(m.constLabels)
 }

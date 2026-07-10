@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -145,6 +146,22 @@ func TestWALFlusher_DispatchDefersAckSyncUpDropCollectionObserve(t *testing.T) {
 	msg := newAckSyncUpDropCollectionMessage(t, "vchannel-1")
 
 	require.ErrorContains(t, flusher.dispatch(msg), "observe failed")
+}
+
+func TestWALFlusher_DispatchObservesDropCollectionStages(t *testing.T) {
+	metrics.WALFlusherDropCollectionStageDurationSeconds.Reset()
+
+	rs := mock_recovery.NewMockRecoveryStorage(t)
+	rs.EXPECT().ObserveMessage(mock.Anything, mock.Anything).Return(nil).Once()
+
+	flusher := newTestWALFlusher(rs)
+	flusher.metrics = newFlusherMetrics(types.PChannelInfo{Name: "pchannel-test-drop-stage", Term: 1})
+	defer flusher.metrics.Close()
+
+	msg := newAckSyncUpDropCollectionMessage(t, "vchannel-1")
+
+	require.NoError(t, flusher.dispatch(msg))
+	require.Equal(t, 4, testutil.CollectAndCount(metrics.WALFlusherDropCollectionStageDurationSeconds))
 }
 
 func TestWALFlusher_DispatchObservesAckSyncUpTruncateCollectionBeforeHandling(t *testing.T) {

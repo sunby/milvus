@@ -20,6 +20,7 @@ import (
 	"context"
 	"math/rand"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
@@ -1179,6 +1180,102 @@ func TestMetaTable_GetCollectionByName(t *testing.T) {
 		assert.Error(t, err)
 		assert.ErrorIs(t, err, merr.ErrCollectionNotFound)
 	})
+}
+
+func TestMetaTable_AddCollectionDoesNotBlockReadersDuringCatalogCreate(t *testing.T) {
+	ctx := context.Background()
+	channel.ResetStaticPChannelStatsManager()
+	channel.RecoverPChannelStatsManager([]string{})
+
+	catalog := mocks.NewRootCoordCatalog(t)
+	enteredCatalog := make(chan struct{})
+	unblockCatalog := make(chan struct{})
+	catalog.EXPECT().
+		CreateCollection(mock.Anything, mock.Anything, mock.Anything).
+		RunAndReturn(func(context.Context, *model.Collection, uint64) error {
+			close(enteredCatalog)
+			<-unblockCatalog
+			return nil
+		}).
+		Once()
+
+	existingColl := &model.Collection{
+		CollectionID: 100,
+		DBID:         util.DefaultDBID,
+		DBName:       util.DefaultDBName,
+		Name:         "existing",
+		State:        pb.CollectionState_CollectionCreated,
+		Partitions: []*model.Partition{
+			{PartitionID: 10, PartitionName: Params.CommonCfg.DefaultPartitionName.GetValue(), State: pb.PartitionState_PartitionCreated},
+		},
+	}
+	meta := &MetaTable{
+		catalog: catalog,
+		dbName2Meta: map[string]*model.Database{
+			util.DefaultDBName: model.NewDefaultDatabase(nil),
+		},
+		collID2Meta: map[typeutil.UniqueID]*model.Collection{
+			existingColl.CollectionID: existingColl,
+		},
+		partitionName2ID:   map[int64]map[string]int64{},
+		names:              newNameDb(),
+		aliases:            newNameDb(),
+		fileResourceRefCnt: map[int64]int{},
+	}
+	meta.names.insert(util.DefaultDBName, existingColl.Name, existingColl.CollectionID)
+	meta.rebuildAvailableCollectionCountLocked()
+
+	addErr := make(chan error, 1)
+	go func() {
+		addErr <- meta.AddCollection(ctx, &model.Collection{
+			CollectionID: 101,
+			DBID:         util.DefaultDBID,
+			DBName:       util.DefaultDBName,
+			Name:         "creating",
+			State:        pb.CollectionState_CollectionCreated,
+			ShardsNum:    1,
+			Partitions: []*model.Partition{
+				{PartitionID: 11, PartitionName: Params.CommonCfg.DefaultPartitionName.GetValue(), State: pb.PartitionState_PartitionCreated},
+			},
+		})
+	}()
+
+	select {
+	case <-enteredCatalog:
+	case <-time.After(time.Second):
+		require.FailNow(t, "AddCollection did not enter catalog CreateCollection")
+	}
+
+	readResult := make(chan *model.Collection, 1)
+	readErr := make(chan error, 1)
+	go func() {
+		coll, err := meta.GetCollectionByName(ctx, util.DefaultDBName, existingColl.Name, typeutil.MaxTimestamp, false)
+		readResult <- coll
+		readErr <- err
+	}()
+
+	readTimedOut := false
+	select {
+	case err := <-readErr:
+		require.NoError(t, err)
+		coll := <-readResult
+		require.NotNil(t, coll)
+		require.Equal(t, existingColl.CollectionID, coll.CollectionID)
+	case <-time.After(200 * time.Millisecond):
+		readTimedOut = true
+	}
+
+	close(unblockCatalog)
+	require.NoError(t, <-addErr)
+
+	if readTimedOut {
+		select {
+		case <-readErr:
+		case <-time.After(time.Second):
+			require.FailNow(t, "GetCollectionByName remained blocked after catalog CreateCollection was unblocked")
+		}
+		require.Fail(t, "GetCollectionByName blocked while catalog CreateCollection was in progress")
+	}
 }
 
 /*

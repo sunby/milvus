@@ -8,6 +8,7 @@ import (
 	"github.com/milvus-io/milvus/internal/streamingnode/server/wal/interceptors/txn"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/types"
+	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/lock"
 )
 
@@ -37,7 +38,7 @@ func (r *lockAppendInterceptor) acquireLockGuard(_ context.Context, msg message.
 				r.txnManager.FailTxnAtVChannel("")
 				r.glock.Unlock()
 			}
-		} else {
+		} else if !funcutil.IsControlChannel(vchannel) {
 			r.vchannelLocker.Lock(vchannel)
 			return func() {
 				// For exclusive messages, we need to fail all transactions at the vchannel.

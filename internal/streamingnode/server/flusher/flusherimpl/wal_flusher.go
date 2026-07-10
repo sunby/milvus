@@ -7,6 +7,7 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/lo"
+	xrate "golang.org/x/time/rate"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/msgpb"
 	"github.com/milvus-io/milvus/internal/flushcommon/broker"
@@ -33,6 +34,15 @@ import (
 )
 
 var errChannelLifetimeUnrecoverable = errors.New("channel lifetime unrecoverable")
+
+const (
+	dropCollectionStageHandleMessage        = "handle_message"
+	dropCollectionStageCloseDataSyncService = "close_data_sync_service"
+	dropCollectionStageObserveMessage       = "observe_message"
+	dropCollectionStageDispatchTotal        = "dispatch_total"
+
+	dropCollectionStageSlowThreshold = 10 * time.Millisecond
+)
 
 // RecoverWALFlusherParam is the parameter for building wal flusher.
 type RecoverWALFlusherParam struct {
@@ -277,6 +287,10 @@ func (impl *WALFlusherImpl) dispatch(msg message.ImmutableMessage) (err error) {
 			}
 			observeElapsed := time.Since(observeStart)
 			totalElapsed := time.Since(dispatchStart)
+			if msg.MessageType() == message.MessageTypeDropCollection {
+				impl.observeDropCollectionStage(msg, dropCollectionStageObserveMessage, observeElapsed)
+				impl.observeDropCollectionStage(msg, dropCollectionStageDispatchTotal, totalElapsed)
+			}
 			if totalElapsed > 10*time.Millisecond {
 				impl.logger.Info(context.TODO(), "[DispatchTiming] dispatch slow",
 					mlog.String("msgType", msg.MessageType().String()),
@@ -304,7 +318,9 @@ func (impl *WALFlusherImpl) dispatch(msg message.ImmutableMessage) (err error) {
 		// defer to remove the data sync service from the components.
 		// TODO: Current drop collection message will be handled by the underlying data sync service.
 		defer func() {
+			closeStart := time.Now()
 			impl.flusherComponents.WhenDropCollection(msg.VChannel())
+			impl.observeDropCollectionStage(msg, dropCollectionStageCloseDataSyncService, time.Since(closeStart))
 		}()
 	case message.MessageTypeRollbackImport:
 		// No-op: DataCoord DDL ack callback handles all state changes.
@@ -312,7 +328,26 @@ func (impl *WALFlusherImpl) dispatch(msg message.ImmutableMessage) (err error) {
 			mlog.FieldVChannel(msg.VChannel()))
 		return nil // don't forward to flusherComponents
 	}
-	return impl.flusherComponents.HandleMessage(impl.notifier.Context(), msg)
+	handleStart := time.Now()
+	err = impl.flusherComponents.HandleMessage(impl.notifier.Context(), msg)
+	if msg.MessageType() == message.MessageTypeDropCollection {
+		impl.observeDropCollectionStage(msg, dropCollectionStageHandleMessage, time.Since(handleStart))
+	}
+	return err
+}
+
+func (impl *WALFlusherImpl) observeDropCollectionStage(msg message.ImmutableMessage, stage string, elapsed time.Duration) {
+	if impl.metrics != nil {
+		impl.metrics.ObserveDropCollectionStage(stage, elapsed)
+	}
+	if elapsed <= dropCollectionStageSlowThreshold {
+		return
+	}
+	impl.logger.RatedInfo(context.TODO(), xrate.Limit(1), "drop collection flusher stage slow",
+		mlog.FieldVChannel(msg.VChannel()),
+		mlog.String("stage", stage),
+		mlog.Duration("elapsed", elapsed),
+		mlog.Uint64("timeTick", msg.TimeTick()))
 }
 
 func (impl *WALFlusherImpl) dispatchCommitImport(msg message.ImmutableMessage) error {

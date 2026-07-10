@@ -91,16 +91,18 @@ func (wNode *writeNode) Operate(in []Msg) []Msg {
 	}()
 
 	start, end := fgMsg.StartPositions[0], fgMsg.EndPositions[0]
-	currentSchema := wNode.metacache.GetSchema(fgMsg.TimeTick())
-	schemaVersion := currentSchema.GetVersion()
-	functionOutputFieldIDs, err := wNode.functionStore.OutputFieldIDs(currentSchema)
-	if err != nil {
-		mlog.Error(context.TODO(), "failed to get embedding output fields", mlog.Err(err))
-		panic(err)
-	}
+	var err error
+	schemaVersion := int32(0)
 
 	insertData := make([]*writebuffer.InsertData, 0)
 	if len(fgMsg.InsertMessages) > 0 {
+		currentSchema := wNode.metacache.GetSchema(fgMsg.TimeTick())
+		schemaVersion = currentSchema.GetVersion()
+		functionOutputFieldIDs, err := wNode.functionStore.OutputFieldIDs(currentSchema)
+		if err != nil {
+			mlog.Error(context.TODO(), "failed to get embedding output fields", mlog.Err(err))
+			panic(err)
+		}
 		for _, msg := range fgMsg.InsertMessages {
 			if len(functionOutputFieldIDs) == 0 || function.HasAllFieldDataByID(msg.GetFieldsData(), functionOutputFieldIDs) {
 				continue

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"math"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -153,17 +154,53 @@ func (m *meta) isSegmentCompactionProtected(segmentID int64) bool {
 
 type channelCPs struct {
 	lock.RWMutex
-	checkpoints map[string]*msgpb.MsgPosition
-	cond        *syncutil.ContextCond
+	checkpoints  map[string]*msgpb.MsgPosition
+	channelLocks *lock.KeyLock[string]
+	cond         *syncutil.ContextCond
 }
 
 func newChannelCps() *channelCPs {
 	cp := &channelCPs{
-		checkpoints: make(map[string]*msgpb.MsgPosition),
+		checkpoints:  make(map[string]*msgpb.MsgPosition),
+		channelLocks: lock.NewKeyLock[string](),
 	}
 	// use the same lock as channelCPs
 	cp.cond = syncutil.NewContextCond(&cp.RWMutex)
 	return cp
+}
+
+func (cp *channelCPs) lockChannel(channel string) {
+	cp.channelLocks.Lock(channel)
+}
+
+func (cp *channelCPs) unlockChannel(channel string) {
+	cp.channelLocks.Unlock(channel)
+}
+
+func (cp *channelCPs) lockChannels(channels []string) []string {
+	uniqueChannels := make(map[string]struct{}, len(channels))
+	for _, channel := range channels {
+		if channel == "" {
+			continue
+		}
+		uniqueChannels[channel] = struct{}{}
+	}
+
+	lockedChannels := make([]string, 0, len(uniqueChannels))
+	for channel := range uniqueChannels {
+		lockedChannels = append(lockedChannels, channel)
+	}
+	sort.Strings(lockedChannels)
+	for _, channel := range lockedChannels {
+		cp.lockChannel(channel)
+	}
+	return lockedChannels
+}
+
+func (cp *channelCPs) unlockChannels(channels []string) {
+	for i := len(channels) - 1; i >= 0; i-- {
+		cp.unlockChannel(channels[i])
+	}
 }
 
 type segmentMetricStateChange map[string]map[string]map[string]map[string]map[string]int
@@ -2159,13 +2196,36 @@ func (m *meta) collectionHasTextFields(collectionID int64) bool {
 	return false
 }
 
+const (
+	updateChannelCheckpointStageTotal                   = "total"
+	updateChannelCheckpointStageValidate                = "validate"
+	updateChannelCheckpointStageGetMinGrowingCheckpoint = "get_min_growing_checkpoint"
+	updateChannelCheckpointStageLockWait                = "lock_wait"
+	updateChannelCheckpointStageCheckUpdateNeeded       = "check_update_needed"
+	updateChannelCheckpointStageSaveChannelCheckpoint   = "save_channel_checkpoint"
+	updateChannelCheckpointStageUpdateMemory            = "update_memory"
+	updateChannelCheckpointStageUpdateCheckpointMetric  = "update_checkpoint_metric"
+)
+
+func observeUpdateChannelCheckpointStage(stage string, start time.Time) {
+	metrics.DataCoordUpdateChannelCheckpointStageDuration.WithLabelValues(stage).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
+}
+
 // UpdateChannelCheckpoint updates and saves channel checkpoint.
 func (m *meta) UpdateChannelCheckpoint(ctx context.Context, vChannel string, pos *msgpb.MsgPosition) error {
+	totalStart := time.Now()
+	defer observeUpdateChannelCheckpointStage(updateChannelCheckpointStageTotal, totalStart)
+
+	stageStart := time.Now()
 	if pos == nil || pos.GetMsgID() == nil {
+		observeUpdateChannelCheckpointStage(updateChannelCheckpointStageValidate, stageStart)
 		return merr.WrapErrServiceInternalMsg("channelCP is nil, vChannel=%s", vChannel)
 	}
+	observeUpdateChannelCheckpointStage(updateChannelCheckpointStageValidate, stageStart)
 
+	stageStart = time.Now()
 	minGrowingCP := m.GetMinGrowingSegmentCheckpoint(vChannel)
+	observeUpdateChannelCheckpointStage(updateChannelCheckpointStageGetMinGrowingCheckpoint, stageStart)
 	if minGrowingCP != nil && pos.GetTimestamp() > minGrowingCP.GetTimestamp() {
 		mlog.Info(context.TODO(), "clamping channel checkpoint to min growing segment checkpoint",
 			zap.String("vChannel", vChannel),
@@ -2174,16 +2234,31 @@ func (m *meta) UpdateChannelCheckpoint(ctx context.Context, vChannel string, pos
 		pos = minGrowingCP
 	}
 
-	m.channelCPs.Lock()
-	defer m.channelCPs.Unlock()
+	stageStart = time.Now()
+	m.channelCPs.lockChannel(vChannel)
+	observeUpdateChannelCheckpointStage(updateChannelCheckpointStageLockWait, stageStart)
+	defer m.channelCPs.unlockChannel(vChannel)
 
+	stageStart = time.Now()
+	m.channelCPs.RLock()
 	oldPosition, ok := m.channelCPs.checkpoints[vChannel]
-	if !ok || oldPosition.Timestamp < pos.Timestamp || (oldPosition.Timestamp == pos.Timestamp && !bytes.Equal(oldPosition.MsgID, pos.MsgID)) {
+	m.channelCPs.RUnlock()
+	needUpdate := !ok || oldPosition.Timestamp < pos.Timestamp || (oldPosition.Timestamp == pos.Timestamp && !bytes.Equal(oldPosition.MsgID, pos.MsgID))
+	observeUpdateChannelCheckpointStage(updateChannelCheckpointStageCheckUpdateNeeded, stageStart)
+	if needUpdate {
+		stageStart = time.Now()
 		err := m.catalog.SaveChannelCheckpoint(ctx, vChannel, pos)
+		observeUpdateChannelCheckpointStage(updateChannelCheckpointStageSaveChannelCheckpoint, stageStart)
 		if err != nil {
 			return err
 		}
+		stageStart = time.Now()
+		m.channelCPs.Lock()
 		m.channelCPs.checkpoints[vChannel] = pos
+		m.channelCPs.cond.UnsafeBroadcast()
+		m.channelCPs.Unlock()
+		observeUpdateChannelCheckpointStage(updateChannelCheckpointStageUpdateMemory, stageStart)
+		stageStart = time.Now()
 		ts, _ := tsoutil.ParseTS(pos.Timestamp)
 		mlog.Info(context.TODO(), "UpdateChannelCheckpoint done",
 			zap.String("vChannel", vChannel),
@@ -2193,6 +2268,7 @@ func (m *meta) UpdateChannelCheckpoint(ctx context.Context, vChannel string, pos
 			zap.Time("time", ts))
 		metrics.DataCoordCheckpointUnixSeconds.WithLabelValues(paramtable.GetStringNodeID(), vChannel).
 			Set(float64(ts.Unix()))
+		observeUpdateChannelCheckpointStage(updateChannelCheckpointStageUpdateCheckpointMetric, stageStart)
 	}
 	return nil
 }
@@ -2200,8 +2276,8 @@ func (m *meta) UpdateChannelCheckpoint(ctx context.Context, vChannel string, pos
 // MarkChannelCheckpointDropped set channel checkpoint to MaxUint64 preventing future update
 // and remove the metrics for channel checkpoint lag.
 func (m *meta) MarkChannelCheckpointDropped(ctx context.Context, channel string) error {
-	m.channelCPs.Lock()
-	defer m.channelCPs.Unlock()
+	m.channelCPs.lockChannel(channel)
+	defer m.channelCPs.unlockChannel(channel)
 
 	cp := &msgpb.MsgPosition{
 		ChannelName: channel,
@@ -2213,7 +2289,10 @@ func (m *meta) MarkChannelCheckpointDropped(ctx context.Context, channel string)
 		return err
 	}
 
+	m.channelCPs.Lock()
 	m.channelCPs.checkpoints[channel] = cp
+	m.channelCPs.cond.UnsafeBroadcast()
+	m.channelCPs.Unlock()
 
 	metrics.DataCoordCheckpointUnixSeconds.DeleteLabelValues(paramtable.GetStringNodeID(), channel)
 	return nil
@@ -2236,8 +2315,16 @@ func (m *meta) UpdateChannelCheckpoints(ctx context.Context, positions []*msgpb.
 		}
 	}
 
-	m.channelCPs.Lock()
-	defer m.channelCPs.Unlock()
+	channels := lo.FilterMap(positions, func(pos *msgpb.MsgPosition, _ int) (string, bool) {
+		if pos == nil {
+			return "", false
+		}
+		return pos.GetChannelName(), pos.GetChannelName() != ""
+	})
+	lockedChannels := m.channelCPs.lockChannels(channels)
+	defer m.channelCPs.unlockChannels(lockedChannels)
+
+	m.channelCPs.RLock()
 	toUpdates := lo.Filter(positions, func(pos *msgpb.MsgPosition, _ int) bool {
 		if pos == nil || (pos.GetMsgID() == nil && pos.GetWALName() != commonpb.WALName_WoodPecker) || pos.GetChannelName() == "" {
 			logger.Warn(ctx, "illegal channel cp", zap.Any("pos", pos))
@@ -2247,10 +2334,15 @@ func (m *meta) UpdateChannelCheckpoints(ctx context.Context, positions []*msgpb.
 		oldPosition, ok := m.channelCPs.checkpoints[vChannel]
 		return !ok || oldPosition.Timestamp < pos.Timestamp || (oldPosition.Timestamp == pos.Timestamp && !bytes.Equal(oldPosition.MsgID, pos.MsgID))
 	})
+	m.channelCPs.RUnlock()
+	if len(toUpdates) == 0 {
+		return nil
+	}
 	err := m.catalog.SaveChannelCheckpoints(ctx, toUpdates)
 	if err != nil {
 		return err
 	}
+	m.channelCPs.Lock()
 	for _, pos := range toUpdates {
 		channel := pos.GetChannelName()
 		m.channelCPs.checkpoints[channel] = pos
@@ -2263,6 +2355,7 @@ func (m *meta) UpdateChannelCheckpoints(ctx context.Context, positions []*msgpb.
 	}
 	// broadcast the change of channel checkpoint for TruncateCollection op to drop segments
 	m.channelCPs.cond.UnsafeBroadcast()
+	m.channelCPs.Unlock()
 	return nil
 }
 
@@ -2277,13 +2370,18 @@ func (m *meta) GetChannelCheckpoint(vChannel string) *msgpb.MsgPosition {
 }
 
 func (m *meta) DropChannelCheckpoint(vChannel string) error {
-	m.channelCPs.Lock()
-	defer m.channelCPs.Unlock()
+	m.channelCPs.lockChannel(vChannel)
+	defer m.channelCPs.unlockChannel(vChannel)
+
 	err := m.catalog.DropChannelCheckpoint(m.ctx, vChannel)
 	if err != nil {
 		return err
 	}
+
+	m.channelCPs.Lock()
 	delete(m.channelCPs.checkpoints, vChannel)
+	m.channelCPs.Unlock()
+
 	metrics.DataCoordCheckpointUnixSeconds.DeleteLabelValues(paramtable.GetStringNodeID(), vChannel)
 	mlog.Info(context.TODO(), "DropChannelCheckpoint done", zap.String("vChannel", vChannel))
 	return nil
