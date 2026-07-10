@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -449,7 +450,9 @@ func findIdxOfVChannel(vchannel string, vchannels []string) int {
 // FastAck trigger a fast ack operation when the broadcast operation is done.
 func (b *broadcastTask) FastAck(ctx context.Context, broadcastResult map[string]*types.AppendResult) error {
 	// Broadcast operation is done.
+	stageStart := time.Now()
 	b.mu.Lock()
+	b.ObserveBroadcastStageDuration(broadcastStageFastAckLockWait, stageStart)
 	defer b.mu.Unlock()
 
 	b.ObserveBroadcastDone()

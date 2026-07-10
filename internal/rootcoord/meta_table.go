@@ -570,15 +570,16 @@ func (mt *MetaTable) AddCollection(ctx context.Context, coll *model.Collection) 
 		return merr.WrapErrServiceInternalMsg("collection state should be created, collection name: %s, collection id: %d, state: %s", coll.Name, coll.CollectionID, coll.State)
 	}
 
-	mt.ddLock.RLock()
+	mt.ddLock.Lock()
+
 	// check if there's a collection meta with the same collection id.
 	// merge the collection meta together.
-	_, collectionExists := mt.collID2Meta[coll.CollectionID]
-	mt.ddLock.RUnlock()
-	if collectionExists {
+	if _, ok := mt.collID2Meta[coll.CollectionID]; ok {
+		mt.ddLock.Unlock()
 		mlog.Info(ctx, "collection already created, skip add collection to meta table", mlog.Int64("collectionID", coll.CollectionID))
 		return nil
 	}
+	mt.ddLock.Unlock()
 
 	// The broadcaster resource-key lock serializes conflicting collection and
 	// database DDL. Do not hold the global metadata lock during catalog I/O so
@@ -591,8 +592,6 @@ func (mt *MetaTable) AddCollection(ctx context.Context, coll *model.Collection) 
 	mt.ddLock.Lock()
 	defer mt.ddLock.Unlock()
 
-	// Recheck after catalog I/O for idempotent retries that may have completed
-	// while the global metadata lock was released.
 	if _, ok := mt.collID2Meta[coll.CollectionID]; ok {
 		mlog.Info(ctx, "collection already created after catalog write, skip add collection to meta table", mlog.Int64("collectionID", coll.CollectionID))
 		return nil

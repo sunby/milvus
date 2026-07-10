@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"strconv"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -18,20 +19,22 @@ func newRecoveryStorageMetrics(channelInfo types.PChannelInfo) *recoveryMetrics 
 		metrics.WALChannelTermLabelName: strconv.FormatInt(channelInfo.Term, 10),
 	}
 	return &recoveryMetrics{
-		constLabels:       constLabels,
-		info:              metrics.WALRecoveryInfo.MustCurryWith(constLabels),
-		isOnPersisting:    metrics.WALRecoveryIsOnPersisting.With(constLabels),
-		inMemTimeTick:     metrics.WALRecoveryInMemTimeTick.With(constLabels),
-		persistedTimeTick: metrics.WALRecoveryPersistedTimeTick.With(constLabels),
+		constLabels:                 constLabels,
+		info:                        metrics.WALRecoveryInfo.MustCurryWith(constLabels),
+		isOnPersisting:              metrics.WALRecoveryIsOnPersisting.With(constLabels),
+		inMemTimeTick:               metrics.WALRecoveryInMemTimeTick.With(constLabels),
+		persistedTimeTick:           metrics.WALRecoveryPersistedTimeTick.With(constLabels),
+		dropCollectionStageDuration: metrics.WALRecoveryDropCollectionStageDurationSeconds.MustCurryWith(constLabels),
 	}
 }
 
 type recoveryMetrics struct {
-	constLabels       prometheus.Labels
-	info              *prometheus.GaugeVec
-	isOnPersisting    prometheus.Gauge
-	inMemTimeTick     prometheus.Gauge
-	persistedTimeTick prometheus.Gauge
+	constLabels                 prometheus.Labels
+	info                        *prometheus.GaugeVec
+	isOnPersisting              prometheus.Gauge
+	inMemTimeTick               prometheus.Gauge
+	persistedTimeTick           prometheus.Gauge
+	dropCollectionStageDuration prometheus.ObserverVec
 }
 
 // ObserveStateChange sets the state of the recovery storage metrics.
@@ -56,9 +59,14 @@ func (m *recoveryMetrics) ObserveIsOnPersisting(onPersisting bool) {
 	}
 }
 
+func (m *recoveryMetrics) ObserveDropCollectionStage(stage string, duration time.Duration) {
+	m.dropCollectionStageDuration.WithLabelValues(stage).Observe(duration.Seconds())
+}
+
 func (m *recoveryMetrics) Close() {
 	metrics.WALRecoveryInfo.DeletePartialMatch(m.constLabels)
 	metrics.WALRecoveryIsOnPersisting.DeletePartialMatch(m.constLabels)
 	metrics.WALRecoveryInMemTimeTick.DeletePartialMatch(m.constLabels)
 	metrics.WALRecoveryPersistedTimeTick.DeletePartialMatch(m.constLabels)
+	metrics.WALRecoveryDropCollectionStageDurationSeconds.DeletePartialMatch(m.constLabels)
 }

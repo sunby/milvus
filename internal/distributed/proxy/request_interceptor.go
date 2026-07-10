@@ -49,6 +49,7 @@ func init() {
 // when other interceptor rejects the request, it will record it as `RejectedLabel`
 func UnaryRequestStatsInterceptor(ctx context.Context, req any, rpcInfo *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 	methodTag := FullMethodName2Tag(rpcInfo.FullMethod)
+	observeProxyFunctionCall := metrics.ShouldObserveProxyFunctionCall(methodTag)
 	db, _ := requestutil.GetDbNameFromRequest(req)
 	collection, _ := requestutil.GetCollectionNameFromRequest(req)
 

@@ -171,6 +171,40 @@ func newChannelCps() *channelCPs {
 	return cp
 }
 
+func (cp *channelCPs) lockChannel(channel string) {
+	cp.channelLocks.Lock(channel)
+}
+
+func (cp *channelCPs) unlockChannel(channel string) {
+	cp.channelLocks.Unlock(channel)
+}
+
+func (cp *channelCPs) lockChannels(channels []string) []string {
+	uniqueChannels := make(map[string]struct{}, len(channels))
+	for _, channel := range channels {
+		if channel == "" {
+			continue
+		}
+		uniqueChannels[channel] = struct{}{}
+	}
+
+	lockedChannels := make([]string, 0, len(uniqueChannels))
+	for channel := range uniqueChannels {
+		lockedChannels = append(lockedChannels, channel)
+	}
+	sort.Strings(lockedChannels)
+	for _, channel := range lockedChannels {
+		cp.lockChannel(channel)
+	}
+	return lockedChannels
+}
+
+func (cp *channelCPs) unlockChannels(channels []string) {
+	for i := len(channels) - 1; i >= 0; i-- {
+		cp.unlockChannel(channels[i])
+	}
+}
+
 type segmentMetricStateChange map[string]map[string]map[string]map[string]map[string]int
 
 // A local cache of segment metric update. Must call commit() to take effect.
@@ -2406,13 +2440,36 @@ func (m *meta) collectionHasTextFields(collectionID int64) bool {
 	return false
 }
 
+const (
+	updateChannelCheckpointStageTotal                   = "total"
+	updateChannelCheckpointStageValidate                = "validate"
+	updateChannelCheckpointStageGetMinGrowingCheckpoint = "get_min_growing_checkpoint"
+	updateChannelCheckpointStageLockWait                = "lock_wait"
+	updateChannelCheckpointStageCheckUpdateNeeded       = "check_update_needed"
+	updateChannelCheckpointStageSaveChannelCheckpoint   = "save_channel_checkpoint"
+	updateChannelCheckpointStageUpdateMemory            = "update_memory"
+	updateChannelCheckpointStageUpdateCheckpointMetric  = "update_checkpoint_metric"
+)
+
+func observeUpdateChannelCheckpointStage(stage string, start time.Time) {
+	metrics.DataCoordUpdateChannelCheckpointStageDuration.WithLabelValues(stage).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
+}
+
 // UpdateChannelCheckpoint updates and saves channel checkpoint.
 func (m *meta) UpdateChannelCheckpoint(ctx context.Context, vChannel string, pos *msgpb.MsgPosition) error {
+	totalStart := time.Now()
+	defer observeUpdateChannelCheckpointStage(updateChannelCheckpointStageTotal, totalStart)
+
+	stageStart := time.Now()
 	if pos == nil || pos.GetMsgID() == nil {
+		observeUpdateChannelCheckpointStage(updateChannelCheckpointStageValidate, stageStart)
 		return merr.WrapErrServiceInternalMsg("channelCP is nil, vChannel=%s", vChannel)
 	}
+	observeUpdateChannelCheckpointStage(updateChannelCheckpointStageValidate, stageStart)
 
+	stageStart = time.Now()
 	minGrowingCP := m.GetMinGrowingSegmentCheckpoint(vChannel)
+	observeUpdateChannelCheckpointStage(updateChannelCheckpointStageGetMinGrowingCheckpoint, stageStart)
 	if minGrowingCP != nil && pos.GetTimestamp() > minGrowingCP.GetTimestamp() {
 		mlog.Info(context.TODO(), "clamping channel checkpoint to min growing segment checkpoint",
 			zap.String("vChannel", vChannel),
@@ -2429,6 +2486,7 @@ func (m *meta) UpdateChannelCheckpoint(ctx context.Context, vChannel string, pos
 	m.channelCPs.RUnlock()
 	if !ok || oldPosition.Timestamp < pos.Timestamp || (oldPosition.Timestamp == pos.Timestamp && !bytes.Equal(oldPosition.MsgID, pos.MsgID)) {
 		err := m.catalog.SaveChannelCheckpoint(ctx, vChannel, pos)
+		observeUpdateChannelCheckpointStage(updateChannelCheckpointStageSaveChannelCheckpoint, stageStart)
 		if err != nil {
 			return err
 		}
@@ -2444,6 +2502,7 @@ func (m *meta) UpdateChannelCheckpoint(ctx context.Context, vChannel string, pos
 			zap.Time("time", ts))
 		metrics.DataCoordCheckpointUnixSeconds.WithLabelValues(paramtable.GetStringNodeID(), vChannel).
 			Set(float64(ts.Unix()))
+		observeUpdateChannelCheckpointStage(updateChannelCheckpointStageUpdateCheckpointMetric, stageStart)
 	}
 	return nil
 }

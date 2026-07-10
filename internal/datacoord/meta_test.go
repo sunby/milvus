@@ -5373,6 +5373,77 @@ func TestChannelCP(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
+	t.Run("UpdateChannelCheckpoint_metrics", func(t *testing.T) {
+		metrics.DataCoordUpdateChannelCheckpointStageDuration.Reset()
+		meta, err := newMemoryMeta(t)
+		require.NoError(t, err)
+
+		err = meta.UpdateChannelCheckpoint(context.TODO(), mockVChannel, pos)
+		require.NoError(t, err)
+
+		assert.Equal(t, 8, prometheustestutil.CollectAndCount(metrics.DataCoordUpdateChannelCheckpointStageDuration))
+	})
+
+	t.Run("UpdateChannelCheckpoint_DifferentChannelsDoNotBlockOnCatalogSave", func(t *testing.T) {
+		catalog := mocks2.NewDataCoordCatalog(t)
+		meta := &meta{
+			ctx:         context.TODO(),
+			catalog:     catalog,
+			collections: typeutil.NewConcurrentMap[UniqueID, *collectionInfo](),
+			segments:    NewSegmentsInfo(),
+			channelCPs:  newChannelCps(),
+		}
+
+		blockedSaveStarted := make(chan struct{})
+		releaseBlockedSave := make(chan struct{})
+		catalog.EXPECT().
+			SaveChannelCheckpoint(mock.Anything, "ch1", mock.Anything).
+			RunAndReturn(func(ctx context.Context, channel string, pos *msgpb.MsgPosition) error {
+				close(blockedSaveStarted)
+				<-releaseBlockedSave
+				return nil
+			}).
+			Once()
+		catalog.EXPECT().
+			SaveChannelCheckpoint(mock.Anything, "ch2", mock.Anything).
+			Return(nil).
+			Once()
+
+		ch1Done := make(chan error, 1)
+		go func() {
+			ch1Done <- meta.UpdateChannelCheckpoint(context.TODO(), "ch1", &msgpb.MsgPosition{
+				ChannelName: "ch1",
+				MsgID:       []byte{1},
+				Timestamp:   100,
+			})
+		}()
+		<-blockedSaveStarted
+
+		ch2Done := make(chan error, 1)
+		go func() {
+			ch2Done <- meta.UpdateChannelCheckpoint(context.TODO(), "ch2", &msgpb.MsgPosition{
+				ChannelName: "ch2",
+				MsgID:       []byte{2},
+				Timestamp:   200,
+			})
+		}()
+
+		blocked := false
+		select {
+		case err := <-ch2Done:
+			require.NoError(t, err)
+		case <-time.After(200 * time.Millisecond):
+			blocked = true
+		}
+
+		close(releaseBlockedSave)
+		require.NoError(t, <-ch1Done)
+		if blocked {
+			require.NoError(t, <-ch2Done)
+			t.Fatal("checkpoint update for another channel waited on blocked catalog save")
+		}
+	})
+
 	t.Run("UpdateChannelCheckpoints", func(t *testing.T) {
 		meta, err := newMemoryMeta(t)
 		assert.NoError(t, err)

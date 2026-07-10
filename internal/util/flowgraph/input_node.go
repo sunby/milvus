@@ -116,8 +116,6 @@ type InputNode struct {
 	dataType           string
 	consumeMsgCount    prometheus.Counter
 	consumeTimeTickLag prometheus.Gauge
-	metricsKey         inputNodeMetricsKey
-	metricsReleaseOnce sync.Once
 
 	closeGracefully *atomic.Bool
 
@@ -193,8 +191,13 @@ func (inNode *InputNode) Operate(in []Msg) []Msg {
 	inNode.lastMsg = msgPack
 	sub := tsoutil.SubByNow(msgPack.EndTs)
 	if inNode.role == typeutil.DataNodeRole {
-		inNode.consumeMsgCount.Inc()
-		inNode.consumeTimeTickLag.Set(float64(sub))
+		if inNode.consumeMsgCount != nil {
+			inNode.consumeMsgCount.Inc()
+		}
+
+		if inNode.consumeTimeTickLag != nil {
+			inNode.consumeTimeTickLag.Set(float64(sub))
+		}
 	}
 
 	var spans []trace.Span
@@ -275,14 +278,8 @@ func NewInputNode(input <-chan *msgstream.MsgPack, nodeName string, maxQueueLeng
 		lastNotTimetickTime: time.Now(),
 	}
 	if role == typeutil.DataNodeRole {
-		node.metricsKey = inputNodeMetricsKey{
-			nodeID:       nodeIDStr,
-			dataType:     dataType,
-			collectionID: collectionIDStr,
-		}
-		handle := acquireInputNodeMetrics(node.metricsKey)
-		node.consumeMsgCount = handle.consumeMsgCount
-		node.consumeTimeTickLag = handle.consumeTimeTickLag
+		node.consumeMsgCount = metrics.DataNodeConsumeMsgCount.WithLabelValues(nodeIDStr, dataType, collectionIDStr)
+		node.consumeTimeTickLag = metrics.DataNodeConsumeTimeTickLag.WithLabelValues(nodeIDStr, dataType, collectionIDStr)
 	}
 	return node
 }

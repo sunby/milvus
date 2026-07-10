@@ -3,6 +3,9 @@ package recovery
 import (
 	"context"
 	"sync"
+	"time"
+
+	xrate "golang.org/x/time/rate"
 
 	"github.com/milvus-io/milvus/internal/flushcommon/broker"
 	"github.com/milvus-io/milvus/internal/flushcommon/syncmgr"
@@ -34,6 +37,10 @@ const (
 	recoveryStorageStatePersistRecovering = "persist-recovering"
 	recoveryStorageStateStreamRecovering  = "stream-recovering"
 	recoveryStorageStateWorking           = "working"
+
+	dropCollectionStageTotal = "total"
+
+	dropCollectionStageSlowThreshold = 10 * time.Millisecond
 )
 
 // RecoverRecoveryStorage creates a new recovery storage.
@@ -329,7 +336,14 @@ func (r *recoveryStorageImpl) consumeDirtySnapshot() *dirtyPersistSnapshot {
 
 // observeMessage observes a message and update the recovery storage.
 func (r *recoveryStorageImpl) observeMessage(ctx context.Context, msg message.ImmutableMessage) {
-	result := r.observeModulesMessage(ctx, msg)
+	var started time.Time
+	if msg.MessageType() == message.MessageTypeDropCollection {
+		started = time.Now()
+		defer func() {
+			r.observeDropCollectionStage(ctx, msg, dropCollectionStageTotal, time.Since(started))
+		}()
+	}
+	result := r.observeLiveModulesMessage(ctx, msg)
 	r.updateCheckpoint(msg, result.Meta)
 	r.updateDataCheckpoint(msg, result.Data)
 	r.metrics.ObServeInMemMetrics(r.checkpoint.TimeTick)
@@ -338,6 +352,38 @@ func (r *recoveryStorageImpl) observeMessage(ctx context.Context, msg message.Im
 	if r.dirtyCounter > r.cfg.maxDirtyMessages {
 		r.notifyPersist()
 	}
+}
+
+func (r *recoveryStorageImpl) observeLiveModulesMessage(ctx context.Context, msg message.ImmutableMessage) moduleapi.ObserveResult {
+	if msg.MessageType() != message.MessageTypeDropCollection {
+		return r.observeModulesMessage(ctx, msg)
+	}
+
+	results := make([]moduleapi.ObserveResult, 0, len(r.modules))
+	for _, module := range r.modules {
+		started := time.Now()
+		result := module.ObserveMessage(ctx, msg)
+		r.observeDropCollectionStage(ctx, msg, string(module.Name()), time.Since(started))
+		results = append(results, result)
+	}
+	return moduleapi.ComposeBarriers(results)
+}
+
+func (r *recoveryStorageImpl) observeDropCollectionStage(
+	ctx context.Context,
+	msg message.ImmutableMessage,
+	stage string,
+	duration time.Duration,
+) {
+	r.metrics.ObserveDropCollectionStage(stage, duration)
+	if duration <= dropCollectionStageSlowThreshold {
+		return
+	}
+	r.Logger().RatedInfo(ctx, xrate.Limit(1), "drop collection recovery stage slow",
+		mlog.FieldVChannel(msg.VChannel()),
+		mlog.String("stage", stage),
+		mlog.Duration("duration", duration),
+		mlog.Uint64("timeTick", msg.TimeTick()))
 }
 
 func (r *recoveryStorageImpl) observeMetaOnlyMessage(ctx context.Context, msg message.ImmutableMessage) {
