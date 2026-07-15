@@ -10071,8 +10071,9 @@ ChunkedSegmentSealedImpl::Prewarm(
     const std::vector<FieldId>& requested_field_ids) const {
     std::vector<FieldId> field_ids = requested_field_ids;
     if (field_ids.empty()) {
-        field_ids.reserve(schema_->get_fields().size());
-        for (const auto& field : schema_->get_fields()) {
+        auto schema_snapshot = CaptureSchemaSnapshot();
+        field_ids.reserve(schema_snapshot->get_fields().size());
+        for (const auto& field : schema_snapshot->get_fields()) {
             field_ids.push_back(field.first);
         }
     }

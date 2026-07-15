@@ -191,7 +191,7 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
 
     int64_t
     get_partition_id() const override {
-        auto load_info = std::atomic_load(&segment_load_info_);
+        auto load_info = CaptureLoadInfoSnapshot();
         return load_info == nullptr ? -1 : load_info->GetPartitionID();
     }
 
