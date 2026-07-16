@@ -534,10 +534,13 @@ It is recommended to change this parameter before starting Milvus for the first 
 }
 
 type MetaStoreConfig struct {
-	MetaStoreType   ParamItem `refreshable:"false"`
-	PaginationSize  ParamItem `refreshable:"true"`
-	ReadConcurrency ParamItem `refreshable:"true"`
-	MaxEtcdTxnNum   ParamItem `refreshable:"true"`
+	MetaStoreType                   ParamItem `refreshable:"false"`
+	PaginationSize                  ParamItem `refreshable:"true"`
+	ReadConcurrency                 ParamItem `refreshable:"true"`
+	MaxEtcdTxnNum                   ParamItem `refreshable:"true"`
+	RootCoordRecoveryMode           ParamItem `refreshable:"true"`
+	RootCoordRecoveryBatchThreshold ParamItem `refreshable:"true"`
+	RootCoordRecoveryPageSize       ParamItem `refreshable:"true"`
 }
 
 func (p *MetaStoreConfig) Init(base *BaseTable) {
@@ -574,6 +577,33 @@ func (p *MetaStoreConfig) Init(base *BaseTable) {
 		Export:       true,
 	}
 	p.MaxEtcdTxnNum.Init(base.mgr)
+
+	p.RootCoordRecoveryMode = ParamItem{
+		Key:          "metastore.rootCoordRecoveryMode",
+		Version:      "3.0.0",
+		DefaultValue: "auto",
+		Doc:          `RootCoord collection metadata recovery mode. Valid values: [auto, point, batch].`,
+		Export:       true,
+	}
+	p.RootCoordRecoveryMode.Init(base.mgr)
+
+	p.RootCoordRecoveryBatchThreshold = ParamItem{
+		Key:          "metastore.rootCoordRecoveryBatchThreshold",
+		Version:      "3.0.0",
+		DefaultValue: "1000",
+		Doc:          `Number of collections with external metadata that triggers RootCoord batch recovery in auto mode.`,
+		Export:       true,
+	}
+	p.RootCoordRecoveryBatchThreshold.Init(base.mgr)
+
+	p.RootCoordRecoveryPageSize = ParamItem{
+		Key:          "metastore.rootCoordRecoveryPageSize",
+		Version:      "3.0.0",
+		DefaultValue: "50000",
+		Doc:          `Page size used by RootCoord batch metadata recovery.`,
+		Export:       true,
+	}
+	p.RootCoordRecoveryPageSize.Init(base.mgr)
 
 	// TODO: The initialization operation of metadata storage is called in the initialization phase of every node.
 	// There should be a single initialization operation for meta store, then move the metrics registration to there.

@@ -40,13 +40,21 @@ import (
 
 type Catalog struct {
 	Txn kv.TxnKV
+	// metaKV exposes paginated prefix walking for recovery. Tests and legacy
+	// callers may provide only TxnKV; those callers keep using the point-read
+	// recovery path.
+	metaKV kv.MetaKv
 
 	pool *conc.Pool[any]
 }
 
 func NewCatalog(metaKV kv.TxnKV) metastore.RootCoordCatalog {
 	ioPool := conc.NewPool[any](paramtable.Get().MetaStoreCfg.ReadConcurrency.GetAsInt())
-	return &Catalog{Txn: metaKV, pool: ioPool}
+	catalog := &Catalog{Txn: metaKV, pool: ioPool}
+	if walkableKV, ok := metaKV.(kv.MetaKv); ok {
+		catalog.metaKV = walkableKV
+	}
+	return catalog
 }
 
 func BuildCollectionKey(dbID typeutil.UniqueID, collectionID typeutil.UniqueID) string {

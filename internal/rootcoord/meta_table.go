@@ -61,6 +61,14 @@ var (
 	errAlterCollectionNotFound = errors.New("alter collection not found") // alter collection not found, so it can be ignored.
 )
 
+type collectionRecoveryCatalog interface {
+	ListCollectionsForRecovery(
+		ctx context.Context,
+		dbIDs []int64,
+		ts typeutil.Timestamp,
+	) (map[int64][]*model.Collection, error)
+}
+
 type MetaTableChecker interface {
 	RBACChecker
 
@@ -242,10 +250,21 @@ func (mt *MetaTable) reload() error {
 		mt.aliases.createDbIfNotExist(util.DefaultDBName)
 	}
 
+	collectionsByDB, recoveryLoaderUsed, err := mt.loadCollectionsForRecovery()
+	if err != nil {
+		return err
+	}
+
 	// in order to support backward compatibility with meta of the old version, it also
 	// needs to reload collections that have no database
-	if err := mt.reloadWithNonDatabase(); err != nil {
-		return err
+	if recoveryLoaderUsed {
+		if err := mt.reloadWithNonDatabaseCollections(collectionsByDB[util.NonDBID]); err != nil {
+			return err
+		}
+	} else {
+		if err := mt.reloadWithNonDatabase(); err != nil {
+			return err
+		}
 	}
 
 	// recover collections from db namespace
@@ -256,10 +275,15 @@ func (mt *MetaTable) reload() error {
 		mt.names.createDbIfNotExist(dbName)
 
 		start := time.Now()
-		// TODO: async list collections to accelerate cases with multiple databases.
-		collections, err := mt.catalog.ListCollections(mt.ctx, db.ID, typeutil.MaxTimestamp)
-		if err != nil {
-			return err
+		var collections []*model.Collection
+		if recoveryLoaderUsed {
+			collections = collectionsByDB[db.ID]
+		} else {
+			// TODO: async list collections to accelerate cases with multiple databases.
+			collections, err = mt.catalog.ListCollections(mt.ctx, db.ID, typeutil.MaxTimestamp)
+			if err != nil {
+				return err
+			}
 		}
 		for _, collection := range collections {
 			if collection.DBName != "" && collection.DBName != dbName {
@@ -342,14 +366,41 @@ func (mt *MetaTable) reload() error {
 	return nil
 }
 
+func (mt *MetaTable) loadCollectionsForRecovery() (map[int64][]*model.Collection, bool, error) {
+	recoveryCatalog, ok := mt.catalog.(collectionRecoveryCatalog)
+	if !ok {
+		return nil, false, nil
+	}
+
+	dbIDs := make([]int64, 0, len(mt.dbName2Meta)+1)
+	dbIDs = append(dbIDs, util.NonDBID)
+	for _, db := range mt.dbName2Meta {
+		dbIDs = append(dbIDs, db.ID)
+	}
+
+	collectionsByDB, err := recoveryCatalog.ListCollectionsForRecovery(
+		mt.ctx,
+		dbIDs,
+		typeutil.MaxTimestamp,
+	)
+	if err != nil {
+		return nil, true, err
+	}
+	return collectionsByDB, true, nil
+}
+
 // insert into default database if the collections doesn't inside some database
 func (mt *MetaTable) reloadWithNonDatabase() error {
-	collectionNum := int64(0)
-	partitionNum := int64(0)
 	oldCollections, err := mt.catalog.ListCollections(mt.ctx, util.NonDBID, typeutil.MaxTimestamp)
 	if err != nil {
 		return err
 	}
+	return mt.reloadWithNonDatabaseCollections(oldCollections)
+}
+
+func (mt *MetaTable) reloadWithNonDatabaseCollections(oldCollections []*model.Collection) error {
+	collectionNum := int64(0)
+	partitionNum := int64(0)
 
 	for _, collection := range oldCollections {
 		ensureCollectionMaxFieldIDProperty(collection)

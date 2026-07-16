@@ -385,28 +385,31 @@ func (c *Core) initKVCreator() {
 func (c *Core) initMetaTable(initCtx context.Context) error {
 	fn := func() error {
 		var catalog metastore.RootCoordCatalog
+		var metaKV kv.MetaKv
 		var err error
 
 		switch Params.MetaStoreCfg.MetaStoreType.GetValue() {
 		case util.MetaStoreTypeEtcd:
 			mlog.Info(initCtx, "Using etcd as meta storage.")
-			metaKV := c.metaKVCreator()
-			kvmetastore.StartLegacySnapshotGC(c.ctx, metaKV)
-			kvmetastore.StartLegacyTombstoneGC(c.ctx, metaKV)
-			catalog = kvmetastore.NewCatalog(metaKV)
+			metaKV = c.metaKVCreator()
 		case util.MetaStoreTypeTiKV:
 			mlog.Info(initCtx, "Using tikv as meta storage.")
-			metaKV := c.metaKVCreator()
-			kvmetastore.StartLegacySnapshotGC(c.ctx, metaKV)
-			kvmetastore.StartLegacyTombstoneGC(c.ctx, metaKV)
-			catalog = kvmetastore.NewCatalog(metaKV)
+			metaKV = c.metaKVCreator()
 		default:
 			return retry.Unrecoverable(merr.WrapErrServiceInternalMsg("not supported meta store: %s", Params.MetaStoreCfg.MetaStoreType.GetValue()))
 		}
+		catalog = kvmetastore.NewCatalog(metaKV)
 
 		if c.meta, err = NewMetaTable(c.ctx, catalog, c.tsoAllocator); err != nil {
 			return err
 		}
+
+		// Recovery loaders skip legacy tombstones on every affected prefix, so
+		// start the cleanup only after the metadata cache is ready. Running these
+		// global walks during recovery competes with the startup scan for the same
+		// metastore bandwidth.
+		kvmetastore.StartLegacySnapshotGC(c.ctx, metaKV)
+		kvmetastore.StartLegacyTombstoneGC(c.ctx, metaKV)
 
 		return nil
 	}
