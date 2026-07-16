@@ -637,6 +637,8 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 		return nil
 	}
 	reloadEtcdFn := func() error {
+		metaInitializationStart := time.Now()
+		mlog.Info(s.ctx, "datacoord metadata initialization attempt started")
 		var err error
 		catalog := datacoord.NewCatalog(s.kv, chunkManager.RootPath(), s.metaRootPath)
 		dataViewStore := &dataViewSegmentStore{}
@@ -672,9 +674,70 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 		}
 		// DataView repair must see the current collection/partition cache so
 		// DDL trim intent from RootCoord is applied before reconciling segments.
-		if err := s.dataViewManager.RepairCollections(s.ctx, s.meta.recoveredCollectionIDs); err != nil {
+		dataViewRecoveryStart := time.Now()
+		totalCollections := len(s.meta.recoveredCollectionIDs)
+		totalCollectionDuration := time.Duration(0)
+		slowestCollectionID := int64(0)
+		slowestCollectionDuration := time.Duration(0)
+		completedCollections := 0
+		collectionRecoveryFailed := false
+		mlog.Info(s.ctx, "datacoord DataView recovery started",
+			mlog.Int("totalCollections", totalCollections))
+		err = recoverDataViewCollections(
+			s.ctx,
+			s.dataViewManager,
+			s.meta.recoveredCollectionIDs,
+			func(index int, collectionID int64, collectionDuration time.Duration, recoveryErr error) {
+				if recoveryErr != nil {
+					collectionRecoveryFailed = true
+					mlog.Warn(s.ctx, "datacoord DataView recovery failed",
+						mlog.FieldCollectionID(collectionID),
+						mlog.Int("completedCollections", index),
+						mlog.Int("totalCollections", totalCollections),
+						mlog.Duration("collectionDuration", collectionDuration),
+						mlog.Duration("duration", time.Since(dataViewRecoveryStart)),
+						mlog.Err(recoveryErr))
+					return
+				}
+				totalCollectionDuration += collectionDuration
+				if collectionDuration > slowestCollectionDuration {
+					slowestCollectionID = collectionID
+					slowestCollectionDuration = collectionDuration
+				}
+				completedCollections = index + 1
+				if completedCollections%collectionRecoveryProgressLogInterval == 0 && completedCollections < totalCollections {
+					mlog.Info(s.ctx, "datacoord DataView recovery progress",
+						mlog.Int("completedCollections", completedCollections),
+						mlog.Int("totalCollections", totalCollections),
+						mlog.Duration("averageCollectionDuration", totalCollectionDuration/time.Duration(completedCollections)),
+						mlog.Int64("slowestCollectionID", slowestCollectionID),
+						mlog.Duration("slowestCollectionDuration", slowestCollectionDuration),
+						mlog.Duration("duration", time.Since(dataViewRecoveryStart)))
+				}
+			},
+		)
+		if err != nil {
+			if !collectionRecoveryFailed {
+				mlog.Warn(s.ctx, "datacoord DataView recovery failed before collection reconciliation",
+					mlog.Int("completedCollections", completedCollections),
+					mlog.Int("totalCollections", totalCollections),
+					mlog.Duration("duration", time.Since(dataViewRecoveryStart)),
+					mlog.Err(err))
+			}
 			return err
 		}
+		averageCollectionDuration := time.Duration(0)
+		if totalCollections > 0 {
+			averageCollectionDuration = totalCollectionDuration / time.Duration(totalCollections)
+		}
+		mlog.Info(s.ctx, "datacoord DataView recovery done",
+			mlog.Int("totalCollections", totalCollections),
+			mlog.Duration("averageCollectionDuration", averageCollectionDuration),
+			mlog.Int64("slowestCollectionID", slowestCollectionID),
+			mlog.Duration("slowestCollectionDuration", slowestCollectionDuration),
+			mlog.Duration("duration", time.Since(dataViewRecoveryStart)))
+		mlog.Info(s.ctx, "datacoord metadata initialization attempt done",
+			mlog.Duration("duration", time.Since(metaInitializationStart)))
 		return nil
 	}
 	return retry.Do(s.ctx, reloadEtcdFn, retry.Attempts(connMetaMaxRetryTime))

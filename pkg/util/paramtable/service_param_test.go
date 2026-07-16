@@ -392,9 +392,6 @@ func TestServiceParam(t *testing.T) {
 		assert.Equal(t, util.MetaStoreTypeEtcd, Params.MetaStoreType.GetValue())
 		assert.Equal(t, 100000, Params.PaginationSize.GetAsInt())
 		assert.Equal(t, 32, Params.ReadConcurrency.GetAsInt())
-		assert.Equal(t, "auto", Params.RootCoordRecoveryMode.GetValue())
-		assert.Equal(t, 1000, Params.RootCoordRecoveryBatchThreshold.GetAsInt())
-		assert.Equal(t, 50000, Params.RootCoordRecoveryPageSize.GetAsInt())
 	})
 
 	t.Run("test profile config", func(t *testing.T) {

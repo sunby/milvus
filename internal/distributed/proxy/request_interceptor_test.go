@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/suite"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -144,9 +145,25 @@ func (suite *StatsInterceptorSuite) TestUnaryRequestStatsInterceptor() {
 	for _, tc := range cases {
 		suite.Run(tc.tag, func() {
 			metrics.ProxyFunctionCall.Reset()
+			metrics.ProxyGRPCStageLatency.Reset()
 			defer metrics.ProxyFunctionCall.Reset()
+			defer metrics.ProxyGRPCStageLatency.Reset()
 
 			UnaryRequestStatsInterceptor(ctx, tc.req, tc.info, tc.handler)
+			methodTag := FullMethodName2Tag(tc.info.FullMethod)
+			for _, stage := range []string{
+				proxyGRPCStageRequestInfo,
+				proxyGRPCStageRequestMetrics,
+				proxyGRPCStageHandler,
+				proxyGRPCStageResponseLabel,
+				proxyGRPCStageResponseMetrics,
+				proxyGRPCStageFailureLog,
+			} {
+				observer := metrics.ProxyGRPCStageLatency.WithLabelValues(paramtable.GetStringNodeID(), methodTag, stage)
+				metric := &dto.Metric{}
+				suite.Require().NoError(observer.(interface{ Write(*dto.Metric) error }).Write(metric))
+				suite.Equal(uint64(1), metric.GetHistogram().GetSampleCount())
+			}
 			if tc.skipMetric {
 				suite.Equal(0, testutil.CollectAndCount(metrics.ProxyFunctionCall))
 				return

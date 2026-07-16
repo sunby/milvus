@@ -609,6 +609,68 @@ func (kc *Catalog) listDataViewsWithPrefix(ctx context.Context, prefix string) (
 	return dataViews, nil
 }
 
+// ListDataViewsForRecovery loads DataViews for all requested collections with
+// one paginated walk over the global DataView prefix. It is intentionally not
+// part of metastore.DataCoordCatalog so callers can use it as an optional
+// recovery acceleration without expanding the catalog interface or mocks.
+func (kc *Catalog) ListDataViewsForRecovery(
+	ctx context.Context,
+	collectionIDs []int64,
+) (map[int64][]*viewpb.DataViewOfCollection, error) {
+	dataViewsByCollection := make(map[int64][]*viewpb.DataViewOfCollection)
+	if len(collectionIDs) == 0 {
+		return dataViewsByCollection, nil
+	}
+
+	requestedCollections := make(map[int64]struct{}, len(collectionIDs))
+	for _, collectionID := range collectionIDs {
+		requestedCollections[collectionID] = struct{}{}
+	}
+
+	prefix := DataViewPrefix + "/"
+	fullPrefix := kc.MetaKv.GetPath(prefix)
+	applyFn := func(key []byte, value []byte) error {
+		collectionID, ok := dataViewCollectionIDFromKey(fullPrefix, key)
+		if !ok {
+			// The global prefix may gain non-version metadata in future versions.
+			// Match the point-read behavior by considering only version subtrees.
+			return nil
+		}
+		if _, ok := requestedCollections[collectionID]; !ok {
+			return nil
+		}
+
+		dataView := &viewpb.DataViewOfCollection{}
+		if err := proto.Unmarshal(value, dataView); err != nil {
+			return merr.WrapErrDataIntegrity(err, "unmarshal DataView metadata during recovery")
+		}
+		dataViewsByCollection[collectionID] = append(dataViewsByCollection[collectionID], dataView)
+		return nil
+	}
+
+	if err := kc.MetaKv.WalkWithPrefix(ctx, prefix, kc.paginationSize, applyFn); err != nil {
+		return nil, err
+	}
+	return dataViewsByCollection, nil
+}
+
+func dataViewCollectionIDFromKey(fullPrefix string, key []byte) (int64, bool) {
+	keyString := string(key)
+	if !strings.HasPrefix(keyString, fullPrefix) {
+		return 0, false
+	}
+
+	parts := strings.Split(strings.TrimPrefix(keyString, fullPrefix), "/")
+	if len(parts) < 3 || parts[1] != "versions" {
+		return 0, false
+	}
+	collectionID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return collectionID, true
+}
+
 func (kc *Catalog) DropDataView(ctx context.Context, collectionID int64, dataVersion *viewpb.DataVersion) error {
 	return kc.MetaKv.Remove(ctx, buildDataViewVersionKey(collectionID, dataVersion.GetStreamingVersion(), dataVersion.GetCompactVersion()))
 }

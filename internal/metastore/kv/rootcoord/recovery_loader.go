@@ -31,17 +31,11 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	pb "github.com/milvus-io/milvus/pkg/v3/proto/etcdpb"
 	"github.com/milvus-io/milvus/pkg/v3/util"
-	"github.com/milvus-io/milvus/pkg/v3/util/conc"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
-	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
 const (
-	rootCoordRecoveryModeAuto  = "auto"
-	rootCoordRecoveryModePoint = "point"
-	rootCoordRecoveryModeBatch = "batch"
-
 	rootCoordRecoveryDefaultPageSize = 50000
 	rootCoordRecoveryLogInterval     = 100000
 )
@@ -61,18 +55,6 @@ func (kc *Catalog) ListCollectionsForRecovery(
 	ts typeutil.Timestamp,
 ) (map[int64][]*model.Collection, error) {
 	uniqueDBIDs, collectionsByDB := initRecoveryResult(dbIDs)
-	mode := strings.ToLower(paramtable.Get().MetaStoreCfg.RootCoordRecoveryMode.GetValue())
-	switch mode {
-	case rootCoordRecoveryModeAuto, rootCoordRecoveryModePoint, rootCoordRecoveryModeBatch:
-	default:
-		mlog.Warn(ctx, "invalid rootcoord metadata recovery mode, fallback to auto",
-			mlog.String("mode", mode))
-		mode = rootCoordRecoveryModeAuto
-	}
-
-	if mode == rootCoordRecoveryModePoint {
-		return kc.listCollectionsForRecoveryPoint(ctx, uniqueDBIDs, ts)
-	}
 	if kc.metaKV == nil {
 		mlog.Warn(ctx, "metadata store does not support paginated rootcoord recovery, fallback to point reads")
 		return kc.listCollectionsForRecoveryPoint(ctx, uniqueDBIDs, ts)
@@ -90,25 +72,11 @@ func (kc *Catalog) ListCollectionsForRecovery(
 		}
 	}
 
-	selectedMode := mode
-	if mode == rootCoordRecoveryModeAuto {
-		threshold := paramtable.Get().MetaStoreCfg.RootCoordRecoveryBatchThreshold.GetAsInt()
-		if threshold > 0 && externalCollectionCount < threshold {
-			selectedMode = rootCoordRecoveryModePoint
-		} else {
-			selectedMode = rootCoordRecoveryModeBatch
-		}
-	}
-
 	mlog.Info(ctx, "rootcoord metadata recovery path selected",
-		mlog.String("configuredMode", mode),
-		mlog.String("selectedMode", selectedMode),
+		mlog.String("selectedMode", "batch"),
 		mlog.Int("numCollections", len(entries)),
 		mlog.Int("numExternalCollections", externalCollectionCount))
 
-	if selectedMode == rootCoordRecoveryModePoint {
-		return kc.buildPointRecoveryCollections(ctx, uniqueDBIDs, entries, ts)
-	}
 	if len(entries) == 0 {
 		return collectionsByDB, nil
 	}
@@ -217,36 +185,6 @@ func (kc *Catalog) scanCollectionRecoveryEntries(
 
 func needsExternalCollectionMetadata(collectionMeta *pb.CollectionInfo) bool {
 	return partitionVersionAfter210(collectionMeta) || fieldVersionAfter210(collectionMeta)
-}
-
-func (kc *Catalog) buildPointRecoveryCollections(
-	ctx context.Context,
-	dbIDs []int64,
-	entries []collectionRecoveryEntry,
-	ts typeutil.Timestamp,
-) (map[int64][]*model.Collection, error) {
-	_, collectionsByDB := initRecoveryResult(dbIDs)
-	collections := make([]*model.Collection, len(entries))
-	futures := make([]*conc.Future[any], 0, len(entries))
-	for i, entry := range entries {
-		i := i
-		entry := entry
-		futures = append(futures, kc.pool.Submit(func() (any, error) {
-			collection, err := kc.appendPartitionAndFieldsInfo(ctx, entry.meta, ts)
-			if err != nil {
-				return nil, err
-			}
-			collections[i] = collection
-			return nil, nil
-		}))
-	}
-	if err := conc.AwaitAll(futures...); err != nil {
-		return nil, err
-	}
-	for i, entry := range entries {
-		collectionsByDB[entry.dbID] = append(collectionsByDB[entry.dbID], collections[i])
-	}
-	return collectionsByDB, nil
 }
 
 func (kc *Catalog) buildBatchRecoveryCollections(
@@ -458,10 +396,7 @@ func (kc *Catalog) walkRecoveryPrefix(
 	if err := ctx.Err(); err != nil {
 		return merr.Wrapf(err, "scan rootcoord metadata prefix %s", prefix)
 	}
-	pageSize := paramtable.Get().MetaStoreCfg.RootCoordRecoveryPageSize.GetAsInt()
-	if pageSize <= 0 {
-		pageSize = rootCoordRecoveryDefaultPageSize
-	}
+	pageSize := rootCoordRecoveryDefaultPageSize
 	start := time.Now()
 	scanned := 0
 	err := kc.metaKV.WalkWithPrefix(ctx, prefix, pageSize, func(key, value []byte) error {

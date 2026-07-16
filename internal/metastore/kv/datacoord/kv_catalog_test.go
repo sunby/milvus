@@ -2235,3 +2235,49 @@ func TestDataViewCatalog(t *testing.T) {
 	txn.EXPECT().RemoveWithPrefix(ctx, dataViewPrefix).Return(nil).Once()
 	assert.NoError(t, catalog.DropDataViews(ctx, 100))
 }
+
+func TestListDataViewsForRecovery(t *testing.T) {
+	ctx := context.Background()
+	txn := mocks.NewMetaKv(t)
+	catalog := NewCatalog(txn, rootPath, "")
+
+	dataView100 := &viewpb.DataViewOfCollection{
+		CollectionId: 100,
+		DataVersion:  &viewpb.DataVersion{StreamingVersion: 2, CompactVersion: 1},
+	}
+	dataView200 := &viewpb.DataViewOfCollection{
+		CollectionId: 200,
+		DataVersion:  &viewpb.DataVersion{StreamingVersion: 3, CompactVersion: 4},
+	}
+	dataView300 := &viewpb.DataViewOfCollection{
+		CollectionId: 300,
+		DataVersion:  &viewpb.DataVersion{StreamingVersion: 5, CompactVersion: 6},
+	}
+	value100, err := proto.Marshal(dataView100)
+	assert.NoError(t, err)
+	value200, err := proto.Marshal(dataView200)
+	assert.NoError(t, err)
+	value300, err := proto.Marshal(dataView300)
+	assert.NoError(t, err)
+
+	prefix := DataViewPrefix + "/"
+	fullPrefix := rootPath + "/" + prefix
+	txn.EXPECT().GetPath(prefix).Return(fullPrefix).Once()
+	txn.EXPECT().WalkWithPrefix(ctx, prefix, catalog.paginationSize, mock.Anything).
+		RunAndReturn(func(_ context.Context, _ string, _ int, f func([]byte, []byte) error) error {
+			assert.NoError(t, f([]byte(fullPrefix+"100/versions/2/1"), value100))
+			assert.NoError(t, f([]byte(fullPrefix+"200/versions/3/4"), value200))
+			assert.NoError(t, f([]byte(fullPrefix+"300/versions/5/6"), value300))
+			assert.NoError(t, f([]byte(fullPrefix+"100/current"), value100))
+			return nil
+		}).Once()
+
+	viewsByCollection, err := catalog.ListDataViewsForRecovery(ctx, []int64{100, 200})
+	assert.NoError(t, err)
+	assert.Len(t, viewsByCollection, 2)
+	assert.Len(t, viewsByCollection[100], 1)
+	assert.Len(t, viewsByCollection[200], 1)
+	assert.True(t, proto.Equal(dataView100, viewsByCollection[100][0]))
+	assert.True(t, proto.Equal(dataView200, viewsByCollection[200][0]))
+	assert.NotContains(t, viewsByCollection, int64(300))
+}

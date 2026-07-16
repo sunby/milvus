@@ -156,6 +156,8 @@ func (s *mixCoordImpl) activateFunc() error {
 }
 
 func (s *mixCoordImpl) initInternal() error {
+	internalRecoveryStart := time.Now()
+	mlog.Info(s.ctx, "MixCoord internal recovery started")
 	s.rootcoordServer.SetMixCoord(s)
 	s.datacoordServer.SetMixCoord(s)
 	s.queryCoordServer.SetMixCoord(s)
@@ -164,54 +166,108 @@ func (s *mixCoordImpl) initInternal() error {
 	// Register WAL callbacks
 	RegisterWALCallbacks(s)
 
+	streamingCoordStart := time.Now()
 	if err := s.streamingCoord.Start(s.ctx, s.fileResourceObserver); err != nil {
-		mlog.Error(s.ctx, "streamCoord start failed", mlog.Err(err))
+		mlog.Error(s.ctx, "streamCoord start failed",
+			mlog.Duration("duration", time.Since(streamingCoordStart)),
+			mlog.Err(err))
 		return err
 	}
+	mlog.Info(s.ctx, "streamCoord start done",
+		mlog.Duration("duration", time.Since(streamingCoordStart)))
 
 	s.rootcoordServer.SetFileResourceObserver(s.fileResourceObserver)
+	rootCoordInitStart := time.Now()
 	if err := s.rootcoordServer.Init(); err != nil {
-		mlog.Error(s.ctx, "rootCoord init failed", mlog.Err(err))
+		mlog.Error(s.ctx, "rootCoord init failed",
+			mlog.Duration("duration", time.Since(rootCoordInitStart)),
+			mlog.Err(err))
 		return err
 	}
+	mlog.Info(s.ctx, "rootCoord init done",
+		mlog.Duration("duration", time.Since(rootCoordInitStart)))
 
+	rootCoordStart := time.Now()
 	if err := s.rootcoordServer.Start(); err != nil {
-		mlog.Error(s.ctx, "rootCoord start failed", mlog.Err(err))
+		mlog.Error(s.ctx, "rootCoord start failed",
+			mlog.Duration("duration", time.Since(rootCoordStart)),
+			mlog.Err(err))
 		return err
 	}
+	mlog.Info(s.ctx, "rootCoord start done",
+		mlog.Duration("duration", time.Since(rootCoordStart)))
 
 	// DataCoord and QueryCoord are independent of each other;
 	// both only depend on RootCoord being ready. Initialize and start them in parallel.
 	g, _ := errgroup.WithContext(s.ctx)
 	g.Go(func() error {
+		dataCoordRecoveryStart := time.Now()
+		mlog.Info(s.ctx, "dataCoord recovery started")
 		s.datacoordServer.SetFileResourceObserver(s.fileResourceObserver)
+		dataCoordInitStart := time.Now()
 		if err := s.datacoordServer.Init(); err != nil {
-			mlog.Error(s.ctx, "dataCoord init failed", mlog.Err(err))
+			mlog.Error(s.ctx, "dataCoord init failed",
+				mlog.Duration("duration", time.Since(dataCoordInitStart)),
+				mlog.Duration("totalDuration", time.Since(dataCoordRecoveryStart)),
+				mlog.Err(err))
 			return err
 		}
+		mlog.Info(s.ctx, "dataCoord init done",
+			mlog.Duration("duration", time.Since(dataCoordInitStart)))
+		dataCoordStart := time.Now()
 		if err := s.datacoordServer.Start(); err != nil {
-			mlog.Error(s.ctx, "dataCoord start failed", mlog.Err(err))
+			mlog.Error(s.ctx, "dataCoord start failed",
+				mlog.Duration("duration", time.Since(dataCoordStart)),
+				mlog.Duration("totalDuration", time.Since(dataCoordRecoveryStart)),
+				mlog.Err(err))
 			return err
 		}
+		mlog.Info(s.ctx, "dataCoord recovery done",
+			mlog.Duration("startDuration", time.Since(dataCoordStart)),
+			mlog.Duration("duration", time.Since(dataCoordRecoveryStart)))
 		return nil
 	})
 	g.Go(func() error {
+		queryCoordRecoveryStart := time.Now()
+		mlog.Info(s.ctx, "queryCoord recovery started")
 		s.queryCoordServer.SetFileResourceObserver(s.fileResourceObserver)
+		queryCoordInitStart := time.Now()
 		if err := s.queryCoordServer.Init(); err != nil {
-			mlog.Error(s.ctx, "queryCoord init failed", mlog.Err(err))
+			mlog.Error(s.ctx, "queryCoord init failed",
+				mlog.Duration("duration", time.Since(queryCoordInitStart)),
+				mlog.Duration("totalDuration", time.Since(queryCoordRecoveryStart)),
+				mlog.Err(err))
 			return err
 		}
+		mlog.Info(s.ctx, "queryCoord init done",
+			mlog.Duration("duration", time.Since(queryCoordInitStart)))
+		queryCoordStart := time.Now()
 		if err := s.queryCoordServer.Start(); err != nil {
-			mlog.Error(s.ctx, "queryCoord start failed", mlog.Err(err))
+			mlog.Error(s.ctx, "queryCoord start failed",
+				mlog.Duration("duration", time.Since(queryCoordStart)),
+				mlog.Duration("totalDuration", time.Since(queryCoordRecoveryStart)),
+				mlog.Err(err))
 			return err
 		}
+		mlog.Info(s.ctx, "queryCoord recovery done",
+			mlog.Duration("startDuration", time.Since(queryCoordStart)),
+			mlog.Duration("duration", time.Since(queryCoordRecoveryStart)))
 		return nil
 	})
 	if err := g.Wait(); err != nil {
+		mlog.Error(s.ctx, "MixCoord parallel coordinator recovery failed",
+			mlog.Duration("duration", time.Since(internalRecoveryStart)),
+			mlog.Err(err))
 		return err
 	}
 
+	fileResourceObserverStart := time.Now()
 	s.fileResourceObserver.Start()
+	mlog.Info(s.ctx, "MixCoord file resource observer start done",
+		mlog.Duration("duration", time.Since(fileResourceObserverStart)))
+	s.rootcoordServer.StartLegacyMetadataGC()
+	mlog.Info(s.ctx, "MixCoord internal recovery done",
+		mlog.Duration("duration", time.Since(internalRecoveryStart)))
 	return nil
 }
 

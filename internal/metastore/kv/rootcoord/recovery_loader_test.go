@@ -19,7 +19,6 @@ package rootcoord
 import (
 	"context"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -35,7 +34,6 @@ import (
 	pb "github.com/milvus-io/milvus/pkg/v3/proto/etcdpb"
 	"github.com/milvus-io/milvus/pkg/v3/util"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
-	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
 
 type recoveryWalkRecorder struct {
@@ -95,22 +93,6 @@ func newRecoveryMetaKV(
 	return metaKV
 }
 
-func setRecoveryConfig(t *testing.T, mode string, threshold, pageSize int) {
-	t.Helper()
-	params := &paramtable.Get().MetaStoreCfg
-	oldMode := params.RootCoordRecoveryMode.GetValue()
-	oldThreshold := params.RootCoordRecoveryBatchThreshold.GetValue()
-	oldPageSize := params.RootCoordRecoveryPageSize.GetValue()
-	require.NoError(t, paramtable.Get().Save(params.RootCoordRecoveryMode.Key, mode))
-	require.NoError(t, paramtable.Get().Save(params.RootCoordRecoveryBatchThreshold.Key, strconv.Itoa(threshold)))
-	require.NoError(t, paramtable.Get().Save(params.RootCoordRecoveryPageSize.Key, strconv.Itoa(pageSize)))
-	t.Cleanup(func() {
-		require.NoError(t, paramtable.Get().Save(params.RootCoordRecoveryMode.Key, oldMode))
-		require.NoError(t, paramtable.Get().Save(params.RootCoordRecoveryBatchThreshold.Key, oldThreshold))
-		require.NoError(t, paramtable.Get().Save(params.RootCoordRecoveryPageSize.Key, oldPageSize))
-	})
-}
-
 func marshalRecoveryProto(t *testing.T, value proto.Message) []byte {
 	t.Helper()
 	bytes, err := proto.Marshal(value)
@@ -130,8 +112,6 @@ func findRecoveryCollection(t *testing.T, collections []*model.Collection, colle
 }
 
 func TestCatalogListCollectionsForRecoveryBatch(t *testing.T) {
-	setRecoveryConfig(t, rootCoordRecoveryModeBatch, 1000, 2)
-
 	legacyCollection := &pb.CollectionInfo{
 		ID:                         50,
 		DbId:                       util.DefaultDBID,
@@ -229,40 +209,28 @@ func TestCatalogListCollectionsForRecoveryBatch(t *testing.T) {
 		FunctionMetaPrefix + "/",
 	} {
 		assert.Equal(t, 1, recorder.calls[prefix], prefix)
-		assert.Equal(t, 2, recorder.pageSizes[prefix], prefix)
+		assert.Equal(t, rootCoordRecoveryDefaultPageSize, recorder.pageSizes[prefix], prefix)
 	}
 }
 
-func TestCatalogListCollectionsForRecoveryAutoUsesPointForSmallMetadata(t *testing.T) {
-	setRecoveryConfig(t, rootCoordRecoveryModeAuto, 2, 10)
-
+func TestCatalogListCollectionsForRecoverySkipsChildScansForEmbeddedMetadata(t *testing.T) {
 	collection := &pb.CollectionInfo{
-		ID:     100,
-		DbId:   1,
-		Schema: &schemapb.CollectionSchema{Name: "c100"},
-		State:  pb.CollectionState_CollectionCreated,
+		ID:                         100,
+		DbId:                       1,
+		PartitionIDs:               []int64{10},
+		PartitionNames:             []string{"p100"},
+		PartitionCreatedTimestamps: []uint64{1},
+		Schema: &schemapb.CollectionSchema{
+			Name:   "c100",
+			Fields: []*schemapb.FieldSchema{{FieldID: 11, Name: "f100"}},
+		},
+		State: pb.CollectionState_CollectionCreated,
 	}
 	records := map[string][]byte{
 		CollectionInfoMetaPrefix + "/1/100": marshalRecoveryProto(t, collection),
 	}
 	recorder := &recoveryWalkRecorder{calls: make(map[string]int), pageSizes: make(map[string]int)}
 	metaKV := newRecoveryMetaKV(t, records, recorder)
-	metaKV.On("LoadWithPrefix", mock.Anything, BuildPartitionPrefix(100)).Return(
-		[]string{"partition"},
-		[]string{string(marshalRecoveryProto(t, &pb.PartitionInfo{CollectionId: 100, PartitionID: 10}))},
-		nil,
-	)
-	metaKV.On("LoadWithPrefix", mock.Anything, BuildFieldPrefix(100)).Return(
-		[]string{"field"},
-		[]string{string(marshalRecoveryProto(t, &schemapb.FieldSchema{FieldID: 11}))},
-		nil,
-	)
-	metaKV.On("LoadWithPrefix", mock.Anything, BuildStructArrayFieldPrefix(100)).Return(
-		[]string{}, []string{}, nil,
-	)
-	metaKV.On("LoadWithPrefix", mock.Anything, BuildFunctionPrefix(100)).Return(
-		[]string{}, []string{}, nil,
-	)
 	catalog := NewCatalog(metaKV).(*Catalog)
 
 	collectionsByDB, err := catalog.ListCollectionsForRecovery(context.Background(), []int64{1}, 0)
@@ -273,11 +241,11 @@ func TestCatalogListCollectionsForRecoveryAutoUsesPointForSmallMetadata(t *testi
 	assert.Equal(t, 1, recorder.calls[CollectionInfoMetaPrefix+"/"])
 	assert.Zero(t, recorder.calls[PartitionMetaPrefix+"/"])
 	assert.Zero(t, recorder.calls[FieldMetaPrefix+"/"])
+	assert.Zero(t, recorder.calls[StructArrayFieldMetaPrefix+"/"])
+	assert.Zero(t, recorder.calls[FunctionMetaPrefix+"/"])
 }
 
 func TestCatalogListCollectionsForRecoveryFallsBackWithoutWalker(t *testing.T) {
-	setRecoveryConfig(t, rootCoordRecoveryModeBatch, 0, 10)
-
 	collection := &pb.CollectionInfo{
 		ID:                         100,
 		DbId:                       1,
@@ -304,8 +272,6 @@ func TestCatalogListCollectionsForRecoveryFallsBackWithoutWalker(t *testing.T) {
 }
 
 func TestCatalogListCollectionsForRecoveryRejectsCorruptTargetMetadata(t *testing.T) {
-	setRecoveryConfig(t, rootCoordRecoveryModeBatch, 0, 10)
-
 	records := map[string][]byte{
 		CollectionInfoMetaPrefix + "/1/100": []byte("corrupt-collection-metadata"),
 	}
@@ -319,8 +285,6 @@ func TestCatalogListCollectionsForRecoveryRejectsCorruptTargetMetadata(t *testin
 }
 
 func TestCatalogListCollectionsForRecoveryRejectsCorruptTargetChildMetadata(t *testing.T) {
-	setRecoveryConfig(t, rootCoordRecoveryModeBatch, 0, 10)
-
 	collection := &pb.CollectionInfo{
 		ID:     100,
 		DbId:   1,
@@ -341,8 +305,6 @@ func TestCatalogListCollectionsForRecoveryRejectsCorruptTargetChildMetadata(t *t
 }
 
 func TestCatalogListCollectionsForRecoveryPreservesScanError(t *testing.T) {
-	setRecoveryConfig(t, rootCoordRecoveryModeBatch, 0, 10)
-
 	injected := merr.WrapErrIoFailedReason("injected recovery scan failure", "test")
 	metaKV := mocks.NewMetaKv(t)
 	metaKV.On("GetPath", mock.Anything).Return(func(key string) string {
@@ -364,8 +326,6 @@ func TestCatalogListCollectionsForRecoveryPreservesScanError(t *testing.T) {
 }
 
 func TestCatalogListCollectionsForRecoveryHonorsCancellationDuringWalk(t *testing.T) {
-	setRecoveryConfig(t, rootCoordRecoveryModeBatch, 0, 10)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	metaKV := mocks.NewMetaKv(t)
 	metaKV.On("GetPath", mock.Anything).Return(func(key string) string {
@@ -397,8 +357,6 @@ func TestCatalogListCollectionsForRecoveryHonorsCancellationDuringWalk(t *testin
 }
 
 func TestCatalogListCollectionsForRecoveryMigratesLegacyCollectionIntoDefaultBucket(t *testing.T) {
-	setRecoveryConfig(t, rootCoordRecoveryModeBatch, 0, 10)
-
 	legacyCollection := &pb.CollectionInfo{
 		ID:     100,
 		DbId:   util.NonDBID,

@@ -245,6 +245,16 @@ var (
 			Buckets:   buckets, // unit: ms
 		}, []string{nodeIDLabelName, functionLabelName, statusLabelName, causeLabelName})
 
+	// ProxyGRPCStageLatency records the latency of each stage in the unified gRPC request interceptor.
+	ProxyGRPCStageLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.ProxyRole,
+			Name:      "grpc_stage_latency",
+			Help:      "latency of each stage in grpc request interceptor",
+			Buckets:   subMsBuckets, // unit: ms
+		}, []string{nodeIDLabelName, functionLabelName, "stage"})
+
 	// ProxyReqLatency records the latency that for all requests, like "CreateCollection".
 	ProxyReqLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -530,6 +540,7 @@ func RegisterProxy(registry *prometheus.Registry) {
 
 	registry.MustRegister(ProxyFunctionCall)
 	registry.MustRegister(ProxyGRPCLatency)
+	registry.MustRegister(ProxyGRPCStageLatency)
 	registry.MustRegister(ProxyReqLatency)
 
 	registry.MustRegister(ProxyReceiveBytes)
