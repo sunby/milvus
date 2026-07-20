@@ -2,7 +2,6 @@ package coordview
 
 import (
 	"github.com/milvus-io/milvus/internal/views/qviews"
-	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 )
 
 // ShardStats is an atomic snapshot of a shard's placement state.
@@ -16,9 +15,9 @@ type ShardStats struct {
 	// Nil when no view is currently Up.
 	UpVersion *qviews.QueryViewVersion
 
-	// UpSettings is the QueryViewSettings of the current Up view.
-	// Nil when no view is currently Up.
-	UpSettings *viewpb.QueryViewSettings
+	// UpLoadInfoVersion is the load-config snapshot version of the current Up view.
+	// Zero when no view is currently Up.
+	UpLoadInfoVersion uint64
 
 	// PreparingVersion is the version of the current Preparing or Ready view,
 	// if any. Nil when there is no in-flight view.
