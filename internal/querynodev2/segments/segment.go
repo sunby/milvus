@@ -515,6 +515,7 @@ func NewSegment(ctx context.Context,
 			mlog.Any("poolCapacity", pool.Cap()))
 
 		var err error
+		createCSegmentStart := time.Now()
 		csegment, err = collection.CreateCSegment(&segcore.CreateCSegmentRequest{
 			SegmentID:   loadInfo.GetSegmentID(),
 			SegmentType: segmentType,

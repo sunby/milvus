@@ -661,6 +661,7 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 	mutations := map[int64][]MutateFunc{}
 	var newSegments []*datapb.SegmentInfo
 	var validationSkipped bool
+	var mutationErr error
 
 	if req.GetSegLevel() == datapb.SegmentLevel_L0 {
 		// Insert new L0 segment if it doesn't exist
@@ -703,8 +704,6 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 			return merr.Status(err), nil
 		}
 
-		operators = append(operators, ValidateSaveBinlogStorageVersion(req.GetSegmentID(), incomingStorageVersion))
-
 		// Set segment state
 		if req.GetDropped() {
 			s.segmentManager.DropSegment(ctx, req.GetChannel(), req.GetSegmentID())
@@ -718,6 +717,12 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 		// Validate inside MutateFunc: check against persist value (lock-free CAS)
 		reqCopy := req // capture for closure
 		validate := func(seg *datapb.SegmentInfo) bool {
+			if incomingStorageVersion != seg.GetStorageVersion() {
+				mutationErr = merr.WrapErrDataIntegrityMsg(
+					"segment %d storage version mismatch, current=%d incoming=%d",
+					seg.GetID(), seg.GetStorageVersion(), incomingStorageVersion)
+				return false
+			}
 			if !reqCopy.GetWithFullBinlogs() {
 				return true
 			}
@@ -743,8 +748,6 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 
 		// Build mutation for the main segment
 		mutate := func(seg *datapb.SegmentInfo) bool {
-			seg.StorageVersion = reqCopy.GetStorageVersion()
-
 			if reqCopy.GetDropped() {
 				seg.State = commonpb.SegmentState_Dropped
 				seg.DroppedAt = uint64(time.Now().UnixNano())
@@ -841,6 +844,10 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 	if err := s.meta.UpdateSegmentsInfo(ctx, mutations, newSegments...); err != nil {
 		logger.Error(ctx, "save binlog and checkpoints failed", mlog.Err(err))
 		return merr.Status(err), nil
+	}
+	if mutationErr != nil {
+		logger.Warn(ctx, "save binlog validation failed", mlog.Err(mutationErr))
+		return merr.Status(mutationErr), nil
 	}
 	updateSegmentsInfoDur := time.Since(stageStart)
 

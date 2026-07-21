@@ -68,34 +68,47 @@ func UnaryRequestStatsInterceptor(ctx context.Context, req any, rpcInfo *grpc.Un
 	nodeID := strconv.FormatInt(paramtable.GetNodeID(), 10)
 	observeProxyGRPCStage(nodeID, methodTag, proxyGRPCStageRequestInfo, stageStart)
 
-	metrics.ProxyFunctionCall.WithLabelValues(
-		strconv.FormatInt(paramtable.GetNodeID(), 10),
-		methodTag,
-		metrics.TotalLabel,
-		metrics.CauseNA,
-		dbName,
-		collectionName,
-	).Inc()
+	stageStart = time.Now()
+	if observeProxyFunctionCall {
+		metrics.ProxyFunctionCall.WithLabelValues(
+			nodeID,
+			methodTag,
+			metrics.TotalLabel,
+			metrics.CauseNA,
+			dbName,
+			collectionName,
+		).Inc()
+	}
+	observeProxyGRPCStage(nodeID, methodTag, proxyGRPCStageRequestMetrics, stageStart)
 
 	start := time.Now()
 	stageStart = time.Now()
 	resp, err := handler(ctx, req)
+	observeProxyGRPCStage(nodeID, methodTag, proxyGRPCStageHandler, stageStart)
+
+	stageStart = time.Now()
 	label, cause := requestutil.ParseMetricLabel(resp, err)
+	observeProxyGRPCStage(nodeID, methodTag, proxyGRPCStageResponseLabel, stageStart)
 
 	// set metrics for state code
-	metrics.ProxyFunctionCall.WithLabelValues(
-		strconv.FormatInt(paramtable.GetNodeID(), 10),
-		methodTag,
-		label,
-		cause,
-		dbName,
-		collectionName,
-	).Inc()
+	stageStart = time.Now()
+	if observeProxyFunctionCall {
+		metrics.ProxyFunctionCall.WithLabelValues(
+			nodeID,
+			methodTag,
+			label,
+			cause,
+			dbName,
+			collectionName,
+		).Inc()
+	}
+	observeProxyGRPCStage(nodeID, methodTag, proxyGRPCStageResponseMetrics, stageStart)
 
 	// Mirror the metric's cause into the logs so a failed request can be
 	// filtered by error_type the same way the metric is. System failures are
 	// logged at Warn (actionable for SRE); input failures at Info (expected user
 	// mistakes — keeping them at Warn would spam the logs).
+	stageStart = time.Now()
 	if label == metrics.FailLabel && (cause == metrics.CauseSystem || cause == metrics.CauseUser) {
 		status, _ := requestutil.GetStatusFromResponse(resp)
 		errType := merr.SystemError

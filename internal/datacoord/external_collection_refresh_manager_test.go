@@ -208,23 +208,28 @@ func TestExternalCollectionRefreshManager_ApplyFinishedJobSegmentsMergesTaskResu
 		UpdatedSegments: []*datapb.SegmentInfo{newTestExternalRefreshSegment(20, 100, 7)},
 	}))
 
-	segments := NewSegmentsInfo()
-	segments.SetSegment(1, &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
-		ID:           1,
-		CollectionID: 100,
-		State:        commonpb.SegmentState_Flushed,
-		NumOfRows:    5,
-	}})
-	segments.SetSegment(2, &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
-		ID:           2,
-		CollectionID: 100,
-		State:        commonpb.SegmentState_Flushed,
-		NumOfRows:    6,
-	}})
+	segments := newTestCachedSegmentsInfo(map[int64]*SegmentInfo{
+		1: {SegmentInfo: &datapb.SegmentInfo{
+			ID:           1,
+			CollectionID: 100,
+			State:        commonpb.SegmentState_Flushed,
+			NumOfRows:    5,
+		}},
+		2: {SegmentInfo: &datapb.SegmentInfo{
+			ID:           2,
+			CollectionID: 100,
+			State:        commonpb.SegmentState_Flushed,
+			NumOfRows:    6,
+		}},
+	})
 	mt := &meta{
-		catalog:     catalog,
-		segments:    segments,
-		collections: newTestCollections(100),
+		catalog:        catalog,
+		segments:       segments,
+		collections:    newTestCollections(100),
+		segmentPersist: newTestSegmentPersist(),
+	}
+	for _, segment := range segments.GetSegments() {
+		assert.NoError(t, mt.AddSegment(ctx, segment))
 	}
 	mgr := &externalCollectionRefreshManager{
 		mt:          mt,
@@ -266,17 +271,22 @@ func TestExternalCollectionRefreshManager_ApplyFinishedJobSegmentsNotifiesUpdate
 		UpdatedSegments: []*datapb.SegmentInfo{newTestExternalRefreshSegment(10, 100, 7)},
 	}))
 
-	segments := NewSegmentsInfo()
-	segments.SetSegment(1, &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
-		ID:           1,
-		CollectionID: 100,
-		State:        commonpb.SegmentState_Flushed,
-		NumOfRows:    5,
-	}})
+	segments := newTestCachedSegmentsInfo(map[int64]*SegmentInfo{
+		1: {SegmentInfo: &datapb.SegmentInfo{
+			ID:           1,
+			CollectionID: 100,
+			State:        commonpb.SegmentState_Flushed,
+			NumOfRows:    5,
+		}},
+	})
 	mt := &meta{
-		catalog:     catalog,
-		segments:    segments,
-		collections: newTestCollections(100),
+		catalog:        catalog,
+		segments:       segments,
+		collections:    newTestCollections(100),
+		segmentPersist: newTestSegmentPersist(),
+	}
+	for _, segment := range segments.GetSegments() {
+		assert.NoError(t, mt.AddSegment(ctx, segment))
 	}
 	mgr := &externalCollectionRefreshManager{
 		mt:          mt,
@@ -316,11 +326,11 @@ func TestExternalCollectionRefreshManager_ApplyFinishedJobSegmentsRejectsNonFini
 
 	mt := &meta{
 		catalog:     catalog,
-		segments:    NewSegmentsInfo(),
+		segments:    NewCachedSegmentsInfo(),
 		collections: newTestCollections(100),
 	}
 	updateCalls := 0
-	mockUpdate := mockey.Mock((*meta).UpdateSegmentsInfo).To(func(_ *meta, _ context.Context, _ ...UpdateOperator) error {
+	mockUpdate := mockey.Mock((*meta).UpdateSegmentsInfo).To(func(_ *meta, _ context.Context, _ map[int64][]MutateFunc, _ ...*datapb.SegmentInfo) error {
 		updateCalls++
 		return nil
 	}).Build()
@@ -365,11 +375,11 @@ func TestExternalCollectionRefreshManager_ApplyFinishedJobSegmentsRejectsDuplica
 
 	mt := &meta{
 		catalog:     catalog,
-		segments:    NewSegmentsInfo(),
+		segments:    NewCachedSegmentsInfo(),
 		collections: newTestCollections(100),
 	}
 	updateCalls := 0
-	mockUpdate := mockey.Mock((*meta).UpdateSegmentsInfo).To(func(_ *meta, _ context.Context, _ ...UpdateOperator) error {
+	mockUpdate := mockey.Mock((*meta).UpdateSegmentsInfo).To(func(_ *meta, _ context.Context, _ map[int64][]MutateFunc, _ ...*datapb.SegmentInfo) error {
 		updateCalls++
 		return nil
 	}).Build()
@@ -413,11 +423,11 @@ func TestExternalCollectionRefreshManager_ApplyFinishedJobSegmentsRejectsMissing
 
 	mt := &meta{
 		catalog:     catalog,
-		segments:    NewSegmentsInfo(),
+		segments:    NewCachedSegmentsInfo(),
 		collections: newTestCollections(100),
 	}
 	updateCalls := 0
-	mockUpdate := mockey.Mock((*meta).UpdateSegmentsInfo).To(func(_ *meta, _ context.Context, _ ...UpdateOperator) error {
+	mockUpdate := mockey.Mock((*meta).UpdateSegmentsInfo).To(func(_ *meta, _ context.Context, _ map[int64][]MutateFunc, _ ...*datapb.SegmentInfo) error {
 		updateCalls++
 		return nil
 	}).Build()

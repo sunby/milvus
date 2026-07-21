@@ -249,6 +249,7 @@ func (ddn *ddNode) Operate(in []Msg) []Msg {
 				mlog.Uint64("timetick", createSegment.CreateSegmentMessage.TimeTick()),
 			)
 			logger.Info(msgCtx, "receive create segment message")
+			t0 := time.Now()
 			if err := ddn.msgHandler.HandleCreateSegment(msgCtx, createSegment.CreateSegmentMessage); err != nil {
 				logger.Warn(msgCtx, "handle create segment message failed", mlog.Err(err))
 			} else {

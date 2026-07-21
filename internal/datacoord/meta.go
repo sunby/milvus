@@ -1218,6 +1218,9 @@ func (m *meta) SetState(ctx context.Context, segmentID UniqueID, targetState com
 	txn := m.segmentPersist.Txn(ctx)
 	txn.Update(key, func(existing *datapb.SegmentInfo) (*datapb.SegmentInfo, bool) {
 		existing.State = targetState
+		if targetState == commonpb.SegmentState_Sealed && curSegInfo.GetLastExpireTime() > existing.GetLastExpireTime() {
+			existing.LastExpireTime = curSegInfo.GetLastExpireTime()
+		}
 		if targetState == commonpb.SegmentState_Dropped {
 			existing.DroppedAt = uint64(time.Now().UnixNano())
 		}
@@ -1306,147 +1309,9 @@ func UpdateStatusOperator(segmentID int64, status commonpb.SegmentState) map[int
 	})
 }
 
-// Set storage version
-func SetStorageVersion(segmentID int64, version int64) UpdateOperator {
-	return func(modPack *updateSegmentPack) bool {
-		segment := modPack.Get(segmentID)
-		if segment == nil {
-			mlog.Warn(context.TODO(), "meta update: update storage version failed - segment not found",
-				mlog.Int64("segmentID", segmentID))
-			return false
-		}
-
-		if segment.GetStorageVersion() == version {
-			mlog.Info(context.TODO(), "meta update: segment stats already is target version",
-				mlog.Int64("segmentID", segmentID), mlog.Int64("version", version))
-			return false
-		}
-
-		segment.StorageVersion = version
-		return true
-	}
-}
-
-func ValidateSaveBinlogStorageVersion(segmentID int64, incoming int64) UpdateOperator {
-	return func(modPack *updateSegmentPack) bool {
-		segment := modPack.Get(segmentID)
-		if segment == nil {
-			modPack.err = merr.WrapErrSegmentNotFound(segmentID)
-			return false
-		}
-
-		current := segment.GetStorageVersion()
-		if incoming != current {
-			modPack.err = merr.WrapErrDataIntegrityMsg(
-				"segment %d storage version mismatch, current=%d incoming=%d",
-				segmentID, current, incoming)
-			return false
-		}
-		return true
-	}
-}
-
-func UpdateCompactedOperator(segmentID int64) UpdateOperator {
-	return func(modPack *updateSegmentPack) bool {
-		segment := modPack.Get(segmentID)
-		if segment == nil {
-			mlog.Warn(context.TODO(), "meta update: update binlog failed - segment not found",
-				mlog.Int64("segmentID", segmentID))
-			return false
-		}
-		segment.Compacted = true
-		return true
-	}
-}
-
-func SetSegmentIsInvisible(segmentID int64, isInvisible bool) UpdateOperator {
-	return func(modPack *updateSegmentPack) bool {
-		segment := modPack.Get(segmentID)
-		if segment == nil {
-			mlog.Warn(context.TODO(), "meta update: update segment visible fail - segment not found",
-				mlog.Int64("segmentID", segmentID))
-			return false
-		}
-		segment.IsInvisible = isInvisible
-		return true
-	}
-}
-
-func UpdateSegmentLevelOperator(segmentID int64, level datapb.SegmentLevel) UpdateOperator {
-	return func(modPack *updateSegmentPack) bool {
-		segment := modPack.Get(segmentID)
-		if segment == nil {
-			mlog.Warn(context.TODO(), "meta update: update level fail - segment not found",
-				mlog.Int64("segmentID", segmentID))
-			return false
-		}
-		if segment.LastLevel == segment.Level && segment.Level == level {
-			mlog.Debug(context.TODO(), "segment already is this level", mlog.Int64("segID", segmentID), mlog.String("level", level.String()))
-			return true
-		}
-		segment.LastLevel = segment.Level
-		segment.Level = level
-		return true
-	}
-}
-
-func UpdateSegmentPartitionStatsVersionOperator(segmentID int64, version int64) UpdateOperator {
-	return func(modPack *updateSegmentPack) bool {
-		segment := modPack.Get(segmentID)
-		if segment == nil {
-			mlog.Warn(context.TODO(), "meta update: update partition stats version fail - segment not found",
-				mlog.Int64("segmentID", segmentID))
-			return false
-		}
-		segment.LastPartitionStatsVersion = segment.PartitionStatsVersion
-		segment.PartitionStatsVersion = version
-		mlog.Debug(context.TODO(), "update segment version", mlog.Int64("segmentID", segmentID), mlog.Int64("PartitionStatsVersion", version), mlog.Int64("LastPartitionStatsVersion", segment.LastPartitionStatsVersion))
-		return true
-	}
-}
-
-func RevertSegmentLevelOperator(segmentID int64) UpdateOperator {
-	return func(modPack *updateSegmentPack) bool {
-		segment := modPack.Get(segmentID)
-		if segment == nil {
-			mlog.Warn(context.TODO(), "meta update: revert level fail - segment not found",
-				mlog.Int64("segmentID", segmentID))
-			return false
-		}
-		// just for compatibility,
-		if segment.GetLevel() != segment.GetLastLevel() && segment.GetLastLevel() != datapb.SegmentLevel_Legacy {
-			segment.Level = segment.LastLevel
-			mlog.Debug(context.TODO(), "revert segment level", mlog.Int64("segmentID", segmentID), mlog.String("LastLevel", segment.LastLevel.String()))
-			return true
-		}
-		return false
-	}
-}
-
-func RevertSegmentPartitionStatsVersionOperator(segmentID int64) UpdateOperator {
-	return func(modPack *updateSegmentPack) bool {
-		segment := modPack.Get(segmentID)
-		if segment == nil {
-			mlog.Warn(context.TODO(), "meta update: revert level fail - segment not found",
-				mlog.Int64("segmentID", segmentID))
-			return false
-		}
-		segment.PartitionStatsVersion = segment.LastPartitionStatsVersion
-		mlog.Debug(context.TODO(), "revert segment partition stats version", mlog.Int64("segmentID", segmentID), mlog.Int64("LastPartitionStatsVersion", segment.LastPartitionStatsVersion))
-		return true
-	}
-}
-
 // Add binlogs in segmentInfo
-func AddBinlogsOperator(segmentID int64, binlogs, statslogs, deltalogs, bm25logs []*datapb.FieldBinlog) UpdateOperator {
-	return func(modPack *updateSegmentPack) bool {
-		segment := modPack.Get(segmentID)
-		if segment == nil {
-			mlog.Warn(context.TODO(), "meta update: add binlog failed - segment not found",
-				mlog.Int64("segmentID", segmentID))
-			return false
-		}
-
+func AddBinlogsOperator(segmentID int64, binlogs, statslogs, deltalogs, bm25logs []*datapb.FieldBinlog) map[int64][]MutateFunc {
+	return singleSegmentMutation(segmentID, func(segment *datapb.SegmentInfo) bool {
 		segment.Binlogs = mergeFieldBinlogs(segment.GetBinlogs(), binlogs)
 		segment.Statslogs = mergeFieldBinlogs(segment.GetStatslogs(), statslogs)
 		segment.Deltalogs = mergeFieldBinlogs(segment.GetDeltalogs(), deltalogs)
@@ -2682,35 +2547,45 @@ func (m *meta) UpdateChannelCheckpoint(ctx context.Context, vChannel string, pos
 	minGrowingCP := m.GetMinGrowingSegmentCheckpoint(vChannel)
 	observeUpdateChannelCheckpointStage(updateChannelCheckpointStageGetMinGrowingCheckpoint, stageStart)
 	if minGrowingCP != nil && pos.GetTimestamp() > minGrowingCP.GetTimestamp() {
-		mlog.Info(context.TODO(), "clamping channel checkpoint to min growing segment checkpoint",
-			zap.String("vChannel", vChannel),
-			zap.Uint64("requestedTs", pos.GetTimestamp()),
-			zap.Uint64("clampedTs", minGrowingCP.GetTimestamp()))
+		mlog.Info(ctx, "clamping channel checkpoint to min growing segment checkpoint",
+			mlog.String("vChannel", vChannel),
+			mlog.Uint64("requestedTs", pos.GetTimestamp()),
+			mlog.Uint64("clampedTs", minGrowingCP.GetTimestamp()))
 		pos = minGrowingCP
 	}
 
-	m.channelCPs.channelLocks.Lock(vChannel)
-	defer m.channelCPs.channelLocks.Unlock(vChannel)
+	stageStart = time.Now()
+	m.channelCPs.lockChannel(vChannel)
+	observeUpdateChannelCheckpointStage(updateChannelCheckpointStageLockWait, stageStart)
+	defer m.channelCPs.unlockChannel(vChannel)
 
+	stageStart = time.Now()
 	m.channelCPs.RLock()
 	oldPosition, ok := m.channelCPs.checkpoints[vChannel]
 	m.channelCPs.RUnlock()
-	if !ok || oldPosition.Timestamp < pos.Timestamp || (oldPosition.Timestamp == pos.Timestamp && !bytes.Equal(oldPosition.MsgID, pos.MsgID)) {
+	needUpdate := !ok || oldPosition.Timestamp < pos.Timestamp || (oldPosition.Timestamp == pos.Timestamp && !bytes.Equal(oldPosition.MsgID, pos.MsgID))
+	observeUpdateChannelCheckpointStage(updateChannelCheckpointStageCheckUpdateNeeded, stageStart)
+	if needUpdate {
+		stageStart = time.Now()
 		err := m.catalog.SaveChannelCheckpoint(ctx, vChannel, pos)
 		observeUpdateChannelCheckpointStage(updateChannelCheckpointStageSaveChannelCheckpoint, stageStart)
 		if err != nil {
 			return err
 		}
+		stageStart = time.Now()
 		m.channelCPs.Lock()
 		m.channelCPs.checkpoints[vChannel] = pos
+		m.channelCPs.cond.UnsafeBroadcast()
 		m.channelCPs.Unlock()
+		observeUpdateChannelCheckpointStage(updateChannelCheckpointStageUpdateMemory, stageStart)
+		stageStart = time.Now()
 		ts, _ := tsoutil.ParseTS(pos.Timestamp)
-		mlog.Info(context.TODO(), "UpdateChannelCheckpoint done",
-			zap.String("vChannel", vChannel),
-			zap.Uint64("ts", pos.GetTimestamp()),
-			zap.ByteString("msgID", pos.GetMsgID()),
-			zap.Stringer("walName", pos.WALName),
-			zap.Time("time", ts))
+		mlog.Info(ctx, "UpdateChannelCheckpoint done",
+			mlog.String("vChannel", vChannel),
+			mlog.Uint64("ts", pos.GetTimestamp()),
+			mlog.ByteString("msgID", pos.GetMsgID()),
+			mlog.Stringer("walName", pos.WALName),
+			mlog.Time("time", ts))
 		metrics.DataCoordCheckpointUnixSeconds.WithLabelValues(paramtable.GetStringNodeID(), vChannel).
 			Set(float64(ts.Unix()))
 		observeUpdateChannelCheckpointStage(updateChannelCheckpointStageUpdateCheckpointMetric, stageStart)
@@ -2721,8 +2596,8 @@ func (m *meta) UpdateChannelCheckpoint(ctx context.Context, vChannel string, pos
 // MarkChannelCheckpointDropped set channel checkpoint to MaxUint64 preventing future update
 // and remove the metrics for channel checkpoint lag.
 func (m *meta) MarkChannelCheckpointDropped(ctx context.Context, channel string) error {
-	m.channelCPs.channelLocks.Lock(channel)
-	defer m.channelCPs.channelLocks.Unlock(channel)
+	m.channelCPs.lockChannel(channel)
+	defer m.channelCPs.unlockChannel(channel)
 
 	cp := &msgpb.MsgPosition{
 		ChannelName: channel,
@@ -2736,6 +2611,7 @@ func (m *meta) MarkChannelCheckpointDropped(ctx context.Context, channel string)
 
 	m.channelCPs.Lock()
 	m.channelCPs.checkpoints[channel] = cp
+	m.channelCPs.cond.UnsafeBroadcast()
 	m.channelCPs.Unlock()
 
 	metrics.DataCoordCheckpointUnixSeconds.DeleteLabelValues(paramtable.GetStringNodeID(), channel)
@@ -2766,23 +2642,11 @@ func (m *meta) UpdateChannelCheckpoints(ctx context.Context, positions []*msgpb.
 		}
 		return true
 	})
-	channelSet := make(map[string]struct{}, len(validPositions))
-	for _, pos := range validPositions {
-		channelSet[pos.GetChannelName()] = struct{}{}
-	}
-	channels := make([]string, 0, len(channelSet))
-	for channel := range channelSet {
-		channels = append(channels, channel)
-	}
-	sort.Strings(channels)
-	for _, channel := range channels {
-		m.channelCPs.channelLocks.Lock(channel)
-	}
-	defer func() {
-		for i := len(channels) - 1; i >= 0; i-- {
-			m.channelCPs.channelLocks.Unlock(channels[i])
-		}
-	}()
+	channels := lo.Map(validPositions, func(pos *msgpb.MsgPosition, _ int) string {
+		return pos.GetChannelName()
+	})
+	lockedChannels := m.channelCPs.lockChannels(channels)
+	defer m.channelCPs.unlockChannels(lockedChannels)
 
 	m.channelCPs.RLock()
 	toUpdates := lo.Filter(validPositions, func(pos *msgpb.MsgPosition, _ int) bool {
@@ -2791,6 +2655,9 @@ func (m *meta) UpdateChannelCheckpoints(ctx context.Context, positions []*msgpb.
 		return !ok || oldPosition.Timestamp < pos.Timestamp || (oldPosition.Timestamp == pos.Timestamp && !bytes.Equal(oldPosition.MsgID, pos.MsgID))
 	})
 	m.channelCPs.RUnlock()
+	if len(toUpdates) == 0 {
+		return nil
+	}
 	err := m.catalog.SaveChannelCheckpoints(ctx, toUpdates)
 	if err != nil {
 		return err
@@ -2826,8 +2693,8 @@ func (m *meta) GetChannelCheckpoint(vChannel string) *msgpb.MsgPosition {
 }
 
 func (m *meta) DropChannelCheckpoint(vChannel string) error {
-	m.channelCPs.channelLocks.Lock(vChannel)
-	defer m.channelCPs.channelLocks.Unlock(vChannel)
+	m.channelCPs.lockChannel(vChannel)
+	defer m.channelCPs.unlockChannel(vChannel)
 	err := m.catalog.DropChannelCheckpoint(m.ctx, vChannel)
 	if err != nil {
 		return err

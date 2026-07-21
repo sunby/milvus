@@ -137,7 +137,9 @@ func (p *ResumableProducer) produceInternal(ctx context.Context, msg message.Mut
 			return nil, err
 		}
 		appendCtx, span := p.startDistAppendSpanIfRemote(ctx, producerHandler, msg)
+		stageStart = time.Now()
 		produceResult, err := producerHandler.Append(appendCtx, msg)
+		observeProduceInternalStage(messageType, produceInternalStageAppend, stageStart)
 		if span != nil {
 			if err != nil {
 				span.RecordError(err)

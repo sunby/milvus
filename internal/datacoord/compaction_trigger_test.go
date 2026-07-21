@@ -96,9 +96,24 @@ func newMockVersionManager() IndexEngineVersionManager {
 	return &versionManagerImpl{}
 }
 
+func enableCompactionForTest(t *testing.T) {
+	t.Helper()
+	params := paramtable.Get()
+	enableCompaction := params.DataCoordCfg.EnableCompaction.GetValue()
+	enableAutoCompaction := params.DataCoordCfg.EnableAutoCompaction.GetValue()
+	params.Save(params.DataCoordCfg.EnableCompaction.Key, "true")
+	params.Save(params.DataCoordCfg.EnableAutoCompaction.Key, "true")
+	t.Cleanup(func() {
+		params.Save(params.DataCoordCfg.EnableCompaction.Key, enableCompaction)
+		params.Save(params.DataCoordCfg.EnableAutoCompaction.Key, enableAutoCompaction)
+	})
+}
+
 var _ CompactionInspector = (*spyCompactionInspector)(nil)
 
 func Test_compactionTrigger_force_without_index(t *testing.T) {
+	enableCompactionForTest(t)
+
 	catalog := mocks.NewDataCoordCatalog(t)
 	catalog.EXPECT().AlterSegments(mock.Anything, mock.Anything).Return(nil).Maybe()
 
@@ -200,6 +215,8 @@ func Test_compactionTrigger_force_without_index(t *testing.T) {
 
 func Test_compactionTrigger_force(t *testing.T) {
 	paramtable.Init()
+	enableCompactionForTest(t)
+
 	type fields struct {
 		meta          *meta
 		allocator     allocator.Allocator
@@ -749,6 +766,8 @@ func Test_compactionTrigger_force(t *testing.T) {
 
 // test force compaction with too many Segment
 func Test_compactionTrigger_force_maxSegmentLimit(t *testing.T) {
+	enableCompactionForTest(t)
+
 	type fields struct {
 		meta          *meta
 		allocator     allocator.Allocator
@@ -1162,6 +1181,8 @@ func mockSegmentsInfo(sizeInMB ...int64) *CachedSegmentsInfo {
 
 // Test compaction with prioritized candi
 func Test_compactionTrigger_PrioritizedCandi(t *testing.T) {
+	enableCompactionForTest(t)
+
 	type fields struct {
 		meta          *meta
 		allocator     allocator.Allocator
@@ -1302,6 +1323,8 @@ func Test_compactionTrigger_PrioritizedCandi(t *testing.T) {
 
 // Test compaction with small candi
 func Test_compactionTrigger_SmallCandi(t *testing.T) {
+	enableCompactionForTest(t)
+
 	type fields struct {
 		meta          *meta
 		allocator     allocator.Allocator
@@ -1447,6 +1470,8 @@ func Test_compactionTrigger_SmallCandi(t *testing.T) {
 
 // Test segment compaction target size
 func Test_compactionTrigger_noplan_random_size(t *testing.T) {
+	enableCompactionForTest(t)
+
 	type fields struct {
 		meta          *meta
 		allocator     allocator.Allocator
@@ -2059,7 +2084,7 @@ func TestCompactionTriggerKeepsMixedSchemaVersionSegments(t *testing.T) {
 	schema := newTestSchema()
 	schema.Version = 5
 	mt := &meta{
-		segments:    NewSegmentsInfo(),
+		segments:    NewCachedSegmentsInfo(),
 		indexMeta:   newSegmentIndexMeta(nil),
 		collections: typeutil.NewConcurrentMap[UniqueID, *collectionInfo](),
 	}
@@ -2085,7 +2110,7 @@ func TestCompactionTriggerKeepsMixedSchemaVersionSegments(t *testing.T) {
 			MaxRowNum:     100,
 			SchemaVersion: item.schemaVersion,
 			Binlogs:       []*datapb.FieldBinlog{{FieldID: 1, Binlogs: []*datapb.Binlog{{EntriesNum: 10, MemorySize: 1}}}},
-		}})
+		}}, 0)
 	}
 
 	inspector := &spyCompactionInspector{t: t, spyChan: make(chan *datapb.CompactionPlan, 1), meta: mt}
@@ -2513,7 +2538,7 @@ func (s *CompactionTriggerSuite) TestHandleSignal() {
 		defer pt.Reset(pt.DataCoordCfg.SegmentMaxSize.Key)
 
 		const mb = 1024 * 1024
-		s.meta.segments.segments[1].Binlogs[0].Binlogs[0].MemorySize = 250 * mb
+		s.meta.segments.GetSegment(1).Binlogs[0].Binlogs[0].MemorySize = 250 * mb
 
 		tr := s.tr
 		handler := NewNMockHandler(s.T())

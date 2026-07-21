@@ -1515,7 +1515,8 @@ func (suite *ServiceSuite) TestLoadBalanceWithNoDstNodeUseSQN() {
 	suite.updateSegmentDist(collection, srcNode)
 
 	suite.taskScheduler.ExpectedCalls = nil
-	suite.taskScheduler.EXPECT().GetSegmentTaskDelta(mock.Anything, mock.Anything).Return(0).Maybe()
+	suite.taskScheduler.EXPECT().GetSegmentTaskDeltaSnapshot(mock.Anything, mock.Anything).
+		Return(task.NewSegmentTaskDeltaSnapshot(nil, nil)).Maybe()
 	suite.taskScheduler.EXPECT().GetChannelTaskDelta(mock.Anything, mock.Anything).Return(0).Maybe()
 	suite.taskScheduler.EXPECT().Add(mock.Anything).Run(func(balanceTask task.Task) {
 		actions := balanceTask.Actions()

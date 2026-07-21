@@ -131,6 +131,7 @@ func (c *Core) broadcastCreateCollectionV1(ctx context.Context, req *milvuspb.Cr
 		MustBuildBroadcast()
 	stageStart = time.Now()
 	if _, err := broadcaster.Broadcast(ctx, msg); err != nil {
+		observeCreateCollectionStage(createCollectionStageBroadcastCall, stageStart)
 		// Once the broadcast task is created, it will retry until success and owns
 		// the reserved refs. If the task was not created, release the reservation.
 		if streamingbroadcaster.IsBroadcastTaskNotCreated(err) {

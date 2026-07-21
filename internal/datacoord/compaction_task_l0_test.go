@@ -57,7 +57,7 @@ func (s *L0CompactionTaskSuite) SetupSubTest() {
 }
 
 func (s *L0CompactionTaskSuite) TestSaveSegmentMetaUsesAtomicDeltalogOperator() {
-	actualDeltaPath := "/tmp/milvus/insert_log/1/10/200/_delta/not-log-id-suffix"
+	actualDeltaPath := "/tmp/milvus/insert_log/1/10/200/_delta/9001"
 
 	task := s.generateTestL0Task(datapb.CompactionTaskState_executing)
 	output := []*datapb.CompactionSegment{{
@@ -67,11 +67,23 @@ func (s *L0CompactionTaskSuite) TestSaveSegmentMetaUsesAtomicDeltalogOperator() 
 		}},
 	}}
 
-	s.mockMeta.EXPECT().UpdateSegmentsInfo(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(ctx context.Context, operators ...UpdateOperator) error {
-			s.Len(operators, 5)
-			s.Equal(actualDeltaPath, output[0].GetDeltalogs()[0].GetBinlogs()[0].GetLogPath())
+	s.mockMeta.EXPECT().GetHealthySegment(mock.Anything, int64(200)).Return(nil).Once()
+	s.mockMeta.EXPECT().UpdateSegmentsInfo(mock.Anything, mock.Anything).RunAndReturn(
+		func(ctx context.Context, mutations map[int64][]MutateFunc, newSegments ...*datapb.SegmentInfo) error {
+			s.Len(mutations, 3)
+			s.Len(mutations[100], 1)
+			s.Len(mutations[101], 1)
+			s.Len(mutations[200], 1)
+			s.Empty(newSegments)
+			s.Empty(output[0].GetDeltalogs()[0].GetBinlogs()[0].GetLogPath())
 			s.EqualValues(9001, output[0].GetDeltalogs()[0].GetBinlogs()[0].GetLogID())
+
+			target := &datapb.SegmentInfo{ID: 200}
+			for _, mutate := range mutations[200] {
+				s.True(mutate(target))
+			}
+			s.Empty(target.GetDeltalogs()[0].GetBinlogs()[0].GetLogPath())
+			s.EqualValues(9001, target.GetDeltalogs()[0].GetBinlogs()[0].GetLogID())
 			return nil
 		},
 	).Once()

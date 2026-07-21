@@ -463,9 +463,22 @@ func (loader *segmentLoader) Load(ctx context.Context,
 		localMapDuration = time.Since(localMapStart)
 		notifyStart := time.Now()
 		loader.notifyLoadFinish(loadInfo)
+		notifyDuration = time.Since(notifyStart)
 		if localSegment, ok := segment.(*LocalSegment); ok {
 			localSegment.compactLoadInfoForRuntime()
 		}
+
+		logger.Info(ctx, "loadSegmentFunc breakdown",
+			mlog.Duration("loadSegmentDataDuration", loadSegmentDataDuration),
+			mlog.Duration("loadDeltalogsDuration", loadDeltalogsDuration),
+			mlog.Duration("pkCandidateDuration", pkCandidateDuration),
+			mlog.Duration("managerPutDuration", managerPutDuration),
+			mlog.Duration("localMapDuration", localMapDuration),
+			mlog.Duration("notifyDuration", notifyDuration),
+			mlog.Duration("totalDuration", time.Since(loadSegmentStart)),
+			mlog.Bool("externalCollection", isExternalCollection),
+			mlog.Bool("bloomFilterEnabled", bloomFilterEnabled),
+			mlog.Bool("pkCandidateExisted", pkCandidateExisted))
 
 		metrics.QueryNodeLoadSegmentLatency.WithLabelValues(paramtable.GetStringNodeID()).Observe(float64(tr.ElapseSpan().Milliseconds()))
 		return nil
@@ -1651,6 +1664,7 @@ func (loader *segmentLoader) loadDeltalogs(ctx context.Context, segment Segment,
 		}
 	}
 
+	loadDeltaDataStart := time.Now()
 	err = segment.LoadDeltaData(ctx, deltaData)
 	if err != nil {
 		return err

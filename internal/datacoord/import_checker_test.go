@@ -33,6 +33,7 @@ import (
 	"github.com/milvus-io/milvus/internal/datacoord/allocator"
 	broker2 "github.com/milvus-io/milvus/internal/datacoord/broker"
 	"github.com/milvus-io/milvus/internal/metastore/mocks"
+	"github.com/milvus-io/milvus/internal/metastore/model"
 	"github.com/milvus-io/milvus/internal/streamingcoord/server/broadcaster"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
@@ -170,6 +171,11 @@ func (s *ImportCheckerSuite) TestLogStats() {
 }
 
 func (s *ImportCheckerSuite) TestCheckJob() {
+	paramtable.Get().Save(paramtable.Get().DataCoordCfg.EnableCompaction.Key, "true")
+	paramtable.Get().Save(paramtable.Get().DataCoordCfg.EnableSortCompaction.Key, "true")
+	defer paramtable.Get().Reset(paramtable.Get().DataCoordCfg.EnableCompaction.Key)
+	defer paramtable.Get().Reset(paramtable.Get().DataCoordCfg.EnableSortCompaction.Key)
+
 	job := s.importMeta.GetJob(context.TODO(), s.jobID)
 
 	// test checkPendingJob
@@ -222,10 +228,6 @@ func (s *ImportCheckerSuite) TestCheckJob() {
 			s.Equal(true, segment.GetIsImporting())
 		}
 	}
-	catalog.EXPECT().AddSegment(mock.Anything, mock.Anything).Return(nil)
-	// AlterSegments is no longer called from checkIndexBuildingJob (unsetSegmentImporting removed);
-	// the upstream checkImportingJob path may still invoke it. Loosen to .Maybe().
-	catalog.EXPECT().AlterSegments(mock.Anything, mock.Anything).Return(nil).Maybe()
 	catalog.EXPECT().SaveChannelCheckpoint(mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	targetSegmentIDs := make([]int64, 0)
 	for _, t := range importTasks {
@@ -853,6 +855,10 @@ func TestImportChecker(t *testing.T) {
 
 func TestImportCheckerCompaction(t *testing.T) {
 	paramtable.Init()
+	Params.Save(Params.DataCoordCfg.EnableCompaction.Key, "true")
+	defer Params.Reset(Params.DataCoordCfg.EnableCompaction.Key)
+	Params.Save(Params.DataCoordCfg.EnableSortCompaction.Key, "true")
+	defer Params.Reset(Params.DataCoordCfg.EnableSortCompaction.Key)
 	Params.Save(Params.DataCoordCfg.ImportCheckIntervalHigh.Key, "1")
 	defer Params.Reset(Params.DataCoordCfg.ImportCheckIntervalHigh.Key)
 	Params.Save(Params.DataCoordCfg.ImportCheckIntervalLow.Key, "10000")
@@ -1019,10 +1025,6 @@ func TestImportCheckerCompaction(t *testing.T) {
 	mlog.Info(context.TODO(), "job importing")
 
 	// check importing
-	catalog.EXPECT().AddSegment(mock.Anything, mock.Anything).Return(nil)
-	// AlterSegments was previously driven by unsetSegmentImporting (removed in 2PC);
-	// the remaining segment writes in this flow may or may not hit it.
-	catalog.EXPECT().AlterSegments(mock.Anything, mock.Anything).Return(nil).Maybe()
 	catalog.EXPECT().SaveChannelCheckpoint(mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
 	catalog.EXPECT().SaveImportJob(mock.Anything, mock.Anything).Return(nil).Once()
 	catalog.EXPECT().SaveImportTask(mock.Anything, mock.Anything).Return(nil).Once()

@@ -49,6 +49,8 @@ type pendingBroadcastTask struct {
 // Same semantics as the `Poll` operation in eventloop.
 func (b *pendingBroadcastTask) Execute(ctx context.Context) error {
 	ctx = message.ExtractTraceContext(ctx, b.msg)
+	b.ObserveBroadcastWorkerStart()
+	stageStart := time.Now()
 
 	if err := b.InitializeRecovery(ctx); err != nil {
 		b.ObserveBroadcastStageDuration(broadcastStageInitializeRecovery, stageStart)
