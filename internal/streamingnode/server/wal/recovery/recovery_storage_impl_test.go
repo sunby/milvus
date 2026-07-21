@@ -356,7 +356,7 @@ func TestValidateRecoveredViewMetaNormalizesBackwardCompatibleDefaults(t *testin
 		CollectionInfo: &streamingpb.CollectionInfoOfVChannel{
 			CollectionId: 1,
 			Partitions: []*streamingpb.PartitionInfoOfVChannel{
-				{PartitionId: 10, State: streamingpb.PartitionState_PARTITION_STATE_NORMAL},
+				{PartitionId: 10},
 			},
 			Schemas: []*streamingpb.CollectionSchemaOfVChannel{
 				{
@@ -386,7 +386,33 @@ func TestValidateRecoveredViewMetaNormalizesBackwardCompatibleDefaults(t *testin
 	)
 
 	require.NoError(t, err)
+	assert.Equal(t, streamingpb.PartitionState_PARTITION_STATE_NORMAL, vchannel.GetCollectionInfo().GetPartitions()[0].GetState())
 	require.NotNil(t, segment.GetPersistedStorage())
+}
+
+func TestValidateRecoveredViewMetaRejectsUnknownPartitionWithTombstone(t *testing.T) {
+	vchannel := &streamingpb.VChannelMeta{
+		Vchannel: "v1",
+		State:    streamingpb.VChannelState_VCHANNEL_STATE_NORMAL,
+		CollectionInfo: &streamingpb.CollectionInfoOfVChannel{
+			CollectionId: 1,
+			Partitions: []*streamingpb.PartitionInfoOfVChannel{
+				{PartitionId: 10, TombstoneTimeTick: 1},
+			},
+			Schemas: []*streamingpb.CollectionSchemaOfVChannel{
+				{
+					Schema:             &schemapb.CollectionSchema{},
+					State:              streamingpb.VChannelSchemaState_VCHANNEL_SCHEMA_STATE_NORMAL,
+					CheckpointTimeTick: 1,
+				},
+			},
+		},
+		CheckpointTimeTick: 1,
+	}
+
+	err := validateRecoveredViewMeta(map[string]*streamingpb.VChannelMeta{"v1": vchannel}, nil)
+
+	require.ErrorContains(t, err, "unknown partition state")
 }
 
 func TestEnsureDataCheckpointInitializesLegacyCheckpoint(t *testing.T) {
