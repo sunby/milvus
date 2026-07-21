@@ -252,6 +252,16 @@ func normalizeRecoveredViewMeta(
 	vchannels map[string]*streamingpb.VChannelMeta,
 	segments map[int64]*streamingpb.SegmentAssignmentMeta,
 ) {
+	for _, vchannel := range vchannels {
+		for _, partition := range vchannel.GetCollectionInfo().GetPartitions() {
+			// Legacy recovery meta only persisted partition IDs and removed dropped
+			// partitions from the list, so an absent state means the partition is normal.
+			if partition.GetState() == streamingpb.PartitionState_PARTITION_STATE_UNKNOWN &&
+				partition.GetTombstoneTimeTick() == 0 {
+				partition.State = streamingpb.PartitionState_PARTITION_STATE_NORMAL
+			}
+		}
+	}
 	for _, segment := range segments {
 		if segment.GetPersistedStorage() == nil {
 			segment.PersistedStorage = &streamingpb.L1SegmentPersistedStorage{}
