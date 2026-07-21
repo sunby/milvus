@@ -150,6 +150,7 @@ func (t *QueryTask) execute(selected []segments.Segment) error {
 	}
 	tr := timerecord.NewTimeRecorderWithTrace(t.ctx, "QueryTask")
 
+	stageStart := time.Now()
 	retrievePlan, err := t.collection.NewRetrievePlan(t.req)
 	if err != nil {
 		logger.Warn(t.ctx, "[sss] query task build retrieve plan failed",
