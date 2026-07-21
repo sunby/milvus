@@ -94,6 +94,25 @@ func TestQueryNodeProviderSnapshotKeepsLastSnapshotOnDependencyError(t *testing.
 	assert.Equal(t, "rg-a", infos[1].ResourceGroup)
 }
 
+func TestQueryNodeResourceGroup(t *testing.T) {
+	rgByNode := map[int64]string{1: "rg-meta"}
+	sqNodes := map[int64]string{2: "rg-sqn", 3: "rg-legacy-sqn"}
+
+	assert.Equal(t, "rg-meta", queryNodeResourceGroup(1, &qnmanager.NodeInfo{}, rgByNode, sqNodes))
+	assert.Equal(t, "rg-session", queryNodeResourceGroup(1, &qnmanager.NodeInfo{
+		ServerLabels: map[string]string{sessionutil.LabelResourceGroup: "rg-session"},
+	}, rgByNode, sqNodes))
+	assert.Equal(t, "rg-sqn", queryNodeResourceGroup(2, &qnmanager.NodeInfo{
+		ServerLabels: map[string]string{sessionutil.LabelStreamingNodeEmbeddedQueryNode: "1"},
+	}, rgByNode, sqNodes))
+	assert.Equal(t, "rg-legacy-sqn", queryNodeResourceGroup(3, &qnmanager.NodeInfo{
+		ServerLabels: map[string]string{sessionutil.LegacyLabelStreamingNodeEmbeddedQueryNode: "1"},
+	}, rgByNode, sqNodes))
+	assert.Empty(t, queryNodeResourceGroup(4, &qnmanager.NodeInfo{
+		ServerLabels: map[string]string{sessionutil.LabelStreamingNodeEmbeddedQueryNode: "1"},
+	}, rgByNode, sqNodes))
+}
+
 type fakeQueryNodeClient struct {
 	nodes     map[int64]*qnmanager.NodeInfo
 	err       error

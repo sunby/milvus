@@ -44,6 +44,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/initcore"
 	internalmetrics "github.com/milvus-io/milvus/internal/util/metrics"
 	"github.com/milvus-io/milvus/internal/util/pathutil"
+	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/streamingutil/util"
 	"github.com/milvus-io/milvus/pkg/v3/config"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
@@ -172,6 +173,14 @@ func NewMilvusRoles() *MilvusRoles {
 		closed: make(chan struct{}),
 	}
 	return mr
+}
+
+func (mr *MilvusRoles) enableEmbeddedQueryNodeIfNeeded(enableSQN bool) {
+	if !enableSQN || !mr.EnableStreamingNode || mr.EnableQueryNode {
+		return
+	}
+	mr.EnableQueryNode = true
+	sessionutil.EnableEmbededQueryNodeLabel()
 }
 
 func (mr *MilvusRoles) printLDPreLoad() {
@@ -429,6 +438,7 @@ func (mr *MilvusRoles) Run() {
 		paramtable.Init()
 		paramtable.SetRole(mr.ServerType)
 	}
+	mr.enableEmbeddedQueryNodeIfNeeded(paramtable.Get().QueryCoordCfg.EnableSQNServeSegments.GetAsBool())
 
 	// Persist immutable configurations at startup, such as mqType paramItem
 	if (mr.EnableRootCoord && mr.EnableDataCoord && mr.EnableQueryCoord) || mr.EnableMixCoord {
