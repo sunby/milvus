@@ -5,10 +5,12 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/milvus-io/milvus/internal/coordinator/snmanager"
 	qnmanager "github.com/milvus-io/milvus/internal/querynodev2/client/manager"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/views/coord/balancer"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
 
 var _ balancer.NodeProvider = (*QueryNodeProvider)(nil)
@@ -61,16 +63,18 @@ func (p *QueryNodeProvider) Snapshot() *balancer.NodeSnapshot {
 		mlog.Warn(p.ctx, "get resource group node bindings failed, use last node snapshot", mlog.Err(err))
 		return p.lastSnapshot()
 	}
+	enableSQN := paramtable.Get().QueryCoordCfg.EnableSQNServeSegments.GetAsBool()
+	var sqNodes map[int64]string
 
 	infos := make(map[int64]*balancer.NodeInfo)
 	for nodeID, node := range nodes {
 		if node == nil {
 			continue
 		}
-		rg := node.ServerLabels[sessionutil.LabelResourceGroup]
-		if rg == "" {
-			rg = rgByNode[nodeID]
+		if enableSQN && sqNodes == nil && isEmbeddedQueryNode(node) {
+			sqNodes = streamingQueryNodes()
 		}
+		rg := queryNodeResourceGroup(nodeID, node, rgByNode, sqNodes)
 		if rg == "" {
 			continue
 		}
@@ -110,6 +114,40 @@ func (p *QueryNodeProvider) resourceGroupByNode() (map[int64]string, error) {
 		}
 	}
 	return rgByNode, nil
+}
+
+func streamingQueryNodes() map[int64]string {
+	nodes := make(map[int64]string)
+	for rg, nodeIDs := range snmanager.StaticStreamingNodeManager.GetStreamingQueryNodeIDsByResourceGroup() {
+		for _, nodeID := range nodeIDs.Collect() {
+			nodes[nodeID] = rg
+		}
+	}
+	return nodes
+}
+
+func queryNodeResourceGroup(
+	nodeID int64,
+	node *qnmanager.NodeInfo,
+	rgByNode map[int64]string,
+	sqNodes map[int64]string,
+) string {
+	if isEmbeddedQueryNode(node) {
+		return sqNodes[nodeID]
+	}
+	if rg := node.ServerLabels[sessionutil.LabelResourceGroup]; rg != "" {
+		return rg
+	}
+	return rgByNode[nodeID]
+}
+
+func isEmbeddedQueryNode(node *qnmanager.NodeInfo) bool {
+	if node == nil {
+		return false
+	}
+	labels := node.ServerLabels
+	return labels[sessionutil.LabelStreamingNodeEmbeddedQueryNode] == "1" ||
+		labels[sessionutil.LegacyLabelStreamingNodeEmbeddedQueryNode] == "1"
 }
 
 func (p *QueryNodeProvider) lastSnapshot() *balancer.NodeSnapshot {

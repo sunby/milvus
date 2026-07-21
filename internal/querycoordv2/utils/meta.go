@@ -30,6 +30,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/streamingutil"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
@@ -118,6 +119,11 @@ func AssignReplica(ctx context.Context, m *meta.Meta, resourceGroups []string, r
 		}
 	}
 
+	var sqNodesByRG map[string]typeutil.UniqueSet
+	if checkNodeNum && streamingutil.IsStreamingServiceEnabled() && paramtable.Get().QueryCoordCfg.EnableSQNServeSegments.GetAsBool() {
+		sqNodesByRG = snmanager.StaticStreamingNodeManager.GetStreamingQueryNodeIDsByResourceGroup()
+	}
+
 	replicaNumInRG := make(map[string]int)
 	if len(resourceGroups) == 0 {
 		// All replicas should be spawned in default resource group.
@@ -145,10 +151,15 @@ func AssignReplica(ctx context.Context, m *meta.Meta, resourceGroups []string, r
 			return nil, err
 		}
 
-		if num > len(nodes) {
+		availableNodeNum := len(nodes)
+		if sqNodes := sqNodesByRG[rgName]; sqNodes != nil {
+			availableNodeNum += sqNodes.Len()
+		}
+
+		if num > availableNodeNum {
 			mlog.Warn(ctx, "failed to check resource group", mlog.Err(err))
 			if checkNodeNum {
-				err := merr.WrapErrResourceGroupNodeNotEnough(rgName, len(nodes), num)
+				err := merr.WrapErrResourceGroupNodeNotEnough(rgName, availableNodeNum, num)
 				return nil, err
 			}
 		}
