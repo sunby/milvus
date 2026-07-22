@@ -165,6 +165,62 @@ func TestTransformLogStreamManagerRemovesRegisteredLog(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestTransformLogStreamAcceptsSubscriptionsWhileCatchupWorkersBusy(t *testing.T) {
+	store := newBlockingReadStore()
+	require.NoError(t, store.WriteTransformLogChunk(context.Background(), "v1", &streamingpb.TransformLogChunk{
+		ChunkId: 0,
+		Entries: []*streamingpb.TransformLogEntry{
+			testTransformLogDeleteEntry(10, 1),
+		},
+	}))
+	transformLog := New(Config{
+		VChannel: "v1",
+		Store:    store,
+		Meta: &streamingpb.VChannelTransformLogMeta{
+			CheckpointTimeTick: 10,
+			NextChunkId:        1,
+		},
+	})
+	manager := NewStreamManager("pchannel")
+	manager.Register("v1", transformLog)
+
+	stream, err := manager.AcquireStream(context.Background(), "pchannel")
+	require.NoError(t, err)
+	defer stream.Close()
+	released := false
+	defer func() {
+		if !released {
+			store.release()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	subscriptionCount := cap(stream.(*transformLogStream).catchupTasks) + defaultStreamCatchupWorkers + 1
+	handler := &countingStreamHandler{caughtUp: make(chan struct{}, subscriptionCount)}
+	for i := 0; i < subscriptionCount; i++ {
+		_, err := stream.Subscribe(ctx, wal.TransformLogSubscriptionOption{
+			VChannel:           "v1",
+			StartAfterTimeTick: 0,
+			Handler:            handler,
+		})
+		require.NoError(t, err, "subscription %d", i)
+		if i == 0 {
+			store.waitReadStarted(t)
+		}
+	}
+	store.release()
+	released = true
+	deadline := time.After(5 * time.Second)
+	for i := 0; i < subscriptionCount; i++ {
+		select {
+		case <-handler.caughtUp:
+		case <-deadline:
+			t.Fatalf("timed out waiting for subscription %d catch-up", i)
+		}
+	}
+}
+
 type blockingReadStore struct {
 	*memoryStore
 	readStarted chan struct{}
@@ -210,6 +266,19 @@ type recordingStreamHandler struct {
 	closed chan struct{}
 	once   sync.Once
 }
+
+type countingStreamHandler struct {
+	caughtUp chan struct{}
+}
+
+func (h *countingStreamHandler) Handle(event wal.TransformLogStreamEvent) error {
+	if event.SyncUp != nil {
+		h.caughtUp <- struct{}{}
+	}
+	return nil
+}
+
+func (*countingStreamHandler) Close() {}
 
 func newRecordingStreamHandler() *recordingStreamHandler {
 	return &recordingStreamHandler{

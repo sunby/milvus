@@ -135,6 +135,20 @@ func TestComponentParam_StorageIopsParams(t *testing.T) {
 	}
 }
 
+func TestComponentParam_TransformLogCatchupConcurrencyPerStream(t *testing.T) {
+	Init()
+	params := Get()
+	key := params.StreamingCfg.TransformLogCatchupConcurrencyPerStream.Key
+	params.Reset(key)
+	t.Cleanup(func() { params.Reset(key) })
+
+	assert.Equal(t, 4, params.StreamingCfg.TransformLogCatchupConcurrencyPerStream.GetAsInt())
+	params.Save(key, "32")
+	assert.Equal(t, 32, params.StreamingCfg.TransformLogCatchupConcurrencyPerStream.GetAsInt())
+	params.Save(key, "0")
+	assert.Equal(t, 1, params.StreamingCfg.TransformLogCatchupConcurrencyPerStream.GetAsInt())
+}
+
 func TestComponentParam(t *testing.T) {
 	Init()
 	params := Get()

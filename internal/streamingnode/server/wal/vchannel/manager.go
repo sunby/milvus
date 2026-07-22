@@ -20,6 +20,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/nodescheduler"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
@@ -78,8 +79,11 @@ func NewPChannelRecoveryManager(config PChannelManagerConfig) (*PChannelRecovery
 		segmentsByVChannel: segmentsByVChannel,
 		dirtyModules:       make(map[string]*VChannelRecoveryModule),
 		config:             config,
-		streamManager:      transformlog.NewStreamManager(config.PChannel),
-		queryDispatcher:    queryresource.NewDispatcher(4),
+		streamManager: transformlog.NewStreamManagerWithCatchupConcurrency(
+			config.PChannel,
+			paramtable.Get().StreamingCfg.TransformLogCatchupConcurrencyPerStream.GetAsInt(),
+		),
+		queryDispatcher: queryresource.NewDispatcher(4),
 	}
 	queryTransformLogStream, err := manager.streamManager.AcquireStream(context.Background(), config.PChannel)
 	if err != nil {

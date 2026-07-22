@@ -22,8 +22,9 @@ type streamLogProvider interface {
 
 // StreamManager owns TransformLog streams for one pchannel.
 type StreamManager struct {
-	pchannel string
-	logs     map[string]*TransformLog
+	pchannel       string
+	logs           map[string]*TransformLog
+	catchupWorkers int
 
 	streamMu     sync.Mutex
 	streamNotify chan struct{}
@@ -33,16 +34,24 @@ type StreamManager struct {
 
 // NewStreamManager creates a TransformLog stream manager for one pchannel.
 func NewStreamManager(pchannel string) *StreamManager {
+	return NewStreamManagerWithCatchupConcurrency(pchannel, defaultStreamCatchupWorkers)
+}
+
+func NewStreamManagerWithCatchupConcurrency(pchannel string, concurrency int) *StreamManager {
+	if concurrency < 1 {
+		concurrency = 1
+	}
 	return &StreamManager{
-		pchannel:     pchannel,
-		logs:         make(map[string]*TransformLog),
-		streamNotify: make(chan struct{}),
-		streamSeqByV: make(map[string]uint64),
+		pchannel:       pchannel,
+		logs:           make(map[string]*TransformLog),
+		catchupWorkers: concurrency,
+		streamNotify:   make(chan struct{}),
+		streamSeqByV:   make(map[string]uint64),
 	}
 }
 
 func (m *StreamManager) AcquireStream(ctx context.Context, pchannel string) (wal.TransformLogStream, error) {
-	return newTransformLogStream(ctx, m, pchannel)
+	return newTransformLogStream(ctx, m, pchannel, m.catchupWorkers)
 }
 
 func (m *StreamManager) Register(vchannel string, log *TransformLog) {
@@ -161,7 +170,7 @@ const (
 	subscriptionStateClosed
 )
 
-func newTransformLogStream(ctx context.Context, provider streamLogProvider, pchannel string) (wal.TransformLogStream, error) {
+func newTransformLogStream(ctx context.Context, provider streamLogProvider, pchannel string, catchupWorkers int) (wal.TransformLogStream, error) {
 	if err := provider.validatePChannel(pchannel); err != nil {
 		return nil, err
 	}
@@ -179,7 +188,7 @@ func newTransformLogStream(ctx context.Context, provider streamLogProvider, pcha
 		byVChannel:   make(map[string]map[int64]*streamSubscription),
 	}
 	_, stream.seenNotifySeq, _ = provider.streamNotifyStateSince(0)
-	for i := 0; i < defaultStreamCatchupWorkers; i++ {
+	for i := 0; i < catchupWorkers; i++ {
 		go stream.catchupWorker()
 	}
 	go stream.run()
@@ -193,10 +202,11 @@ type transformLogStream struct {
 	provider streamLogProvider
 	pchannel string
 
-	requests     chan streamRequest
-	events       chan streamEvent
-	catchupTasks chan *streamSubscription
-	done         chan struct{}
+	requests        chan streamRequest
+	events          chan streamEvent
+	catchupTasks    chan *streamSubscription
+	pendingCatchups []*streamSubscription
+	done            chan struct{}
 
 	nextID        int64
 	seenNotifySeq uint64
@@ -272,7 +282,16 @@ func (s *transformLogStream) run() {
 			s.dispatchChangedLive(changedVChannels)
 			continue
 		}
+		var catchupTaskCh chan<- *streamSubscription
+		var catchupTask *streamSubscription
+		if len(s.pendingCatchups) > 0 {
+			catchupTaskCh = s.catchupTasks
+			catchupTask = s.pendingCatchups[0]
+		}
 		select {
+		case catchupTaskCh <- catchupTask:
+			s.pendingCatchups[0] = nil
+			s.pendingCatchups = s.pendingCatchups[1:]
 		case req := <-s.requests:
 			if s.handleRequest(req) {
 				return
@@ -346,13 +365,8 @@ func (s *transformLogStream) createSubscription(opt wal.TransformLogSubscription
 		done:       make(chan struct{}),
 	}
 	s.subs[subscriptionID] = sub
-	select {
-	case s.catchupTasks <- sub:
-		return sub, nil
-	case <-s.ctx.Done():
-		s.finishSubscription(sub, s.ctx.Err(), false)
-		return nil, s.ctx.Err()
-	}
+	s.pendingCatchups = append(s.pendingCatchups, sub)
+	return sub, nil
 }
 
 func (s *transformLogStream) handleEvent(event streamEvent) {
