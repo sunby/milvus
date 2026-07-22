@@ -98,6 +98,20 @@ func TestComponentParam_TransformLogCatchupConcurrencyPerStream(t *testing.T) {
 	assert.Equal(t, 1, params.StreamingCfg.TransformLogCatchupConcurrencyPerStream.GetAsInt())
 }
 
+func TestComponentParam_QueryViewLiveEventDispatchConcurrencyPerPChannel(t *testing.T) {
+	Init()
+	params := Get()
+	key := params.StreamingCfg.QueryViewLiveEventDispatchConcurrencyPerPChannel.Key
+	params.Reset(key)
+	t.Cleanup(func() { params.Reset(key) })
+
+	assert.Equal(t, 4, params.StreamingCfg.QueryViewLiveEventDispatchConcurrencyPerPChannel.GetAsInt())
+	params.Save(key, "32")
+	assert.Equal(t, 32, params.StreamingCfg.QueryViewLiveEventDispatchConcurrencyPerPChannel.GetAsInt())
+	params.Save(key, "0")
+	assert.Equal(t, 1, params.StreamingCfg.QueryViewLiveEventDispatchConcurrencyPerPChannel.GetAsInt())
+}
+
 func TestComponentParam(t *testing.T) {
 	Init()
 	params := Get()

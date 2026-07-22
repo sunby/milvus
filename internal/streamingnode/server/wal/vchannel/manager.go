@@ -85,7 +85,9 @@ func NewPChannelRecoveryManager(config PChannelManagerConfig) (*PChannelRecovery
 			config.PChannel,
 			paramtable.Get().StreamingCfg.TransformLogCatchupConcurrencyPerStream.GetAsInt(),
 		),
-		queryDispatcher: queryresource.NewDispatcher(4),
+		queryDispatcher: queryresource.NewDispatcher(
+			paramtable.Get().StreamingCfg.QueryViewLiveEventDispatchConcurrencyPerPChannel.GetAsInt(),
+		),
 	}
 	queryTransformLogStream, err := manager.streamManager.AcquireStream(context.Background(), config.PChannel)
 	if err != nil {
