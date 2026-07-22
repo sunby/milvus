@@ -85,7 +85,7 @@ func NewPChannelRecoveryManager(config PChannelManagerConfig) (*PChannelRecovery
 	segmentsByVChannel := groupSegmentsByVChannel(config.Segments)
 	manager := &PChannelRecoveryManager{
 		pchannel:                config.PChannel,
-		queryDispatcher:         queryresource.NewDispatcher(4),
+		queryDispatcher:         queryresource.NewDispatcher(paramtable.Get().StreamingCfg.QueryViewLiveEventDispatchConcurrencyPerPChannel.GetAsInt()),
 		queryTransformLogStream: walsummary.NewStream(config.SummaryManager),
 		modules:                 typeutil.NewConcurrentMap[string, *VChannelRecoveryModule](),
 		segmentsByVChannel:      segmentsByVChannel,
