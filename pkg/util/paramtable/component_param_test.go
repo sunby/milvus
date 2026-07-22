@@ -70,6 +70,20 @@ func TestComponentParam_QueryViewSegmentCatchupConcurrency(t *testing.T) {
 	assert.Equal(t, 1, params.QueryNodeCfg.QueryViewSegmentCatchupConcurrency.GetAsInt())
 }
 
+func TestComponentParam_QueryViewTransformLogDrainConcurrency(t *testing.T) {
+	Init()
+	params := Get()
+	key := params.QueryNodeCfg.QueryViewTransformLogDrainConcurrency.Key
+	params.Reset(key)
+	t.Cleanup(func() { params.Reset(key) })
+
+	assert.Equal(t, 4, params.QueryNodeCfg.QueryViewTransformLogDrainConcurrency.GetAsInt())
+	params.Save(key, "32")
+	assert.Equal(t, 32, params.QueryNodeCfg.QueryViewTransformLogDrainConcurrency.GetAsInt())
+	params.Save(key, "0")
+	assert.Equal(t, 1, params.QueryNodeCfg.QueryViewTransformLogDrainConcurrency.GetAsInt())
+}
+
 func TestComponentParam_TransformLogCatchupConcurrencyPerStream(t *testing.T) {
 	Init()
 	params := Get()
