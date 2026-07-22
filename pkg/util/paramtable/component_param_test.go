@@ -135,6 +135,20 @@ func TestComponentParam_StorageIopsParams(t *testing.T) {
 	}
 }
 
+func TestComponentParam_QueryViewSegmentCatchupConcurrency(t *testing.T) {
+	Init()
+	params := Get()
+	key := params.QueryNodeCfg.QueryViewSegmentCatchupConcurrency.Key
+	params.Reset(key)
+	t.Cleanup(func() { params.Reset(key) })
+
+	assert.Equal(t, 4, params.QueryNodeCfg.QueryViewSegmentCatchupConcurrency.GetAsInt())
+	params.Save(key, "32")
+	assert.Equal(t, 32, params.QueryNodeCfg.QueryViewSegmentCatchupConcurrency.GetAsInt())
+	params.Save(key, "0")
+	assert.Equal(t, 1, params.QueryNodeCfg.QueryViewSegmentCatchupConcurrency.GetAsInt())
+}
+
 func TestComponentParam_TransformLogCatchupConcurrencyPerStream(t *testing.T) {
 	Init()
 	params := Get()
