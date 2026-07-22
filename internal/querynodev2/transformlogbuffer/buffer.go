@@ -25,14 +25,23 @@ type Buffer struct {
 	drainTasks chan *registration
 }
 
+const defaultDrainConcurrency = 4
+
 func New(streams wal.TransformLogStreamManager) *Buffer {
+	return NewWithDrainConcurrency(streams, defaultDrainConcurrency)
+}
+
+func NewWithDrainConcurrency(streams wal.TransformLogStreamManager, concurrency int) *Buffer {
+	if concurrency <= 0 {
+		concurrency = defaultDrainConcurrency
+	}
 	b := &Buffer{
 		streams:           streams,
 		streamsByPChannel: make(map[string]*streamState),
 		channels:          make(map[string]*vchannelBuffer),
 		drainTasks:        make(chan *registration, 1024),
 	}
-	for i := 0; i < 4; i++ {
+	for i := 0; i < concurrency; i++ {
 		go b.drainWorker()
 	}
 	return b
