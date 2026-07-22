@@ -3,6 +3,7 @@ package segment
 import (
 	"context"
 	"math"
+	"slices"
 	"sort"
 	"sync"
 
@@ -896,6 +897,7 @@ func (s *SegmentView) appendPersistedStorage(storage *streamingpb.L1SegmentPersi
 	if s.meta.PersistedStorage == nil {
 		s.meta.PersistedStorage = &streamingpb.L1SegmentPersistedStorage{}
 	}
+	backfillPersistedStorageFormats(s.meta.PersistedStorage, storage)
 	if storage.GetManifestPath() != "" {
 		s.meta.PersistedStorage.ManifestPath = storage.GetManifestPath()
 	}
@@ -905,6 +907,33 @@ func (s *SegmentView) appendPersistedStorage(storage *streamingpb.L1SegmentPersi
 	)
 	if storage.GetMergedStatsBinlog() != nil {
 		s.meta.PersistedStorage.MergedStatsBinlog = cloneFieldBinlog(storage.GetMergedStatsBinlog())
+	}
+}
+
+func backfillPersistedStorageFormats(existing, incoming *streamingpb.L1SegmentPersistedStorage) {
+	if existing == nil || incoming == nil {
+		return
+	}
+	for _, existingBatch := range existing.GetBinlogs() {
+		for _, existingBinlog := range existingBatch.GetFieldBinlog() {
+			if existingBinlog.GetFormat() != "" {
+				continue
+			}
+			for _, incomingBatch := range incoming.GetBinlogs() {
+				for _, incomingBinlog := range incomingBatch.GetFieldBinlog() {
+					if incomingBinlog.GetFormat() == "" ||
+						existingBinlog.GetFieldID() != incomingBinlog.GetFieldID() ||
+						!slices.Equal(existingBinlog.GetChildFields(), incomingBinlog.GetChildFields()) {
+						continue
+					}
+					existingBinlog.Format = incomingBinlog.GetFormat()
+					break
+				}
+				if existingBinlog.GetFormat() != "" {
+					break
+				}
+			}
+		}
 	}
 }
 
