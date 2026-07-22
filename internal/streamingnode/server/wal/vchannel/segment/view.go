@@ -61,8 +61,23 @@ func NewSegmentView(
 		onDataUpdated:         config.onDataUpdated,
 		onSegmentSealed:       config.onSegmentSealed,
 		schema:                schema,
+		finalCommitDone:       finalCommitDoneFromMeta(meta),
 		metaAndData:           config.metaAndData,
 		commitL1Limiter:       config.commitL1Limiter,
+	}
+}
+
+func finalCommitDoneFromMeta(meta *streamingpb.SegmentAssignmentMeta) bool {
+	if meta.GetSealedAtDataVersion() != nil {
+		return true
+	}
+	switch meta.GetState() {
+	case streamingpb.SegmentAssignmentState_SEGMENT_ASSIGNMENT_STATE_FLUSHED,
+		streamingpb.SegmentAssignmentState_SEGMENT_ASSIGNMENT_STATE_TOMBSTONED:
+		return meta.GetCheckpointTimeTick() > 0 &&
+			meta.GetDataCheckpointTimeTick() >= meta.GetCheckpointTimeTick()
+	default:
+		return false
 	}
 }
 
@@ -126,10 +141,16 @@ type SegmentView struct {
 	// lifecycle commits data-side segment state to the coordinator after object
 	// storage output is ready.
 	lifecycle    Lifecycle
-	packWriter   PackWriter            // writes pending insert data to object storage.
-	runtime      moduleapi.Runtime     // schedules segment-owned data tasks.
-	pendingTasks []segmentTask         // unfinished segment tasks used as predecessors.
-	pending      writeOnlyInsertBuffer // in-memory insert buffer not yet written as L1.
+	packWriter   PackWriter        // writes pending insert data to object storage.
+	runtime      moduleapi.Runtime // schedules segment-owned data tasks.
+	pendingTasks []segmentTask     // unfinished segment tasks used as predecessors.
+	// pendingFinalCommit keeps repeated flush messages from enqueueing another
+	// final commit while the current one is pending or retrying.
+	pendingFinalCommit segmentTask
+	// finalCommitDone is process-local task state. Recovery infers it from the
+	// persisted sealed version or from the flushed data checkpoint.
+	finalCommitDone bool
+	pending         writeOnlyInsertBuffer // in-memory insert buffer not yet written as L1.
 	// pendingFlushChunks keeps chunks already handed to pending/running flush tasks,
 	// ordered by toTimeTick. Chunks stay here until segment data checkpoint advances
 	// over them.
@@ -342,7 +363,9 @@ func (s *SegmentView) Flush(_ context.Context, timetick uint64) moduleapi.Observ
 	}
 	task := s.newCommitL1SegmentTaskLocked(flushTimeTick)
 	result.Data = s.dataBarrier()
-	s.runtime.Scheduler.Submit(task)
+	if task != nil {
+		s.runtime.Scheduler.Submit(task)
+	}
 	return result
 }
 
