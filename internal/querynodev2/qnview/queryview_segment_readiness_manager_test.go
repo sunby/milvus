@@ -5,6 +5,7 @@ package qnview
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -282,6 +283,119 @@ func TestQueryViewSegmentReadinessManager_CollectionGuardFailureStopsPhysicalAcq
 type blockingQueryViewCollectionRuntimeManager struct {
 	entered chan struct{}
 	done    chan struct{}
+}
+
+type concurrentTransformRegistration struct {
+	entered   chan struct{}
+	gate      chan struct{}
+	active    *atomic.Int32
+	maxActive *atomic.Int32
+}
+
+func (r *concurrentTransformRegistration) WaitCatchup(ctx context.Context) error {
+	active := r.active.Add(1)
+	defer r.active.Add(-1)
+	for {
+		current := r.maxActive.Load()
+		if active <= current || r.maxActive.CompareAndSwap(current, active) {
+			break
+		}
+	}
+	r.entered <- struct{}{}
+	select {
+	case <-r.gate:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (*concurrentTransformRegistration) Unregister() {}
+
+type concurrentTransformLogBuffer struct {
+	entered   chan struct{}
+	gate      chan struct{}
+	active    atomic.Int32
+	maxActive atomic.Int32
+}
+
+func (*concurrentTransformLogBuffer) Acquire(context.Context, *qviews.QueryViewAtQueryNode) (TransformLogGuard, error) {
+	return instantTransformGuard{}, nil
+}
+
+func (b *concurrentTransformLogBuffer) RegisterSegment(context.Context, TransformSegment) (TransformRegistration, error) {
+	return &concurrentTransformRegistration{
+		entered:   b.entered,
+		gate:      b.gate,
+		active:    &b.active,
+		maxActive: &b.maxActive,
+	}, nil
+}
+
+func TestQueryViewSegmentReadinessManager_BoundsSegmentCatchupConcurrency(t *testing.T) {
+	const (
+		workerCount  = 2
+		segmentCount = 20
+	)
+	segmentIDs := make([]int64, 0, segmentCount)
+	loaded := make([]TransformSegment, 0, segmentCount)
+	for i := int64(0); i < segmentCount; i++ {
+		segmentID := int64(1000) + i
+		segmentIDs = append(segmentIDs, segmentID)
+		loaded = append(loaded, &fakeTransformSegment{id: segmentID, partitionID: 10})
+	}
+	meta := buildHandlerTestMeta(1)
+	view := &viewpb.QueryViewOfQueryNode{
+		NodeId: 1,
+		Partitions: []*viewpb.QueryViewOfPartition{{
+			PartitionId: 10,
+			SegmentIds:  segmentIDs,
+		}},
+	}
+	buffer := &concurrentTransformLogBuffer{
+		entered: make(chan struct{}, segmentCount),
+		gate:    make(chan struct{}),
+	}
+	nodeScheduler := nodescheduler.New(1)
+	t.Cleanup(nodeScheduler.Close)
+	mgr := NewQueryViewSegmentReadinessManagerWithSchedulerAndCatchupConcurrency(
+		nodeScheduler,
+		fakePhysicalSegmentManager{
+			acquire: func(req AcquirePhysicalSegments) { req.OnLoaded(loaded) },
+			release: func(req ReleaseSegments) { req.OnDropped() },
+		},
+		buffer,
+		workerCount,
+	)
+
+	var ready atomic.Int32
+	mgr.Acquire(AcquireSegments{
+		Key:  qviews.NewQueryViewAtQueryNode(meta, view).QueryViewKey(),
+		Meta: meta,
+		View: view,
+		OnReady: func(readySegments map[int64][]int64) {
+			ready.Add(int32(len(readySegments[10])))
+		},
+		OnUnrecoverable: func() { t.Error("unexpected unrecoverable") },
+	})
+
+	for i := 0; i < workerCount; i++ {
+		select {
+		case <-buffer.entered:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for segment catch-up worker")
+		}
+	}
+	select {
+	case <-buffer.entered:
+		t.Fatal("segment catch-up exceeded configured concurrency")
+	case <-time.After(20 * time.Millisecond):
+	}
+	assert.Equal(t, int32(workerCount), buffer.maxActive.Load())
+	close(buffer.gate)
+	require.Eventually(t, func() bool {
+		return ready.Load() == segmentCount
+	}, time.Second, 10*time.Millisecond)
 }
 
 func (m *blockingQueryViewCollectionRuntimeManager) Acquire(ctx context.Context, _ *qviews.QueryViewAtQueryNode) (CollectionRuntimeGuard, bool, error) {
