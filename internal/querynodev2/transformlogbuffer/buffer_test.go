@@ -543,6 +543,65 @@ func TestBufferRegisterSegmentReturnsBeforeCatchupDrainCompletes(t *testing.T) {
 	}
 }
 
+func TestBufferBoundsDrainConcurrency(t *testing.T) {
+	const (
+		workerCount  = 2
+		segmentCount = 10
+	)
+	streams := newFakeStreamManager()
+	buffer := NewWithDrainConcurrency(streams, workerCount)
+	guard, err := buffer.Acquire(context.Background(), newTestQueryView("p_1v0", 50))
+	require.NoError(t, err)
+	defer guard.Release()
+
+	stream := streams.stream("p")
+	require.NotNil(t, stream)
+	requireSubscriptionVChannels(t, stream, []string{"p_1v0"})
+	stream.emit(wal.TransformLogStreamEvent{
+		VChannel: "p_1v0",
+		Entry:    &streamingpb.TransformLogEntry{TimeTick: 60},
+	})
+	require.NoError(t, guard.WaitTransformVisible(context.Background(), 60))
+
+	applyStarted := make(chan struct{}, segmentCount)
+	applyBlock := make(chan struct{})
+	registrations := make([]qnview.TransformRegistration, 0, segmentCount)
+	for i := int64(0); i < segmentCount; i++ {
+		reg, err := buffer.RegisterSegment(context.Background(), &fakeSegment{
+			id:           1000 + i,
+			vchannel:     "p_1v0",
+			startAfter:   50,
+			applyStarted: applyStarted,
+			applyBlock:   applyBlock,
+		})
+		require.NoError(t, err)
+		registrations = append(registrations, reg)
+		defer reg.Unregister()
+	}
+
+	for i := 0; i < workerCount; i++ {
+		select {
+		case <-applyStarted:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for TransformLog drain worker")
+		}
+	}
+	select {
+	case <-applyStarted:
+		t.Fatal("TransformLog drain exceeded configured concurrency")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	stream.emit(wal.TransformLogStreamEvent{
+		VChannel: "p_1v0",
+		SyncUp:   &wal.TransformLogSyncUp{TimeTick: 50},
+	})
+	close(applyBlock)
+	for _, reg := range registrations {
+		require.NoError(t, reg.WaitCatchup(context.Background()))
+	}
+}
+
 func TestBufferRegisterSegmentDrainsEntriesArrivingDuringCatchupBeforeLiveAttach(t *testing.T) {
 	streams := newFakeStreamManager()
 	buffer := New(streams)

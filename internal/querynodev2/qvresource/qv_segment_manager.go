@@ -45,7 +45,10 @@ func NewQueryViewSegmentManager(ctx context.Context, manager *segments.Manager, 
 	return qnview.NewQueryViewSegmentReadinessManagerWithSchedulerAndCatchupConcurrency(
 		nodeScheduler,
 		physicalManager,
-		qvtransformlogbuffer.New(streams),
+		qvtransformlogbuffer.NewWithDrainConcurrency(
+			streams,
+			paramtable.Get().QueryNodeCfg.QueryViewTransformLogDrainConcurrency.GetAsInt(),
+		),
 		paramtable.Get().QueryNodeCfg.QueryViewSegmentCatchupConcurrency.GetAsInt(),
 		collectionRuntime,
 	)
