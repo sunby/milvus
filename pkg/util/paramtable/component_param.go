@@ -7705,10 +7705,11 @@ type streamingConfig struct {
 	FlushL1CommitConcurrency ParamItem `refreshable:"true"`
 
 	// recovery configuration.
-	WALRecoveryPersistInterval           ParamItem `refreshable:"true"`
-	WALRecoveryMaxDirtyMessage           ParamItem `refreshable:"true"`
-	WALRecoveryGracefulCloseTimeout      ParamItem `refreshable:"true"`
-	WALRecoverySchemaExpirationTolerance ParamItem `refreshable:"true"`
+	WALRecoveryPersistInterval              ParamItem `refreshable:"true"`
+	WALRecoveryMaxDirtyMessage              ParamItem `refreshable:"true"`
+	WALRecoveryGracefulCloseTimeout         ParamItem `refreshable:"true"`
+	WALRecoverySchemaExpirationTolerance    ParamItem `refreshable:"true"`
+	TransformLogCatchupConcurrencyPerStream ParamItem `refreshable:"false"`
 
 	// wal rate limit
 	WALRateLimitDefaultBurst                     ParamItem `refreshable:"true"`
@@ -8142,6 +8143,21 @@ If the schema is older than (the channel checkpoint - tolerance), it will be rem
 		Export:       false,
 	}
 	p.WALRecoverySchemaExpirationTolerance.Init(base.mgr)
+
+	p.TransformLogCatchupConcurrencyPerStream = ParamItem{
+		Key:          "streaming.transformLog.catchupConcurrencyPerStream",
+		Version:      "3.0.0",
+		DefaultValue: "4",
+		Doc:          "Maximum number of TransformLog subscriptions catching up concurrently on each stream.",
+		Export:       true,
+		Formatter: func(v string) string {
+			if getAsInt(v) < 1 {
+				return "1"
+			}
+			return v
+		},
+	}
+	p.TransformLogCatchupConcurrencyPerStream.Init(base.mgr)
 
 	p.OldVersionLastConfirmedWindowSize = ParamItem{
 		Key:     "streaming.walScanner.oldVersionLastConfirmedWindowSize",
