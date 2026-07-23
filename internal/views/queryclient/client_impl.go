@@ -73,6 +73,14 @@ func (c *viewQueryClientImpl) Legacy() LegacyClient {
 	return c.legacyClient
 }
 
+func (c *viewQueryClientImpl) CheckCollectionReady(ctx context.Context, collectionID int64, expectedVChannels []string) error {
+	return c.shardResolver.CheckCollectionReady(ctx, collectionID, expectedVChannels)
+}
+
+func (c *viewQueryClientImpl) WaitForCollectionReady(ctx context.Context, collectionID int64, expectedVChannels []string) error {
+	return c.shardResolver.WaitForCollectionReady(ctx, collectionID, expectedVChannels)
+}
+
 // Search implements ViewQueryClient.Search.
 func (c *viewQueryClientImpl) Search(ctx context.Context, req *SearchRequest) (*SearchResult, error) {
 	// === Stage: Plan ===

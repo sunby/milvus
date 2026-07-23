@@ -150,6 +150,14 @@ type fakeShardResolver struct {
 	replicas *resolver.ShardReplicas
 }
 
+func (f *fakeShardResolver) CheckCollectionReady(context.Context, int64, []string) error {
+	return nil
+}
+
+func (f *fakeShardResolver) WaitForCollectionReady(context.Context, int64, []string) error {
+	return nil
+}
+
 func (f *fakeShardResolver) ResolveVChannels(context.Context, int64) ([]string, error) {
 	return []string{f.replicas.VChannel}, nil
 }
