@@ -14,9 +14,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/syncutil"
 )
 
-var (
-	ErrShardResolverClosed = errors.New("shard resolver is closed")
-)
+var ErrShardResolverClosed = errors.New("shard resolver is closed")
 
 var _ ShardResolver = (*ShardResolverImpl)(nil)
 
@@ -29,6 +27,14 @@ type ShardReplicas struct {
 
 // ShardResolver resolves shard topology for a collection.
 type ShardResolver interface {
+	// CheckCollectionReady checks whether all expected vchannels of a collection
+	// have complete shard routing in the latest assignment snapshot.
+	CheckCollectionReady(ctx context.Context, collectionID int64, expectedVChannels []string) error
+
+	// WaitForCollectionReady blocks until all expected vchannels of a collection
+	// have complete shard routing in an assignment snapshot.
+	WaitForCollectionReady(ctx context.Context, collectionID int64, expectedVChannels []string) error
+
 	// ResolveVChannels returns all vchannels of a collection.
 	// Used by the collection-level client to determine the shard fanout.
 	// It blocks until the first assignment discovery snapshot is ready.
@@ -68,6 +74,39 @@ type shardResolverCache struct {
 type collectionVChannelKey struct {
 	collectionID int64
 	vchannel     string
+}
+
+func (t *ShardResolverImpl) CheckCollectionReady(ctx context.Context, collectionID int64, expectedVChannels []string) error {
+	cache, err := t.getCache(ctx)
+	if err != nil {
+		return err
+	}
+	if !isCollectionReady(cache, collectionID, sortedVChannels(expectedVChannels)) {
+		return merr.WrapErrCollectionNotLoaded(collectionID)
+	}
+	return nil
+}
+
+func (t *ShardResolverImpl) WaitForCollectionReady(ctx context.Context, collectionID int64, expectedVChannels []string) error {
+	expectedVChannels = sortedVChannels(expectedVChannels)
+	if len(expectedVChannels) == 0 {
+		return merr.WrapErrCollectionNotLoaded(collectionID)
+	}
+	t.cond.L.Lock()
+	for {
+		if t.cache != nil && isCollectionReady(*t.cache, collectionID, expectedVChannels) {
+			t.cond.L.Unlock()
+			return nil
+		}
+		if t.closed {
+			t.cond.L.Unlock()
+			return ErrShardResolverClosed
+		}
+		if err := t.cond.Wait(ctx); err != nil {
+			// ContextCond.Wait does not re-acquire the lock when it returns an error.
+			return err
+		}
+	}
 }
 
 func (t *ShardResolverImpl) ResolveVChannels(ctx context.Context, collectionID int64) ([]string, error) {
@@ -197,4 +236,27 @@ func cloneShardReplicas(replicas *ShardReplicas) *ShardReplicas {
 		PrimaryShardID: replicas.PrimaryShardID,
 		ShardIDs:       append([]qviews.ShardID(nil), replicas.ShardIDs...),
 	}
+}
+
+func sortedVChannels(vchannels []string) []string {
+	vchannels = append([]string(nil), vchannels...)
+	sort.Strings(vchannels)
+	return vchannels
+}
+
+func isCollectionReady(cache shardResolverCache, collectionID int64, expectedVChannels []string) bool {
+	actualVChannels := cache.collectionVChannels[collectionID]
+	if len(expectedVChannels) == 0 || len(actualVChannels) != len(expectedVChannels) {
+		return false
+	}
+	for i, vchannel := range expectedVChannels {
+		if actualVChannels[i] != vchannel {
+			return false
+		}
+		replicas := cache.shardReplicas[collectionVChannelKey{collectionID: collectionID, vchannel: vchannel}]
+		if replicas == nil || len(replicas.ShardIDs) == 0 || replicas.PrimaryShardID.VChannel != vchannel {
+			return false
+		}
+	}
+	return true
 }

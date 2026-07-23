@@ -41,6 +41,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
+	"github.com/milvus-io/milvus/pkg/v3/util/conc"
 	"github.com/milvus-io/milvus/pkg/v3/util/expr"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metricsinfo"
@@ -117,7 +118,8 @@ type Proxy struct {
 	enableMaterializedView bool
 
 	// query view
-	viewQueryClient queryclient.Client
+	viewQueryClient         queryclient.Client
+	autoLoadCollectionGroup conc.Singleflight[struct{}]
 
 	// delete rate limiter
 	enableComplexDeleteLimit bool

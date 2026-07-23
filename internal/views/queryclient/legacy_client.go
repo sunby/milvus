@@ -18,6 +18,12 @@ type Client interface {
 	Legacy() LegacyClient
 }
 
+// CollectionReadiness exposes local assignment readiness for collection-level queries.
+type CollectionReadiness interface {
+	CheckCollectionReady(ctx context.Context, collectionID int64, expectedVChannels []string) error
+	WaitForCollectionReady(ctx context.Context, collectionID int64, expectedVChannels []string) error
+}
+
 // LegacyClient executes proxy-generated legacy internal requests and returns raw results.
 type LegacyClient interface {
 	Search(ctx context.Context, req *LegacySearchRequest) (*LegacySearchResult, error)
@@ -43,11 +49,20 @@ type LegacyQueryResult struct {
 }
 
 type legacyOnlyClient struct {
-	legacy LegacyClient
+	legacy        LegacyClient
+	shardResolver resolver.ShardResolver
 }
 
 func (c *legacyOnlyClient) Legacy() LegacyClient {
 	return c.legacy
+}
+
+func (c *legacyOnlyClient) CheckCollectionReady(ctx context.Context, collectionID int64, expectedVChannels []string) error {
+	return c.shardResolver.CheckCollectionReady(ctx, collectionID, expectedVChannels)
+}
+
+func (c *legacyOnlyClient) WaitForCollectionReady(ctx context.Context, collectionID int64, expectedVChannels []string) error {
+	return c.shardResolver.WaitForCollectionReady(ctx, collectionID, expectedVChannels)
 }
 
 type legacyClient struct {
@@ -63,7 +78,8 @@ func NewLegacyViewQueryClient(
 	replicaPicker ReplicaPicker,
 ) Client {
 	return &legacyOnlyClient{
-		legacy: newLegacyClient(cfg, queryPlanClient, queryServiceClient, shardResolver, replicaPicker),
+		legacy:        newLegacyClient(cfg, queryPlanClient, queryServiceClient, shardResolver, replicaPicker),
+		shardResolver: shardResolver,
 	}
 }
 

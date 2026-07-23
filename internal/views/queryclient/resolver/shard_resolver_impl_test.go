@@ -203,6 +203,115 @@ func TestShardResolverImplReturnsContextErrorWhileWaitingForReady(t *testing.T) 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
+func TestShardResolverImplChecksCompleteCollectionAssignment(t *testing.T) {
+	const collectionID int64 = 100
+	vchannel0 := funcutil.GetVirtualChannel("p0", collectionID, 0)
+	vchannel1 := funcutil.GetVirtualChannel("p1", collectionID, 1)
+	resolver := NewShardResolverImpl(&staticAssignmentWatcher{
+		assignments: []*types.VersionedStreamingNodeAssignments{
+			mergeVersionedAssignments(
+				versionedAssignment(1, "localhost:1", "p0", collectionID, 0, 10),
+				versionedAssignment(2, "localhost:2", "p1", collectionID, 1, 10),
+			),
+		},
+	})
+	defer resolver.Close()
+
+	require.NoError(t, resolver.CheckCollectionReady(context.Background(), collectionID, []string{vchannel1, vchannel0}))
+	require.ErrorIs(t,
+		resolver.CheckCollectionReady(context.Background(), collectionID, []string{vchannel0}),
+		merr.ErrCollectionNotLoaded)
+	require.ErrorIs(t,
+		resolver.CheckCollectionReady(context.Background(), collectionID, []string{vchannel0, vchannel1, "extra"}),
+		merr.ErrCollectionNotLoaded)
+	require.ErrorIs(t,
+		resolver.CheckCollectionReady(context.Background(), collectionID, nil),
+		merr.ErrCollectionNotLoaded)
+	require.ErrorIs(t,
+		resolver.WaitForCollectionReady(context.Background(), collectionID, nil),
+		merr.ErrCollectionNotLoaded)
+
+	secondaryOnly := versionedAssignment(3, "localhost:3", "p0", collectionID, 0, 10)
+	nodeAssignment := secondaryOnly.Assignments[3]
+	nodeAssignment.SecondaryChannels = nodeAssignment.Channels
+	nodeAssignment.Channels = map[string]types.PChannelInfo{}
+	secondaryOnly.Assignments[3] = nodeAssignment
+	secondaryResolver := NewShardResolverImpl(&staticAssignmentWatcher{
+		assignments: []*types.VersionedStreamingNodeAssignments{secondaryOnly},
+	})
+	defer secondaryResolver.Close()
+	require.ErrorIs(t,
+		secondaryResolver.CheckCollectionReady(context.Background(), collectionID, []string{vchannel0}),
+		merr.ErrCollectionNotLoaded)
+}
+
+func TestShardResolverImplWaitsForCompleteCollectionAssignment(t *testing.T) {
+	const collectionID int64 = 100
+	vchannel0 := funcutil.GetVirtualChannel("p0", collectionID, 0)
+	vchannel1 := funcutil.GetVirtualChannel("p1", collectionID, 1)
+	watcher := newPushableAssignmentWatcher()
+	resolver := NewShardResolverImpl(watcher)
+	defer resolver.Close()
+
+	watcher.push(versionedAssignment(1, "localhost:1", "p0", collectionID, 0, 10))
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- resolver.WaitForCollectionReady(context.Background(), collectionID, []string{vchannel0, vchannel1})
+	}()
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("WaitForCollectionReady returned for a partial assignment: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	watcher.push(mergeVersionedAssignments(
+		versionedAssignment(1, "localhost:1", "p0", collectionID, 0, 10),
+		versionedAssignment(2, "localhost:2", "p1", collectionID, 1, 10),
+	))
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("WaitForCollectionReady did not return after the complete assignment arrived")
+	}
+}
+
+func TestShardResolverImplReturnsContextErrorWhileWaitingForCollection(t *testing.T) {
+	watcher := newPushableAssignmentWatcher()
+	resolver := NewShardResolverImpl(watcher)
+	defer resolver.Close()
+	watcher.push(&types.VersionedStreamingNodeAssignments{
+		Assignments: map[int64]types.StreamingNodeAssignment{},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	err := resolver.WaitForCollectionReady(ctx, 100, []string{"vchannel"})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestShardResolverImplReturnsClosedWhileWaitingForCollection(t *testing.T) {
+	watcher := newPushableAssignmentWatcher()
+	resolver := NewShardResolverImpl(watcher)
+	watcher.push(&types.VersionedStreamingNodeAssignments{
+		Assignments: map[int64]types.StreamingNodeAssignment{},
+	})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- resolver.WaitForCollectionReady(context.Background(), 100, []string{"vchannel"})
+	}()
+	resolver.Close()
+
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, ErrShardResolverClosed)
+	case <-time.After(time.Second):
+		t.Fatal("WaitForCollectionReady did not return after resolver close")
+	}
+}
+
 type staticAssignmentWatcher struct {
 	assignments []*types.VersionedStreamingNodeAssignments
 }
@@ -254,6 +363,44 @@ func (w *waitableAssignmentWatcher) ReportAssignmentError(ctx context.Context, p
 	return nil
 }
 
+type assignmentUpdate struct {
+	assignment *types.VersionedStreamingNodeAssignments
+	done       chan struct{}
+}
+
+type pushableAssignmentWatcher struct {
+	updates chan assignmentUpdate
+}
+
+func newPushableAssignmentWatcher() *pushableAssignmentWatcher {
+	return &pushableAssignmentWatcher{updates: make(chan assignmentUpdate)}
+}
+
+func (w *pushableAssignmentWatcher) push(assignment *types.VersionedStreamingNodeAssignments) {
+	update := assignmentUpdate{assignment: assignment, done: make(chan struct{})}
+	w.updates <- update
+	<-update.done
+}
+
+func (w *pushableAssignmentWatcher) AssignmentDiscover(ctx context.Context, cb func(*types.VersionedStreamingNodeAssignments) error) error {
+	for {
+		select {
+		case update := <-w.updates:
+			err := cb(update.assignment)
+			close(update.done)
+			if err != nil {
+				return err
+			}
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		}
+	}
+}
+
+func (w *pushableAssignmentWatcher) ReportAssignmentError(ctx context.Context, pchannel types.PChannelInfo, err error) error {
+	return nil
+}
+
 func versionedAssignment(
 	serverID int64,
 	address string,
@@ -284,4 +431,16 @@ func versionedAssignment(
 			},
 		},
 	}
+}
+
+func mergeVersionedAssignments(assignments ...*types.VersionedStreamingNodeAssignments) *types.VersionedStreamingNodeAssignments {
+	merged := &types.VersionedStreamingNodeAssignments{
+		Assignments: make(map[int64]types.StreamingNodeAssignment),
+	}
+	for _, assignment := range assignments {
+		for serverID, nodeAssignment := range assignment.Assignments {
+			merged.Assignments[serverID] = nodeAssignment
+		}
+	}
+	return merged
 }
