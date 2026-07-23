@@ -128,6 +128,13 @@ StreamingNode also owns Phase 1 query planning and must recover the sealed
 `QueryNode` topology after restart. Persisting only the SN portion makes the
 recovered query plan contain only the growing work node.
 
+SN-local persisted key format:
+
+- `streamingnode-meta/wal/{pchannel}/query-view/{collectionID}/{replicaID}/{vchannel}/{streamingVersion}/{compactVersion}/{queryVersion}` — `QueryViewOfShard` proto.
+
+The key keeps the full vchannel name and the QueryView/DataView version tuple so
+multiple in-flight views for the same shard do not overwrite each other.
+
 ### 4.3 SN: Crash Recovery
 
 SN persists only the Up state. On crash recovery:

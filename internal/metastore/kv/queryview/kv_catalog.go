@@ -8,6 +8,7 @@ import (
 
 	"github.com/milvus-io/milvus/pkg/v3/kv"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
 const queryViewKeyPrefix = "qv/"
@@ -26,7 +27,7 @@ type QueryViewCatalog interface {
 
 type queryViewCatalog struct {
 	metaKV kv.MetaKv
-	prefix string // full prefix: {rootPrefix}{queryViewKeyPrefix}
+	prefix string // full prefix: {role}/{queryViewKeyPrefix}
 }
 
 // NewQueryViewCatalog creates a new QueryViewCatalog backed by ETCD.
@@ -65,14 +66,19 @@ func (c *queryViewCatalog) SaveQueryViews(ctx context.Context, views []*viewpb.Q
 	removals := make([]string, 0)
 
 	for _, view := range views {
-		key := c.buildKey(view.Meta)
+		key, err := c.buildKey(view.Meta)
+		if err != nil {
+			return err
+		}
 		if view.Meta.State == viewpb.QueryViewState_QueryViewStateDropped {
+			delete(saves, key)
 			removals = append(removals, key)
 		} else {
 			data, err := marshalForPersistence(view)
 			if err != nil {
 				return err
 			}
+			removals = removeString(removals, key)
 			saves[key] = string(data)
 		}
 	}
@@ -82,17 +88,24 @@ func (c *queryViewCatalog) SaveQueryViews(ctx context.Context, views []*viewpb.Q
 
 // buildKey constructs the ETCD key for a query view.
 // Format: {prefix}{collection_id}/{replica_id}/{vchannel}/{sv}/{cv}/{qv}
-func (c *queryViewCatalog) buildKey(meta *viewpb.QueryViewMeta) string {
-	dv := meta.Version.DataVersion
+func (c *queryViewCatalog) buildKey(meta *viewpb.QueryViewMeta) (string, error) {
+	if meta == nil {
+		return "", merr.WrapErrServiceInternalMsg("query view meta is nil")
+	}
+	version := meta.GetVersion()
+	if version == nil || version.GetDataVersion() == nil {
+		return "", merr.WrapErrServiceInternalMsg("query view %s has nil version", meta.GetVchannel())
+	}
+	dataVersion := version.GetDataVersion()
 	return fmt.Sprintf("%s%d/%d/%s/%d/%d/%d",
 		c.prefix,
-		meta.CollectionId,
-		meta.ReplicaId,
-		meta.Vchannel,
-		dv.StreamingVersion,
-		dv.CompactVersion,
-		meta.Version.QueryVersion,
-	)
+		meta.GetCollectionId(),
+		meta.GetReplicaId(),
+		meta.GetVchannel(),
+		dataVersion.GetStreamingVersion(),
+		dataVersion.GetCompactVersion(),
+		version.GetQueryVersion(),
+	), nil
 }
 
 // marshalForPersistence serializes a QueryViewOfShard for ETCD storage.
@@ -105,4 +118,15 @@ func marshalForPersistence(view *viewpb.QueryViewOfShard) ([]byte, error) {
 		}
 	}
 	return proto.Marshal(clone)
+}
+
+func removeString(values []string, value string) []string {
+	for idx := 0; idx < len(values); {
+		if values[idx] == value {
+			values = append(values[:idx], values[idx+1:]...)
+			continue
+		}
+		idx++
+	}
+	return values
 }

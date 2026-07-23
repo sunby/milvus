@@ -47,6 +47,13 @@ Sealed Segment Balancer
 
 ETCD persistence layer. Implemented in `internal/metastore/kv/queryview/kv_catalog.go`.
 
+Persisted key format:
+
+- `coord/qv/{collectionID}/{replicaID}/{vchannel}/{streamingVersion}/{compactVersion}/{queryVersion}` — `QueryViewOfShard` proto.
+
+The key keeps the full vchannel name and the QueryView/DataView version tuple so
+multiple in-flight views for the same shard do not overwrite each other.
+
 ### 2.2 ReliableSyncer (existing)
 
 Reliable delivery of QueryView syncs from Coord to work nodes. Defined in `internal/views/coord/coordview/syncer/reliable_syncer.go`.
