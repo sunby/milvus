@@ -2,6 +2,7 @@ package vchannel
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -352,13 +353,28 @@ func (m *PChannelRecoveryManager) shouldBroadcast(msg message.ImmutableMessage) 
 
 func (m *PChannelRecoveryManager) observeBroadcastMessage(ctx context.Context, msg message.ImmutableMessage) moduleapi.ObserveResult {
 	results := make([]moduleapi.ObserveResult, 0, m.modules.Len())
-	m.modules.Range(func(_ string, module *VChannelRecoveryModule) bool {
+	if msg.VChannel() != "" && !msg.IsPChannelLevel() {
+		vchannel := msg.VChannel()
+		module, ok := m.modules.Get(vchannel)
+		if !ok {
+			panic(fmt.Errorf("vchannel module not found: %s", vchannel))
+		}
 		result := module.ObserveMessage(ctx, msg)
 		m.markModuleUpdated(module)
 		m.syncTransformLogStream(module)
 		results = append(results, result)
-		return true
-	})
+	} else {
+
+		logger := mlog.With(mlog.String("pchannel", m.pchannel))
+		logger.Info(ctx, "observe broadcast message", mlog.String("vchannel", msg.VChannel()), mlog.String("message_type", msg.MessageType().String()))
+
+		m.modules.Range(func(_ string, module *VChannelRecoveryModule) bool {
+			result := module.ObserveMessage(ctx, msg)
+			m.syncTransformLogStream(module)
+			results = append(results, result)
+			return true
+		})
+	}
 	return moduleapi.ComposeBarriers(results)
 }
 

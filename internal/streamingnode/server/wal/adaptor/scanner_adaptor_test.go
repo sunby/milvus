@@ -210,6 +210,9 @@ func TestTimeTickConfirmsBufferedMessagesWithoutEnteringPendingQueue(t *testing.
 	timeTick := newScannerTestMessage(t, 20, "", message.MessageTypeTimeTick, true)
 
 	scanner.handleUpstream(msg)
+	assert.Equal(t, 1, scanner.reorderBuffer.Len())
+	assert.Equal(t, 0, scanner.pendingQueue.Len())
+
 	scanner.handleUpstream(timeTick)
 
 	assert.Equal(t, 0, scanner.reorderBuffer.Len())
