@@ -214,9 +214,48 @@ func TestLegacyClientSearchReturnsStatusError(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestLegacyClientDelegatesCollectionReadiness(t *testing.T) {
+	resolver := &legacyResolver{}
+	client := NewLegacyViewQueryClient(
+		ViewQueryClientConfig{},
+		nil,
+		nil,
+		resolver,
+		nil,
+	)
+	expectedVChannels := []string{"v0", "v1"}
+	readiness, ok := client.(CollectionReadiness)
+	require.True(t, ok)
+
+	require.NoError(t, readiness.CheckCollectionReady(context.Background(), 100, expectedVChannels))
+	require.NoError(t, readiness.WaitForCollectionReady(context.Background(), 100, expectedVChannels))
+	require.Equal(t, 1, resolver.checkReadyCalls)
+	require.Equal(t, 1, resolver.waitReadyCalls)
+	require.Equal(t, int64(100), resolver.collectionID)
+	require.Equal(t, expectedVChannels, resolver.expectedVChannels)
+}
+
 type legacyResolver struct {
-	vchannels []string
-	replicas  map[string]*resolver.ShardReplicas
+	vchannels         []string
+	replicas          map[string]*resolver.ShardReplicas
+	checkReadyCalls   int
+	waitReadyCalls    int
+	collectionID      int64
+	expectedVChannels []string
+}
+
+func (r *legacyResolver) CheckCollectionReady(_ context.Context, collectionID int64, expectedVChannels []string) error {
+	r.checkReadyCalls++
+	r.collectionID = collectionID
+	r.expectedVChannels = expectedVChannels
+	return nil
+}
+
+func (r *legacyResolver) WaitForCollectionReady(_ context.Context, collectionID int64, expectedVChannels []string) error {
+	r.waitReadyCalls++
+	r.collectionID = collectionID
+	r.expectedVChannels = expectedVChannels
+	return nil
 }
 
 func (r *legacyResolver) ResolveVChannels(context.Context, int64) ([]string, error) {

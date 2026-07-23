@@ -2818,6 +2818,10 @@ func (node *Proxy) Search(ctx context.Context, request *milvuspb.SearchRequest) 
 	rsp := &milvuspb.SearchResults{
 		Status: merr.Success(),
 	}
+	if err := node.ensureCollectionReadyForSearch(ctx, request.GetDbName(), request.GetCollectionName()); err != nil {
+		rsp.Status = merr.Status(err)
+		return rsp, nil
+	}
 
 	optimizedSearch := true
 	resultSizeInsufficient := false
@@ -3088,6 +3092,10 @@ func (node *Proxy) HybridSearch(ctx context.Context, request *milvuspb.HybridSea
 	var err error
 	rsp := &milvuspb.SearchResults{
 		Status: merr.Success(),
+	}
+	if err := node.ensureCollectionReadyForSearch(ctx, request.GetDbName(), request.GetCollectionName()); err != nil {
+		rsp.Status = merr.Status(err)
+		return rsp, nil
 	}
 	optimizedSearch := true
 	resultSizeInsufficient := false
