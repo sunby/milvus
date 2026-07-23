@@ -58,6 +58,9 @@ type ModuleConfig struct {
 
 // VChannelRecoveryModule owns all recovery_storage state for one vchannel.
 type VChannelRecoveryModule struct {
+	// mu serializes WAL observation with snapshots and frontier reads. In
+	// particular, segments may grow when CreateSegment is observed while the
+	// recovery background task is collecting dirty snapshots.
 	mu       sync.Mutex
 	pchannel string
 	vchannel string
@@ -234,6 +237,8 @@ func (m *VChannelRecoveryModule) SwitchIntoMetaAndData() moduleapi.ModuleSnapsho
 	if m == nil {
 		return nil
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.metaAndData = true
 	snapshots := make(moduleapi.CompositeModuleSnapshot, 0, 3)
 	if m.vchannelView != nil {
@@ -271,6 +276,8 @@ func (m *VChannelRecoveryModule) ConsumeDirtySnapshots() []moduleapi.DirtySnapsh
 	if m == nil {
 		return nil
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	snapshots := make([]moduleapi.DirtySnapshot, 0)
 	if m.vchannelView != nil {
 		if meta := m.vchannelView.ConsumeDirtyAndGetSnapshot(); meta != nil {
@@ -327,14 +334,25 @@ func (m *VChannelRecoveryModule) DataFrontier(scope moduleapi.Scope) walcheckpoi
 	if m == nil || !m.matchesScope(scope) {
 		return nil
 	}
-	return walcheckpoint.NewCompositeBarrier(
-		walcheckpoint.BarrierFunc(func() uint64 { return m.segmentFrontierTimeTick(scope) }),
-		walcheckpoint.BarrierFunc(func() uint64 { return m.transformFrontierTimeTick(scope.Kind) }),
-	)
+	return walcheckpoint.BarrierFunc(func() uint64 {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		segmentTimeTick := m.segmentFrontierTimeTick(scope)
+		transformTimeTick := m.transformFrontierTimeTick(scope.Kind)
+		if segmentTimeTick < transformTimeTick {
+			return segmentTimeTick
+		}
+		return transformTimeTick
+	})
 }
 
 func (m *VChannelRecoveryModule) IsActive() bool {
-	return m != nil && m.vchannelView != nil && m.vchannelView.IsActive()
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.vchannelView != nil && m.vchannelView.IsActive()
 }
 
 func (m *VChannelRecoveryModule) handleCreateCollectionMessage(msg message.ImmutableCreateCollectionMessageV1) moduleapi.ObserveResult {

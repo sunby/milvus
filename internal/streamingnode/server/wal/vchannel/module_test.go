@@ -2,6 +2,7 @@ package vchannel
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -145,6 +146,45 @@ func TestVChannelRecoveryModuleConsumesOnlyDirtySegments(t *testing.T) {
 		}
 	}
 	assert.Equal(t, []int64{30}, segmentIDs)
+}
+
+func TestVChannelRecoveryModuleConcurrentObserveAndSnapshot(t *testing.T) {
+	ctx := context.Background()
+	module := newTestModule(t, "p1", "v1")
+	module.runtime.Scheduler = &recordingScheduler{}
+	module.SwitchIntoMetaAndData()
+
+	const segmentCount = 500
+	messages := make([]message.ImmutableMessage, 0, segmentCount)
+	for i := 0; i < segmentCount; i++ {
+		messages = append(messages, newTestCreateSegmentMessage(t, "v1", int64(i+1), uint64(i+10)))
+	}
+	frontier := module.DataFrontier(moduleapi.Scope{
+		Type:     moduleapi.ScopeVChannel,
+		Kind:     moduleapi.DataProgressDurable,
+		VChannel: "v1",
+	})
+	require.NotNil(t, frontier)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for _, msg := range messages {
+			module.ObserveMessage(ctx, msg)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range messages {
+			module.ConsumeDirtySnapshots()
+			frontier.TimeTick()
+			module.IsActive()
+		}
+	}()
+	wg.Wait()
+
+	assert.Len(t, module.segments, segmentCount)
 }
 
 func TestManualFlushDeduplicatesPendingSegmentFinalCommit(t *testing.T) {
