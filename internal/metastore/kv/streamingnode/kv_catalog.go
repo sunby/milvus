@@ -375,7 +375,11 @@ func (c *catalog) ListQueryViews(ctx context.Context, pChannelName string) ([]*v
 			return nil, errors.Wrapf(err, "unmarshal query view %s failed", keys[idx])
 		}
 		key := typeutil.After(keys[idx], prefix)
-		expectedKey := typeutil.After(buildQueryViewKey(pChannelName, view.GetMeta()), prefix)
+		expectedFullKey, err := buildQueryViewKey(pChannelName, view.GetMeta())
+		if err != nil {
+			return nil, err
+		}
+		expectedKey := typeutil.After(expectedFullKey, prefix)
 		if key != expectedKey {
 			panic(fmt.Sprintf("mismatched query view recovery meta, key %s, meta %s", keys[idx], view.GetMeta().GetVchannel()))
 		}
@@ -394,15 +398,20 @@ func (c *catalog) SaveQueryViews(ctx context.Context, pChannelName string, views
 	removes := make([]string, 0)
 	for _, view := range views {
 		meta := view.GetMeta()
-		key := buildQueryViewKey(pChannelName, meta)
+		key, err := buildQueryViewKey(pChannelName, meta)
+		if err != nil {
+			return err
+		}
 		if meta.GetState() == viewpb.QueryViewState_QueryViewStateUp {
 			data, err := marshalQueryViewForPersistence(view)
 			if err != nil {
 				return errors.Wrapf(err, "marshal query view %s at pchannel %s failed", meta.GetVchannel(), pChannelName)
 			}
+			removes = removeString(removes, key)
 			kvs[key] = string(data)
 			continue
 		}
+		delete(kvs, key)
 		removes = append(removes, key)
 	}
 
@@ -525,13 +534,13 @@ func buildTransformLogKey(pChannelName string, vchannelName string) string {
 }
 
 // buildQueryViewKey returns the key for a specific StreamingNode query view recovery meta.
-func buildQueryViewKey(pChannelName string, meta *viewpb.QueryViewMeta) string {
+func buildQueryViewKey(pChannelName string, meta *viewpb.QueryViewMeta) (string, error) {
 	if meta == nil {
-		panic("query view meta is nil")
+		return "", merr.WrapErrServiceInternalMsg("query view meta is nil")
 	}
 	version := meta.GetVersion()
 	if version == nil || version.GetDataVersion() == nil {
-		panic(fmt.Sprintf("query view %s has nil version", meta.GetVchannel()))
+		return "", merr.WrapErrServiceInternalMsg("query view %s has nil version", meta.GetVchannel())
 	}
 	dataVersion := version.GetDataVersion()
 	return fmt.Sprintf("%s%d/%d/%s/%d/%d/%d",
@@ -542,7 +551,7 @@ func buildQueryViewKey(pChannelName string, meta *viewpb.QueryViewMeta) string {
 		dataVersion.GetStreamingVersion(),
 		dataVersion.GetCompactVersion(),
 		version.GetQueryVersion(),
-	)
+	), nil
 }
 
 // buildConsumeCheckpointKey returns the key for the consume checkpoint of a pchannel.
@@ -558,6 +567,17 @@ func marshalQueryViewForPersistence(view *viewpb.QueryViewOfShard) ([]byte, erro
 		}
 	}
 	return proto.Marshal(clone)
+}
+
+func removeString(values []string, value string) []string {
+	for idx := 0; idx < len(values); {
+		if values[idx] == value {
+			values = append(values[:idx], values[idx+1:]...)
+			continue
+		}
+		idx++
+	}
+	return values
 }
 
 // removePrefix removes the prefix from the keys.

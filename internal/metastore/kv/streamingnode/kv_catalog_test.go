@@ -188,10 +188,12 @@ func TestCatalogListRecoveryMetaWithRootPath(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, kv.Save(ctx, buildSegmentDataVersionSummaryKey("p1", "v1"), string(summaryValue)))
 
-	view := makeQueryViewForCatalogTest("p1_100v0", viewpb.QueryViewState_QueryViewStateUp)
+	view := makeQueryViewForCatalogTest("p1_1v0", viewpb.QueryViewState_QueryViewStateUp)
 	viewValue, err := marshalQueryViewForPersistence(view)
 	require.NoError(t, err)
-	require.NoError(t, kv.Save(ctx, buildQueryViewKey("p1", view.GetMeta()), string(viewValue)))
+	queryViewKey, err := buildQueryViewKey("p1", view.GetMeta())
+	require.NoError(t, err)
+	require.NoError(t, kv.Save(ctx, queryViewKey, string(viewValue)))
 
 	segments, err := catalog.ListSegmentAssignment(ctx, "p1")
 	require.NoError(t, err)
@@ -206,7 +208,7 @@ func TestCatalogListRecoveryMetaWithRootPath(t *testing.T) {
 	views, err := catalog.ListQueryViews(ctx, "p1")
 	require.NoError(t, err)
 	require.Len(t, views, 1)
-	assert.Equal(t, "p1_100v0", views[0].GetMeta().GetVchannel())
+	assert.Equal(t, "p1_1v0", views[0].GetMeta().GetVchannel())
 }
 
 func TestCatalogRetainsClosedRecoveryMeta(t *testing.T) {
@@ -760,8 +762,8 @@ func TestCatalogQueryViews(t *testing.T) {
 
 	catalog := NewCataLog(kv)
 	ctx := context.Background()
-	view := makeQueryViewForCatalogTest("p1_100v0", viewpb.QueryViewState_QueryViewStateUp)
-	key := "streamingnode-meta/wal/p1/query-view/1/10/p1_100v0/20/0/30"
+	view := makeQueryViewForCatalogTest("p1_1v0", viewpb.QueryViewState_QueryViewStateUp)
+	key := "streamingnode-meta/wal/p1/query-view/1/10/p1_1v0/20/0/30"
 
 	require.NoError(t, catalog.SaveQueryViews(ctx, "p1", []*viewpb.QueryViewOfShard{view}))
 	require.Contains(t, storage, key)
@@ -769,7 +771,7 @@ func TestCatalogQueryViews(t *testing.T) {
 	views, err := catalog.ListQueryViews(ctx, "p1")
 	require.NoError(t, err)
 	require.Len(t, views, 1)
-	require.Equal(t, "p1_100v0", views[0].GetMeta().GetVchannel())
+	require.Equal(t, "p1_1v0", views[0].GetMeta().GetVchannel())
 
 	views, err = catalog.ListQueryViews(ctx, "p2")
 	require.NoError(t, err)
@@ -788,6 +790,19 @@ func TestCatalogQueryViews(t *testing.T) {
 		require.NoError(t, catalog.SaveQueryViews(ctx, "p1", []*viewpb.QueryViewOfShard{view}))
 		require.NotContains(t, storage, key)
 	}
+
+	view.Meta.State = viewpb.QueryViewState_QueryViewStateUp
+	nextView := proto.Clone(view).(*viewpb.QueryViewOfShard)
+	nextView.Meta.Version.DataVersion.StreamingVersion = 21
+	nextView.Meta.Version.QueryVersion = 1
+	nextKey := "streamingnode-meta/wal/p1/query-view/1/10/p1_1v0/21/0/1"
+	require.NoError(t, catalog.SaveQueryViews(ctx, "p1", []*viewpb.QueryViewOfShard{view, nextView}))
+	require.Contains(t, storage, key)
+	require.Contains(t, storage, nextKey)
+
+	views, err = catalog.ListQueryViews(ctx, "p1")
+	require.NoError(t, err)
+	require.Len(t, views, 2)
 }
 
 func makeQueryViewForCatalogTest(vchannel string, state viewpb.QueryViewState) *viewpb.QueryViewOfShard {
