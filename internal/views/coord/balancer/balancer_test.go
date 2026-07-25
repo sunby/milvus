@@ -233,3 +233,20 @@ func TestBalancer_StartStop(t *testing.T) {
 	b.Stop()
 	b.Stop()
 }
+
+func TestTriggerQueueBatchCapturesTriggerScope(t *testing.T) {
+	shardID := qviews.ShardID{ReplicaID: 10, VChannel: "v0"}
+	queue := newTriggerQueue()
+	queue.add(TriggerScope{
+		DirtyNodes:       []int64{1, 2},
+		DirtyShards:      []qviews.ShardID{shardID},
+		DirtyCollections: []int64{100},
+	})
+
+	batch := queue.takePending()
+	assert.False(t, batch.full)
+	assert.Len(t, batch.dirtyNodes, 2)
+	assert.Len(t, batch.dirtyShards, 1)
+	assert.Len(t, batch.dirtyColls, 1)
+	assert.Equal(t, []qviews.ShardID{shardID}, batch.expand(&BalancerSnapshot{}))
+}
