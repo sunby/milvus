@@ -175,10 +175,14 @@ func (b *DefaultBalancer) Reconcile(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	totalStartedAt := time.Now()
+	triggerStartedAt := time.Now()
 	pending := b.queue.takePending()
+	triggerDuration := time.Since(triggerStartedAt)
 	if pending.empty() {
 		return nil
 	}
+	snapshotStartedAt := time.Now()
 	if pending.full {
 		if policy, ok := b.policy.(*DefaultBalancePolicy); ok {
 			policy.mu.Lock()
@@ -192,9 +196,12 @@ func (b *DefaultBalancer) Reconcile(ctx context.Context) error {
 	}
 	reader := newPlanningContext(b.cache)
 	dirty := resolveCacheScope(reader, pending)
+	snapshotDuration := time.Since(snapshotStartedAt)
 	if len(dirty) == 0 {
+		logReconcileStats(ctx, pending, 0, nil, snapshotDuration, triggerDuration, 0, 0, time.Since(totalStartedAt), nil)
 		return nil
 	}
+	planStartedAt := time.Now()
 	dirty, err := b.readSchemaVersions(ctx, reader, dirty)
 	plan := b.policy.Plan(reader, dirty)
 	if plan != nil {
@@ -207,9 +214,54 @@ func (b *DefaultBalancer) Reconcile(ctx context.Context) error {
 			return cfg != nil && manager != nil && manager.PublishedRecovery(reader.SchemaVersion(cfg.CollectionID)) != nil
 		})
 	}
+	planDuration := time.Since(planStartedAt)
+	applyStartedAt := time.Now()
 	applyErr := b.apply(ctx, plan)
 	recoveryErr := b.recoverPublishedSchemas(ctx, reader, dirty)
-	return errors.CombineErrors(err, errors.CombineErrors(applyErr, recoveryErr))
+	applyDuration := time.Since(applyStartedAt)
+	err = errors.CombineErrors(err, errors.CombineErrors(applyErr, recoveryErr))
+	logReconcileStats(ctx, pending, len(dirty), plan, snapshotDuration, triggerDuration, planDuration, applyDuration, time.Since(totalStartedAt), err)
+	return err
+}
+
+func logReconcileStats(
+	ctx context.Context,
+	batch triggerBatch,
+	reconciledShardCount int,
+	plan *BalancePlan,
+	snapshotDuration time.Duration,
+	triggerDuration time.Duration,
+	planDuration time.Duration,
+	applyDuration time.Duration,
+	totalDuration time.Duration,
+	err error,
+) {
+	prepareCount := 0
+	releaseCount := 0
+	if plan != nil {
+		prepareCount = len(plan.Prepares)
+		releaseCount = len(plan.Releases)
+	}
+	fields := []mlog.Field{
+		mlog.String("phase", "qc.recovery_reconcile"),
+		mlog.Bool("fullScan", batch.full),
+		mlog.Int("dirtyNodes", len(batch.dirtyNodes)),
+		mlog.Int("dirtyShards", len(batch.dirtyShards)),
+		mlog.Int("dirtyCollections", len(batch.dirtyColls)),
+		mlog.Int("reconciledShards", reconciledShardCount),
+		mlog.Int("prepareCount", prepareCount),
+		mlog.Int("releaseCount", releaseCount),
+		mlog.Duration("snapshotDuration", snapshotDuration),
+		mlog.Duration("triggerDrainDuration", triggerDuration),
+		mlog.Duration("planDuration", planDuration),
+		mlog.Duration("applyDuration", applyDuration),
+		mlog.Duration("totalDuration", totalDuration),
+	}
+	if err != nil {
+		mlog.Warn(ctx, "[SN recovery] query view reconcile completed with errors", append(fields, mlog.Err(err))...)
+		return
+	}
+	mlog.Info(ctx, "[SN recovery] query view reconcile completed", fields...)
 }
 
 func (b *DefaultBalancer) apply(ctx context.Context, plan *BalancePlan) error {
