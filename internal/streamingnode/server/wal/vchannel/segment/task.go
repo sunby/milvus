@@ -133,13 +133,28 @@ func (s *SegmentView) newFlushL1BufferTaskLocked() segmentTask {
 }
 
 func (s *SegmentView) newCommitL1SegmentTaskLocked(timetick uint64) segmentTask {
-	if s.finalCommitDone || (s.pendingFinalCommit != nil && !s.pendingFinalCommit.Done()) {
+	if !s.canScheduleFinalCommitLocked() {
 		return nil
 	}
+	return s.newCommitL1SegmentTaskWithFlushTimeTickLocked(timetick, s.enqueuePendingFlushChunkLocked())
+}
+
+func (s *SegmentView) newRecoveredCommitL1SegmentTaskLocked(timetick uint64) segmentTask {
+	if !s.canScheduleFinalCommitLocked() {
+		return nil
+	}
+	return s.newCommitL1SegmentTaskWithFlushTimeTickLocked(timetick, 0)
+}
+
+func (s *SegmentView) canScheduleFinalCommitLocked() bool {
+	return !s.finalCommitDone && (s.pendingFinalCommit == nil || s.pendingFinalCommit.Done())
+}
+
+func (s *SegmentView) newCommitL1SegmentTaskWithFlushTimeTickLocked(timetick, flushTimeTick uint64) segmentTask {
 	task := &commitL1SegmentTask{
 		segmentTaskBase: s.newSegmentTaskBaseLocked(),
 		timetick:        timetick,
-		flushTimeTick:   s.enqueuePendingFlushChunkLocked(),
+		flushTimeTick:   flushTimeTick,
 	}
 	s.pendingFinalCommit = task
 	s.pendingTasks = append(s.pendingTasks, task)

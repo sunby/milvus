@@ -104,6 +104,7 @@ func TestRecoveredFinalCommitIsNotRepeated(t *testing.T) {
 	meta.State = streamingpb.SegmentAssignmentState_SEGMENT_ASSIGNMENT_STATE_FLUSHED
 	meta.CheckpointTimeTick = 30
 	meta.DataCheckpointTimeTick = 30
+	meta.SealedAtDataVersion = &viewpb.DataVersion{StreamingVersion: 10}
 	segment := NewSegmentViewFromMeta(
 		meta,
 		&schemapb.CollectionSchema{},
@@ -117,6 +118,28 @@ func TestRecoveredFinalCommitIsNotRepeated(t *testing.T) {
 	require.NoError(t, task.Execute(context.Background()))
 	assert.True(t, task.Done())
 	assert.Empty(t, recorder.commitSegmentIDs)
+}
+
+func TestRecoveredDataCheckpointDoesNotProveFinalCommit(t *testing.T) {
+	recorder := &segmentTaskRecorder{}
+	meta := newFinalCommitTestMeta(100)
+	meta.State = streamingpb.SegmentAssignmentState_SEGMENT_ASSIGNMENT_STATE_FLUSHED
+	meta.CheckpointTimeTick = 30
+	meta.DataCheckpointTimeTick = 30
+	segment := NewSegmentViewFromMeta(
+		meta,
+		&schemapb.CollectionSchema{},
+		runtimeConfig{lifecycle: recorder, metaAndData: true},
+	)
+	task := &commitL1SegmentTask{
+		segmentTaskBase: segmentTaskBase{segment: segment},
+		timetick:        30,
+	}
+
+	require.NoError(t, task.Execute(context.Background()))
+
+	assert.True(t, task.Done())
+	assert.Equal(t, []int64{100}, recorder.commitSegmentIDs)
 }
 
 type testSegmentTask struct {

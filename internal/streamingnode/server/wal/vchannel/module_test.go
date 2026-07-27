@@ -187,6 +187,52 @@ func TestVChannelRecoveryModuleConcurrentObserveAndSnapshot(t *testing.T) {
 	assert.Len(t, module.segments, segmentCount)
 }
 
+func TestRecoveredDurableSegmentRetriesMissingFinalCommit(t *testing.T) {
+	for name, state := range map[string]streamingpb.SegmentAssignmentState{
+		"flushed":    streamingpb.SegmentAssignmentState_SEGMENT_ASSIGNMENT_STATE_FLUSHED,
+		"tombstoned": streamingpb.SegmentAssignmentState_SEGMENT_ASSIGNMENT_STATE_TOMBSTONED,
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			taskScheduler := &recordingScheduler{}
+			lifecycle := &recordingSegmentLifecycle{}
+			module := newTestModule(t, "p1", "v1")
+			module.runtime.Scheduler = taskScheduler
+			module.segmentLifecycle = lifecycle
+
+			meta := newTestGrowingSegmentMeta(10, 10)
+			meta.State = state
+			meta.CheckpointTimeTick = 30
+			meta.DataCheckpointTimeTick = 30
+			if state == streamingpb.SegmentAssignmentState_SEGMENT_ASSIGNMENT_STATE_TOMBSTONED {
+				meta.TombstoneTimeTick = 30
+			}
+			var view *segment.SegmentView
+			view = segment.NewSegmentViewFromMetaWithOptions(
+				meta,
+				&schemapb.CollectionSchema{Name: "c100"},
+				module.segmentOptions(10, func() *segment.SegmentView { return view })...,
+			)
+			module.segments = map[int64]*segment.SegmentView{10: view}
+
+			module.SwitchIntoMetaAndData()
+
+			require.Len(t, taskScheduler.tasks, 1)
+			frontier := module.DataFrontier(moduleapi.Scope{
+				Type:     moduleapi.ScopeVChannel,
+				Kind:     moduleapi.DataProgressDurable,
+				VChannel: "v1",
+			})
+			require.NotNil(t, frontier)
+			assert.Equal(t, uint64(29), frontier.TimeTick())
+			require.NoError(t, taskScheduler.tasks[0].Execute(ctx))
+
+			assert.Equal(t, []int64{10}, lifecycle.committedSegmentIDs)
+			assert.NotNil(t, view.AssignmentMeta().GetSealedAtDataVersion())
+		})
+	}
+}
+
 func TestManualFlushDeduplicatesPendingSegmentFinalCommit(t *testing.T) {
 	ctx := context.Background()
 	taskScheduler := &recordingScheduler{}
