@@ -142,6 +142,8 @@ func groupSegmentsByVChannel(segments map[int64]*streamingpb.SegmentAssignmentMe
 }
 
 func (m *PChannelRecoveryManager) releaseInitialState() {
+	// Recovery modules now own the state needed after initialization. Keep only
+	// the shared runtime dependencies required to create future vchannels.
 	m.config.VChannelMetas = nil
 	m.config.Segments = nil
 	m.config.SegmentDataVersionSummary = nil

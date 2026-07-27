@@ -148,6 +148,7 @@ func TestPChannelRecoveryManagerReleasesInitialState(t *testing.T) {
 	assert.Equal(t, int64(101), segmentID)
 	assert.Equal(t, "v1", vchannel)
 }
+
 func TestPChannelRecoveryManagerConsumesDirtySnapshotsFromUpdatedModule(t *testing.T) {
 	ctx := context.Background()
 	manager := newTestManager(t, "p1", "v1")
