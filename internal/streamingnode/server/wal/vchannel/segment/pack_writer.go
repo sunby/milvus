@@ -3,7 +3,6 @@ package segment
 import (
 	"context"
 	"path"
-	"strconv"
 
 	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
@@ -25,7 +24,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/streamingpb"
-	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/retry"
@@ -33,22 +31,14 @@ import (
 )
 
 type growingBulkPackWriter struct {
-	chunkManager          storage.ChunkManager
-	allocator             allocator.Interface
-	storageConfig         *indexpb.StorageConfig
-	writeRetryOpts        []retry.Option
-	writeFn               growingBulkWriteFunc
-	resolveManifestFormat manifestFormatResolver
+	chunkManager   storage.ChunkManager
+	allocator      allocator.Interface
+	storageConfig  *indexpb.StorageConfig
+	writeRetryOpts []retry.Option
+	writeFn        growingBulkWriteFunc
 }
 
 type growingBulkWriteFunc func(context.Context, *growingBulkWriteRequest) (*growingBulkWriteResult, error)
-
-type manifestFormatResolver func(
-	manifestPath string,
-	storageConfig *indexpb.StorageConfig,
-	columns []string,
-	fallbackFormat string,
-) (string, error)
 
 type growingBulkWriteRequest struct {
 	syncPack       *syncmgr.SyncPack
@@ -81,12 +71,11 @@ func NewBulkPackWriter(
 		storageConfig = packed.CreateStorageConfig()
 	}
 	return &growingBulkPackWriter{
-		chunkManager:          chunkManager,
-		allocator:             allocator,
-		storageConfig:         storageConfig,
-		writeRetryOpts:        writeRetryOpts,
-		writeFn:               writeGrowingBulkPack,
-		resolveManifestFormat: packed.ResolveManifestSingleWriterFormat,
+		chunkManager:   chunkManager,
+		allocator:      allocator,
+		storageConfig:  storageConfig,
+		writeRetryOpts: writeRetryOpts,
+		writeFn:        writeGrowingBulkPack,
 	}
 }
 
@@ -106,10 +95,6 @@ func (w *growingBulkPackWriter) FlushInsertBuffer(ctx context.Context, pack *flu
 	}
 
 	metaCache := newGrowingSegmentMetaCache(pack.Meta, schema)
-	currentSplit, err := w.currentSplitForGrowingPack(schema, insertData, pack.Meta)
-	if err != nil {
-		return nil, err
-	}
 	syncPack := new(syncmgr.SyncPack).
 		WithCollectionID(pack.CollectionID).
 		WithPartitionID(pack.PartitionID).
@@ -129,7 +114,7 @@ func (w *growingBulkPackWriter) FlushInsertBuffer(ctx context.Context, pack *flu
 		storageConfig:  w.storageConfig,
 		writeRetryOpts: w.writeRetryOpts,
 		storageVersion: pack.Meta.GetStorageVersion(),
-		currentSplit:   currentSplit,
+		currentSplit:   currentSplitForGrowingPack(schema, insertData, pack.Meta),
 		manifestPath:   manifestPathForGrowingPack(pack.Meta),
 	}
 	writeResult, err := writeFn(ctx, request)
@@ -295,20 +280,15 @@ func currentSplitFromPersistedStorage(schema *schemapb.CollectionSchema, storage
 	for idx, field := range typeutil.GetAllFieldSchemas(schema) {
 		fieldIndexes[field.GetFieldID()] = idx
 	}
-	var fallback []storagecommon.ColumnGroup
 	for _, binlogBatch := range storage.GetBinlogs() {
 		if len(binlogBatch.GetFieldBinlog()) == 0 {
 			continue
 		}
 		result := make([]storagecommon.ColumnGroup, 0, len(binlogBatch.GetFieldBinlog()))
-		complete := true
 		for _, fieldBinlog := range binlogBatch.GetFieldBinlog() {
 			fields := fieldBinlog.GetChildFields()
 			if len(fields) == 0 {
 				return nil
-			}
-			if fieldBinlog.GetFormat() == "" {
-				complete = false
 			}
 			result = append(result, storagecommon.ColumnGroup{
 				GroupID: fieldBinlog.GetFieldID(),
@@ -317,74 +297,37 @@ func currentSplitFromPersistedStorage(schema *schemapb.CollectionSchema, storage
 				Format:  fieldBinlog.GetFormat(),
 			})
 		}
-		if complete {
-			return result
-		}
-		if fallback == nil {
-			fallback = result
-		}
+		return result
 	}
-	return fallback
+	return nil
 }
 
-func (w *growingBulkPackWriter) currentSplitForGrowingPack(
+func currentSplitForGrowingPack(
 	schema *schemapb.CollectionSchema,
 	insertData []*storage.InsertData,
 	meta *streamingpb.SegmentAssignmentMeta,
-) ([]storagecommon.ColumnGroup, error) {
+) []storagecommon.ColumnGroup {
 	switch meta.GetStorageVersion() {
 	case storage.StorageV2, storage.StorageV3:
 	default:
-		return nil, nil
+		return nil
 	}
 
 	currentSplit := currentSplitFromPersistedStorage(schema, meta.GetPersistedStorage())
-	recoveredFromStorage := len(currentSplit) > 0
-	if !recoveredFromStorage {
-		currentSplit = storagecommon.SplitColumns(
-			typeutil.GetAllFieldSchemas(schema),
-			calcGrowingColumnStats(insertData),
-			storagecommon.DefaultPolicies()...,
-		)
-	}
-
 	writerFormat := paramtable.Get().DataNodeCfg.StorageFormat.GetValue()
-	if meta.GetStorageVersion() != storage.StorageV3 {
-		return storagecommon.FillColumnGroupFormats(currentSplit, writerFormat), nil
+	if len(currentSplit) > 0 {
+		if meta.GetStorageVersion() == storage.StorageV3 {
+			return currentSplit
+		}
+		return storagecommon.FillColumnGroupFormats(currentSplit, writerFormat)
 	}
 
-	manifestPath := manifestPathForGrowingPack(meta)
-	_, version, err := packed.UnmarshalManifestPath(manifestPath)
-	if err != nil {
-		return nil, merr.WrapErrDataIntegrity(err, "parse manifest path for growing segment %d", meta.GetSegmentId())
-	}
-	if version == packed.ManifestEarliest {
-		return storagecommon.FillColumnGroupFormats(currentSplit, writerFormat), nil
-	}
-
-	resolveManifestFormat := w.resolveManifestFormat
-	if resolveManifestFormat == nil {
-		resolveManifestFormat = packed.ResolveManifestSingleWriterFormat
-	}
-	for idx, columnGroup := range currentSplit {
-		if recoveredFromStorage && columnGroup.Format != "" {
-			continue
-		}
-		columns := lo.Map(columnGroup.Fields, func(fieldID int64, _ int) string {
-			return strconv.FormatInt(fieldID, 10)
-		})
-		format, err := resolveManifestFormat(manifestPath, w.storageConfig, columns, "")
-		if err != nil {
-			return nil, merr.Wrapf(err, "resolve manifest format for growing segment %d column group %d", meta.GetSegmentId(), columnGroup.GroupID)
-		}
-		if format == "" {
-			return nil, merr.WrapErrDataIntegrityMsg(
-				"manifest %s has no writer format for growing segment %d column group %d fields %v",
-				manifestPath, meta.GetSegmentId(), columnGroup.GroupID, columnGroup.Fields)
-		}
-		currentSplit[idx].Format = format
-	}
-	return currentSplit, nil
+	currentSplit = storagecommon.SplitColumns(
+		typeutil.GetAllFieldSchemas(schema),
+		calcGrowingColumnStats(insertData),
+		storagecommon.DefaultPolicies()...,
+	)
+	return storagecommon.FillColumnGroupFormats(currentSplit, writerFormat)
 }
 
 func calcGrowingColumnStats(insertData []*storage.InsertData) map[int64]storagecommon.ColumnStats {

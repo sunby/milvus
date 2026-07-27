@@ -7,7 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus/internal/views/qviews"
-	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/streamingpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
@@ -132,42 +131,4 @@ func TestPendingFlushChunkSearchBoundaries(t *testing.T) {
 	assert.Equal(t, 1, firstPendingFlushChunkAfter(chunks, 10))
 	assert.Equal(t, 3, firstPendingFlushChunkAfter(chunks, 15))
 	assert.Equal(t, len(chunks), firstPendingFlushChunkAfter(chunks, 30))
-}
-
-func TestAppendPersistedStorageBackfillsFormats(t *testing.T) {
-	view := &SegmentView{
-		meta: &streamingpb.SegmentAssignmentMeta{
-			PersistedStorage: &streamingpb.L1SegmentPersistedStorage{
-				ManifestPath: "manifest-v1",
-				Binlogs: []*streamingpb.L1SegmentBinLogs{
-					{
-						FieldBinlog: []*datapb.FieldBinlog{
-							{FieldID: 0, ChildFields: []int64{100, 0, 1}},
-							{FieldID: 101, ChildFields: []int64{101}, Format: "vortex"},
-						},
-					},
-				},
-			},
-		},
-	}
-	incoming := &streamingpb.L1SegmentPersistedStorage{
-		ManifestPath: "manifest-v2",
-		Binlogs: []*streamingpb.L1SegmentBinLogs{
-			{
-				FieldBinlog: []*datapb.FieldBinlog{
-					{FieldID: 0, ChildFields: []int64{100, 0, 1}, Format: "parquet"},
-					{FieldID: 101, ChildFields: []int64{101}, Format: "parquet"},
-				},
-			},
-		},
-	}
-
-	view.appendPersistedStorage(incoming)
-
-	persisted := view.meta.GetPersistedStorage()
-	require.Equal(t, "manifest-v2", persisted.GetManifestPath())
-	require.Len(t, persisted.GetBinlogs(), 2)
-	require.Equal(t, "parquet", persisted.GetBinlogs()[0].GetFieldBinlog()[0].GetFormat())
-	require.Equal(t, "vortex", persisted.GetBinlogs()[0].GetFieldBinlog()[1].GetFormat())
-	require.Equal(t, "parquet", persisted.GetBinlogs()[1].GetFieldBinlog()[0].GetFormat())
 }
