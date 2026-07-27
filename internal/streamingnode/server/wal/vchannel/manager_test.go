@@ -2,6 +2,7 @@ package vchannel
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -85,18 +86,114 @@ func TestPChannelRecoveryManagerSwitchAggregatesVChannelMetaSnapshot(t *testing.
 	assert.ElementsMatch(t, []string{"v1", "v2"}, mapKeys(vchannelSnapshots[0].VChannels))
 }
 
-func TestGroupSegmentsByVChannel(t *testing.T) {
-	segments := map[int64]*streamingpb.SegmentAssignmentMeta{
-		1: {SegmentId: 1, Vchannel: "v1"},
-		2: {SegmentId: 2, Vchannel: "v2"},
-		3: {SegmentId: 3, Vchannel: "v1"},
-		4: {SegmentId: 4},
+func TestBuildInitialVChannelStates(t *testing.T) {
+	vchannelMeta := newTestVChannelMeta("v1")
+	v1Segment := &streamingpb.SegmentAssignmentMeta{SegmentId: 101, Vchannel: "v1"}
+	v2Segment := &streamingpb.SegmentAssignmentMeta{SegmentId: 202, Vchannel: "v2"}
+	versionSummary := &streamingpb.SegmentDataVersionSummary{}
+	transformLogMeta := &streamingpb.VChannelTransformLogMeta{CheckpointTimeTick: 40}
+
+	states := buildInitialVChannelStates(PChannelManagerConfig{
+		VChannelMetas: map[string]*streamingpb.VChannelMeta{
+			"v1": vchannelMeta,
+		},
+		Segments: map[int64]*streamingpb.SegmentAssignmentMeta{
+			101: v1Segment,
+			202: v2Segment,
+			303: {SegmentId: 303},
+		},
+		SegmentDataVersionSummary: map[string]*streamingpb.SegmentDataVersionSummary{
+			"v3": versionSummary,
+		},
+		TransformLogMetas: map[string]*streamingpb.VChannelTransformLogMeta{
+			"v4": transformLogMeta,
+		},
+	})
+
+	assert.Equal(t, []string{"v1", "v2", "v3", "v4"}, sortedInitialVChannels(states))
+	require.NotContains(t, states, "")
+	require.Same(t, vchannelMeta, states["v1"].vchannelMeta)
+	require.Equal(t, map[int64]*streamingpb.SegmentAssignmentMeta{101: v1Segment}, states["v1"].segments)
+	require.Equal(t, map[int64]*streamingpb.SegmentAssignmentMeta{202: v2Segment}, states["v2"].segments)
+	require.Same(t, versionSummary, states["v3"].segmentDataVersionSummary)
+	require.Same(t, transformLogMeta, states["v4"].transformLogMeta)
+}
+
+func TestPChannelRecoveryManagerReleasesInitialState(t *testing.T) {
+	vchannelMeta := newTestVChannelMeta("v1")
+	segmentMeta := &streamingpb.SegmentAssignmentMeta{
+		SegmentId:    101,
+		CollectionId: 100,
+		PartitionId:  10,
+		Vchannel:     "v1",
+		State:        streamingpb.SegmentAssignmentState_SEGMENT_ASSIGNMENT_STATE_GROWING,
+		Stat:         &streamingpb.SegmentAssignmentStat{},
+	}
+	vchannelMetas := map[string]*streamingpb.VChannelMeta{"v1": vchannelMeta}
+	segments := map[int64]*streamingpb.SegmentAssignmentMeta{101: segmentMeta}
+	versionSummary := &streamingpb.SegmentDataVersionSummary{
+		DataVersion: &viewpb.DataVersion{StreamingVersion: 10, CompactVersion: 20},
+	}
+	transformLogMeta := &streamingpb.VChannelTransformLogMeta{CheckpointTimeTick: 30}
+	versionSummaries := map[string]*streamingpb.SegmentDataVersionSummary{"v1": versionSummary}
+	transformLogMetas := map[string]*streamingpb.VChannelTransformLogMeta{"v1": transformLogMeta}
+
+	manager, err := NewPChannelRecoveryManager(PChannelManagerConfig{
+		PChannel:                  "p1",
+		VChannelMetas:             vchannelMetas,
+		Segments:                  segments,
+		SegmentDataVersionSummary: versionSummaries,
+		TransformLogMetas:         transformLogMetas,
+	})
+	require.NoError(t, err)
+	t.Cleanup(manager.Close)
+
+	assert.Nil(t, manager.config.VChannelMetas)
+	assert.Nil(t, manager.config.Segments)
+	assert.Nil(t, manager.config.SegmentDataVersionSummary)
+	assert.Nil(t, manager.config.TransformLogMetas)
+	require.Same(t, vchannelMeta, vchannelMetas["v1"])
+	require.Same(t, segmentMeta, segments[101])
+	require.Same(t, versionSummary, versionSummaries["v1"])
+	require.Same(t, transformLogMeta, transformLogMetas["v1"])
+
+	module := manager.Module("v1")
+	require.NotNil(t, module)
+	require.True(t, proto.Equal(vchannelMeta, module.vchannelView.AssignmentMeta()))
+	require.True(t, proto.Equal(versionSummary, module.segmentDataVersionSummary))
+	require.True(t, proto.Equal(transformLogMeta, module.transformLog.SnapshotMeta()))
+	require.Contains(t, module.segments, int64(101))
+	segmentID, vchannel := module.segments[101].IDAndVChannel()
+	assert.Equal(t, int64(101), segmentID)
+	assert.Equal(t, "v1", vchannel)
+}
+
+func BenchmarkBuildInitialVChannelStates(b *testing.B) {
+	const (
+		vchannelCount = 62_500
+		segmentCount  = 58_000
+	)
+	config := PChannelManagerConfig{
+		VChannelMetas: make(map[string]*streamingpb.VChannelMeta, vchannelCount),
+		Segments:      make(map[int64]*streamingpb.SegmentAssignmentMeta, segmentCount),
+	}
+	for i := 0; i < vchannelCount; i++ {
+		vchannel := "v" + strconv.Itoa(i)
+		config.VChannelMetas[vchannel] = &streamingpb.VChannelMeta{Vchannel: vchannel}
+	}
+	for i := 0; i < segmentCount; i++ {
+		vchannel := "v" + strconv.Itoa(i%vchannelCount)
+		config.Segments[int64(i)] = &streamingpb.SegmentAssignmentMeta{SegmentId: int64(i), Vchannel: vchannel}
 	}
 
-	grouped := groupSegmentsByVChannel(segments)
-	require.Len(t, grouped, 2)
-	assert.ElementsMatch(t, []int64{1, 3}, mapKeys(grouped["v1"]))
-	assert.ElementsMatch(t, []int64{2}, mapKeys(grouped["v2"]))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		states := buildInitialVChannelStates(config)
+		if len(states) != vchannelCount {
+			b.Fatalf("unexpected state count: %d", len(states))
+		}
+	}
 }
 
 func TestPChannelRecoveryManagerConsumesDirtySnapshotsFromUpdatedModule(t *testing.T) {
