@@ -131,14 +131,16 @@ func TestRecoveredDataCheckpointDoesNotProveFinalCommit(t *testing.T) {
 		&schemapb.CollectionSchema{},
 		runtimeConfig{lifecycle: recorder, metaAndData: true},
 	)
-	task := &commitL1SegmentTask{
-		segmentTaskBase: segmentTaskBase{segment: segment},
-		timetick:        30,
-	}
+	segment.mu.Lock()
+	task := segment.newRecoveredCommitL1SegmentTaskLocked(30)
+	segment.mu.Unlock()
+	recovered, ok := task.(*commitL1SegmentTask)
+	require.True(t, ok)
+	assert.Zero(t, recovered.flushTimeTick)
 
-	require.NoError(t, task.Execute(context.Background()))
+	require.NoError(t, recovered.Execute(context.Background()))
 
-	assert.True(t, task.Done())
+	assert.True(t, recovered.Done())
 	assert.Equal(t, []int64{100}, recorder.commitSegmentIDs)
 }
 

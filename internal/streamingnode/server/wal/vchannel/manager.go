@@ -49,20 +49,17 @@ type PChannelManagerConfig struct {
 	NodeScheduler              nodescheduler.Scheduler
 }
 
-type initialVChannelState struct {
-	vchannelMeta              *streamingpb.VChannelMeta
-	segments                  map[int64]*streamingpb.SegmentAssignmentMeta
-	segmentDataVersionSummary *streamingpb.SegmentDataVersionSummary
-	transformLogMeta          *streamingpb.VChannelTransformLogMeta
-}
-
 // PChannelRecoveryManager owns all vchannel recovery modules on one pchannel.
 type PChannelRecoveryManager struct {
 	pchannel string
 	modules  *typeutil.ConcurrentMap[string, *VChannelRecoveryModule]
 
-	dirtyMu               sync.Mutex
-	dirtyModules          map[string]*VChannelRecoveryModule
+	segmentsByVChannel map[string]map[int64]*streamingpb.SegmentAssignmentMeta
+	dirtyMu            sync.Mutex
+	dirtyModules       map[string]*VChannelRecoveryModule
+	// frontierMu serializes generation checks with both cached frontier updates.
+	frontierMu            sync.Mutex
+	frontierGenerations   map[string]uint64
 	durableFrontiers      *minimumFrontierIndex[string]
 	materializedFrontiers *minimumFrontierIndex[string]
 
@@ -77,15 +74,13 @@ func NewPChannelRecoveryManager(config PChannelManagerConfig) (*PChannelRecovery
 	if config.PChannel == "" {
 		return nil, merr.WrapErrServiceInternalMsg("pchannel recovery manager pchannel is empty")
 	}
-	initialStates := buildInitialVChannelStates(config)
-	config.VChannelMetas = nil
-	config.Segments = nil
-	config.SegmentDataVersionSummary = nil
-	config.TransformLogMetas = nil
+	segmentsByVChannel := groupSegmentsByVChannel(config.Segments)
 	manager := &PChannelRecoveryManager{
 		pchannel:              config.PChannel,
 		modules:               typeutil.NewConcurrentMap[string, *VChannelRecoveryModule](),
+		segmentsByVChannel:    segmentsByVChannel,
 		dirtyModules:          make(map[string]*VChannelRecoveryModule),
+		frontierGenerations:   make(map[string]uint64),
 		durableFrontiers:      newMinimumFrontierIndex[string](),
 		materializedFrontiers: newMinimumFrontierIndex[string](),
 		config:                config,
@@ -98,8 +93,8 @@ func NewPChannelRecoveryManager(config PChannelManagerConfig) (*PChannelRecovery
 		return nil, err
 	}
 	manager.queryTransformLogStream = queryTransformLogStream
-	for _, vchannel := range sortedInitialVChannels(initialStates) {
-		module, err := manager.newModule(vchannel, initialStates[vchannel])
+	for _, vchannel := range manager.initialVChannels(config) {
+		module, err := manager.newModule(vchannel)
 		if err != nil {
 			manager.Close()
 			return nil, err
@@ -108,50 +103,53 @@ func NewPChannelRecoveryManager(config PChannelManagerConfig) (*PChannelRecovery
 		manager.refreshModuleFrontiers(module)
 		manager.syncTransformLogStream(module)
 	}
+	manager.releaseInitialState()
 	return manager, nil
 }
 
-// buildInitialVChannelStates groups recovered metadata once so creating each
-// vchannel module does not rescan every recovered segment.
-func buildInitialVChannelStates(config PChannelManagerConfig) map[string]initialVChannelState {
-	states := make(map[string]initialVChannelState, len(config.VChannelMetas))
-	for vchannel, meta := range config.VChannelMetas {
-		state := states[vchannel]
-		state.vchannelMeta = meta
-		states[vchannel] = state
+func (m *PChannelRecoveryManager) initialVChannels(config PChannelManagerConfig) []string {
+	index := make(map[string]struct{})
+	for vchannel := range config.VChannelMetas {
+		index[vchannel] = struct{}{}
 	}
-	for id, meta := range config.Segments {
-		vchannel := meta.GetVchannel()
-		if vchannel == "" {
-			continue
-		}
-		state := states[vchannel]
-		if state.segments == nil {
-			state.segments = make(map[int64]*streamingpb.SegmentAssignmentMeta)
-		}
-		state.segments[id] = meta
-		states[vchannel] = state
+	for vchannel := range m.segmentsByVChannel {
+		index[vchannel] = struct{}{}
 	}
-	for vchannel, summary := range config.SegmentDataVersionSummary {
-		state := states[vchannel]
-		state.segmentDataVersionSummary = summary
-		states[vchannel] = state
+	for vchannel := range config.SegmentDataVersionSummary {
+		index[vchannel] = struct{}{}
 	}
-	for vchannel, meta := range config.TransformLogMetas {
-		state := states[vchannel]
-		state.transformLogMeta = meta
-		states[vchannel] = state
+	for vchannel := range config.TransformLogMetas {
+		index[vchannel] = struct{}{}
 	}
-	return states
-}
-
-func sortedInitialVChannels(states map[string]initialVChannelState) []string {
-	vchannels := make([]string, 0, len(states))
-	for vchannel := range states {
+	vchannels := make([]string, 0, len(index))
+	for vchannel := range index {
 		vchannels = append(vchannels, vchannel)
 	}
 	sort.Strings(vchannels)
 	return vchannels
+}
+
+func groupSegmentsByVChannel(segments map[int64]*streamingpb.SegmentAssignmentMeta) map[string]map[int64]*streamingpb.SegmentAssignmentMeta {
+	grouped := make(map[string]map[int64]*streamingpb.SegmentAssignmentMeta)
+	for id, meta := range segments {
+		vchannel := meta.GetVchannel()
+		if vchannel == "" {
+			continue
+		}
+		if grouped[vchannel] == nil {
+			grouped[vchannel] = make(map[int64]*streamingpb.SegmentAssignmentMeta)
+		}
+		grouped[vchannel][id] = meta
+	}
+	return grouped
+}
+
+func (m *PChannelRecoveryManager) releaseInitialState() {
+	m.config.VChannelMetas = nil
+	m.config.Segments = nil
+	m.config.SegmentDataVersionSummary = nil
+	m.config.TransformLogMetas = nil
+	m.segmentsByVChannel = nil
 }
 
 func (m *PChannelRecoveryManager) Name() moduleapi.ModuleName {
@@ -388,7 +386,7 @@ func (m *PChannelRecoveryManager) moduleForMessage(msg message.ImmutableMessage)
 	if module != nil || msg.MessageType() != message.MessageTypeCreateCollection {
 		return module
 	}
-	module, err := m.newModule(vchannel, initialVChannelState{})
+	module, err := m.newModule(vchannel)
 	if err != nil {
 		return nil
 	}
@@ -408,7 +406,7 @@ func (m *PChannelRecoveryManager) moduleForMessage(msg message.ImmutableMessage)
 	return module
 }
 
-func (m *PChannelRecoveryManager) newModule(vchannel string, initialState initialVChannelState) (*VChannelRecoveryModule, error) {
+func (m *PChannelRecoveryManager) newModule(vchannel string) (*VChannelRecoveryModule, error) {
 	runtime := m.config.Runtime
 	runtime.Notifier = &dirtyTrackingNotifier{
 		inner: runtime.Notifier,
@@ -416,13 +414,13 @@ func (m *PChannelRecoveryManager) newModule(vchannel string, initialState initia
 			m.markModuleUpdatedByVChannel(vchannel)
 		},
 	}
-	return NewModule(ModuleConfig{
+	module, err := NewModule(ModuleConfig{
 		PChannel:                   m.pchannel,
 		VChannel:                   vchannel,
-		VChannelMeta:               initialState.vchannelMeta,
-		Segments:                   initialState.segments,
-		SegmentDataVersionSummary:  initialState.segmentDataVersionSummary,
-		TransformLogMeta:           initialState.transformLogMeta,
+		VChannelMeta:               m.config.VChannelMetas[vchannel],
+		Segments:                   m.segmentsByVChannel[vchannel],
+		SegmentDataVersionSummary:  m.config.SegmentDataVersionSummary[vchannel],
+		TransformLogMeta:           m.config.TransformLogMetas[vchannel],
 		Runtime:                    runtime,
 		Logger:                     m.config.Logger,
 		SegmentLifecycle:           m.config.SegmentLifecycle,
@@ -439,19 +437,19 @@ func (m *PChannelRecoveryManager) newModule(vchannel string, initialState initia
 		QueryViewLoadInfoProvider:  m.config.QueryViewLoadInfoProvider,
 		NodeScheduler:              m.config.NodeScheduler,
 		QueryRuntimeDispatcher:     m.queryDispatcher,
-		OnFrontierUpdated:          func() { m.refreshModuleFrontiersByVChannel(vchannel) },
 	})
+	if err != nil {
+		return nil, err
+	}
+	module.onFrontierUpdated = func(snapshot moduleFrontierSnapshot) {
+		m.updateModuleFrontiers(module, snapshot)
+	}
+	return module, nil
 }
 
 func (m *PChannelRecoveryManager) markModuleUpdatedByVChannel(vchannel string) {
 	if module := m.Module(vchannel); module != nil {
 		m.markModuleUpdated(module)
-	}
-}
-
-func (m *PChannelRecoveryManager) refreshModuleFrontiersByVChannel(vchannel string) {
-	if module := m.Module(vchannel); module != nil {
-		m.refreshModuleFrontiers(module)
 	}
 }
 
@@ -481,8 +479,21 @@ func (m *PChannelRecoveryManager) refreshModuleFrontiers(module *VChannelRecover
 	if module == nil {
 		return
 	}
-	m.durableFrontiers.Update(module.vchannel, module.dataFrontierTimeTick(moduleapi.DataProgressDurable))
-	m.materializedFrontiers.Update(module.vchannel, module.dataFrontierTimeTick(moduleapi.DataProgressMaterialized))
+	m.updateModuleFrontiers(module, module.frontierSnapshot())
+}
+
+func (m *PChannelRecoveryManager) updateModuleFrontiers(module *VChannelRecoveryModule, snapshot moduleFrontierSnapshot) {
+	if module == nil || m.Module(module.vchannel) != module {
+		return
+	}
+	m.frontierMu.Lock()
+	defer m.frontierMu.Unlock()
+	if generation := m.frontierGenerations[module.vchannel]; snapshot.generation <= generation {
+		return
+	}
+	m.frontierGenerations[module.vchannel] = snapshot.generation
+	m.durableFrontiers.Update(module.vchannel, snapshot.durableTimeTick)
+	m.materializedFrontiers.Update(module.vchannel, snapshot.materializedTimeTick)
 }
 
 type dirtyTrackingNotifier struct {
