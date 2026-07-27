@@ -137,6 +137,11 @@ func TestCurrentSplitForGrowingPackDoesNotGuessPersistedV3Format(t *testing.T) {
 	require.Empty(t, currentSplit[0].Format)
 }
 
+func TestCurrentSplitForGrowingPackIgnoresStorageV2(t *testing.T) {
+	meta := &streamingpb.SegmentAssignmentMeta{StorageVersion: storage.StorageV2}
+	require.Nil(t, currentSplitForGrowingPack(testGrowingPackSchema(), nil, meta))
+}
+
 func testGrowingPackSchema() *schemapb.CollectionSchema {
 	return &schemapb.CollectionSchema{
 		Fields: []*schemapb.FieldSchema{

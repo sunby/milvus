@@ -304,19 +304,13 @@ func currentSplitForGrowingPack(
 	insertData []*storage.InsertData,
 	meta *streamingpb.SegmentAssignmentMeta,
 ) []storagecommon.ColumnGroup {
-	switch meta.GetStorageVersion() {
-	case storage.StorageV2, storage.StorageV3:
-	default:
+	if meta.GetStorageVersion() != storage.StorageV3 {
 		return nil
 	}
 
 	currentSplit := currentSplitFromPersistedStorage(schema, meta.GetPersistedStorage())
-	writerFormat := paramtable.Get().DataNodeCfg.StorageFormat.GetValue()
 	if len(currentSplit) > 0 {
-		if meta.GetStorageVersion() == storage.StorageV3 {
-			return currentSplit
-		}
-		return storagecommon.FillColumnGroupFormats(currentSplit, writerFormat)
+		return currentSplit
 	}
 
 	currentSplit = storagecommon.SplitColumns(
@@ -324,7 +318,7 @@ func currentSplitForGrowingPack(
 		calcGrowingColumnStats(insertData),
 		storagecommon.DefaultPolicies()...,
 	)
-	return storagecommon.FillColumnGroupFormats(currentSplit, writerFormat)
+	return storagecommon.FillColumnGroupFormats(currentSplit, paramtable.Get().DataNodeCfg.StorageFormat.GetValue())
 }
 
 func calcGrowingColumnStats(insertData []*storage.InsertData) map[int64]storagecommon.ColumnStats {
