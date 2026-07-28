@@ -30,6 +30,7 @@ const (
 	DataStatLabel   = "stat"
 
 	persistentDataOpType = "persistent_data_op_type"
+	storageObjectType    = "object_type"
 )
 
 var (
@@ -58,6 +59,14 @@ var (
 			Name:      "op_count",
 			Help:      "count of persistent data operation",
 		}, []string{persistentDataOpType, statusLabelName})
+
+	PersistentDataGetObjectCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: milvusNamespace,
+			Subsystem: "storage",
+			Name:      "get_object_count",
+			Help:      "count of persistent data get operations by object type",
+		}, []string{storageObjectType, statusLabelName})
 
 	// Deprecated: filesystem metrics are collected from the filesystem cache at scrape time. Remove in v4.
 	FilesystemReadCount = prometheus.NewGaugeVec(
@@ -248,6 +257,7 @@ func RegisterStorageMetrics(registry *prometheus.Registry) {
 	registry.MustRegister(PersistentDataKvSize)
 	registry.MustRegister(PersistentDataRequestLatency)
 	registry.MustRegister(PersistentDataOpCounter)
+	registry.MustRegister(PersistentDataGetObjectCounter)
 
 	registry.MustRegister(&filesystemMetricsCollector{})
 }
