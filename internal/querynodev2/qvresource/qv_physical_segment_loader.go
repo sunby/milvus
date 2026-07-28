@@ -2,6 +2,7 @@ package qvresource
 
 import (
 	"context"
+	"time"
 
 	"github.com/milvus-io/milvus/internal/querynodev2/pkoracle"
 	"github.com/milvus-io/milvus/internal/querynodev2/qnview"
@@ -22,7 +23,12 @@ func (l *queryViewPhysicalSegmentLoader) Load(ctx context.Context, info *querypb
 		return nil, merr.WrapErrServiceInternalMsg("query view collection runtime is nil")
 	}
 
+	timing := segments.PhysicalLoadTimingFromContext(ctx)
+	startedAt := time.Now()
 	loaded, err := l.loader.NewSegment(ctx, collection, info)
+	if timing != nil {
+		timing.NewSegment = time.Since(startedAt)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -32,13 +38,28 @@ func (l *queryViewPhysicalSegmentLoader) Load(ctx context.Context, info *querypb
 			_ = loaded.Release(context.Background())
 		}
 	}()
-	if err := l.loader.LoadSegment(ctx, loaded, info); err != nil {
+	startedAt = time.Now()
+	err = l.loader.LoadSegment(ctx, loaded, info)
+	if timing != nil {
+		timing.LoadSegment = time.Since(startedAt)
+	}
+	if err != nil {
 		return nil, err
 	}
-	if err := l.loader.LoadDeltaLogs(ctx, loaded, info); err != nil {
+	startedAt = time.Now()
+	err = l.loader.LoadDeltaLogs(ctx, loaded, info)
+	if timing != nil {
+		timing.DeltaLogs = time.Since(startedAt)
+	}
+	if err != nil {
 		return nil, err
 	}
-	if err := l.loader.LoadPKCandidate(ctx, loaded, info); err != nil {
+	startedAt = time.Now()
+	err = l.loader.LoadPKCandidate(ctx, loaded, info)
+	if timing != nil {
+		timing.PKCandidate = time.Since(startedAt)
+	}
+	if err != nil {
 		return nil, err
 	}
 	releaseOnFailure = false
