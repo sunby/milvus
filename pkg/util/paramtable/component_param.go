@@ -1176,7 +1176,7 @@ Large numeric passwords require double quotes to avoid yaml parsing precision is
 	p.StorageZstdConcurrency = ParamItem{
 		Key:          "common.storage.zstd.concurrency",
 		Version:      "2.6.0",
-		DefaultValue: "1",
+		DefaultValue: "100",
 		Doc: `The number of concurrent zstd compress threads for one binlog generation, 0 means use all cores.
 Every concurrent zstd compress thread will use additional memory.
 The default value is 1, which is enough for most cases.`,
@@ -1394,8 +1394,8 @@ If enabled, IPv6 ULA/global addresses will be prioritized ahead of IPv4.`,
 	p.NodeSchedulerMaxConcurrencyRatio = ParamItem{
 		Key:          "common.nodeScheduler.maxConcurrencyRatio",
 		Version:      "3.0",
-		DefaultValue: "2",
-		Doc:          "Maximum number of tasks executed concurrently by the process-level node scheduler, expressed as a ratio of CPU cores. Must be greater than zero; 2 by default.",
+		DefaultValue: "100",
+		Doc:          "Maximum number of tasks executed concurrently by the process-level node scheduler, expressed as a ratio of CPU cores. Must be greater than zero.",
 		Export:       true,
 	}
 	p.NodeSchedulerMaxConcurrencyRatio.Init(base.mgr)
@@ -8083,7 +8083,7 @@ If the binary size of l0 segment is greater than this size, it will be flushed.`
 		Key:          "streaming.flush.l1.commitConcurrency",
 		Version:      "2.6.10",
 		Doc:          `The max concurrency of L1 segment commit tasks per streaming node, 4 by default. Non-positive value means unlimited.`,
-		DefaultValue: "4",
+		DefaultValue: "400",
 		Export:       true,
 	}
 	p.FlushL1CommitConcurrency.Init(base.mgr)

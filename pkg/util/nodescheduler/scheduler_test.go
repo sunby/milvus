@@ -26,9 +26,11 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/util/hardware"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
@@ -446,6 +448,98 @@ func TestConcurrencyFromRatio(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestSchedulerMetrics(t *testing.T) {
+	resetSchedulerMetrics()
+	t.Cleanup(resetSchedulerMetrics)
+
+	scheduler := New(1)
+	nodeID := paramtable.GetStringNodeID()
+	require.Equal(t, float64(1), testutil.ToFloat64(metrics.NodeSchedulerConcurrency.WithLabelValues(nodeID)))
+
+	blockerStarted := make(chan struct{})
+	releaseBlocker := make(chan struct{})
+	blocker := scheduler.Submit(&metricTask{
+		taskType: "blocker",
+		execute: func(context.Context) error {
+			close(blockerStarted)
+			<-releaseBlocker
+			return nil
+		},
+	})
+	<-blockerStarted
+
+	queued := scheduler.Submit(&metricTask{
+		taskType: "queued",
+		execute: func(context.Context) error {
+			return nil
+		},
+	})
+
+	require.Eventually(t, func() bool {
+		pending := testutil.ToFloat64(metrics.NodeSchedulerPendingTaskCount.WithLabelValues(nodeID, "queued"))
+		running := testutil.ToFloat64(metrics.NodeSchedulerRunningTaskCount.WithLabelValues(nodeID, "blocker"))
+		return pending == 1 && running == 1
+	}, time.Second, 10*time.Millisecond)
+
+	close(releaseBlocker)
+	require.NoError(t, blocker.Wait(context.Background()))
+	require.NoError(t, queued.Wait(context.Background()))
+
+	var retryAttempts atomic.Int32
+	retried := scheduler.Submit(&metricTask{
+		taskType: "retried",
+		execute: func(context.Context) error {
+			if retryAttempts.Add(1) == 1 {
+				return ErrDelay
+			}
+			return nil
+		},
+	})
+	require.NoError(t, retried.Wait(context.Background()))
+
+	failed := scheduler.Submit(&metricTask{
+		taskType: "failed",
+		execute: func(context.Context) error {
+			return errors.New("metric test failure")
+		},
+	})
+	require.NoError(t, failed.Wait(context.Background()))
+
+	cancelStarted := make(chan struct{})
+	canceled := scheduler.Submit(&metricTask{
+		taskType: "canceled",
+		execute: func(ctx context.Context) error {
+			close(cancelStarted)
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	})
+	<-cancelStarted
+	canceled.Cancel()
+	require.NoError(t, canceled.Wait(context.Background()))
+
+	require.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.NodeSchedulerTaskExecutionTotal.WithLabelValues(nodeID, "queued", metrics.SuccessLabel),
+	))
+	require.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.NodeSchedulerTaskExecutionTotal.WithLabelValues(nodeID, "retried", metrics.RetryLabel),
+	))
+	require.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.NodeSchedulerTaskExecutionTotal.WithLabelValues(nodeID, "retried", metrics.SuccessLabel),
+	))
+	require.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.NodeSchedulerTaskExecutionTotal.WithLabelValues(nodeID, "failed", metrics.FailLabel),
+	))
+	require.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.NodeSchedulerTaskExecutionTotal.WithLabelValues(nodeID, "canceled", metrics.CancelLabel),
+	))
+	require.Zero(t, testutil.ToFloat64(metrics.NodeSchedulerPendingTaskCount.WithLabelValues(nodeID, "queued")))
+	require.Zero(t, testutil.ToFloat64(metrics.NodeSchedulerRunningTaskCount.WithLabelValues(nodeID, "blocker")))
+
+	scheduler.Close()
+	require.Zero(t, testutil.ToFloat64(metrics.NodeSchedulerConcurrency.WithLabelValues(nodeID)))
+}
+
 func TestGlobalSchedulerLazyInitializationAndDynamicResize(t *testing.T) {
 	params := paramtable.Get()
 	ratioParam := &params.CommonCfg.NodeSchedulerMaxConcurrencyRatio
@@ -488,4 +582,26 @@ type TaskFunc func(context.Context) error
 
 func (f TaskFunc) Execute(ctx context.Context) error {
 	return f(ctx)
+}
+
+type metricTask struct {
+	taskType string
+	execute  func(context.Context) error
+}
+
+func (t *metricTask) SchedulerTaskType() string {
+	return t.taskType
+}
+
+func (t *metricTask) Execute(ctx context.Context) error {
+	return t.execute(ctx)
+}
+
+func resetSchedulerMetrics() {
+	metrics.NodeSchedulerConcurrency.Reset()
+	metrics.NodeSchedulerPendingTaskCount.Reset()
+	metrics.NodeSchedulerRunningTaskCount.Reset()
+	metrics.NodeSchedulerTaskQueueDurationSeconds.Reset()
+	metrics.NodeSchedulerTaskExecutionDurationSeconds.Reset()
+	metrics.NodeSchedulerTaskExecutionTotal.Reset()
 }

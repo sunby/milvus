@@ -162,6 +162,7 @@ func (m *VChannelRecoveryModule) segmentViewOptions(
 		segment.WithViewRuntime(config.Runtime),
 		segment.WithViewLifecycle(config.SegmentLifecycle),
 		segment.WithViewPackWriter(config.SegmentPackWriter),
+		segment.WithViewCommitL1Limiter(),
 		segment.WithViewSegmentSealedNotifier(m.onSegmentSealed),
 		segment.WithViewDataUpdatedNotifier(func() {
 			m.markSegmentViewUpdated(segmentID, view())

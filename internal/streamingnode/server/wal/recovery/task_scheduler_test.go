@@ -92,6 +92,15 @@ func TestScopedTaskSchedulerCloseCancelsDelayedTask(t *testing.T) {
 	require.NoError(t, scheduler.WaitIdle(context.Background()))
 }
 
+func TestTrackedTaskExposesUnderlyingTaskType(t *testing.T) {
+	task := nodeschedulerTaskFunc(func(context.Context) error {
+		return nil
+	})
+	tracked := &trackedTask{task: task}
+
+	require.Equal(t, nodescheduler.TaskTypeName(task), tracked.SchedulerTaskType())
+}
+
 type nodeschedulerTaskFunc func(context.Context) error
 
 func (f nodeschedulerTaskFunc) Execute(ctx context.Context) error {

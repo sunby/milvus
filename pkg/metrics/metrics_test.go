@@ -39,6 +39,7 @@ func TestRegisterMetrics(t *testing.T) {
 		RegisterStreamingServiceClient(r)
 		RegisterStreamingNode(r)
 		RegisterLoggingMetrics(r)
+		registerNodeScheduler(r)
 	})
 }
 

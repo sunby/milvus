@@ -71,9 +71,9 @@ func (t *commitL1SegmentTask) Execute(ctx context.Context) error {
 			return err
 		}
 		if limiter := segment.commitL1Limiter; limiter != nil {
-			release, err := limiter.Acquire(ctx)
-			if err != nil {
-				return err
+			release, ok := limiter.TryAcquire()
+			if !ok {
+				return nodescheduler.ErrDelay
 			}
 			defer release()
 		}

@@ -20,17 +20,17 @@ func newCommitL1Limiter(concurrency int) *commitL1Limiter {
 	return limiter
 }
 
-func (l *commitL1Limiter) Acquire(ctx context.Context) (func(), error) {
+func (l *commitL1Limiter) TryAcquire() (func(), bool) {
 	l.mu.RLock()
 	semaphore := l.semaphore
 	l.mu.RUnlock()
 	if semaphore == nil {
-		return func() {}, nil
+		return func() {}, true
 	}
-	if err := semaphore.Acquire(ctx); err != nil {
-		return nil, err
+	if !semaphore.TryAcquire() {
+		return nil, false
 	}
-	return semaphore.Release, nil
+	return semaphore.Release, true
 }
 
 func (l *commitL1Limiter) UpdateConcurrency(concurrency int) {
@@ -75,4 +75,10 @@ func getDynamicCommitL1Limiter(param *paramtable.ParamItem) *commitL1Limiter {
 		})
 	})
 	return globalCommitL1LimiterRegistry.limiter
+}
+
+func WithViewCommitL1Limiter() ViewOption {
+	return func(config *runtimeConfig) {
+		config.commitL1Limiter = getDynamicCommitL1Limiter(&paramtable.Get().StreamingCfg.FlushL1CommitConcurrency)
+	}
 }
