@@ -54,12 +54,9 @@ type PChannelRecoveryManager struct {
 	pchannel string
 	modules  *typeutil.ConcurrentMap[string, *VChannelRecoveryModule]
 
-	segmentsByVChannel map[string]map[int64]*streamingpb.SegmentAssignmentMeta
-	dirtyMu            sync.Mutex
-	dirtyModules       map[string]*VChannelRecoveryModule
-	// frontierMu serializes generation checks with both cached frontier updates.
-	frontierMu            sync.Mutex
-	frontierGenerations   map[string]uint64
+	segmentsByVChannel    map[string]map[int64]*streamingpb.SegmentAssignmentMeta
+	dirtyMu               sync.Mutex
+	dirtyModules          map[string]*VChannelRecoveryModule
 	durableFrontiers      *minimumFrontierIndex[string]
 	materializedFrontiers *minimumFrontierIndex[string]
 
@@ -80,7 +77,6 @@ func NewPChannelRecoveryManager(config PChannelManagerConfig) (*PChannelRecovery
 		modules:               typeutil.NewConcurrentMap[string, *VChannelRecoveryModule](),
 		segmentsByVChannel:    segmentsByVChannel,
 		dirtyModules:          make(map[string]*VChannelRecoveryModule),
-		frontierGenerations:   make(map[string]uint64),
 		durableFrontiers:      newMinimumFrontierIndex[string](),
 		materializedFrontiers: newMinimumFrontierIndex[string](),
 		config:                config,
@@ -414,7 +410,7 @@ func (m *PChannelRecoveryManager) newModule(vchannel string) (*VChannelRecoveryM
 			m.markModuleUpdatedByVChannel(vchannel)
 		},
 	}
-	module, err := NewModule(ModuleConfig{
+	return NewModule(ModuleConfig{
 		PChannel:                   m.pchannel,
 		VChannel:                   vchannel,
 		VChannelMeta:               m.config.VChannelMetas[vchannel],
@@ -437,19 +433,19 @@ func (m *PChannelRecoveryManager) newModule(vchannel string) (*VChannelRecoveryM
 		QueryViewLoadInfoProvider:  m.config.QueryViewLoadInfoProvider,
 		NodeScheduler:              m.config.NodeScheduler,
 		QueryRuntimeDispatcher:     m.queryDispatcher,
+		OnFrontierUpdated:          func() { m.refreshModuleFrontiersByVChannel(vchannel) },
 	})
-	if err != nil {
-		return nil, err
-	}
-	module.onFrontierUpdated = func(snapshot moduleFrontierSnapshot) {
-		m.updateModuleFrontiers(module, snapshot)
-	}
-	return module, nil
 }
 
 func (m *PChannelRecoveryManager) markModuleUpdatedByVChannel(vchannel string) {
 	if module := m.Module(vchannel); module != nil {
 		m.markModuleUpdated(module)
+	}
+}
+
+func (m *PChannelRecoveryManager) refreshModuleFrontiersByVChannel(vchannel string) {
+	if module := m.Module(vchannel); module != nil {
+		m.refreshModuleFrontiers(module)
 	}
 }
 
@@ -479,21 +475,8 @@ func (m *PChannelRecoveryManager) refreshModuleFrontiers(module *VChannelRecover
 	if module == nil {
 		return
 	}
-	m.updateModuleFrontiers(module, module.frontierSnapshot())
-}
-
-func (m *PChannelRecoveryManager) updateModuleFrontiers(module *VChannelRecoveryModule, snapshot moduleFrontierSnapshot) {
-	if module == nil || m.Module(module.vchannel) != module {
-		return
-	}
-	m.frontierMu.Lock()
-	defer m.frontierMu.Unlock()
-	if generation := m.frontierGenerations[module.vchannel]; snapshot.generation <= generation {
-		return
-	}
-	m.frontierGenerations[module.vchannel] = snapshot.generation
-	m.durableFrontiers.Update(module.vchannel, snapshot.durableTimeTick)
-	m.materializedFrontiers.Update(module.vchannel, snapshot.materializedTimeTick)
+	m.durableFrontiers.Update(module.vchannel, module.dataFrontierTimeTick(moduleapi.DataProgressDurable))
+	m.materializedFrontiers.Update(module.vchannel, module.dataFrontierTimeTick(moduleapi.DataProgressMaterialized))
 }
 
 type dirtyTrackingNotifier struct {

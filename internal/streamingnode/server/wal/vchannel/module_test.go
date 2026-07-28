@@ -116,11 +116,11 @@ func TestVChannelRecoveryModuleRefreshesFrontierAfterTransformSnapshotPersisted(
 			},
 		},
 		TransformLogMeta: &streamingpb.VChannelTransformLogMeta{},
+		OnFrontierUpdated: func() {
+			frontierUpdates.Add(1)
+		},
 	})
 	require.NoError(t, err)
-	module.onFrontierUpdated = func(moduleFrontierSnapshot) {
-		frontierUpdates.Add(1)
-	}
 	before := frontierUpdates.Load()
 	module.markTransformSnapshotPersisted(module.transformLog.SnapshotMeta())
 	assert.Greater(t, frontierUpdates.Load(), before)

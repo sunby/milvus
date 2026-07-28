@@ -2,7 +2,6 @@ package vchannel
 
 import (
 	"context"
-	"math"
 	"testing"
 	"time"
 
@@ -233,41 +232,6 @@ func TestPChannelRecoveryManagerAggregatesDataFrontier(t *testing.T) {
 		Kind: moduleapi.DataProgressDurable,
 	})
 	require.NotNil(t, allFrontier)
-	assert.Equal(t, uint64(0), allFrontier.TimeTick())
-}
-
-func TestPChannelRecoveryManagerScopeAllRejectsLateStaleFrontierSnapshot(t *testing.T) {
-	ctx := context.Background()
-	manager := newTestManager(t, "p1", "v1")
-	manager.SwitchIntoMetaAndData()
-	module := manager.Module("v1")
-	require.NotNil(t, module)
-
-	staleReady := make(chan moduleFrontierSnapshot, 1)
-	applyStale := make(chan struct{})
-	staleApplied := make(chan struct{})
-	go func() {
-		stale := module.frontierSnapshot()
-		staleReady <- stale
-		<-applyStale
-		manager.updateModuleFrontiers(module, stale)
-		close(staleApplied)
-	}()
-
-	stale := <-staleReady
-	assert.Equal(t, uint64(math.MaxUint64), stale.durableTimeTick)
-
-	result := manager.ObserveMessage(ctx, newTestDeleteMessage(t, "v1", 10))
-	require.NotNil(t, result.Data)
-	allFrontier := manager.DataFrontier(moduleapi.Scope{
-		Type: moduleapi.ScopeAll,
-		Kind: moduleapi.DataProgressDurable,
-	})
-	require.NotNil(t, allFrontier)
-	assert.Equal(t, uint64(0), allFrontier.TimeTick())
-
-	close(applyStale)
-	<-staleApplied
 	assert.Equal(t, uint64(0), allFrontier.TimeTick())
 }
 
