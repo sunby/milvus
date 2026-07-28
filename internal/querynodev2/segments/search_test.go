@@ -37,6 +37,7 @@ import (
 
 type SearchSuite struct {
 	suite.Suite
+	rootPath     string
 	chunkManager storage.ChunkManager
 
 	manager      *Manager
@@ -58,8 +59,10 @@ func (suite *SearchSuite) SetupTest() {
 	ctx := context.Background()
 	msgLength := 100
 
-	chunkManagerFactory := storage.NewChunkManagerFactoryWithParam(paramtable.Get())
-	suite.chunkManager, _ = chunkManagerFactory.NewPersistentStorageChunkManager(ctx)
+	suite.rootPath = suite.T().Name()
+	chunkManagerFactory := storage.NewTestChunkManagerFactory(paramtable.Get(), suite.rootPath)
+	suite.chunkManager, err = chunkManagerFactory.NewPersistentStorageChunkManager(ctx)
+	suite.Require().NoError(err)
 	initcore.InitRemoteChunkManager(paramtable.Get())
 	initcore.InitLocalChunkManager(suite.T().Name())
 	initcore.InitMmapManager(paramtable.Get(), 1)
@@ -142,7 +145,7 @@ func (suite *SearchSuite) TearDownTest() {
 	suite.sealed.Release(context.Background())
 	DeleteCollection(suite.collection)
 	ctx := context.Background()
-	suite.chunkManager.RemoveWithPrefix(ctx, paramtable.Get().MinioCfg.RootPath.GetValue())
+	suite.chunkManager.RemoveWithPrefix(ctx, suite.rootPath)
 }
 
 func (suite *SearchSuite) TestSearchSealed() {
