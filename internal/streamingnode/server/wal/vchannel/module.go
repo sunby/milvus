@@ -118,10 +118,11 @@ func NewModule(config ModuleConfig) (*VChannelRecoveryModule, error) {
 		Dispatcher:       config.QueryRuntimeDispatcher,
 		LoadInfoProvider: config.QueryViewLoadInfoProvider,
 	})
+	onSegmentSealed := config.OnSegmentSealed
 	module.onSegmentSealed = func(event walview.SegmentSealedEvent) {
 		module.observeQueryResourceEvent(context.Background(), walview.VChannelResourceEvent{SegmentSealed: &event})
-		if config.OnSegmentSealed != nil {
-			config.OnSegmentSealed(event)
+		if onSegmentSealed != nil {
+			onSegmentSealed(event)
 		}
 	}
 	if config.VChannelMeta != nil {
