@@ -3,6 +3,7 @@ package shards
 import (
 	"context"
 	"math/rand"
+	"reflect"
 	"testing"
 
 	"github.com/cockroachdb/errors"
@@ -27,27 +28,21 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/syncutil"
 )
 
-func TestPartitionManagerReusesPChannelLogger(t *testing.T) {
-	logger := mlog.With(
-		mlog.FieldComponent("shard-manager"),
-		mlog.FieldPChannel("pchannel"),
-	)
-	m := newPartitionSegmentManager(
-		context.Background(),
-		logger,
-		nil,
-		nil,
-		types.PChannelInfo{Name: "pchannel", Term: 1},
-		"vchannel",
-		1,
-		2,
-		map[int64]*segmentAllocManager{},
-		nil,
-		0,
-		nil,
-	)
+func assertDoesNotRetainLogger(t *testing.T, value any) {
+	t.Helper()
+	valueType := reflect.TypeOf(value)
+	loggerType := reflect.TypeOf((*mlog.Logger)(nil))
+	for i := 0; i < valueType.NumField(); i++ {
+		assert.NotEqual(t, loggerType, valueType.Field(i).Type)
+	}
+	withLoggerType := reflect.TypeOf((*mlog.WithLogger)(nil)).Elem()
+	assert.False(t, reflect.PointerTo(valueType).Implements(withLoggerType))
+}
 
-	assert.Same(t, logger, m.Logger())
+func TestPartitionAndWorkersDoNotRetainLogger(t *testing.T) {
+	assertDoesNotRetainLogger(t, partitionManager{})
+	assertDoesNotRetainLogger(t, segmentAllocWorker{})
+	assertDoesNotRetainLogger(t, segmentFlushWorker{})
 }
 
 func TestPartitionManager(t *testing.T) {
@@ -88,7 +83,6 @@ func TestPartitionManager(t *testing.T) {
 	nodeScheduler := nodescheduler.New(4)
 	t.Cleanup(nodeScheduler.Close)
 	m := newPartitionSegmentManager(ctx,
-		mlog.With(),
 		f,
 		nodeScheduler,
 		types.PChannelInfo{

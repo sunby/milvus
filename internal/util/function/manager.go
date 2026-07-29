@@ -66,6 +66,10 @@ type FunctionRunnerManager interface {
 	// ok=false when the caller should build compatibility runners instead.
 	TryMaterialize(ctx context.Context, collectionID int64, schemaVersion int32, body *msgpb.InsertRequest) (bool, bool, error)
 
+	// HasCachedRunners reports whether the manager has a runner snapshot for the
+	// collection and schema version. It does not wait for runner initialization.
+	HasCachedRunners(collectionID int64, schemaVersion int32) bool
+
 	// RunWithRunner runs the callback with the runner that owns the output field.
 	// The lifecycle key selects its currently registered schema version. The
 	// callback is executed synchronously while the manager protects the runner
@@ -272,6 +276,22 @@ func (e *functionRunnerCollectionEntry) getVersionRunnerEntries(schemaVersion in
 	defer e.mu.RUnlock()
 
 	return e.getVersionRunnerEntriesLocked(schemaVersion)
+}
+
+func (e *functionRunnerCollectionEntry) hasCachedRunners(schemaVersion int32) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	versionRunners, ok := e.getVersionRunnerLocked(schemaVersion)
+	if !ok {
+		return false
+	}
+	for _, signature := range versionRunners.signatures {
+		if e.runners[signature] == nil {
+			return false
+		}
+	}
+	return true
 }
 
 func runWithRunnerEntries(
@@ -885,6 +905,11 @@ func (m *functionRunnerManager) TryMaterialize(
 	return changed, ok, err
 }
 
+func (m *functionRunnerManager) HasCachedRunners(collectionID int64, schemaVersion int32) bool {
+	entry := m.getEntry(collectionID)
+	return entry != nil && entry.hasCachedRunners(schemaVersion)
+}
+
 func (m *functionRunnerManager) RunWithRunner(
 	ctx context.Context,
 	collectionID int64,
@@ -1130,6 +1155,74 @@ func writeStrings(hasher hashWriter, prefix string, values []string) {
 
 type hashWriter interface {
 	Write([]byte) (int, error)
+}
+
+func cloneMap[K comparable, V any](values map[K]V) map[K]V {
+	cloned := make(map[K]V, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+// FillFunctionData fills function output fields before appending an insert message to WAL.
+// Passing nil schema uses the latest runner snapshot allocated by collection
+// create, recovery, or update.
+func FillFunctionData(ctx context.Context, collectionID int64, schema *schemapb.CollectionSchema, body *msgpb.InsertRequest) (bool, error) {
+	return defaultFunctionRunnerManager.Materialize(ctx, collectionID, schema, body)
+}
+
+// TryMaterialize is used by compatibility logic to try materializing old insert
+// messages with cache-managed runners. It returns ok=false when a matching cache
+// is absent so the caller can build a short-lived runner for that message.
+func TryMaterialize(collectionID int64, schemaVersion int32, body *msgpb.InsertRequest) (changed bool, ok bool, err error) {
+	return defaultFunctionRunnerManager.TryMaterialize(collectionID, schemaVersion, body)
+}
+
+// HasCachedRunners reports whether cache-managed runners exist for the given
+// collection and schema version without decoding an insert body first.
+func HasCachedRunners(collectionID int64, schemaVersion int32) bool {
+	return defaultFunctionRunnerManager.HasCachedRunners(collectionID, schemaVersion)
+}
+
+func AllocFunctionRunners(
+	collectionID int64,
+	key string,
+	schema *schemapb.CollectionSchema,
+) error {
+	return defaultFunctionRunnerManager.Alloc(collectionID, key, schema)
+}
+
+func UpdateFunctionRunners(
+	collectionID int64,
+	key string,
+	schema *schemapb.CollectionSchema,
+) error {
+	return defaultFunctionRunnerManager.Update(collectionID, key, schema)
+}
+
+func ReleaseFunctionRunners(collectionID int64, key string) {
+	defaultFunctionRunnerManager.Release(collectionID, key)
+}
+
+func RunWithRunner(
+	ctx context.Context,
+	collectionID int64,
+	schemaVersion int32,
+	outputFieldID int64,
+	run func(schemapb.FunctionType, FunctionRunner) error,
+) (bool, error) {
+	return defaultFunctionRunnerManager.RunWithRunner(ctx, collectionID, schemaVersion, outputFieldID, run)
+}
+
+func RunWithAnalyzer(
+	ctx context.Context,
+	collectionID int64,
+	schemaVersion int32,
+	fieldID int64,
+	run func(Analyzer) error,
+) (bool, error) {
+	return defaultFunctionRunnerManager.RunWithAnalyzer(ctx, collectionID, schemaVersion, fieldID, run)
 }
 
 func FillFunctionFields(runners []FunctionRunner, body *msgpb.InsertRequest) (bool, error) {

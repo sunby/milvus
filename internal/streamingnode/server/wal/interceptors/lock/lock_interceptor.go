@@ -3,9 +3,12 @@ package lock
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/milvus-io/milvus/internal/streamingnode/server/wal/interceptors"
 	"github.com/milvus-io/milvus/internal/streamingnode/server/wal/interceptors/txn"
+	"github.com/milvus-io/milvus/internal/streamingnode/server/wal/metricsutil"
+	"github.com/milvus-io/milvus/internal/streamingnode/server/wal/utility"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/types"
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
@@ -20,7 +23,9 @@ type lockAppendInterceptor struct {
 }
 
 func (r *lockAppendInterceptor) DoAppend(ctx context.Context, msg message.MutableMessage, append interceptors.Append) (message.MessageID, error) {
+	stageStart := time.Now()
 	g := r.acquireLockGuard(ctx, msg)
+	utility.ObserveAppendStage(ctx, metricsutil.AppendStageLockAcquire, stageStart)
 	defer g()
 
 	return append(ctx, msg)

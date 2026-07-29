@@ -99,6 +99,16 @@ var (
 			Buckets:   buckets, // unit: ms
 		}, []string{nodeIDLabelName, msgTypeLabelName, databaseLabelName, collectionName})
 
+	// ProxyInsertStageLatency records low-cardinality insert processing stages.
+	ProxyInsertStageLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.ProxyRole,
+			Name:      "insert_stage_latency",
+			Help:      "latency of each insert processing stage",
+			Buckets:   subMsBuckets, // unit: ms
+		}, []string{nodeIDLabelName, "stage", statusLabelName})
+
 	// ProxyCollectionMutationLatency record the latency that mutate successfully, per collection
 	// Deprecated, ProxyMutationLatency instead of it
 	ProxyCollectionMutationLatency = prometheus.NewHistogramVec(
@@ -519,6 +529,7 @@ func RegisterProxy(registry *prometheus.Registry) {
 	registry.MustRegister(ProxyCollectionSQLatency)
 	registry.MustRegister(ProxyMutationLatency)
 	registry.MustRegister(ProxyCollectionMutationLatency)
+	registry.MustRegister(ProxyInsertStageLatency)
 
 	registry.MustRegister(ProxyWaitForSearchResultLatency)
 	registry.MustRegister(ProxyReduceResultLatency)

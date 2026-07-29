@@ -93,7 +93,6 @@ func (m *shardManagerImpl) CreateCollection(msg message.ImmutableCreateCollectio
 		}
 		m.partitionManagers[uniqueKey] = newPartitionSegmentManager(
 			m.ctx,
-			m.Logger(),
 			m.wal,
 			m.scheduler,
 			m.pchannel,

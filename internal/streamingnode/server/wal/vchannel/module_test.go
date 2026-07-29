@@ -368,7 +368,7 @@ type recordingSegmentLifecycle struct {
 	committedSegmentIDs []int64
 }
 
-func (l *recordingSegmentLifecycle) EnsureGrowingSegment(context.Context, *streamingpb.SegmentAssignmentMeta) error {
+func (l *recordingSegmentLifecycle) EnsureGrowingSegment(context.Context, *streamingpb.SegmentAssignmentMeta, int32) error {
 	return nil
 }
 

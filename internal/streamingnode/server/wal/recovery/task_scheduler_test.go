@@ -22,7 +22,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus/pkg/v3/util/nodescheduler"
@@ -84,7 +83,7 @@ func TestScopedTaskSchedulerCloseCancelsDelayedTask(t *testing.T) {
 	scheduler.Submit(nodeschedulerTaskFunc(func(ctx context.Context) error {
 		close(started)
 		<-ctx.Done()
-		return errors.Mark(ctx.Err(), nodescheduler.ErrDelay)
+		return nodescheduler.MarkDelay(ctx.Err())
 	}))
 	<-started
 

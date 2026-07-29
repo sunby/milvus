@@ -339,8 +339,12 @@ func TestFunctionRunnerManagerAllocTracksKeysBySchemaVersion(t *testing.T) {
 	t.Cleanup(manager.Close)
 
 	schema := newBM25SignatureTestSchema()
+	require.False(t, manager.HasCachedRunners(1, schema.GetVersion()))
 	require.NoError(t, manager.Alloc(1, "v1", schema))
 	require.NoError(t, manager.Alloc(1, "v2", schema))
+	require.True(t, manager.HasCachedRunners(1, schema.GetVersion()))
+	require.True(t, manager.HasCachedRunners(1, LatestFunctionRunnerVersion))
+	require.False(t, manager.HasCachedRunners(1, schema.GetVersion()+1))
 
 	keyVersions, versionRunners, runnerCount := functionRunnerEntrySnapshot(t, manager, 1)
 	require.Equal(t, map[string]int32{"v1": 1, "v2": 1}, keyVersions)
@@ -357,6 +361,7 @@ func TestFunctionRunnerManagerAllocTracksKeysBySchemaVersion(t *testing.T) {
 
 	manager.Release(1, "v2")
 	requireFunctionRunnerEntryRemoved(t, manager, 1)
+	require.False(t, manager.HasCachedRunners(1, schema.GetVersion()))
 	require.True(t, baseRunner.isClosed())
 }
 

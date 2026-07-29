@@ -3,7 +3,6 @@ package segment
 import (
 	"context"
 
-	"github.com/cockroachdb/errors"
 	"go.uber.org/atomic"
 
 	"github.com/milvus-io/milvus/pkg/v3/util/nodescheduler"
@@ -35,7 +34,7 @@ func (t *segmentTaskBase) execute(ctx context.Context, fn func(context.Context) 
 		t.done.Store(true)
 		return nil
 	}
-	return errors.Mark(err, nodescheduler.ErrDelay)
+	return nodescheduler.MarkDelay(err)
 }
 
 type flushL1BufferTask struct {

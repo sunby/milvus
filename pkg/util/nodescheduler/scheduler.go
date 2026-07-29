@@ -19,11 +19,10 @@ package nodescheduler
 import (
 	"container/list"
 	"context"
+	"errors"
 	"math"
 	"sync"
 	"time"
-
-	"github.com/cockroachdb/errors"
 
 	"github.com/milvus-io/milvus/pkg/v3/config"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
@@ -69,6 +68,32 @@ func (e *ScheduleError) Is(target error) bool {
 }
 
 var ErrDelay = &ScheduleError{kind: scheduleErrorKindDelay}
+
+type delayError struct {
+	cause error
+}
+
+func (e *delayError) Error() string {
+	return e.cause.Error()
+}
+
+func (e *delayError) Unwrap() error {
+	return e.cause
+}
+
+func (e *delayError) Is(target error) bool {
+	return ErrDelay.Is(target)
+}
+
+// MarkDelay preserves err as the cause while asking the scheduler to retry the
+// task. Unlike cockroachdb/errors.Mark, it does not build reflection-based type
+// markers on this hot path.
+func MarkDelay(err error) error {
+	if err == nil || errors.Is(err, ErrDelay) {
+		return err
+	}
+	return &delayError{cause: err}
+}
 
 type nodeScheduler struct {
 	ctx    context.Context
@@ -250,7 +275,7 @@ func (s *nodeScheduler) runWorker() {
 			entry.finish()
 			continue
 		}
-		if errors.Is(err, ErrDelay) {
+		if err != nil && errors.Is(err, ErrDelay) {
 			if s.requeue(entry) {
 				continue
 			}

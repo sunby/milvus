@@ -32,6 +32,7 @@ const (
 	TimeTickSyncTypeLabelName             = "type"
 	TimeTickAckTypeLabelName              = "type"
 	WALInterceptorLabelName               = "interceptor_name"
+	WALAppendStageLabelName               = "stage"
 	WALTxnStateLabelName                  = "state"
 	WALFlusherStateLabelName              = "state"
 	WALRecoveryStorageStateLabelName      = "state"
@@ -115,6 +116,12 @@ var (
 		Help:    "Duration of ResumableProducer produceInternal stages",
 		Buckets: secondsBuckets,
 	}, WALMessageTypeLabelName, ProduceInternalStageLabelName)
+
+	StreamingServiceClientProduceInternalStageDurationByChannelSeconds = newStreamingServiceClientHistogramVec(prometheus.HistogramOpts{
+		Name:    "produce_internal_stage_duration_by_channel_seconds",
+		Help:    "Duration of ResumableProducer produceInternal stages by pchannel",
+		Buckets: secondsBuckets,
+	}, WALChannelLabelName, WALMessageTypeLabelName, ProduceInternalStageLabelName)
 
 	// Streaming Service Client Consumer Metrics.
 	StreamingServiceClientResumingConsumerTotal = newStreamingServiceClientGaugeVec(prometheus.GaugeOpts{
@@ -372,6 +379,12 @@ var (
 		Name: "append_message_total",
 		Help: "Total of append message to wal",
 	}, WALChannelLabelName, WALMessageTypeLabelName, StatusLabelName)
+
+	WALAppendMessageStageDurationSeconds = newWALHistogramVec(prometheus.HistogramOpts{
+		Name:    "append_message_stage_duration_seconds",
+		Help:    "Duration of each stage while appending a message to wal",
+		Buckets: secondsBuckets,
+	}, WALChannelLabelName, WALMessageTypeLabelName, WALAppendStageLabelName, StatusLabelName)
 
 	WALAppendMessageBeforeInterceptorDurationSeconds = newWALHistogramVec(prometheus.HistogramOpts{
 		Name:    "interceptor_before_append_duration_seconds",
@@ -633,6 +646,7 @@ func RegisterStreamingServiceClient(registry *prometheus.Registry) {
 		registry.MustRegister(StreamingServiceClientAppendMessagesStageDurationSeconds)
 		registry.MustRegister(StreamingServiceClientBatchCommitProduceStageDurationSeconds)
 		registry.MustRegister(StreamingServiceClientProduceInternalStageDurationSeconds)
+		registry.MustRegister(StreamingServiceClientProduceInternalStageDurationByChannelSeconds)
 		registry.MustRegister(StreamingServiceClientResumingConsumerTotal)
 		registry.MustRegister(StreamingServiceClientConsumerTotal)
 		registry.MustRegister(StreamingServiceClientConsumeBytes)
@@ -700,6 +714,7 @@ func registerWAL(registry *prometheus.Registry) {
 	registry.MustRegister(WALCollectionTotal)
 	registry.MustRegister(WALAppendMessageBytes)
 	registry.MustRegister(WALAppendMessageTotal)
+	registry.MustRegister(WALAppendMessageStageDurationSeconds)
 	registry.MustRegister(WALAppendMessageBeforeInterceptorDurationSeconds)
 	registry.MustRegister(WALAppendMessageAfterInterceptorDurationSeconds)
 	registry.MustRegister(WALImplsAppendRetryTotal)

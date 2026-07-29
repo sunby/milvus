@@ -8,28 +8,33 @@ import (
 )
 
 // NewMVCCManager creates a new per-vchannel query MVCC manager.
-func NewMVCCManager(_ uint64) *MVCCManager {
+func NewMVCCManager(lastConfirmedTimeTick uint64) *MVCCManager {
 	return &MVCCManager{
-		vchannelMVCCs:        make(map[string]VChannelMVCC),
-		unconfirmedVChannels: make(map[string]struct{}),
+		lastConfirmedTimeTick: lastConfirmedTimeTick,
+		vchannelMVCCs:         make(map[string]vchannelMVCC),
 	}
 }
 
 // MVCCManager is the manager that manages all the mvcc state of one wal.
 // It tracks the persisted query-plan frontiers of each recovered vchannel.
 type MVCCManager struct {
-	mu                   sync.Mutex
-	vchannelMVCCs        map[string]VChannelMVCC
-	unconfirmedVChannels map[string]struct{}
+	mu                    sync.RWMutex
+	lastConfirmedTimeTick uint64 // PChannel-level confirmation frontier.
+	vchannelMVCCs         map[string]vchannelMVCC
 }
 
 // GetMVCCOfVChannel gets the query MVCC frontiers of the vchannel.
 func (cm *MVCCManager) GetMVCCOfVChannel(vchannel string) VChannelMVCC {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
 
 	if mvcc, ok := cm.vchannelMVCCs[vchannel]; ok {
-		return mvcc
+		latestTimeTick := max(mvcc.GrowingTimetick, mvcc.TransformingTimetick)
+		return VChannelMVCC{
+			GrowingTimetick:      mvcc.GrowingTimetick,
+			TransformingTimetick: mvcc.TransformingTimetick,
+			Confirmed:            latestTimeTick <= cm.lastConfirmedTimeTick,
+		}
 	}
 	return VChannelMVCC{}
 }
@@ -43,7 +48,7 @@ func (cm *MVCCManager) ApplyRecoveryBarrier(vchannel string, timetick uint64) {
 	mvcc := cm.vchannelMVCCs[vchannel]
 	mvcc.GrowingTimetick = max(mvcc.GrowingTimetick, timetick)
 	mvcc.TransformingTimetick = max(mvcc.TransformingTimetick, timetick)
-	mvcc.Confirmed = true
+	cm.lastConfirmedTimeTick = max(cm.lastConfirmedTimeTick, timetick)
 	cm.vchannelMVCCs[vchannel] = mvcc
 	delete(cm.unconfirmedVChannels, vchannel)
 }
@@ -58,16 +63,16 @@ func (cm *MVCCManager) UpdateMVCC(msg message.MutableMessage) {
 
 	tt := msg.TimeTick()
 	msgType := msg.MessageType()
+	if messageutil.IsTimeTickConfirmBarrier(msgType) {
+		cm.sync(tt)
+		return
+	}
+
 	vchannel := msg.VChannel()
 	isTxn := msg.TxnContext() != nil
 
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
-
-	if messageutil.IsTimeTickConfirmBarrier(msgType) {
-		cm.sync(tt)
-		return
-	}
 
 	// If the message belongs to a transaction, the query MVCC frontiers cannot
 	// move forward until the transaction is committed.
@@ -126,21 +131,18 @@ func (cm *MVCCManager) UpdateMVCC(msg message.MutableMessage) {
 	default:
 		return
 	}
-	mvcc.Confirmed = false
 	cm.vchannelMVCCs[vchannel] = mvcc
 	cm.unconfirmedVChannels[vchannel] = struct{}{}
 }
 
-// sync confirms the unconfirmed vchannel MVCC states covered by the incoming timetick message.
+// sync advances the pchannel-level confirmation frontier. Whether a vchannel
+// MVCC is confirmed is derived when it is read, so no per-vchannel update is
+// needed for a time tick confirmation barrier.
 func (cm *MVCCManager) sync(tt uint64) {
-	for vchannel := range cm.unconfirmedVChannels {
-		mvcc := cm.vchannelMVCCs[vchannel]
-		if max(mvcc.GrowingTimetick, mvcc.TransformingTimetick) <= tt {
-			mvcc.Confirmed = true
-			cm.vchannelMVCCs[vchannel] = mvcc
-			delete(cm.unconfirmedVChannels, vchannel)
-		}
-	}
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	cm.lastConfirmedTimeTick = max(cm.lastConfirmedTimeTick, tt)
 }
 
 func (cm *MVCCManager) advanceTransformingAllLocked(tt uint64) {
@@ -149,7 +151,6 @@ func (cm *MVCCManager) advanceTransformingAllLocked(tt uint64) {
 			continue
 		}
 		mvcc.TransformingTimetick = tt
-		mvcc.Confirmed = false
 		cm.vchannelMVCCs[vchannel] = mvcc
 		cm.unconfirmedVChannels[vchannel] = struct{}{}
 	}
@@ -160,10 +161,15 @@ func isPChannelTransformBarrier(msgType message.MessageType) bool {
 		msgType == message.MessageTypeAlterWAL
 }
 
+type vchannelMVCC struct {
+	GrowingTimetick      uint64
+	TransformingTimetick uint64
+}
+
 // VChannelMVCC is a mvcc of one vchannel
 // which is used to identify the maximum query-plan timeticks persisted into the wal of one vchannel.
-// The state of mvcc that is confirmed if the timetick is synced by timeticksync message,
-// otherwise, the mvcc is not confirmed.
+// The state of mvcc is confirmed when both frontiers are covered by the latest
+// pchannel-level timetick confirmation barrier.
 type VChannelMVCC struct {
 	GrowingTimetick      uint64
 	TransformingTimetick uint64

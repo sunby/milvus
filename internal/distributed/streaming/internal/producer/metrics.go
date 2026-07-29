@@ -39,8 +39,10 @@ func observeBatchCommitProduceStage(messageType string, stage string, start time
 	metrics.StreamingServiceClientBatchCommitProduceStageDurationSeconds.WithLabelValues(paramtable.GetStringNodeID(), messageType, stage).Observe(time.Since(start).Seconds())
 }
 
-func observeProduceInternalStage(messageType string, stage string, start time.Time) {
-	metrics.StreamingServiceClientProduceInternalStageDurationSeconds.WithLabelValues(paramtable.GetStringNodeID(), messageType, stage).Observe(time.Since(start).Seconds())
+func observeProduceInternalStage(pchannel string, messageType string, stage string, start time.Time) {
+	duration := time.Since(start).Seconds()
+	metrics.StreamingServiceClientProduceInternalStageDurationSeconds.WithLabelValues(paramtable.GetStringNodeID(), messageType, stage).Observe(duration)
+	metrics.StreamingServiceClientProduceInternalStageDurationByChannelSeconds.WithLabelValues(paramtable.GetStringNodeID(), pchannel, messageType, stage).Observe(duration)
 }
 
 // newResumingProducerMetrics creates a new producer metrics.

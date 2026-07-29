@@ -18,6 +18,7 @@ package nodescheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -25,7 +26,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cockroachdb/errors"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -76,7 +76,7 @@ func TestSchedulerMovesDelayedTaskToQueueTail(t *testing.T) {
 		if attempt == 1 {
 			close(firstStarted)
 			<-allowDelay
-			return errors.Mark(errors.New("not ready"), ErrDelay)
+			return MarkDelay(errors.New("not ready"))
 		}
 		return nil
 	}))
@@ -93,6 +93,16 @@ func TestSchedulerMovesDelayedTaskToQueueTail(t *testing.T) {
 	require.NoError(t, first.Wait(context.Background()))
 	require.NoError(t, second.Wait(context.Background()))
 	assert.Equal(t, []string{"first-1", "second", "first-2"}, order)
+}
+
+func TestMarkDelayPreservesCause(t *testing.T) {
+	cause := errors.New("not ready")
+	marked := MarkDelay(cause)
+
+	require.ErrorIs(t, marked, ErrDelay)
+	require.ErrorIs(t, marked, cause)
+	assert.Same(t, ErrDelay, MarkDelay(ErrDelay))
+	assert.NoError(t, MarkDelay(nil))
 }
 
 func TestSchedulerHonorsConcurrencyLimit(t *testing.T) {

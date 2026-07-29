@@ -18,10 +18,9 @@ package nodescheduler
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"time"
-
-	"github.com/cockroachdb/errors"
 
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 )
@@ -78,16 +77,19 @@ func (m schedulerMetrics) observeExecutionFinished(taskType, status string, exec
 }
 
 func taskExecutionStatus(ctxErr, taskErr error) string {
+	if ctxErr != nil {
+		return metrics.CancelLabel
+	}
+	if taskErr == nil {
+		return metrics.SuccessLabel
+	}
 	switch {
-	case ctxErr != nil,
-		errors.Is(taskErr, context.Canceled),
+	case errors.Is(taskErr, context.Canceled),
 		errors.Is(taskErr, context.DeadlineExceeded):
 		return metrics.CancelLabel
 	case errors.Is(taskErr, ErrDelay):
 		return metrics.RetryLabel
-	case taskErr != nil:
-		return metrics.FailLabel
 	default:
-		return metrics.SuccessLabel
+		return metrics.FailLabel
 	}
 }

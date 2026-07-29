@@ -85,7 +85,6 @@ func RecoverShardManager(param *ShardManagerRecoverParam) ShardManager {
 			}
 			managers[uniqueKey] = newPartitionSegmentManager(
 				ctx,
-				logger,
 				param.WAL,
 				param.Scheduler,
 				param.ChannelInfo,

@@ -195,13 +195,15 @@ func TestBatchCommitProduce_ReservationError(t *testing.T) {
 func TestBatchCommitProduceStageMetricsDoNotPanicOnLabels(t *testing.T) {
 	metrics.StreamingServiceClientBatchCommitProduceStageDurationSeconds.Reset()
 	metrics.StreamingServiceClientProduceInternalStageDurationSeconds.Reset()
+	metrics.StreamingServiceClientProduceInternalStageDurationByChannelSeconds.Reset()
 
 	assert.NotPanics(t, func() {
 		observeBatchCommitProduceStage(message.MessageTypeCreateCollection.String(), batchCommitProduceStageTotal, time.Now())
-		observeProduceInternalStage(message.MessageTypeCreateCollection.String(), produceInternalStageAppend, time.Now())
+		observeProduceInternalStage("pchannel", message.MessageTypeCreateCollection.String(), produceInternalStageAppend, time.Now())
 	})
 	assert.Equal(t, 1, testutil.CollectAndCount(metrics.StreamingServiceClientBatchCommitProduceStageDurationSeconds))
 	assert.Equal(t, 1, testutil.CollectAndCount(metrics.StreamingServiceClientProduceInternalStageDurationSeconds))
+	assert.Equal(t, 1, testutil.CollectAndCount(metrics.StreamingServiceClientProduceInternalStageDurationByChannelSeconds))
 }
 
 func TestProduceGuard_Commit_Txn(t *testing.T) {

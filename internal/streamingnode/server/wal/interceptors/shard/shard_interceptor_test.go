@@ -28,31 +28,13 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/streaming/walimpls/impls/rmq"
 )
 
-func allocWALSchemaForTest(t *testing.T, collectionID int64, vchannel string, schemaVersion int32) {
-	t.Helper()
-	key := WALFunctionRunnerKey(vchannel)
-	assert.NoError(t, function.GetManager().Alloc(collectionID, key, &schemapb.CollectionSchema{Version: schemaVersion}))
-	t.Cleanup(func() {
-		function.GetManager().Release(collectionID, key)
-	})
+type shardManagerWithSchema struct {
+	shards.ShardManager
+	schema *schemapb.CollectionSchema
 }
 
-func TestMaterializeFunctionFieldsSkipsOmittedVersionWithoutFunctions(t *testing.T) {
-	collectionID := int64(99000)
-	vchannel := "v1"
-	shardManager := mock_shards.NewMockShardManager(t)
-	impl := &shardInterceptor{
-		shardManager: shardManager,
-	}
-	msg := message.NewInsertMessageBuilderV1().
-		WithVChannel(vchannel).
-		WithHeader(&messagespb.InsertMessageHeader{CollectionId: collectionID}).
-		WithBody(&msgpb.InsertRequest{}).
-		MustBuildMutable()
-
-	insertMsg := message.MustAsMutableInsertMessageV1(msg)
-	err := impl.materializeFunctionFields(context.Background(), insertMsg, collectionID, function.LatestFunctionRunnerVersion)
-	assert.NoError(t, err)
+func (m *shardManagerWithSchema) GetCollectionSchema(_ int64, _ int32) (*schemapb.CollectionSchema, error) {
+	return m.schema, nil
 }
 
 func TestShardInterceptorPassesOmittedSchemaVersionToChecker(t *testing.T) {
@@ -325,6 +307,30 @@ func TestShardInterceptorAlterCollectionSkipsPartialSchemaForFunctionManager(t *
 	})
 	assert.NoError(t, err)
 	assert.False(t, ok)
+}
+
+func TestMaterializeFunctionFieldsSkipsBodyDecodeWithoutEmbeddingFunctions(t *testing.T) {
+	const collectionID int64 = 99002
+
+	valid := message.NewInsertMessageBuilderV1().
+		WithVChannel("v1").
+		WithHeader(&messagespb.InsertMessageHeader{CollectionId: collectionID}).
+		WithBody(&msgpb.InsertRequest{}).
+		MustBuildMutable()
+	raw := valid.IntoMessageProto()
+	raw.Payload = []byte{0xff}
+	insertMsg, err := message.AsMutableInsertMessageV1(
+		message.NewMutableMessageBeforeAppend(raw.Payload, raw.Properties),
+	)
+	require.NoError(t, err)
+
+	mockManager := mock_shards.NewMockShardManager(t)
+	impl := &shardInterceptor{shardManager: &shardManagerWithSchema{
+		ShardManager: mockManager,
+		schema:       &schemapb.CollectionSchema{Version: 1},
+	}}
+
+	require.NoError(t, impl.materializeFunctionFields(context.Background(), insertMsg, collectionID, 1))
 }
 
 func TestShardInterceptorDeleteAppliesBeforeAppend(t *testing.T) {

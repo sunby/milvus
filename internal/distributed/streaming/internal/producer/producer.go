@@ -118,28 +118,28 @@ func (p *ResumableProducer) BeginProduce(ctx context.Context, msgs ...message.Mu
 func (p *ResumableProducer) produceInternal(ctx context.Context, msg message.MutableMessage) (result *types.AppendResult, err error) {
 	messageType := msg.MessageType().String()
 	totalStart := time.Now()
-	defer observeProduceInternalStage(messageType, produceInternalStageTotal, totalStart)
+	defer observeProduceInternalStage(p.opts.PChannel, messageType, produceInternalStageTotal, totalStart)
 
 	stageStart := time.Now()
 	if !p.lifetime.Add(typeutil.LifetimeStateWorking) {
-		observeProduceInternalStage(messageType, produceInternalStageLifetimeGuard, stageStart)
+		observeProduceInternalStage(p.opts.PChannel, messageType, produceInternalStageLifetimeGuard, stageStart)
 		return nil, errors.Wrapf(errs.ErrClosed, "produce on closed producer")
 	}
-	observeProduceInternalStage(messageType, produceInternalStageLifetimeGuard, stageStart)
+	observeProduceInternalStage(p.opts.PChannel, messageType, produceInternalStageLifetimeGuard, stageStart)
 	defer p.lifetime.Done()
 
 	for {
 		// get producer.
 		stageStart = time.Now()
 		producerHandler, err := p.producer.GetProducerAfterAvailable(ctx)
-		observeProduceInternalStage(messageType, produceInternalStageGetProducerAfterAvailable, stageStart)
+		observeProduceInternalStage(p.opts.PChannel, messageType, produceInternalStageGetProducerAfterAvailable, stageStart)
 		if err != nil {
 			return nil, err
 		}
 		appendCtx, span := p.startDistAppendSpanIfRemote(ctx, producerHandler, msg)
 		stageStart = time.Now()
 		produceResult, err := producerHandler.Append(appendCtx, msg)
-		observeProduceInternalStage(messageType, produceInternalStageAppend, stageStart)
+		observeProduceInternalStage(p.opts.PChannel, messageType, produceInternalStageAppend, stageStart)
 		if span != nil {
 			if err != nil {
 				span.RecordError(err)
@@ -168,10 +168,10 @@ func (p *ResumableProducer) produceInternal(ctx context.Context, msg message.Mut
 				// current message is rate limit rejected, wait until the rate limit is available.
 				stageStart = time.Now()
 				if err := p.rateLimiter.WaitUntilAvailable(ctx); err != nil {
-					observeProduceInternalStage(messageType, produceInternalStageWaitRateLimitAvailable, stageStart)
+					observeProduceInternalStage(p.opts.PChannel, messageType, produceInternalStageWaitRateLimitAvailable, stageStart)
 					return nil, errors.Mark(err, errs.ErrCanceledOrDeadlineExceed)
 				}
-				observeProduceInternalStage(messageType, produceInternalStageWaitRateLimitAvailable, stageStart)
+				observeProduceInternalStage(p.opts.PChannel, messageType, produceInternalStageWaitRateLimitAvailable, stageStart)
 			}
 		}
 	}

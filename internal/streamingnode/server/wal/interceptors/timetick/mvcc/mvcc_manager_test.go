@@ -152,6 +152,85 @@ func TestTransformBarrierMessagesAdvanceTransformingMVCC(t *testing.T) {
 	assert.Equal(t, VChannelMVCC{GrowingTimetick: 120, TransformingTimetick: 130, Confirmed: true}, mvcc)
 }
 
+func TestMVCCConfirmationUsesPChannelFrontier(t *testing.T) {
+	cm := NewMVCCManager(100)
+	cm.ApplyRecoveryBarrier("vc1", 100)
+	cm.ApplyRecoveryBarrier("vc2", 100)
+
+	cm.UpdateMVCC(createTestMessage(t, 130, "vc1", message.MessageTypeInsert, false, true))
+	cm.UpdateMVCC(createTestMessage(t, 110, "vc2", message.MessageTypeInsert, false, true))
+
+	assert.Equal(t,
+		VChannelMVCC{GrowingTimetick: 130, TransformingTimetick: 100, Confirmed: false},
+		cm.GetMVCCOfVChannel("vc1"),
+	)
+	assert.Equal(t,
+		VChannelMVCC{GrowingTimetick: 110, TransformingTimetick: 100, Confirmed: false},
+		cm.GetMVCCOfVChannel("vc2"),
+	)
+
+	cm.UpdateMVCC(createTestMessage(t, 120, "", message.MessageTypeTimeTick, false, true))
+
+	assert.Equal(t,
+		VChannelMVCC{GrowingTimetick: 130, TransformingTimetick: 100, Confirmed: false},
+		cm.GetMVCCOfVChannel("vc1"),
+	)
+	assert.Equal(t,
+		VChannelMVCC{GrowingTimetick: 110, TransformingTimetick: 100, Confirmed: true},
+		cm.GetMVCCOfVChannel("vc2"),
+	)
+
+	cm.UpdateMVCC(createTestMessage(t, 130, "", message.MessageTypeTimeTick, false, true))
+	assert.True(t, cm.GetMVCCOfVChannel("vc1").Confirmed)
+	assert.True(t, cm.GetMVCCOfVChannel("vc2").Confirmed)
+}
+
+func TestMVCCUpdateAfterConfirmBarrierIsAlreadyConfirmed(t *testing.T) {
+	cm := NewMVCCManager(100)
+	cm.ApplyRecoveryBarrier("vc1", 100)
+
+	// Append acknowledgement can make the TimeTick sync visible before the
+	// append interceptor finishes updating the per-vchannel frontier.
+	cm.UpdateMVCC(createTestMessage(t, 130, "", message.MessageTypeTimeTick, false, true))
+	cm.UpdateMVCC(createTestMessage(t, 120, "vc1", message.MessageTypeInsert, false, true))
+
+	assert.Equal(t,
+		VChannelMVCC{GrowingTimetick: 120, TransformingTimetick: 100, Confirmed: true},
+		cm.GetMVCCOfVChannel("vc1"),
+	)
+	assert.Equal(t, VChannelMVCC{}, cm.GetMVCCOfVChannel("missing"))
+}
+
+func TestRecoveryBarrierDoesNotOverConfirmNewerFrontier(t *testing.T) {
+	cm := NewMVCCManager(100)
+	cm.UpdateMVCC(createTestMessage(t, 130, "vc1", message.MessageTypeInsert, false, true))
+
+	cm.ApplyRecoveryBarrier("vc1", 120)
+
+	assert.Equal(t,
+		VChannelMVCC{GrowingTimetick: 130, TransformingTimetick: 120, Confirmed: false},
+		cm.GetMVCCOfVChannel("vc1"),
+	)
+}
+
+func TestPChannelTransformBarrierUsesConfirmationFrontier(t *testing.T) {
+	cm := NewMVCCManager(100)
+	cm.ApplyRecoveryBarrier("vc1", 100)
+	cm.ApplyRecoveryBarrier("vc2", 100)
+
+	cm.UpdateMVCC(createTestMessage(t, 150, "", message.MessageTypeTimeTick, false, true))
+	cm.UpdateMVCC(createTestMessage(t, 130, "", message.MessageTypeFlushAll, false, true))
+
+	assert.Equal(t,
+		VChannelMVCC{GrowingTimetick: 100, TransformingTimetick: 130, Confirmed: true},
+		cm.GetMVCCOfVChannel("vc1"),
+	)
+	assert.Equal(t,
+		VChannelMVCC{GrowingTimetick: 100, TransformingTimetick: 130, Confirmed: true},
+		cm.GetMVCCOfVChannel("vc2"),
+	)
+}
+
 func createTestMessage(
 	t *testing.T,
 	tt uint64,
