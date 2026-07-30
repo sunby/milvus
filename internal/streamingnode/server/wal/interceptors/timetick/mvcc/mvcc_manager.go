@@ -50,7 +50,6 @@ func (cm *MVCCManager) ApplyRecoveryBarrier(vchannel string, timetick uint64) {
 	mvcc.TransformingTimetick = max(mvcc.TransformingTimetick, timetick)
 	cm.lastConfirmedTimeTick = max(cm.lastConfirmedTimeTick, timetick)
 	cm.vchannelMVCCs[vchannel] = mvcc
-	delete(cm.unconfirmedVChannels, vchannel)
 }
 
 // UpdateMVCC updates the mvcc state by incoming message.
@@ -132,7 +131,6 @@ func (cm *MVCCManager) UpdateMVCC(msg message.MutableMessage) {
 		return
 	}
 	cm.vchannelMVCCs[vchannel] = mvcc
-	cm.unconfirmedVChannels[vchannel] = struct{}{}
 }
 
 // sync advances the pchannel-level confirmation frontier. Whether a vchannel
@@ -152,7 +150,6 @@ func (cm *MVCCManager) advanceTransformingAllLocked(tt uint64) {
 		}
 		mvcc.TransformingTimetick = tt
 		cm.vchannelMVCCs[vchannel] = mvcc
-		cm.unconfirmedVChannels[vchannel] = struct{}{}
 	}
 }
 

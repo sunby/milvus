@@ -2,6 +2,7 @@ package syncmgr
 
 import (
 	"context"
+	"math"
 	"time"
 
 	"github.com/cockroachdb/errors"

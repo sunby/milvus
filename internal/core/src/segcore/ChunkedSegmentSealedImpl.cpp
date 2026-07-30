@@ -7122,30 +7122,19 @@ ChunkedSegmentSealedImpl::load_field_data_common(
     milvus::OpContext* op_ctx,
     bool is_replace,
     StagedStateCommitter* committer) {
-    auto t0 = std::chrono::steady_clock::now();
-    auto snapshot = CapturePublishedState();
-    auto t1 = std::chrono::steady_clock::now();
-
-    if (!enable_mmap) {
-        if (IsVariableDataType(data_type)) {
-            SegmentInternalInterface::set_field_avg_size(
-                field_id, num_rows, column->DataByteSize());
+    const auto start = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::duration snapshot_duration{};
+    std::shared_ptr<const PublishedSegmentState> snapshot;
+    auto capture_snapshot =
+        [&]() -> const std::shared_ptr<const PublishedSegmentState>& {
+        if (snapshot == nullptr) {
+            const auto capture_start = std::chrono::steady_clock::now();
+            snapshot = CapturePublishedState();
+            snapshot_duration +=
+                std::chrono::steady_clock::now() - capture_start;
         }
-    }
-    // Skip index construction: for proxy columns (external tables) with no
-    // statistics, skip building the skip index during load to avoid triggering
-    // S3 data fetches when warmup=disable. The skip index will be unavailable
-    // for these segments, which only affects skip-index-based pruning.
-    auto t2 = std::chrono::steady_clock::now();
-    if (!IsVariableDataType(data_type) || IsStringDataType(data_type)) {
-        if (statistics) {
-            LoadSkipIndexFromStatistics(
-                field_id, data_type, statistics.value());
-        } else if (!is_proxy_column) {
-            LoadSkipIndex(field_id, data_type, column);
-        }
-    }
-    auto t3 = std::chrono::steady_clock::now();
+        return snapshot;
+    };
 
     std::shared_ptr<CacheSlot<storagev2translator::PkIndexCell>> pk_index_slot;
     const bool is_primary_field =
@@ -7159,9 +7148,9 @@ ChunkedSegmentSealedImpl::load_field_data_common(
                              op_ctx);
     }
 
-    auto t4 = std::chrono::steady_clock::now();
+    const auto prepare_done = std::chrono::steady_clock::now();
     generate_interim_index(field_id, num_rows, column, op_ctx, committer);
-    auto t5 = std::chrono::steady_clock::now();
+    const auto interim_index_done = std::chrono::steady_clock::now();
 
     if (!SystemProperty::Instance().IsSystem(field_id) &&
         data_type == DataType::GEOMETRY &&
@@ -7274,26 +7263,26 @@ ChunkedSegmentSealedImpl::load_field_data_common(
         };
 
     auto log_load_done = [&]() {
-        auto t6 = std::chrono::steady_clock::now();
+        const auto done = std::chrono::steady_clock::now();
         LOG_INFO(
             "[xxx] segment {} field {} load_field_data_common done, "
-            "snapshot={}ms, stats={}ms, skip_index={}ms, pk={}ms, "
-            "interim_index={}ms, publish={}ms, total={}ms",
+            "snapshot={}ms, prepare={}ms, interim_index={}ms, "
+            "publish={}ms, total={}ms",
             id_,
             field_id.get(),
-            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0)
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                snapshot_duration)
                 .count(),
-            std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1)
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                prepare_done - start)
                 .count(),
-            std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2)
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                interim_index_done - prepare_done)
                 .count(),
-            std::chrono::duration_cast<std::chrono::milliseconds>(t4 - t3)
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                done - interim_index_done)
                 .count(),
-            std::chrono::duration_cast<std::chrono::milliseconds>(t5 - t4)
-                .count(),
-            std::chrono::duration_cast<std::chrono::milliseconds>(t6 - t5)
-                .count(),
-            std::chrono::duration_cast<std::chrono::milliseconds>(t6 - t0)
+            std::chrono::duration_cast<std::chrono::milliseconds>(done - start)
                 .count());
     };
 
@@ -7306,7 +7295,8 @@ ChunkedSegmentSealedImpl::load_field_data_common(
                 old_column = it->second;
             }
             if (old_column == nullptr) {
-                old_column = get_column(capture_snapshot()->runtime, field_id);
+                old_column =
+                    get_column(capture_snapshot()->runtime, field_id);
             }
 
             std::unique_lock lck(mutex_);
@@ -7327,7 +7317,7 @@ ChunkedSegmentSealedImpl::load_field_data_common(
         }
 
         std::unique_lock lck(mutex_);
-        apply_loaded_column(*runtime, old_column, *snapshot);
+        apply_loaded_column(*runtime, old_column, *capture_snapshot());
         log_load_done();
         return;
     }

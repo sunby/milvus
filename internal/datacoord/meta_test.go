@@ -39,6 +39,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v3/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/datacoord/broker"
+	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/metastore/kv/datacoord"
 	mocks2 "github.com/milvus-io/milvus/internal/metastore/mocks"
 	"github.com/milvus-io/milvus/internal/metastore/model"
@@ -6059,13 +6060,9 @@ func TestAddDeltalogsToSegment_PreservesInsertAndStats(t *testing.T) {
 		},
 	}
 
-	modPack := &updateSegmentPack{
-		segments:   map[int64]*SegmentInfo{7: segment},
-		increments: map[int64]metastore.BinlogsIncrement{},
-	}
 	newDelta := []*datapb.FieldBinlog{mkBinlog(2, 9, 128, 150, 400)}
 
-	ok := addDeltalogsToSegment(modPack, 7, segment, newDelta)
+	ok := addDeltalogsToSegment(segment.SegmentInfo, newDelta)
 	require.True(t, ok)
 
 	stats := segment.GetStats()
@@ -6083,12 +6080,6 @@ func TestAddDeltalogsToSegment_PreservesInsertAndStats(t *testing.T) {
 	assert.EqualValues(t, 100, stats.GetTimestampFrom())
 	assert.EqualValues(t, 200, stats.GetTimestampTo())
 	assert.Equal(t, []int64{110, 130, 150, 170, 200}, stats.GetTimestampQuantiles())
-	// Increment recorded for the delta-only KV update.
-	inc, ok := modPack.increments[7]
-	require.True(t, ok)
-	assert.False(t, inc.UpdateMask.WithoutDeltalogs)
-	assert.True(t, inc.UpdateMask.WithoutBinlogs)
-	assert.True(t, inc.UpdateMask.WithoutStatslogs)
 }
 
 func TestAddDeltalogsToSegment_NilStatsInitializes(t *testing.T) {
@@ -6098,11 +6089,7 @@ func TestAddDeltalogsToSegment_NilStatsInitializes(t *testing.T) {
 	segment := &SegmentInfo{
 		SegmentInfo: &datapb.SegmentInfo{ID: 8},
 	}
-	modPack := &updateSegmentPack{
-		segments:   map[int64]*SegmentInfo{8: segment},
-		increments: map[int64]metastore.BinlogsIncrement{},
-	}
-	ok := addDeltalogsToSegment(modPack, 8, segment, []*datapb.FieldBinlog{mkBinlog(1, 7, 256)})
+	ok := addDeltalogsToSegment(segment.SegmentInfo, []*datapb.FieldBinlog{mkBinlog(1, 7, 256)})
 	require.True(t, ok)
 	require.NotNil(t, segment.GetStats())
 	assert.EqualValues(t, 256, segment.GetStats().GetDeltaBinlogSize())
@@ -6114,16 +6101,10 @@ func TestAddDeltalogsToSegment_EmptyInputIsNoOp(t *testing.T) {
 	segment := &SegmentInfo{
 		SegmentInfo: &datapb.SegmentInfo{ID: 9, Stats: &datapb.Statistics{DeltaBinlogSize: 42}},
 	}
-	modPack := &updateSegmentPack{
-		segments:   map[int64]*SegmentInfo{9: segment},
-		increments: map[int64]metastore.BinlogsIncrement{},
-	}
-	ok := addDeltalogsToSegment(modPack, 9, segment, nil)
+	ok := addDeltalogsToSegment(segment.SegmentInfo, nil)
 	assert.False(t, ok)
 	// Stats untouched on no-op.
 	assert.EqualValues(t, 42, segment.GetStats().GetDeltaBinlogSize())
-	_, hasInc := modPack.increments[9]
-	assert.False(t, hasInc)
 }
 
 // UpdateBinlogsOperator fully replaces the FieldBinlog arrays AND recomputes

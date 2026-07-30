@@ -69,6 +69,7 @@ func (m *shardManagerImpl) CreatePartition(msg message.ImmutableCreatePartitionM
 	}
 	m.partitionManagers[uniquePartitionKey] = newPartitionSegmentManager(
 		m.ctx,
+		m.Logger(),
 		m.wal,
 		m.scheduler,
 		m.pchannel,

@@ -107,8 +107,8 @@ func (s *statsTaskSuite) SetupTest() {
 					State:         commonpb.SegmentState_Flushed,
 					MaxRowNum:     65535,
 					Level:         datapb.SegmentLevel_L2,
+					Stats:         &datapb.Statistics{InsertBinlogSize: 512 * 1024 * 1024},
 				},
-				size: *atomic.NewInt64(512 * 1024 * 1024),
 			},
 		}),
 

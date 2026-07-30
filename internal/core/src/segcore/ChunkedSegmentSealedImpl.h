@@ -195,6 +195,14 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
         return load_info == nullptr ? -1 : load_info->GetPartitionID();
     }
 
+    std::shared_ptr<SegmentReadLease>
+    AcquireReadLease(const folly::CancellationToken& cancel_token) const {
+        return operation_gate_.AcquireRead(cancel_token, id_);
+    }
+
+    void
+    ValidateSchemaCompatibility(const SchemaPtr& plan_schema) const;
+
     bool
     HasRawData(int64_t field_id) const override;
 

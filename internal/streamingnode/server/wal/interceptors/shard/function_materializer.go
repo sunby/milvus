@@ -51,43 +51,14 @@ type collectionSchemaProvider interface {
 	GetAllCollectionSchemaInfos() map[int64]shards.CollectionSchemaInfo
 }
 
-type collectionSchemaGetter interface {
-	GetCollectionSchema(collectionID int64, schemaVersion int32) (*schemapb.CollectionSchema, error)
-}
-
-func (impl *shardInterceptor) materializeFunctionFields(ctx context.Context, insertMsg message.MutableInsertMessageV1, collectionID int64, schemaVersion int32) error {
-	if function.HasCachedRunners(collectionID, schemaVersion) {
-		body := insertMsg.MustBody()
-		changed, ok, err := function.TryMaterialize(collectionID, schemaVersion, body)
-		if err != nil {
-			return err
-		}
-		if ok {
-			if changed {
-				insertMsg.OverwriteBody(body)
-			}
-			return nil
-		}
-	}
-
-	schemaGetter, ok := impl.shardManager.(collectionSchemaGetter)
-	if !ok {
-		return nil
-	}
-
-	schema, err := schemaGetter.GetCollectionSchema(collectionID, schemaVersion)
-	if err != nil {
-		if errors.Is(err, shards.ErrCollectionSchemaNotFound) {
-			return nil
-		}
-		return err
-	}
-	if !function.HasEmbeddingFunctions(schema) {
-		return nil
-	}
-
+func (impl *shardInterceptor) materializeFunctionFields(
+	ctx context.Context,
+	insertMsg message.MutableInsertMessageV1,
+	collectionID int64,
+	schemaVersion int32,
+) error {
 	body := insertMsg.MustBody()
-	changed, err := function.FillFunctionData(ctx, collectionID, schema, body)
+	changed, err := function.GetManager().Materialize(ctx, collectionID, WALFunctionRunnerKey(insertMsg.VChannel()), schemaVersion, body)
 	if err != nil {
 		return err
 	}

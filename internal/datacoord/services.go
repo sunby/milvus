@@ -667,14 +667,102 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 		// Insert new L0 segment if it doesn't exist
 		segment := s.meta.GetSegment(ctx, req.GetSegmentID())
 		if segment == nil {
-			newSegments = append(newSegments, &datapb.SegmentInfo{
-				ID:            req.GetSegmentID(),
-				CollectionID:  req.GetCollectionID(),
-				PartitionID:   req.GetPartitionID(),
-				InsertChannel: req.GetChannel(),
-				State:         commonpb.SegmentState_Flushed,
-				Level:         datapb.SegmentLevel_L0,
-			})
+			newSegment := &datapb.SegmentInfo{
+				ID:             req.GetSegmentID(),
+				CollectionID:   req.GetCollectionID(),
+				PartitionID:    req.GetPartitionID(),
+				InsertChannel:  req.GetChannel(),
+				State:          commonpb.SegmentState_Flushed,
+				Level:          datapb.SegmentLevel_L0,
+				StorageVersion: req.GetStorageVersion(),
+				Binlogs:        mergeFieldBinlogs(nil, req.GetField2BinlogPaths()),
+				Statslogs:      mergeFieldBinlogs(nil, req.GetField2StatslogPaths()),
+				Deltalogs:      mergeFieldBinlogs(nil, req.GetDeltalogs()),
+				Bm25Statslogs:  mergeFieldBinlogs(nil, req.GetField2Bm25LogPaths()),
+				ManifestPath:   req.GetManifestPath(),
+				Stats:          req.GetStats(),
+			}
+			if newSegment.Stats == nil {
+				newSegment.Stats = storage.BuildStatsFromFieldBinlogs(
+					newSegment.GetBinlogs(), newSegment.GetStatslogs(), newSegment.GetBm25Statslogs(), newSegment.GetDeltalogs())
+			}
+			for _, cp := range req.GetCheckPoints() {
+				if cp.GetSegmentID() == newSegment.GetID() {
+					newSegment.DmlPosition = cp.GetPosition()
+					newSegment.NumOfRows = cp.GetNumOfRows()
+				}
+			}
+			for _, pos := range req.GetStartPositions() {
+				if pos.GetSegmentID() == newSegment.GetID() {
+					newSegment.StartPosition = pos.GetStartPosition()
+				}
+			}
+			deleteApplyStartAfterTimetick := req.GetDeleteApplyStartAfterTimetick()
+			if deleteApplyStartAfterTimetick == 0 && newSegment.GetStartPosition() != nil {
+				deleteApplyStartAfterTimetick = newSegment.GetStartPosition().GetTimestamp()
+			}
+			newSegment.DeleteApplyStartAfterTimetick = deleteApplyStartAfterTimetick
+			newSegments = append(newSegments, newSegment)
+		} else {
+			reqCopy := req
+			mutations[req.GetSegmentID()] = []MutateFunc{func(seg *datapb.SegmentInfo) bool {
+				if reqCopy.GetWithFullBinlogs() {
+					seg.Binlogs = mergeFieldBinlogs(nil, reqCopy.GetField2BinlogPaths())
+					seg.Statslogs = mergeFieldBinlogs(nil, reqCopy.GetField2StatslogPaths())
+					seg.Deltalogs = mergeFieldBinlogs(nil, reqCopy.GetDeltalogs())
+					seg.Bm25Statslogs = mergeFieldBinlogs(nil, reqCopy.GetField2Bm25LogPaths())
+				} else {
+					seg.Binlogs = mergeFieldBinlogs(seg.GetBinlogs(), reqCopy.GetField2BinlogPaths())
+					seg.Statslogs = mergeFieldBinlogs(seg.GetStatslogs(), reqCopy.GetField2StatslogPaths())
+					seg.Deltalogs = mergeFieldBinlogs(seg.GetDeltalogs(), reqCopy.GetDeltalogs())
+					seg.Bm25Statslogs = mergeFieldBinlogs(seg.GetBm25Statslogs(), reqCopy.GetField2Bm25LogPaths())
+				}
+				if reqCopy.GetManifestPath() != "" {
+					seg.ManifestPath = reqCopy.GetManifestPath()
+				}
+				if reqCopy.GetStats() != nil {
+					seg.Stats = reqCopy.GetStats()
+				} else {
+					seg.Stats = storage.BuildStatsFromFieldBinlogs(
+						seg.GetBinlogs(), seg.GetStatslogs(), seg.GetBm25Statslogs(), seg.GetDeltalogs())
+				}
+
+				var checkpointRows int64
+				for _, cp := range reqCopy.GetCheckPoints() {
+					if cp.GetSegmentID() != seg.GetID() || cp.GetPosition() == nil {
+						continue
+					}
+					if !reqCopy.GetWithFullBinlogs() && seg.GetDmlPosition() != nil &&
+						seg.GetDmlPosition().GetTimestamp() >= cp.GetPosition().GetTimestamp() {
+						continue
+					}
+					checkpointRows = cp.GetNumOfRows()
+					seg.DmlPosition = cp.GetPosition()
+				}
+				if count := segmentutil.CalcRowCountFromBinLog(seg); count > 0 {
+					seg.NumOfRows = count
+				} else if checkpointRows > 0 && seg.GetStorageVersion() == storage.StorageV3 {
+					seg.NumOfRows = checkpointRows
+				}
+
+				for _, pos := range reqCopy.GetStartPositions() {
+					if pos.GetSegmentID() == seg.GetID() {
+						seg.StartPosition = pos.GetStartPosition()
+					}
+				}
+				deleteApplyStartAfterTimetick := reqCopy.GetDeleteApplyStartAfterTimetick()
+				if deleteApplyStartAfterTimetick == 0 && seg.GetDeleteApplyStartAfterTimetick() == 0 {
+					if ts := seg.GetCommitTimestamp(); ts != 0 {
+						deleteApplyStartAfterTimetick = ts
+					} else if seg.GetStartPosition() != nil {
+						deleteApplyStartAfterTimetick = seg.GetStartPosition().GetTimestamp()
+					}
+				}
+				if deleteApplyStartAfterTimetick != 0 {
+					seg.DeleteApplyStartAfterTimetick = deleteApplyStartAfterTimetick
+				}
+				return true
+			}}
 		}
 	} else {
 		startGetSegment := time.Now()
@@ -769,6 +857,12 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 				seg.Statslogs = mergeFieldBinlogs(seg.GetStatslogs(), reqCopy.GetField2StatslogPaths())
 				seg.Deltalogs = mergeFieldBinlogs(seg.GetDeltalogs(), reqCopy.GetDeltalogs())
 				seg.Bm25Statslogs = mergeFieldBinlogs(seg.GetBm25Statslogs(), reqCopy.GetField2Bm25LogPaths())
+			}
+			if reqCopy.GetStats() != nil {
+				seg.Stats = reqCopy.GetStats()
+			} else {
+				seg.Stats = storage.BuildStatsFromFieldBinlogs(
+					seg.GetBinlogs(), seg.GetStatslogs(), seg.GetBm25Statslogs(), seg.GetDeltalogs())
 			}
 
 			// Checkpoint

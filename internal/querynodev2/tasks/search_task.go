@@ -250,7 +250,6 @@ func (t *SearchTask) execute(selected []segments.Segment) error {
 		mlog.Duration("duration", time.Since(stageStart)),
 		mlog.Int("searchedSegmentNum", len(searchedSegments)),
 		mlog.Int("resultNum", len(results)))
-	defer segments.DeleteSearchResults(results)
 
 	// In filter-only mode, extract filter statistics and return early.
 	// This supports two-stage search: stage-1 collects per-segment valid

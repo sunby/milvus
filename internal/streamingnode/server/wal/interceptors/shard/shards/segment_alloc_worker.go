@@ -13,17 +13,13 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
-	"github.com/milvus-io/milvus/pkg/v3/streaming/util/types"
-	"github.com/milvus-io/milvus/pkg/v3/util/nodescheduler"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
 
 // asyncAllocSegment allocates a new growing segment asynchronously.
 func (m *partitionManager) asyncAllocSegment(schemaVersion int32, requiresStorageV3 bool) {
 	if m.onAllocating != nil {
-		resource.Resource().Logger().Debug(m.ctx, "segment alloc worker is already on allocating",
-			mlog.FieldComponent("shard-manager"),
-			mlog.Stringer("pchannel", m.pchannel),
+		m.Logger().Debug(context.TODO(), "segment alloc worker is already on allocating",
 			mlog.FieldVChannel(m.vchannel),
 			mlog.FieldCollectionID(m.collectionID),
 			mlog.FieldPartitionID(m.partitionID),
@@ -35,7 +31,6 @@ func (m *partitionManager) asyncAllocSegment(schemaVersion int32, requiresStorag
 	m.onAllocating = make(chan struct{})
 	w := &segmentAllocWorker{
 		ctx:               m.ctx,
-		pchannel:          m.pchannel,
 		collectionID:      m.collectionID,
 		partitionID:       m.partitionID,
 		vchannel:          m.vchannel,
@@ -43,13 +38,16 @@ func (m *partitionManager) asyncAllocSegment(schemaVersion int32, requiresStorag
 		schemaVersion:     schemaVersion,
 		requiresStorageV3: requiresStorageV3,
 	}
-	m.scheduler.Submit(w)
+	w.SetLogger(m.Logger())
+	// It should always run asynchronously. Otherwise, a deadlock may happen
+	// while the WAL is writing the CreateSegment message.
+	go w.do()
 }
 
 // segmentAllocWorker is a worker that allocates new growing segments asynchronously.
 type segmentAllocWorker struct {
+	mlog.Binder
 	ctx          context.Context
-	pchannel     types.PChannelInfo
 	collectionID int64
 	partitionID  int64
 	vchannel     string
@@ -146,9 +144,7 @@ func (w *segmentAllocWorker) doOnce() error {
 
 	result, err := w.wal.Append(w.ctx, msg)
 	if err != nil {
-		resource.Resource().Logger().Warn(ctx, "failed to append create segment message",
-			mlog.FieldComponent("shard-manager"),
-			mlog.Stringer("pchannel", w.pchannel),
+		w.Logger().Warn(w.ctx, "failed to append create segment message",
 			mlog.FieldVChannel(w.vchannel),
 			mlog.FieldCollectionID(w.collectionID),
 			mlog.FieldPartitionID(w.partitionID),
@@ -157,9 +153,8 @@ func (w *segmentAllocWorker) doOnce() error {
 		)
 		return err
 	}
-	resource.Resource().Logger().Info(ctx, "append create segment message",
-		mlog.FieldComponent("shard-manager"),
-		mlog.Stringer("pchannel", w.pchannel),
+	w.Logger().Info(w.ctx,
+		"append create segment message",
 		mlog.FieldVChannel(w.vchannel),
 		mlog.FieldCollectionID(w.collectionID),
 		mlog.FieldPartitionID(w.partitionID),
@@ -181,9 +176,7 @@ func (w *segmentAllocWorker) initSegmentConfig() error {
 	// Allocate new segment id.
 	segmentID, err := resource.Resource().IDAllocator().Allocate(w.ctx)
 	if err != nil {
-		resource.Resource().Logger().Warn(ctx, "failed to allocate segment id",
-			mlog.FieldComponent("shard-manager"),
-			mlog.Stringer("pchannel", w.pchannel),
+		w.Logger().Warn(w.ctx, "failed to allocate segment id",
 			mlog.FieldVChannel(w.vchannel),
 			mlog.FieldCollectionID(w.collectionID),
 			mlog.FieldPartitionID(w.partitionID),

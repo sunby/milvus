@@ -23,6 +23,7 @@ import (
 	"github.com/milvus-io/milvus/internal/streamingnode/server/wal/interceptors/shard/policy"
 	"github.com/milvus-io/milvus/internal/streamingnode/server/wal/interceptors/shard/stats"
 	"github.com/milvus-io/milvus/internal/util/streamingutil/status"
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/types"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/walimpls/impls/rmq"
@@ -94,116 +95,30 @@ func TestPartitionManagerRunsFlushAndAllocationOutsideNodeScheduler(t *testing.T
 		scheduler:    scheduler,
 		txnManager:   &mockedTxnManager{},
 		wal:          walFuture,
-		pchannel:     channel,
 		vchannel:     "v1",
 		collectionID: 1,
 		partitionID:  2,
 	}
+	m.SetLogger(mlog.With())
 
 	m.asyncFlushSegment(context.Background(), segment)
 	m.asyncAllocSegment(7, true)
 
-	require.Len(t, scheduler.tasks, 2)
-	assert.IsType(t, &segmentFlushWorker{}, scheduler.tasks[0])
-	assert.IsType(t, &segmentAllocWorker{}, scheduler.tasks[1])
-}
-
-func TestSegmentFlushWorkerExecuteUsesErrDelay(t *testing.T) {
-	paramtable.Init()
-	resource.InitForTest(t)
-	channel := types.PChannelInfo{Name: "pchannel", Term: 1}
-	operator := mock_utils.NewMockSealOperator(t)
-	operator.EXPECT().Channel().Return(channel)
-	operator.EXPECT().AsyncFlushSegment(mock.Anything).Return().Maybe()
-	resource.Resource().SegmentStatsManager().RegisterSealOperator(operator, nil, nil)
-
-	t.Run("txn recovery", func(t *testing.T) {
-		mockWAL := mock_wal.NewMockWAL(t)
-		mockWAL.EXPECT().Available().Return(make(chan struct{})).Maybe()
-		w := &segmentFlushWorker{
-			txnManager: &neverReadyTxnManager{},
-			ctx:        context.Background(),
-			wal:        mockWAL,
-		}
-		require.ErrorIs(t, w.Execute(context.Background()), nodescheduler.ErrDelay)
-	})
-
-	t.Run("ack precondition", func(t *testing.T) {
-		segment := newTestSegmentAllocManager(channel, &message.CreateSegmentMessageHeader{
-			CollectionId:   1,
-			PartitionId:    2,
-			SegmentId:      1001,
-			MaxRows:        100,
-			MaxSegmentSize: 100,
-		}, 100)
-		result, err := segment.AllocRows(&AssignSegmentRequest{TimeTick: 101, ModifiedMetrics: stats.ModifiedMetrics{Rows: 1, BinarySize: 1}})
-		require.NoError(t, err)
-		defer result.Ack()
-		mockWAL := mock_wal.NewMockWAL(t)
-		mockWAL.EXPECT().Available().Return(make(chan struct{})).Maybe()
-		w := &segmentFlushWorker{
-			txnManager: &mockedTxnManager{},
-			ctx:        context.Background(),
-			segment:    segment,
-			wal:        mockWAL,
-		}
-		require.ErrorIs(t, w.Execute(context.Background()), nodescheduler.ErrDelay)
-	})
-
-	t.Run("transient append", func(t *testing.T) {
-		segment := newTestSegmentAllocManager(channel, &message.CreateSegmentMessageHeader{
-			CollectionId:   1,
-			PartitionId:    2,
-			SegmentId:      1002,
-			MaxRows:        100,
-			MaxSegmentSize: 100,
-		}, 100)
-		segment.Flush(policy.PolicyCapacity())
-		mockWAL := mock_wal.NewMockWAL(t)
-		mockWAL.EXPECT().Available().Return(make(chan struct{})).Maybe()
-		mockWAL.EXPECT().Append(mock.Anything, mock.Anything).Return(nil, errors.New("temporary append failure")).Once()
-		w := &segmentFlushWorker{
-			txnManager: &mockedTxnManager{},
-			ctx:        context.Background(),
-			vchannel:   "v1",
-			segment:    segment,
-			wal:        mockWAL,
-		}
-		require.ErrorIs(t, w.Execute(context.Background()), nodescheduler.ErrDelay)
-	})
-}
-
-func TestSegmentAllocWorkerExecuteRetriesAndPreservesConfiguration(t *testing.T) {
-	paramtable.Init()
-	resource.InitForTest(t)
-
-	var attempts atomic.Int32
-	mockWAL := mock_wal.NewMockWAL(t)
-	mockWAL.EXPECT().Available().Return(make(chan struct{})).Maybe()
-	mockWAL.EXPECT().Append(mock.Anything, mock.Anything).RunAndReturn(func(context.Context, message.MutableMessage) (*wal.AppendResult, error) {
-		if attempts.Add(1) == 1 {
-			return nil, errors.New("temporary append failure")
-		}
-		return &wal.AppendResult{MessageID: rmq.NewRmqID(100), TimeTick: 200}, nil
-	}).Twice()
-	w := &segmentAllocWorker{
-		ctx:          context.Background(),
-		collectionID: 1,
-		partitionID:  2,
-		vchannel:     "v1",
-		wal:          mockWAL,
+	select {
+	case <-flushStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("flush worker was not started directly")
 	}
-
-	require.ErrorIs(t, w.Execute(context.Background()), nodescheduler.ErrDelay)
-	segmentID := w.segmentID
-	storageVersion := w.storageVersion
-	limitation := w.limitation
-	require.NotZero(t, segmentID)
-
-	require.NoError(t, w.Execute(context.Background()))
-	assert.Equal(t, segmentID, w.segmentID)
-	assert.Equal(t, storageVersion, w.storageVersion)
-	assert.Equal(t, limitation, w.limitation)
+	select {
+	case <-allocStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("allocation worker was not started directly")
+	}
+	select {
+	case task := <-scheduler.tasks:
+		t.Fatalf("unexpected NodeScheduler task %T", task)
+	default:
+	}
 }
 
 // TestSegmentFlushWorker_RetryAfterAppendFailure tests that the flush worker
@@ -272,6 +187,7 @@ func TestSegmentFlushWorker_RetryAfterAppendFailure(t *testing.T) {
 		segment:      segment,
 		wal:          mockWAL,
 	}
+	w.SetLogger(mlog.With())
 
 	// First call should fail
 	err := w.doOnce()
@@ -349,6 +265,7 @@ func TestSegmentAllocWorker_RetryAfterAppendFailure(t *testing.T) {
 		wal:          mockWAL,
 		segmentID:    0, // Initially not allocated
 	}
+	w.SetLogger(mlog.With())
 
 	// First call should fail
 	err := w.doOnce()
@@ -419,6 +336,7 @@ func TestSegmentFlushWorker_DoOnceCheckIfReady(t *testing.T) {
 		segment:      segment,
 		wal:          mockWAL,
 	}
+	w.SetLogger(mlog.With())
 
 	// When segment is ready (no pending acks), it should try to flush
 	mockWAL.EXPECT().Append(mock.Anything, mock.Anything).RunAndReturn(
@@ -450,6 +368,7 @@ func TestSegmentAllocWorker_InitSegmentConfig(t *testing.T) {
 		wal:          mockWAL,
 		segmentID:    0,
 	}
+	w.SetLogger(mlog.With())
 
 	// Initialize config - should allocate segment ID and set storageVersion/limitation
 	err := w.initSegmentConfig()
@@ -495,6 +414,7 @@ func TestSegmentAllocWorkerStorageVersionFollowsRequirements(t *testing.T) {
 				wal:               mock_wal.NewMockWAL(t),
 				requiresStorageV3: tc.requiresStorageV3,
 			}
+			w.SetLogger(mlog.With())
 
 			err := w.initSegmentConfig()
 			assert.NoError(t, err)
@@ -574,6 +494,7 @@ func TestSegmentAllocWorker_DoLoop(t *testing.T) {
 			wal:          mockWAL,
 			segmentID:    0,
 		}
+		w.SetLogger(mlog.With())
 
 		runShardWorkerAndWait(t, w.do)
 	})
@@ -600,6 +521,7 @@ func TestSegmentAllocWorker_DoLoop(t *testing.T) {
 			wal:          mockWAL,
 			segmentID:    0,
 		}
+		w.SetLogger(mlog.With())
 
 		runShardWorkerAndWait(t, w.do)
 	})
@@ -651,6 +573,7 @@ func TestSegmentFlushWorker_DoLoop(t *testing.T) {
 			segment:      segment,
 			wal:          mockWAL,
 		}
+		w.SetLogger(mlog.With())
 
 		runShardWorkerAndWait(t, w.do)
 	})
@@ -679,6 +602,7 @@ func TestSegmentAllocWorker_InitSegmentConfigPreservesValues(t *testing.T) {
 		wal:          mockWAL,
 		segmentID:    0,
 	}
+	w.SetLogger(mlog.With())
 
 	// Initialize config - should allocate segment ID
 	err := w.initSegmentConfig()
@@ -721,6 +645,7 @@ func TestSegmentFlushWorker_CheckIfReady(t *testing.T) {
 		w := &segmentFlushWorker{
 			segment: segment,
 		}
+		w.SetLogger(mlog.With())
 
 		assert.True(t, w.checkIfReady())
 	})
@@ -749,6 +674,7 @@ func TestSegmentFlushWorker_CheckIfReady(t *testing.T) {
 		w := &segmentFlushWorker{
 			segment: segment,
 		}
+		w.SetLogger(mlog.With())
 
 		assert.False(t, w.checkIfReady())
 
@@ -783,6 +709,7 @@ func TestSegmentFlushWorker_CheckIfReady(t *testing.T) {
 		w := &segmentFlushWorker{
 			segment: segment,
 		}
+		w.SetLogger(mlog.With())
 
 		// Now ackSem = 0 but txnSem > 0, so should hit the txnSem branch
 		assert.False(t, w.checkIfReady())
@@ -831,6 +758,7 @@ func TestSegmentFlushWorker_DoOnceDelayFlush(t *testing.T) {
 		segment:      segment,
 		wal:          mockWAL,
 	}
+	w.SetLogger(mlog.With())
 
 	// Should return errDelayFlush because segment has pending operations
 	err := w.doOnce()
@@ -866,6 +794,7 @@ func TestSegmentAllocWorker_UnrecoverableError(t *testing.T) {
 		wal:          mockWAL,
 		segmentID:    0,
 	}
+	w.SetLogger(mlog.With())
 
 	runShardWorkerAndWait(t, w.do)
 }
@@ -912,6 +841,7 @@ func TestSegmentFlushWorker_UnrecoverableError(t *testing.T) {
 		segment:      segment,
 		wal:          mockWAL,
 	}
+	w.SetLogger(mlog.With())
 
 	runShardWorkerAndWait(t, w.do)
 }
@@ -944,6 +874,7 @@ func TestSegmentAllocWorker_WALUnavailable(t *testing.T) {
 		wal:          mockWAL,
 		segmentID:    0,
 	}
+	w.SetLogger(mlog.With())
 
 	runShardWorkerAndWait(t, w.do)
 }
@@ -991,6 +922,7 @@ func TestSegmentFlushWorker_ContextCanceledDuringRetry(t *testing.T) {
 		segment:      segment,
 		wal:          mockWAL,
 	}
+	w.SetLogger(mlog.With())
 
 	runShardWorkerAndWait(t, w.do)
 }
@@ -1034,6 +966,7 @@ func TestSegmentFlushWorker_TxnManagerRecoverFailed(t *testing.T) {
 		segment:      segment,
 		wal:          mockWAL,
 	}
+	w.SetLogger(mlog.With())
 
 	runShardWorkerAndWait(t, w.do)
 }
@@ -1083,6 +1016,7 @@ func TestSegmentFlushWorker_WALUnavailableDuringRetry(t *testing.T) {
 		segment:      segment,
 		wal:          mockWAL,
 	}
+	w.SetLogger(mlog.With())
 
 	runShardWorkerAndWait(t, w.do)
 }

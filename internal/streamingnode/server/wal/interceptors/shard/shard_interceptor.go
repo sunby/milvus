@@ -188,6 +188,9 @@ func (impl *shardInterceptor) handleInsertMessage(ctx context.Context, msg messa
 		return nil, status.NewUnrecoverableError("unexpected error from CheckIfCollectionSchemaVersionMatch: %s", err.Error())
 	}
 	schemaVersion = correctSchemaVersion
+	if header.SchemaVersion == nil {
+		schemaVersion = function.LatestFunctionRunnerVersion
+	}
 	stageStart = time.Now()
 	err = impl.materializeFunctionFields(ctx, insertMsg, header.GetCollectionId(), schemaVersion)
 	utility.ObserveAppendStage(ctx, metricsutil.AppendStageShardFunctionMaterialize, stageStart)

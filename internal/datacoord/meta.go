@@ -1316,8 +1316,69 @@ func AddBinlogsOperator(segmentID int64, binlogs, statslogs, deltalogs, bm25logs
 		segment.Statslogs = mergeFieldBinlogs(segment.GetStatslogs(), statslogs)
 		segment.Deltalogs = mergeFieldBinlogs(segment.GetDeltalogs(), deltalogs)
 		segment.Bm25Statslogs = mergeFieldBinlogs(segment.GetBm25Statslogs(), bm25logs)
+		segment.Stats = storage.BuildStatsFromFieldBinlogs(
+			segment.GetBinlogs(), segment.GetStatslogs(), segment.GetBm25Statslogs(), segment.GetDeltalogs())
 		return true
 	})
+}
+
+// addDeltalogsToSegment merges only previously unseen deltalogs and advances
+// the delta-related Statistics fields without rebuilding insert/statistics
+// fields that may exist only in a StorageV3 manifest.
+func addDeltalogsToSegment(segment *datapb.SegmentInfo, deltalogs []*datapb.FieldBinlog) bool {
+	deltalogs = filterDuplicateFieldBinlogs(segment.GetDeltalogs(), deltalogs)
+	if len(deltalogs) == 0 {
+		return false
+	}
+
+	segment.Deltalogs = mergeFieldBinlogs(segment.GetDeltalogs(), deltalogs)
+	if segment.Stats == nil {
+		segment.Stats = &datapb.Statistics{}
+	}
+	for _, fieldBinlog := range deltalogs {
+		for _, binlog := range fieldBinlog.GetBinlogs() {
+			segment.Stats.DeltaBinlogSize += binlog.GetMemorySize()
+			segment.Stats.DeleteNumRows += binlog.GetEntriesNum()
+			segment.Stats.DeltaBinlogCount++
+			if from := binlog.GetTimestampFrom(); from > 0 &&
+				(segment.Stats.DeltaTimestampFrom == 0 || from < segment.Stats.DeltaTimestampFrom) {
+				segment.Stats.DeltaTimestampFrom = from
+			}
+			if to := binlog.GetTimestampTo(); to > segment.Stats.DeltaTimestampTo {
+				segment.Stats.DeltaTimestampTo = to
+			}
+		}
+	}
+	return true
+}
+
+func updateManifestPathIfNewer(segment *datapb.SegmentInfo, manifestPath string) (bool, error) {
+	if manifestPath == "" || segment.GetManifestPath() == manifestPath {
+		return false, nil
+	}
+	if segment.GetManifestPath() == "" {
+		segment.ManifestPath = manifestPath
+		return true, nil
+	}
+
+	currentBase, currentVersion, err := packed.UnmarshalManifestPath(segment.GetManifestPath())
+	if err != nil {
+		return false, err
+	}
+	incomingBase, incomingVersion, err := packed.UnmarshalManifestPath(manifestPath)
+	if err != nil {
+		return false, err
+	}
+	if currentBase != incomingBase {
+		return false, merr.WrapErrServiceInternalMsg(
+			"manifest base path mismatch for segment %d: current %s, incoming %s",
+			segment.GetID(), currentBase, incomingBase)
+	}
+	if incomingVersion <= currentVersion {
+		return false, nil
+	}
+	segment.ManifestPath = manifestPath
+	return true, nil
 }
 
 func UpdateBinlogsOperator(segmentID int64, binlogs, statslogs, deltalogs, bm25logs []*datapb.FieldBinlog) map[int64][]MutateFunc {
@@ -1326,6 +1387,22 @@ func UpdateBinlogsOperator(segmentID int64, binlogs, statslogs, deltalogs, bm25l
 		segment.Statslogs = statslogs
 		segment.Deltalogs = deltalogs
 		segment.Bm25Statslogs = bm25logs
+		segment.Stats = storage.BuildStatsFromFieldBinlogs(binlogs, statslogs, bm25logs, deltalogs)
+		return true
+	})
+}
+
+// UpdateSegmentStats stores a producer-provided cumulative Statistics object.
+// A nil request is the rolling-upgrade fallback and derives Statistics from
+// the segment's cumulative binlog arrays.
+func UpdateSegmentStats(segmentID int64, requestStats *datapb.Statistics) map[int64][]MutateFunc {
+	return singleSegmentMutation(segmentID, func(segment *datapb.SegmentInfo) bool {
+		if requestStats != nil {
+			segment.Stats = requestStats
+		} else {
+			segment.Stats = storage.BuildStatsFromFieldBinlogs(
+				segment.GetBinlogs(), segment.GetStatslogs(), segment.GetBm25Statslogs(), segment.GetDeltalogs())
+		}
 		return true
 	})
 }
@@ -1336,6 +1413,8 @@ func UpdateBinlogsFromSaveBinlogPathsOperator(segmentID int64, binlogs, statslog
 		segment.Statslogs = mergeFieldBinlogs(nil, statslogs)
 		segment.Deltalogs = mergeFieldBinlogs(nil, deltalogs)
 		segment.Bm25Statslogs = mergeFieldBinlogs(nil, bm25logs)
+		segment.Stats = storage.BuildStatsFromFieldBinlogs(
+			segment.GetBinlogs(), segment.GetStatslogs(), segment.GetBm25Statslogs(), segment.GetDeltalogs())
 		return true
 	})
 }
@@ -2247,20 +2326,19 @@ func (m *meta) completeMixCompactionMutation(
 	compactToSegments := make([]*SegmentInfo, 0)
 	for _, compactToSegment := range result.GetSegments() {
 		startPos, dmlPos := recalculateSegmentPosition(compactToSegment.GetInsertLogs(), t.GetChannel(), fallbackStart, fallbackDml)
-		compactToSegmentInfo := NewSegmentInfo(
-			&datapb.SegmentInfo{
-				ID:            compactToSegment.GetSegmentID(),
-				CollectionID:  compactFromCached[0].CollectionID,
-				PartitionID:   compactFromCached[0].PartitionID,
-				InsertChannel: t.GetChannel(),
-				NumOfRows:     compactToSegment.NumOfRows,
-				State:         commonpb.SegmentState_Flushed,
-				MaxRowNum:     compactFromCached[0].MaxRowNum,
-				Binlogs:       compactToSegment.GetInsertLogs(),
-				Statslogs:     compactToSegment.GetField2StatslogPaths(),
-				Deltalogs:     compactToSegment.GetDeltalogs(),
-				Bm25Statslogs: compactToSegment.GetBm25Logs(),
-				TextStatsLogs: compactToSegment.GetTextStatsLogs(),
+		compactToProto := &datapb.SegmentInfo{
+			ID:            compactToSegment.GetSegmentID(),
+			CollectionID:  compactFromCached[0].CollectionID,
+			PartitionID:   compactFromCached[0].PartitionID,
+			InsertChannel: t.GetChannel(),
+			NumOfRows:     compactToSegment.NumOfRows,
+			State:         commonpb.SegmentState_Flushed,
+			MaxRowNum:     compactFromCached[0].MaxRowNum,
+			Binlogs:       compactToSegment.GetInsertLogs(),
+			Statslogs:     compactToSegment.GetField2StatslogPaths(),
+			Deltalogs:     compactToSegment.GetDeltalogs(),
+			Bm25Statslogs: compactToSegment.GetBm25Logs(),
+			TextStatsLogs: compactToSegment.GetTextStatsLogs(),
 
 			CreatedByCompaction:           true,
 			CompactionFrom:                compactFromSegIDs,
