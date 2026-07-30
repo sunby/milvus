@@ -587,7 +587,7 @@ func TestImportTask_QueryTaskOnWorker(t *testing.T) {
 			alloc: nil,
 			meta: &meta{
 				collections: typeutil.NewConcurrentMap[UniqueID, *collectionInfo](),
-				segments:    NewSegmentsInfo(),
+				segments:    NewCachedSegmentsInfo(),
 			},
 			importMeta: im,
 			tr:         timerecord.NewTimeRecorder(""),
@@ -601,7 +601,8 @@ func TestImportTask_QueryTaskOnWorker(t *testing.T) {
 				ID:        42,
 				NumOfRows: 0,
 			},
-		})
+		}, 0)
+		seedTestSegmentPersist(t, task.meta)
 
 		cluster := session.NewMockCluster(t)
 		cluster.EXPECT().QueryImport(mock.Anything, mock.Anything).Return(&datapb.QueryImportResponse{
@@ -623,7 +624,6 @@ func TestImportTask_QueryTaskOnWorker(t *testing.T) {
 			},
 		}, nil)
 
-		catalog.EXPECT().AlterSegments(mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		task.meta.catalog = catalog
 
 		task.QueryTaskOnWorker(cluster)
@@ -671,7 +671,7 @@ func TestImportTask_QueryTaskOnWorker(t *testing.T) {
 			alloc: nil,
 			meta: &meta{
 				collections: typeutil.NewConcurrentMap[UniqueID, *collectionInfo](),
-				segments:    NewSegmentsInfo(),
+				segments:    NewCachedSegmentsInfo(),
 			},
 			importMeta: im,
 			tr:         timerecord.NewTimeRecorder(""),
@@ -686,7 +686,8 @@ func TestImportTask_QueryTaskOnWorker(t *testing.T) {
 				NumOfRows: 0,
 				Level:     datapb.SegmentLevel_L0,
 			},
-		})
+		}, 0)
+		seedTestSegmentPersist(t, task.meta)
 
 		cluster := session.NewMockCluster(t)
 		cluster.EXPECT().QueryImport(mock.Anything, mock.Anything).Return(&datapb.QueryImportResponse{
@@ -717,7 +718,6 @@ func TestImportTask_QueryTaskOnWorker(t *testing.T) {
 			},
 		}, nil)
 
-		catalog.EXPECT().AlterSegments(mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		task.meta.catalog = catalog
 
 		task.QueryTaskOnWorker(cluster)

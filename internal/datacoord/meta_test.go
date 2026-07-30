@@ -52,6 +52,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/kv"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
+	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/rootcoordpb"
 	"github.com/milvus-io/milvus/pkg/v3/util"
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
@@ -1189,28 +1190,28 @@ func (suite *MetaBasicSuite) TestCompleteCompactionMutation() {
 	})
 }
 
-func (suite *MetaBasicSuite) TestCompleteMixCompactionMutation_UsesCompositeUpdate() {
-	mockChMgr := mocks.NewChunkManager(suite.T())
-
-	latestSegments := NewSegmentsInfo()
+func (suite *MetaBasicSuite) TestCompleteMixCompactionMutation_UsesOptimisticTxn() {
+	latestSegments := NewCachedSegmentsInfo()
 	latestSegments.SetSegment(1, &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
-		ID:           1,
-		CollectionID: 100,
-		PartitionID:  10,
-		State:        commonpb.SegmentState_Flushed,
-		Level:        datapb.SegmentLevel_L1,
-		Binlogs:      []*datapb.FieldBinlog{getFieldBinlogIDs(0, 10000)},
-		NumOfRows:    2,
-	}})
+		ID:            1,
+		CollectionID:  100,
+		PartitionID:   10,
+		InsertChannel: "ch-1",
+		State:         commonpb.SegmentState_Flushed,
+		Level:         datapb.SegmentLevel_L1,
+		Binlogs:       []*datapb.FieldBinlog{getFieldBinlogIDs(0, 10000)},
+		NumOfRows:     2,
+	}}, 0)
 	latestSegments.SetSegment(2, &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
-		ID:           2,
-		CollectionID: 100,
-		PartitionID:  10,
-		State:        commonpb.SegmentState_Flushed,
-		Level:        datapb.SegmentLevel_L1,
-		Binlogs:      []*datapb.FieldBinlog{getFieldBinlogIDs(0, 11000)},
-		NumOfRows:    2,
-	}})
+		ID:            2,
+		CollectionID:  100,
+		PartitionID:   10,
+		InsertChannel: "ch-1",
+		State:         commonpb.SegmentState_Flushed,
+		Level:         datapb.SegmentLevel_L1,
+		Binlogs:       []*datapb.FieldBinlog{getFieldBinlogIDs(0, 11000)},
+		NumOfRows:     2,
+	}}, 0)
 
 	compactToSeg := &datapb.CompactionSegment{
 		SegmentID:           3,
@@ -1223,109 +1224,71 @@ func (suite *MetaBasicSuite) TestCompleteMixCompactionMutation_UsesCompositeUpda
 	}
 	task := &datapb.CompactionTask{
 		InputSegments: []UniqueID{1, 2},
+		CollectionID:  100,
+		PartitionID:   10,
+		Channel:       "ch-1",
 		Type:          datapb.CompactionType_MixCompaction,
 		Schema:        &schemapb.CollectionSchema{Version: 1},
 	}
 
-	// catalog has no AlterSegments expectation: if completeMixCompactionMutation
-	// still called AlterSegments directly (the old two-call path), mockery
-	// would fail the test with an unexpected-call panic.
-	catalog := mocks2.NewDataCoordCatalog(suite.T())
-	var gotActions []metastore.UpdateAction
-	catalog.EXPECT().Update(mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(ctx context.Context, actions ...metastore.UpdateAction) error {
-			gotActions = actions
-			return nil
-		}).Once()
+	m := newTestMetaWithSegments(suite.T(), latestSegments, nil)
 
-	m := &meta{
-		catalog:      catalog,
-		segments:     latestSegments,
-		chunkManager: mockChMgr,
-	}
-
-	_, _, err := m.CompleteCompactionMutation(context.TODO(), task, result)
+	compactTo, _, err := m.CompleteCompactionMutation(context.TODO(), task, result)
 	suite.NoError(err)
-
-	// One AddSegment for the compactTo segment, then one UpdateSegment per
-	// compactFrom segment (2). catalog.Update called exactly once (.Once()).
-	suite.Require().Len(gotActions, 3, "expected one add + two update actions")
-
-	// The compactTo add comes first, so it is published before the compactFrom
-	// segments are retired in the fallback (chunked) ordering.
-	compactToEntry, ok := gotActions[0].Entry.(metastore.SegmentEntry)
-	suite.Require().True(ok)
-	suite.Equal(metastore.ActionAdd, gotActions[0].Type)
-	suite.EqualValues(3, compactToEntry.Segment.GetID())
-
-	var compactFromIDs []int64
-	for _, a := range gotActions[1:] {
-		se, ok := a.Entry.(metastore.SegmentEntry)
-		suite.Require().True(ok)
-		suite.Equal(metastore.ActionUpdate, a.Type)
-		compactFromIDs = append(compactFromIDs, se.Segment.GetID())
+	suite.Require().Len(compactTo, 1)
+	suite.EqualValues(3, compactTo[0].GetID())
+	suite.Equal(commonpb.SegmentState_Flushed, m.segments.GetSegment(3).GetState())
+	suite.ElementsMatch([]int64{1, 2}, m.segments.GetSegment(3).GetCompactionFrom())
+	for _, segmentID := range []int64{1, 2} {
+		segment := m.segments.GetSegment(segmentID)
+		suite.Require().NotNil(segment)
+		suite.Equal(commonpb.SegmentState_Dropped, segment.GetState())
+		suite.True(segment.GetCompacted())
 	}
-	suite.ElementsMatch([]int64{1, 2}, compactFromIDs)
 }
 
-func (suite *MetaBasicSuite) TestBatchSaveDropSegments_UsesCompositeUpdate() {
-	modSegments := map[int64]*SegmentInfo{
-		1: {SegmentInfo: &datapb.SegmentInfo{
-			ID:           1,
-			CollectionID: 100,
-			PartitionID:  10,
-			State:        commonpb.SegmentState_Dropped,
-		}},
-		2: {SegmentInfo: &datapb.SegmentInfo{
-			ID:           2,
-			CollectionID: 100,
-			PartitionID:  10,
-			State:        commonpb.SegmentState_Dropped,
-		}},
+func (suite *MetaBasicSuite) TestUpdateDropChannelSegmentInfo_MarksChannelDropped() {
+	segments := NewCachedSegmentsInfo()
+	for _, segmentID := range []int64{1, 2} {
+		segments.SetSegment(segmentID, NewSegmentInfo(&datapb.SegmentInfo{
+			ID:            segmentID,
+			CollectionID:  100,
+			PartitionID:   10,
+			InsertChannel: "ch-1",
+			State:         commonpb.SegmentState_Flushed,
+		}), 0)
 	}
 
-	// catalog has no SaveDroppedSegmentsInBatch/MarkChannelDeleted
-	// expectation: if batchSaveDropSegments still called those directly (the
-	// old two-call path), mockery would fail the test with an
-	// unexpected-call panic.
 	catalog := mocks2.NewDataCoordCatalog(suite.T())
 	var gotActions []metastore.UpdateAction
-	catalog.EXPECT().Update(mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+	catalog.EXPECT().Update(mock.Anything, mock.Anything).RunAndReturn(
 		func(ctx context.Context, actions ...metastore.UpdateAction) error {
 			gotActions = actions
 			return nil
 		}).Once()
 
 	m := &meta{
-		catalog:  catalog,
-		segments: NewSegmentsInfo(),
+		ctx:            context.Background(),
+		catalog:        catalog,
+		segments:       segments,
+		segmentPersist: newTestSegmentPersist(),
 	}
+	seedTestSegmentPersist(suite.T(), m)
 
-	err := m.batchSaveDropSegments(context.TODO(), "ch-1", modSegments)
+	err := m.UpdateDropChannelSegmentInfo(context.TODO(), "ch-1", nil)
 	suite.NoError(err)
 
-	// One UpdateSegment per dropped segment (2), then the channel tombstone.
-	// catalog.Update called exactly once (.Once()).
-	suite.Require().Len(gotActions, 3, "expected two segment updates + one channel action")
-
-	// The channel tombstone is last (the visibility marker).
-	channelEntry, ok := gotActions[2].Entry.(metastore.ChannelEntry)
+	suite.Require().Len(gotActions, 1)
+	channelEntry, ok := gotActions[0].Entry.(metastore.ChannelEntry)
 	suite.Require().True(ok)
-	suite.Equal(metastore.ActionUpdate, gotActions[2].Type)
+	suite.Equal(metastore.ActionUpdate, gotActions[0].Type)
 	suite.Require().Equal("ch-1", channelEntry.Channel)
 
-	var droppedIDs []int64
-	for _, a := range gotActions[:2] {
-		se, ok := a.Entry.(metastore.SegmentEntry)
-		suite.Require().True(ok)
-		suite.Equal(metastore.ActionUpdate, a.Type)
-		droppedIDs = append(droppedIDs, se.Segment.GetID())
+	for _, segmentID := range []int64{1, 2} {
+		segment := m.segments.GetSegment(segmentID)
+		suite.Require().NotNil(segment)
+		suite.Equal(commonpb.SegmentState_Dropped, segment.GetState())
 	}
-	suite.ElementsMatch([]int64{1, 2}, droppedIDs)
-
-	// memory info updated
-	suite.NotNil(m.segments.GetSegment(1))
-	suite.NotNil(m.segments.GetSegment(2))
 }
 
 func (suite *MetaBasicSuite) TestValidateSegmentState_BlockedBySnapshot() {

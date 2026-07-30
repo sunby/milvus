@@ -1770,7 +1770,7 @@ func (m *meta) UpdateDropChannelSegmentInfo(ctx context.Context, channel string,
 
 	if len(segRefs) == 0 {
 		// No segments to drop, just mark channel deleted
-		if err := m.catalog.MarkChannelDeleted(ctx, channel); err != nil {
+		if err := m.catalog.Update(ctx, metastore.MarkChannelDropped(channel)); err != nil {
 			return err
 		}
 		return nil
@@ -1858,7 +1858,7 @@ func (m *meta) UpdateDropChannelSegmentInfo(ctx context.Context, channel string,
 		return err
 	}
 
-	if err = m.catalog.MarkChannelDeleted(ctx, channel); err != nil {
+	if err = m.catalog.Update(ctx, metastore.MarkChannelDropped(channel)); err != nil {
 		return err
 	}
 
@@ -2981,9 +2981,32 @@ func (m *meta) CleanPartitionStatsInfo(ctx context.Context, info *datapb.Partiti
 		return err
 	}
 
-	// first clean analyze task
-	if err = m.analyzeMeta.DropAnalyzeTask(ctx, info.GetAnalyzeTaskID()); err != nil {
-		mlog.Warn(ctx, "remove analyze task failed", zap.Int64("analyzeTaskID", info.GetAnalyzeTaskID()), zap.Error(err))
+	// Persist the analyze task removal, the current-partition-stats-version
+	// rollback (if the dropped version is the current one), and the
+	// partition-stats info removal as a single composite catalog write. Keep
+	// both meta locks across compute, persistence, and in-memory apply so a
+	// concurrent compaction cannot advance the current version in between.
+	m.analyzeMeta.Lock()
+	defer m.analyzeMeta.Unlock()
+	m.partitionStatsMeta.Lock()
+	defer m.partitionStatsMeta.Unlock()
+
+	rollbackVersion := m.partitionStatsMeta.getRollbackVersionLocked(info)
+	actions := []metastore.UpdateAction{metastore.DropAnalyzeTask(info.GetAnalyzeTaskID())}
+	if rollbackVersion != nil {
+		actions = append(actions, metastore.SavePartitionStatsVersion(
+			info.GetCollectionID(), info.GetPartitionID(), info.GetVChannel(), *rollbackVersion))
+	}
+	actions = append(actions, metastore.DropPartitionStats(info))
+
+	if err := m.catalog.Update(ctx, actions...); err != nil {
+		mlog.Warn(ctx, "clean partition stats info failed",
+			zap.Int64("collectionID", info.GetCollectionID()),
+			zap.Int64("partitionID", info.GetPartitionID()),
+			zap.String("vChannel", info.GetVChannel()),
+			zap.Int64("planID", info.GetVersion()),
+			zap.Int64("analyzeTaskID", info.GetAnalyzeTaskID()),
+			zap.Error(err))
 		return err
 	}
 
@@ -2995,9 +3018,6 @@ func (m *meta) CleanPartitionStatsInfo(ctx context.Context, info *datapb.Partiti
 		zap.Int64("partitionID", info.GetPartitionID()),
 		zap.String("vChannel", info.GetVChannel()),
 		zap.Int64("planID", info.GetVersion()))
-	if err != nil {
-		return err
-	}
 	return nil
 }
 
