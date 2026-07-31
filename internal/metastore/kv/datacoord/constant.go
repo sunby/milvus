@@ -42,7 +42,8 @@ const (
 	FileResourceVersionKey              = MetaPrefix + "/file_resource_version"
 	SnapshotPrefix                      = MetaPrefix + "/snapshot"
 	ExportSnapshotJobPrefix             = MetaPrefix + "/export-snapshot-job"
-	DataViewPrefix                      = MetaPrefix + "/dataview"
+	DataViewPrefix                      = "coord/dv"
+	DataViewDropMarkerPrefix            = DataViewPrefix + "/drop"
 
 	NonRemoveFlagTomestone = "non-removed"
 	RemoveFlagTomestone    = "removed"
