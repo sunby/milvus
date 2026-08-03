@@ -52,10 +52,10 @@ func NewManager(config Config) *Manager {
 	}
 }
 
-// AcquireLocked registers a query view reference and starts runtime building
-// when needed. The caller should hold the owning VChannel state lock so build
-// observes a consistent DataView snapshot.
-func (m *Manager) AcquireLocked(req snview.AcquireResource, build ViewBuilder) {
+// Acquire registers a query view reference and starts runtime building when
+// needed. The builder may be retried asynchronously and must synchronize access
+// to its source state.
+func (m *Manager) Acquire(req snview.AcquireResource, build ViewBuilder) {
 	if req.Meta == nil || req.Meta.GetVersion() == nil || req.Meta.GetVersion().GetDataVersion() == nil {
 		panic("query view meta version is nil")
 	}
@@ -200,10 +200,6 @@ func (m *Manager) startBuildLocked(meta *viewpb.QueryViewMeta, build ViewBuilder
 	if build == nil {
 		panic("query resource view builder is nil")
 	}
-	view, ok := build(meta)
-	if !ok {
-		return false
-	}
 	if m.scheduler == nil {
 		m.scheduler = nodescheduler.Get()
 	}
@@ -212,6 +208,10 @@ func (m *Manager) startBuildLocked(meta *viewpb.QueryViewMeta, build ViewBuilder
 	}
 	runtime := newQueryRuntime(m.dispatcher, m.newModules()...)
 	task := newResourceBuildTask(func(ctx context.Context) (*QueryRuntime, error) {
+		view, ok := build(meta)
+		if !ok {
+			return runtime, nodescheduler.ErrDelay
+		}
 		resolved, err := m.resolveLoadInfo(ctx, view)
 		if err != nil {
 			return runtime, errors.Mark(err, nodescheduler.ErrDelay)
