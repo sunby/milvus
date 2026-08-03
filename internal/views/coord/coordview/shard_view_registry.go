@@ -80,7 +80,6 @@ func RecoverShardViewRegistry(
 		}
 		shards[sid] = manager
 	}
-	batch.Commit()
 
 	registry := &ShardViewRegistry{
 		ctx:                ctx,
@@ -94,6 +93,7 @@ func RecoverShardViewRegistry(
 		mgr.SetStatsObserver(registry.onShardStatsChanged)
 		registry.stats[sid] = mgr.Stats()
 	}
+	batch.Commit()
 	if err := flushScheduler.Flush(ctx); err != nil {
 		for _, manager := range shards {
 			manager.unpinAllReferences()

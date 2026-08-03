@@ -15,9 +15,13 @@ func (m *VChannelRecoveryModule) AcquireQueryResource(req snview.AcquireResource
 	if req.Meta == nil || req.Meta.GetVchannel() != m.vchannel {
 		panic("query view vchannel does not match recovery module")
 	}
+	m.queryResources.Acquire(req, m.queryWALView)
+}
+
+func (m *VChannelRecoveryModule) queryWALView(meta *viewpb.QueryViewMeta) (walview.VChannelWALView, bool) {
 	m.mu.Lock()
-	m.queryResources.AcquireLocked(req, m.queryWALViewLocked)
-	m.mu.Unlock()
+	defer m.mu.Unlock()
+	return m.queryWALViewLocked(meta)
 }
 
 func (m *VChannelRecoveryModule) ReleaseQueryResource(req snview.ReleaseResource) {
