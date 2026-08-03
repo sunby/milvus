@@ -8,6 +8,7 @@ import (
 	"github.com/cockroachdb/errors"
 
 	"github.com/milvus-io/milvus/internal/views/coord/coordview"
+	"github.com/milvus-io/milvus/internal/views/qviews"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 )
 
@@ -22,7 +23,7 @@ type Balancer interface {
 }
 
 type snapshotSource interface {
-	Build(ctx context.Context) *BalancerSnapshot
+	build(ctx context.Context, pending triggerBatch) (*BalancerSnapshot, []qviews.ShardID)
 }
 
 // DefaultBalancer owns the trigger queue and reconcile loop. Business
@@ -149,11 +150,8 @@ func (b *DefaultBalancer) Reconcile(ctx context.Context) error {
 		return nil
 	}
 	snapshotStartedAt := time.Now()
-	snap := b.snapshotBuilder.Build(ctx)
+	snap, dirty := b.snapshotBuilder.build(ctx, pending)
 	snapshotDuration := time.Since(snapshotStartedAt)
-	expandStartedAt := time.Now()
-	dirty := pending.expand(snap)
-	triggerDuration += time.Since(expandStartedAt)
 	if len(dirty) == 0 {
 		logReconcileStats(
 			ctx,
