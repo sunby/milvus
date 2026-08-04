@@ -154,6 +154,14 @@ func (t *SyncTask) Run(ctx context.Context) (err error) {
 	columnGroups := t.getColumnGroups(segmentInfo)
 	getColumnGroupsDur := time.Since(stageStart)
 	logger.Info(ctx, "sync task stage getColumnGroups done", mlog.Duration("duration", getColumnGroupsDur))
+	var statsWriter interface {
+		PreparedStats() *metacache.SegmentStats
+	}
+
+	if t.storageConfig == nil {
+		t.storageConfig = packed.CreateStorageConfig()
+		logger.Info(ctx, "sync task uses default storage config")
+	}
 
 	stageStart = time.Now()
 	switch segmentInfo.GetStorageVersion() {

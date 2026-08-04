@@ -145,6 +145,26 @@ func (bw *BulkPackWriterV2) Write(ctx context.Context, pack *SyncPack) (
 	writeBM25Dur := time.Since(stageStart)
 
 	size = bw.sizeWritten
+	// V2 returns stats and BM25 stats arrays, so derive their persisted byte
+	// contribution before building the cumulative segment Statistics.
+	digested := len(inserts) > 0 || len(stats) > 0 || len(bm25Stats) > 0 || len(deltas.GetBinlogs()) > 0
+	var statsBlobSize int64
+	if digested {
+		for _, fieldBinlog := range stats {
+			for _, binlog := range fieldBinlog.GetBinlogs() {
+				statsBlobSize += binlog.GetMemorySize()
+			}
+		}
+		for _, fieldBinlog := range bm25Stats {
+			for _, binlog := range fieldBinlog.GetBinlogs() {
+				statsBlobSize += binlog.GetMemorySize()
+			}
+		}
+	}
+	segmentStats, err = bw.finalizeStats(pack, digested, inserts, deltas, statsBlobSize)
+	if err != nil {
+		return
+	}
 
 	mlog.Info(ctx, "[BulkPackWriterV2] writeData stages",
 		mlog.Int64("segmentID", pack.segmentID),
@@ -155,7 +175,7 @@ func (bw *BulkPackWriterV2) Write(ctx context.Context, pack *SyncPack) (
 		mlog.Duration("total", time.Since(start)),
 		mlog.Int64("size", size),
 	)
-	return inserts, deltas, stats, bm25Stats, manifest, size, err
+	return
 }
 
 // getRootPath returns the rootPath current task shall use.

@@ -383,7 +383,7 @@ func (s *ClusteringCompactionPolicySuite) TestTriggerOneCollectionAllowsMixedSch
 		segments[id] = segment
 	}
 	for id, segment := range segments {
-		s.meta.segments.SetSegment(id, segment)
+		s.meta.segments.SetSegment(id, segment, 0)
 	}
 
 	s.handler.EXPECT().GetCollection(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, collectionID int64) (*collectionInfo, error) {

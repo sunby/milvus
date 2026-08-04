@@ -18,6 +18,7 @@ package datacoord
 
 import (
 	"context"
+	"time"
 
 	"github.com/milvus-io/milvus/internal/dataview"
 	"github.com/milvus-io/milvus/internal/metastore"
@@ -41,12 +42,46 @@ type (
 	TruncateDataViewEvent            = dataview.TruncateDataViewEvent
 )
 
+type batchDataViewRecoveryManager interface {
+	RecoverCollections(
+		ctx context.Context,
+		collectionIDs []int64,
+		observe func(index int, collectionID int64, duration time.Duration, err error),
+	) error
+}
+
 type dataViewSegmentStore struct {
 	meta *meta
 }
 
 func newDataViewManager(catalog metastore.DataCoordCatalog, meta *meta) DataViewManager {
 	return dataview.NewManager(catalog, &dataViewSegmentStore{meta: meta})
+}
+
+func recoverDataViewCollections(
+	ctx context.Context,
+	manager DataViewManager,
+	collectionIDs []int64,
+	observe func(index int, collectionID int64, duration time.Duration, err error),
+) error {
+	if batchManager, ok := manager.(batchDataViewRecoveryManager); ok {
+		return batchManager.RecoverCollections(ctx, collectionIDs, observe)
+	}
+
+	for index, collectionID := range collectionIDs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		start := time.Now()
+		err := manager.RepairCollection(ctx, collectionID)
+		if observe != nil {
+			observe(index, collectionID, time.Since(start), err)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Server) CreateCollectionDataView(ctx context.Context, collectionID int64, vchannels []string) (*viewpb.DataVersion, error) {

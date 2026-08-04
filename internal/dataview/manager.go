@@ -22,12 +22,14 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/msgpb"
 	balancerapi "github.com/milvus-io/milvus/internal/views/coord/balancer/api"
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 )
@@ -141,6 +143,13 @@ type dataViewManager struct {
 	states         map[int64]*collectionDataViewState
 	recoveredAll   bool
 	recoveredViews map[int64][]*viewpb.DataViewOfCollection
+}
+
+type dataViewRecoveryCatalog interface {
+	ListDataViewsForRecovery(
+		ctx context.Context,
+		collectionIDs []int64,
+	) (map[int64][]*viewpb.DataViewOfCollection, error)
 }
 
 type Segment struct {
@@ -487,6 +496,85 @@ func (m *dataViewManager) RepairCollections(ctx context.Context, collectionIDs [
 	return nil
 }
 
+// RecoverCollections uses a global-prefix batch scan when the catalog supports
+// it. The method is deliberately kept off Manager: DataCoord discovers it
+// through a private optional interface, so existing manager implementations
+// keep the point-recovery fallback.
+func (m *dataViewManager) RecoverCollections(
+	ctx context.Context,
+	collectionIDs []int64,
+	observe func(index int, collectionID int64, duration time.Duration, err error),
+) error {
+	m.mu.RLock()
+	recoveredAll := m.recoveredAll
+	m.mu.RUnlock()
+	if recoveredAll {
+		mlog.Info(ctx, "DataView recovery path selected",
+			mlog.String("selectedMode", "memory"),
+			mlog.Int("numCollections", len(collectionIDs)))
+		return m.recoverCollectionList(ctx, collectionIDs, observe, func(collectionID int64) error {
+			return m.RepairCollection(ctx, collectionID)
+		})
+	}
+
+	recoveryCatalog, batchSupported := m.catalog.(dataViewRecoveryCatalog)
+	if !batchSupported {
+		mlog.Info(ctx, "DataView recovery path selected",
+			mlog.String("selectedMode", "point"),
+			mlog.Int("numCollections", len(collectionIDs)),
+			mlog.String("reason", "catalog does not support batch recovery"))
+		return m.recoverCollectionList(ctx, collectionIDs, observe, func(collectionID int64) error {
+			return m.RepairCollection(ctx, collectionID)
+		})
+	}
+
+	mlog.Info(ctx, "DataView recovery path selected",
+		mlog.String("selectedMode", "batch"),
+		mlog.Int("numCollections", len(collectionIDs)))
+	scanStart := time.Now()
+	dataViewsByCollection, err := recoveryCatalog.ListDataViewsForRecovery(ctx, collectionIDs)
+	if err != nil {
+		mlog.Warn(ctx, "DataView batch catalog scan failed",
+			mlog.Duration("duration", time.Since(scanStart)),
+			mlog.Err(err))
+		return err
+	}
+	numDataViews := 0
+	for _, dataViews := range dataViewsByCollection {
+		numDataViews += len(dataViews)
+	}
+	mlog.Info(ctx, "DataView batch catalog scan done",
+		mlog.Int("numCollectionsWithDataViews", len(dataViewsByCollection)),
+		mlog.Int("numDataViews", numDataViews),
+		mlog.Duration("duration", time.Since(scanStart)))
+
+	return m.recoverCollectionList(ctx, collectionIDs, observe, func(collectionID int64) error {
+		return m.repairCollectionWithDataViews(ctx, collectionID, dataViewsByCollection[collectionID])
+	})
+}
+
+func (m *dataViewManager) recoverCollectionList(
+	ctx context.Context,
+	collectionIDs []int64,
+	observe func(index int, collectionID int64, duration time.Duration, err error),
+	recoverCollection func(collectionID int64) error,
+) error {
+	for index, collectionID := range collectionIDs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		start := time.Now()
+		err := recoverCollection(collectionID)
+		if observe != nil {
+			observe(index, collectionID, time.Since(start), err)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *dataViewManager) recoverFromDataViews(dataViews []*viewpb.DataViewOfCollection) {
 	viewsByCollection := make(map[int64][]*viewpb.DataViewOfCollection)
 	recoveredViews := make(map[int64][]*viewpb.DataViewOfCollection)
@@ -558,6 +646,7 @@ func (m *dataViewManager) recoverCollectionFromDataViews(collectionID int64, per
 func (m *dataViewManager) repairCollectionWithDataViews(ctx context.Context, collectionID int64, persistedViews []*viewpb.DataViewOfCollection) error {
 	state := m.getOrCreateState(collectionID)
 	state.mu.Lock()
+	defer state.mu.Unlock()
 	state.dropped = false
 	state.mergeSegmentJoinVersions(persistedViews)
 
@@ -568,7 +657,6 @@ func (m *dataViewManager) repairCollectionWithDataViews(ctx context.Context, col
 	if isDataViewMembershipEqual(latestPersisted, residentExpected) {
 		state.latestResident = canonicalDataViewClone(latestPersisted)
 		state.latestVisible = m.latestVisiblePersistedView(ctx, persistedViews)
-		state.mu.Unlock()
 		return nil
 	}
 	expected := buildRecoverExpectedDataView(collectionID, latestPersisted, segments, pendingRetainedInputs)
@@ -576,11 +664,9 @@ func (m *dataViewManager) repairCollectionWithDataViews(ctx context.Context, col
 	if isDataViewMembershipEqual(latestPersisted, expected) {
 		state.latestResident = canonicalDataViewClone(latestPersisted)
 		state.latestVisible = m.latestVisiblePersistedView(ctx, persistedViews)
-		state.mu.Unlock()
 		return nil
 	}
 	if latestPersisted == nil && isDataViewEmpty(expected) {
-		state.mu.Unlock()
 		return nil
 	}
 
@@ -588,7 +674,6 @@ func (m *dataViewManager) repairCollectionWithDataViews(ctx context.Context, col
 	expected.DataVersion = nextDataVersion(latestPersisted, advance)
 	toPersist := cloneDataViewWithoutDeleteTimetick(expected)
 	if err := m.catalog.SaveDataView(ctx, toPersist); err != nil {
-		state.mu.Unlock()
 		return err
 	}
 	m.rememberRecoveredDataView(toPersist)
@@ -600,7 +685,6 @@ func (m *dataViewManager) repairCollectionWithDataViews(ctx context.Context, col
 	} else {
 		state.latestVisible = m.latestVisiblePersistedView(ctx, persistedViews)
 	}
-	state.mu.Unlock()
 	return nil
 }
 

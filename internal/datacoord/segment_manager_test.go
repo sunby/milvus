@@ -27,6 +27,7 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/msgpb"
@@ -34,9 +35,7 @@ import (
 	"github.com/milvus-io/milvus/internal/datacoord/allocator"
 	"github.com/milvus-io/milvus/internal/datacoord/broker"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
-	mockkv "github.com/milvus-io/milvus/internal/kv/mocks"
 	"github.com/milvus-io/milvus/internal/metastore/kv/datacoord"
-	"github.com/milvus-io/milvus/internal/metastore/mocks"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/storagev2/packed"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
@@ -163,7 +162,7 @@ func TestAllocSegment(t *testing.T) {
 		assert.EqualValues(t, 1, len(allocations1))
 		segments, ok := segmentManager.channel2Growing.Get(vchannel)
 		assert.True(t, ok)
-		assert.EqualValues(t, 1, segments.Len())
+		assert.Len(t, segments.Collect(), 1)
 
 		err = meta.SetState(context.TODO(), allocations1[0].SegmentID, commonpb.SegmentState_Dropped)
 		assert.NoError(t, err)
@@ -174,7 +173,7 @@ func TestAllocSegment(t *testing.T) {
 		// clear old healthy and alloc new
 		segments, ok = segmentManager.channel2Growing.Get(vchannel)
 		assert.True(t, ok)
-		assert.EqualValues(t, 1, segments.Len())
+		assert.Len(t, segments.Collect(), 1)
 		assert.NotEqual(t, allocations1[0].SegmentID, allocations2[0].SegmentID)
 	})
 }
@@ -214,11 +213,19 @@ func TestLastExpireReset(t *testing.T) {
 	// set up meta on dc
 	ctx := context.Background()
 	paramtable.Init()
+	allocLatestExpireAttempt := Params.DataCoordCfg.AllocLatestExpireAttempt.GetValue()
+	segmentMaxSize := Params.DataCoordCfg.SegmentMaxSize.GetValue()
+	segmentSealProportion := Params.DataCoordCfg.SegmentSealProportion.GetValue()
+	segmentSealJitter := Params.DataCoordCfg.SegmentSealProportionJitter.GetValue()
 	Params.Save(Params.DataCoordCfg.AllocLatestExpireAttempt.Key, "1")
 	Params.Save(Params.DataCoordCfg.SegmentMaxSize.Key, "1")
+	Params.Save(Params.DataCoordCfg.SegmentSealProportion.Key, "0.8")
+	Params.Save(Params.DataCoordCfg.SegmentSealProportionJitter.Key, "0")
 	defer func() {
-		Params.Save(Params.DataCoordCfg.AllocLatestExpireAttempt.Key, "200")
-		Params.Save(Params.DataCoordCfg.SegmentMaxSize.Key, "1024")
+		Params.Save(Params.DataCoordCfg.AllocLatestExpireAttempt.Key, allocLatestExpireAttempt)
+		Params.Save(Params.DataCoordCfg.SegmentMaxSize.Key, segmentMaxSize)
+		Params.Save(Params.DataCoordCfg.SegmentSealProportion.Key, segmentSealProportion)
+		Params.Save(Params.DataCoordCfg.SegmentSealProportionJitter.Key, segmentSealJitter)
 	}()
 	mockAllocator := allocator.NewRootCoordAllocator(newMockMixCoord())
 	etcdCli, _ := etcd.GetEtcdClient(
@@ -246,8 +253,9 @@ func TestLastExpireReset(t *testing.T) {
 		},
 	}, nil)
 	broker.EXPECT().ShowPartitionsInternal(mock.Anything, collID).Return([]int64{}, nil)
-	meta, err := newMeta(context.TODO(), catalog, nil, broker, newTestSegmentPersist())
-	assert.Nil(t, err)
+	segmentPersist := NewOptimisticTxnEtcdPersist[string, *datapb.SegmentInfo](etcdCli, &SegmentInfoMarshaler{})
+	meta, err := newMeta(context.TODO(), catalog, nil, broker, segmentPersist, rootPath)
+	require.NoError(t, err)
 	// add collection
 	channelName := "c1"
 	schema := newTestSchema()
@@ -265,8 +273,7 @@ func TestLastExpireReset(t *testing.T) {
 	// assign segments, set max segment to only 1MB, equalling to 10485 rows
 	var bigRows, smallRows int64 = 10000, 1000
 	segmentManager, _ := newSegmentManager(meta, mockAllocator)
-	initSegment.SegmentInfo.State = commonpb.SegmentState_Dropped
-	meta.segments.SetSegment(1, initSegment, 0)
+	require.NoError(t, meta.SetState(context.TODO(), initSegment.GetID(), commonpb.SegmentState_Dropped))
 	allocs, _ := segmentManager.AllocSegment(context.Background(), collID, 0, channelName, bigRows, storage.StorageV1)
 	segmentID1, expire1 := allocs[0].SegmentID, allocs[0].ExpireTime
 	time.Sleep(100 * time.Millisecond)
@@ -300,9 +307,10 @@ func TestLastExpireReset(t *testing.T) {
 	newMetaKV := etcdkv.NewEtcdKV(newEtcdCli, rootPath)
 	defer newMetaKV.RemoveWithPrefix(ctx, "")
 	newCatalog := datacoord.NewCatalog(newMetaKV, "", "")
-	restartedMeta, err := newMeta(context.TODO(), newCatalog, nil, broker, newTestSegmentPersist())
+	restartedPersist := NewOptimisticTxnEtcdPersist[string, *datapb.SegmentInfo](newEtcdCli, &SegmentInfoMarshaler{})
+	restartedMeta, err := newMeta(context.TODO(), newCatalog, nil, broker, restartedPersist, rootPath)
+	require.NoError(t, err)
 	restartedMeta.AddCollection(&collectionInfo{ID: collID, Schema: schema})
-	assert.Nil(t, err)
 	newSegmentManager, _ := newSegmentManager(restartedMeta, mockAllocator)
 	// reset row number to avoid being cleaned by empty segment
 	restartedMeta.SetRowCount(segmentID1, bigRows)
@@ -378,10 +386,10 @@ func TestLoadSegmentsFromMeta(t *testing.T) {
 	assert.NoError(t, err)
 	growing, ok := segmentManager.channel2Growing.Get(vchannel)
 	assert.True(t, ok)
-	assert.EqualValues(t, 1, growing.Len())
+	assert.Len(t, growing.Collect(), 1)
 	sealed, ok := segmentManager.channel2Sealed.Get(vchannel)
 	assert.True(t, ok)
-	assert.EqualValues(t, 1, sealed.Len())
+	assert.Len(t, sealed.Collect(), 1)
 }
 
 func TestSaveSegmentsToMeta(t *testing.T) {
@@ -758,16 +766,16 @@ func TestTryToSealSegment(t *testing.T) {
 		assert.NoError(t, err)
 		assert.EqualValues(t, 1, len(allocations))
 
-		metakv := mockkv.NewMetaKv(t)
-		metakv.EXPECT().Save(mock.Anything, mock.Anything, mock.Anything).Return(errors.New("failed")).Maybe()
-		metakv.EXPECT().MultiSave(mock.Anything, mock.Anything).Return(errors.New("failed")).Maybe()
-		metakv.EXPECT().LoadWithPrefix(mock.Anything, mock.Anything).Return(nil, nil, nil).Maybe()
-		segmentManager.meta.catalog = &datacoord.Catalog{MetaKv: metakv}
+		expectedErr := errors.New("failed")
+		segmentManager.meta.segmentPersist = &failingCommitSegmentPersist{
+			base: segmentManager.meta.segmentPersist,
+			err:  expectedErr,
+		}
 
 		ts, err := segmentManager.allocator.AllocTimestamp(context.Background())
 		assert.NoError(t, err)
 		err = segmentManager.tryToSealSegment(context.TODO(), ts, "c1")
-		assert.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
 	})
 
 	t.Run("seal with channel policy with kv fails", func(t *testing.T) {
@@ -789,16 +797,16 @@ func TestTryToSealSegment(t *testing.T) {
 		assert.NoError(t, err)
 		assert.EqualValues(t, 1, len(allocations))
 
-		metakv := mockkv.NewMetaKv(t)
-		metakv.EXPECT().Save(mock.Anything, mock.Anything, mock.Anything).Return(errors.New("failed")).Maybe()
-		metakv.EXPECT().MultiSave(mock.Anything, mock.Anything).Return(errors.New("failed")).Maybe()
-		metakv.EXPECT().LoadWithPrefix(mock.Anything, mock.Anything).Return(nil, nil, nil).Maybe()
-		segmentManager.meta.catalog = &datacoord.Catalog{MetaKv: metakv}
+		expectedErr := errors.New("failed")
+		segmentManager.meta.segmentPersist = &failingCommitSegmentPersist{
+			base: segmentManager.meta.segmentPersist,
+			err:  expectedErr,
+		}
 
 		ts, err := segmentManager.allocator.AllocTimestamp(context.Background())
 		assert.NoError(t, err)
 		err = segmentManager.tryToSealSegment(context.TODO(), ts, "c1")
-		assert.Error(t, err)
+		assert.ErrorIs(t, err, expectedErr)
 	})
 }
 
@@ -927,8 +935,8 @@ func TestSegmentManager_DropSegmentsOfChannel(t *testing.T) {
 			s := &SegmentManager{
 				meta:            tt.fields.meta,
 				channelLock:     lock.NewKeyLock[string](),
-				channel2Growing: typeutil.NewConcurrentMap[string, typeutil.UniqueSet](),
-				channel2Sealed:  typeutil.NewConcurrentMap[string, typeutil.UniqueSet](),
+				channel2Growing: typeutil.NewConcurrentMap[string, *typeutil.ConcurrentSet[int64]](),
+				channel2Sealed:  typeutil.NewConcurrentMap[string, *typeutil.ConcurrentSet[int64]](),
 			}
 			for _, segmentID := range tt.fields.segments {
 				segmentInfo := tt.fields.meta.GetSegment(context.Background(), segmentID)
@@ -937,20 +945,20 @@ func TestSegmentManager_DropSegmentsOfChannel(t *testing.T) {
 					channel = segmentInfo.GetInsertChannel()
 				}
 				if segmentInfo == nil || segmentInfo.GetState() == commonpb.SegmentState_Growing {
-					growing, _ := s.channel2Growing.GetOrInsert(channel, typeutil.NewUniqueSet())
+					growing, _ := s.channel2Growing.GetOrInsert(channel, typeutil.NewConcurrentSet[int64]())
 					growing.Insert(segmentID)
 				} else if segmentInfo.GetState() == commonpb.SegmentState_Sealed {
-					sealed, _ := s.channel2Sealed.GetOrInsert(channel, typeutil.NewUniqueSet())
+					sealed, _ := s.channel2Sealed.GetOrInsert(channel, typeutil.NewConcurrentSet[int64]())
 					sealed.Insert(segmentID)
 				}
 			}
 			s.DropSegmentsOfChannel(context.TODO(), tt.args.channel)
 			all := make([]int64, 0)
-			s.channel2Sealed.Range(func(_ string, segments typeutil.UniqueSet) bool {
+			s.channel2Sealed.Range(func(_ string, segments *typeutil.ConcurrentSet[int64]) bool {
 				all = append(all, segments.Collect()...)
 				return true
 			})
-			s.channel2Growing.Range(func(_ string, segments typeutil.UniqueSet) bool {
+			s.channel2Growing.Range(func(_ string, segments *typeutil.ConcurrentSet[int64]) bool {
 				all = append(all, segments.Collect()...)
 				return true
 			})
@@ -969,9 +977,6 @@ func TestSegmentManager_CleanZeroSealedSegmentsOfChannel(t *testing.T) {
 		channel string
 		cpTs    Timestamp
 	}
-
-	mockCatalog := mocks.NewDataCoordCatalog(t)
-	mockCatalog.EXPECT().AlterSegments(mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	seg1 := &SegmentInfo{
 		SegmentInfo: &datapb.SegmentInfo{
@@ -1013,15 +1018,13 @@ func TestSegmentManager_CleanZeroSealedSegmentsOfChannel(t *testing.T) {
 		},
 	}
 	newMetaFunc := func() *meta {
-		return &meta{
-			catalog: mockCatalog,
-			segments: newTestCachedSegmentsInfo(map[int64]*SegmentInfo{
+		return newTestMetaWithSegments(t,
+			newTestCachedSegmentsInfo(map[int64]*SegmentInfo{
 				1: seg1,
 				2: seg2,
 				3: seg3,
 				4: seg4,
-			}),
-		}
+			}), nil)
 	}
 
 	tests := []struct {
@@ -1058,8 +1061,8 @@ func TestSegmentManager_CleanZeroSealedSegmentsOfChannel(t *testing.T) {
 			s := &SegmentManager{
 				meta:            tt.fields.meta,
 				channelLock:     lock.NewKeyLock[string](),
-				channel2Growing: typeutil.NewConcurrentMap[string, typeutil.UniqueSet](),
-				channel2Sealed:  typeutil.NewConcurrentMap[string, typeutil.UniqueSet](),
+				channel2Growing: typeutil.NewConcurrentMap[string, *typeutil.ConcurrentSet[int64]](),
+				channel2Sealed:  typeutil.NewConcurrentMap[string, *typeutil.ConcurrentSet[int64]](),
 			}
 			for _, segmentID := range tt.fields.segments {
 				segmentInfo := tt.fields.meta.GetSegment(context.TODO(), segmentID)
@@ -1068,20 +1071,20 @@ func TestSegmentManager_CleanZeroSealedSegmentsOfChannel(t *testing.T) {
 					channel = segmentInfo.GetInsertChannel()
 				}
 				if segmentInfo == nil || segmentInfo.GetState() == commonpb.SegmentState_Growing {
-					growing, _ := s.channel2Growing.GetOrInsert(channel, typeutil.NewUniqueSet())
+					growing, _ := s.channel2Growing.GetOrInsert(channel, typeutil.NewConcurrentSet[int64]())
 					growing.Insert(segmentID)
 				} else if segmentInfo.GetState() == commonpb.SegmentState_Sealed {
-					sealed, _ := s.channel2Sealed.GetOrInsert(channel, typeutil.NewUniqueSet())
+					sealed, _ := s.channel2Sealed.GetOrInsert(channel, typeutil.NewConcurrentSet[int64]())
 					sealed.Insert(segmentID)
 				}
 			}
 			s.CleanZeroSealedSegmentsOfChannel(context.TODO(), tt.args.channel, tt.args.cpTs)
 			all := make([]int64, 0)
-			s.channel2Sealed.Range(func(_ string, segments typeutil.UniqueSet) bool {
+			s.channel2Sealed.Range(func(_ string, segments *typeutil.ConcurrentSet[int64]) bool {
 				all = append(all, segments.Collect()...)
 				return true
 			})
-			s.channel2Growing.Range(func(_ string, segments typeutil.UniqueSet) bool {
+			s.channel2Growing.Range(func(_ string, segments *typeutil.ConcurrentSet[int64]) bool {
 				all = append(all, segments.Collect()...)
 				return true
 			})

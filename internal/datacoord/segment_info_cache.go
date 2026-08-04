@@ -7,7 +7,6 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/msgpb"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
-	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
@@ -139,7 +138,11 @@ func (s *CachedSegmentsInfo) GetCompactionTo(fromSegmentID int64) ([]*SegmentInf
 // SetSegment inserts a new segment into the cache.
 // Returns the previous value and whether it existed.
 func (s *CachedSegmentsInfo) SetSegment(segmentID UniqueID, segment *SegmentInfo, version int64) (old *SegmentInfo, existed bool) {
-	old, existed = s.segments.Insert(segmentID, segment, version)
+	var applied bool
+	old, existed, applied = s.segments.Insert(segmentID, segment, version)
+	if !applied {
+		return old, false
+	}
 	if existed {
 		s.removeSecondaryIndex(old)
 		s.deleteCompactTo(old)
@@ -152,11 +155,10 @@ func (s *CachedSegmentsInfo) SetSegment(segmentID UniqueID, segment *SegmentInfo
 // DropSegment marks the segment as a tombstone in the cache.
 // The version is retained to reject stale writes.
 func (s *CachedSegmentsInfo) DropSegment(segmentID UniqueID, version int64) {
-	if old, ok := s.segments.Lookup(segmentID); ok {
+	if old := s.segments.Erase(segmentID, version); old != nil {
 		s.removeSecondaryIndex(old)
 		s.deleteCompactTo(old)
 	}
-	s.segments.Erase(segmentID, version)
 }
 
 // PruneSegment removes a tombstone entry, freeing memory.
@@ -196,10 +198,6 @@ func (s *CachedSegmentsInfo) SetFlushTime(segmentID UniqueID, t time.Time) {
 
 func (s *CachedSegmentsInfo) SetIsCompacting(segmentID UniqueID, isCompacting bool) {
 	s.updateSegment(segmentID, SetIsCompacting(isCompacting))
-}
-
-func (s *CachedSegmentsInfo) SetLevel(segmentID UniqueID, level datapb.SegmentLevel) {
-	s.updateSegment(segmentID, SetLevel(level))
 }
 
 func (s *CachedSegmentsInfo) SetLastExpire(segmentID UniqueID, lastExpire uint64) {

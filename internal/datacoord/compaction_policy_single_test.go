@@ -26,6 +26,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/datacoord/allocator"
+	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
@@ -135,15 +136,18 @@ func (s *SingleCompactionPolicySuite) TestL2SingleCompaction() {
 
 	collID := int64(100)
 	coll := &collectionInfo{
-		ID:     collID,
-		Schema: newTestSchema(),
+		ID:         collID,
+		Schema:     newTestSchema(),
+		Properties: map[string]string{common.CollectionAutoCompactionKey: "true"},
 	}
-	s.handler.EXPECT().GetCollection(mock.Anything, mock.Anything).Return(coll, nil)
+	handler := NewNMockHandler(s.T())
+	handler.EXPECT().GetCollection(mock.Anything, mock.Anything).Return(coll, nil)
+	s.singlePolicy.handler = handler
 
 	segments := make(map[UniqueID]*SegmentInfo, 0)
 	segments[101] = buildTestSegment(101, collID, datapb.SegmentLevel_L2, 0, 10000, 201, true, false)
-	segments[102] = buildTestSegment(101, collID, datapb.SegmentLevel_L2, 500, 10000, 10, true, false)
-	segments[103] = buildTestSegment(101, collID, datapb.SegmentLevel_L2, 100, 10000, 1, true, false)
+	segments[102] = buildTestSegment(102, collID, datapb.SegmentLevel_L2, 500, 10000, 10, true, false)
+	segments[103] = buildTestSegment(103, collID, datapb.SegmentLevel_L2, 100, 10000, 1, true, false)
 	segmentsInfo := newTestCachedSegmentsInfo(segments)
 
 	compactionTaskMeta := newTestCompactionTaskMeta(s.T())
@@ -177,8 +181,8 @@ func (s *SingleCompactionPolicySuite) TestSortCompaction() {
 
 	segments := make(map[UniqueID]*SegmentInfo, 0)
 	segments[101] = buildTestSegment(101, collID, datapb.SegmentLevel_L1, 0, 10000, 201, false, true)
-	segments[102] = buildTestSegment(101, collID, datapb.SegmentLevel_L2, 500, 10000, 10, false, true)
-	segments[103] = buildTestSegment(101, collID, datapb.SegmentLevel_L1, 100, 10000, 1, false, false)
+	segments[102] = buildTestSegment(102, collID, datapb.SegmentLevel_L2, 500, 10000, 10, false, true)
+	segments[103] = buildTestSegment(103, collID, datapb.SegmentLevel_L1, 100, 10000, 1, false, false)
 	segmentsInfo := newTestCachedSegmentsInfo(segments)
 
 	compactionTaskMeta := newTestCompactionTaskMeta(s.T())

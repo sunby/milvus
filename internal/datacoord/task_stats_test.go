@@ -70,7 +70,7 @@ func Test_statsTaskSuite(t *testing.T) {
 	suite.Run(t, new(statsTaskSuite))
 }
 
-func (s *statsTaskSuite) SetupSuite() {
+func (s *statsTaskSuite) SetupTest() {
 	s.collID = 1
 	s.partID = 2
 	s.taskID = 1178
@@ -107,8 +107,8 @@ func (s *statsTaskSuite) SetupSuite() {
 					State:         commonpb.SegmentState_Flushed,
 					MaxRowNum:     65535,
 					Level:         datapb.SegmentLevel_L2,
+					Stats:         &datapb.Statistics{InsertBinlogSize: 512 * 1024 * 1024},
 				},
-				size: *atomic.NewInt64(512 * 1024 * 1024),
 			},
 		}),
 
@@ -120,6 +120,7 @@ func (s *statsTaskSuite) SetupSuite() {
 			segmentID2Tasks: secondaryIndex,
 		},
 	}
+	seedTestSegmentPersist(s.T(), s.mt)
 }
 
 func (s *statsTaskSuite) TestBasicTaskOperations() {
@@ -417,8 +418,11 @@ func (s *statsTaskSuite) TestCreateTaskOnWorkerDropsExternalJSONWithoutV3Manifes
 			StorageVersion: storage.StorageV2,
 		},
 	}
-	s.mt.segments.segments[segmentID] = segment
-	defer delete(s.mt.segments.segments, segmentID)
+	s.mt.segments.SetSegment(segmentID, segment, 0)
+	defer func() {
+		s.mt.segments.DropSegment(segmentID, 1)
+		s.mt.segments.PruneSegment(segmentID)
+	}()
 
 	statsTask := &indexpb.StatsTask{
 		CollectionID:    s.collID,
@@ -561,8 +565,9 @@ func (s *statsTaskSuite) TestSetJobInfo() {
 		NumRows:      1000,
 	}
 
-	// Temporarily replace the segment with one we control
+	// Temporarily replace the segment store with one we control.
 	origSegments := s.mt.segments
+	origSegmentPersist := s.mt.segmentPersist
 
 	// Create test segment for testing
 	testSegment := &SegmentInfo{
@@ -575,7 +580,9 @@ func (s *statsTaskSuite) TestSetJobInfo() {
 		},
 	}
 
-	s.mt.segments.SetSegment(s.segID, testSegment, 0)
+	s.mt.segments = newTestCachedSegmentsInfo(map[int64]*SegmentInfo{s.segID: testSegment})
+	s.mt.segmentPersist = newTestSegmentPersist()
+	seedTestSegmentPersist(s.T(), s.mt)
 
 	s.Run("set job info success for different sub job types", func() {
 		catalog := &mockeyDataCoordCatalog{}
@@ -599,6 +606,41 @@ func (s *statsTaskSuite) TestSetJobInfo() {
 
 	// Restore original segments
 	s.mt.segments = origSegments
+	s.mt.segmentPersist = origSegmentPersist
+}
+
+func (s *statsTaskSuite) TestSetSortJobInfoEnqueuesTargetSegment() {
+	drainBuildIndexChForTest()
+	defer drainBuildIndexChForTest()
+
+	s.mt.segments.SetSegment(s.targetID, &SegmentInfo{
+		SegmentInfo: &datapb.SegmentInfo{
+			ID:            s.targetID,
+			CollectionID:  s.collID,
+			PartitionID:   s.partID,
+			InsertChannel: "ch1",
+			State:         commonpb.SegmentState_Flushed,
+		},
+	}, 0)
+	defer func() {
+		s.mt.segments.DropSegment(s.targetID, 1)
+		s.mt.segments.PruneSegment(s.targetID)
+	}()
+	st := newStatsTask(&indexpb.StatsTask{
+		TaskID:          s.taskID,
+		SegmentID:       s.segID,
+		TargetSegmentID: s.targetID,
+		SubJobType:      indexpb.StatsSubJob_Sort,
+		State:           indexpb.JobState_JobStateInProgress,
+	}, 1, s.mt, nil, nil, newIndexEngineVersionManager())
+
+	err := st.SetJobInfo(context.Background(), &workerpb.StatsResult{
+		TaskID: s.taskID,
+		State:  indexpb.JobState_JobStateFinished,
+	})
+
+	s.NoError(err)
+	assertBuildIndexEvents(s.T(), s.targetID)
 }
 
 func (s *statsTaskSuite) TestSetJobInfoJSONStatsResultManifestHandling() {
@@ -641,7 +683,6 @@ func (s *statsTaskSuite) TestSetJobInfoJSONStatsResultManifestHandling() {
 		logs           map[int64]*datapb.JsonKeyStats
 		expectManifest string
 		expectStats    bool
-		expectCatalog  bool
 		expectNotify   bool
 		persistErr     error
 		expectErr      error
@@ -663,7 +704,6 @@ func (s *statsTaskSuite) TestSetJobInfoJSONStatsResultManifestHandling() {
 			logs:           statsLogs,
 			expectManifest: resultManifest,
 			expectStats:    true,
-			expectCatalog:  true,
 			expectNotify:   true,
 		},
 		{
@@ -681,7 +721,6 @@ func (s *statsTaskSuite) TestSetJobInfoJSONStatsResultManifestHandling() {
 			result:         resultManifest,
 			logs:           statsLogs,
 			expectManifest: currentManifest,
-			expectCatalog:  true,
 			persistErr:     persistErr,
 			expectErr:      persistErr,
 		},
@@ -693,7 +732,6 @@ func (s *statsTaskSuite) TestSetJobInfoJSONStatsResultManifestHandling() {
 			logs:           oldFormatStatsLogs,
 			expectManifest: currentManifest,
 			expectStats:    true,
-			expectCatalog:  true,
 		},
 		{
 			name:           "mixed_format_stats_notify_current_format_change",
@@ -703,7 +741,6 @@ func (s *statsTaskSuite) TestSetJobInfoJSONStatsResultManifestHandling() {
 			logs:           mixedFormatStatsLogs,
 			expectManifest: currentManifest,
 			expectStats:    true,
-			expectCatalog:  true,
 			expectNotify:   true,
 		},
 	}
@@ -716,20 +753,12 @@ func (s *statsTaskSuite) TestSetJobInfoJSONStatsResultManifestHandling() {
 			restore := s.installJSONStatsSegment(testCase.current)
 			defer restore()
 
-			alterSegmentsCount := 0
-			mockAlterSegments := mockey.Mock((*mockeyDataCoordCatalog).AlterSegments).To(
-				func(
-					_ *mockeyDataCoordCatalog,
-					_ context.Context,
-					_ []*datapb.SegmentInfo,
-					_ ...metastore.BinlogsIncrement,
-				) error {
-					alterSegmentsCount++
-					return testCase.persistErr
-				}).Build()
-			defer mockAlterSegments.UnPatch()
-			s.mt.catalog = &mockeyDataCoordCatalog{}
-
+			if testCase.persistErr != nil {
+				s.mt.segmentPersist = &failingCommitSegmentPersist{
+					base: s.mt.segmentPersist,
+					err:  testCase.persistErr,
+				}
+			}
 			err := s.newJSONStatsTask().SetJobInfo(context.Background(), &workerpb.StatsResult{
 				TaskID:           s.taskID,
 				CollectionID:     s.collID,
@@ -755,10 +784,13 @@ func (s *statsTaskSuite) TestSetJobInfoJSONStatsResultManifestHandling() {
 			} else {
 				s.Empty(segment.GetJsonKeyStats())
 			}
-			if testCase.expectCatalog {
-				s.Equal(1, alterSegmentsCount)
+			persisted := s.getPersistedStatsSegment(s.segID)
+			s.Equal(testCase.expectManifest, persisted.GetManifestPath())
+			if testCase.expectStats {
+				s.Require().Contains(persisted.GetJsonKeyStats(), int64(500))
+				s.Equal(s.taskID, persisted.GetJsonKeyStats()[500].GetBuildID())
 			} else {
-				s.Equal(0, alterSegmentsCount)
+				s.Empty(persisted.GetJsonKeyStats())
 			}
 			if testCase.expectNotify {
 				s.Equal([]queryViewLoadInfoNotification{{
@@ -795,7 +827,6 @@ func (s *statsTaskSuite) TestSetJobInfoTextStatsResultManifestHandling() {
 		logs           map[int64]*datapb.TextIndexStats
 		expectManifest string
 		expectStats    bool
-		expectCatalog  bool
 		expectNotify   bool
 		persistErr     error
 		expectErr      error
@@ -817,7 +848,6 @@ func (s *statsTaskSuite) TestSetJobInfoTextStatsResultManifestHandling() {
 			logs:           statsLogs,
 			expectManifest: resultManifest,
 			expectStats:    true,
-			expectCatalog:  true,
 			expectNotify:   true,
 		},
 		{
@@ -835,7 +865,6 @@ func (s *statsTaskSuite) TestSetJobInfoTextStatsResultManifestHandling() {
 			result:         resultManifest,
 			logs:           statsLogs,
 			expectManifest: currentManifest,
-			expectCatalog:  true,
 			persistErr:     persistErr,
 			expectErr:      persistErr,
 		},
@@ -849,20 +878,12 @@ func (s *statsTaskSuite) TestSetJobInfoTextStatsResultManifestHandling() {
 			restore := s.installJSONStatsSegment(testCase.current)
 			defer restore()
 
-			alterSegmentsCount := 0
-			mockAlterSegments := mockey.Mock((*mockeyDataCoordCatalog).AlterSegments).To(
-				func(
-					_ *mockeyDataCoordCatalog,
-					_ context.Context,
-					_ []*datapb.SegmentInfo,
-					_ ...metastore.BinlogsIncrement,
-				) error {
-					alterSegmentsCount++
-					return testCase.persistErr
-				}).Build()
-			defer mockAlterSegments.UnPatch()
-			s.mt.catalog = &mockeyDataCoordCatalog{}
-
+			if testCase.persistErr != nil {
+				s.mt.segmentPersist = &failingCommitSegmentPersist{
+					base: s.mt.segmentPersist,
+					err:  testCase.persistErr,
+				}
+			}
 			err := s.newTextStatsTask().SetJobInfo(context.Background(), &workerpb.StatsResult{
 				TaskID:        s.taskID,
 				CollectionID:  s.collID,
@@ -888,10 +909,13 @@ func (s *statsTaskSuite) TestSetJobInfoTextStatsResultManifestHandling() {
 			} else {
 				s.Empty(segment.GetTextStatsLogs())
 			}
-			if testCase.expectCatalog {
-				s.Equal(1, alterSegmentsCount)
+			persisted := s.getPersistedStatsSegment(s.segID)
+			s.Equal(testCase.expectManifest, persisted.GetManifestPath())
+			if testCase.expectStats {
+				s.Require().Contains(persisted.GetTextStatsLogs(), int64(500))
+				s.Equal(s.taskID, persisted.GetTextStatsLogs()[500].GetBuildID())
 			} else {
-				s.Equal(0, alterSegmentsCount)
+				s.Empty(persisted.GetTextStatsLogs())
 			}
 			if testCase.expectNotify {
 				s.Equal([]queryViewLoadInfoNotification{{
@@ -1117,9 +1141,10 @@ func (s *statsTaskSuite) installStatsTaskCollection(external bool) func() {
 }
 
 func (s *statsTaskSuite) installJSONStatsSegment(manifest string) func() {
-	origSegment := s.mt.segments.segments[s.segID]
+	origSegments := s.mt.segments
+	origSegmentPersist := s.mt.segmentPersist
 	origCatalog := s.mt.catalog
-	s.mt.segments.segments[s.segID] = &SegmentInfo{
+	s.mt.segments = newTestCachedSegmentsInfo(map[int64]*SegmentInfo{s.segID: {
 		SegmentInfo: &datapb.SegmentInfo{
 			ID:             s.segID,
 			CollectionID:   s.collID,
@@ -1131,11 +1156,26 @@ func (s *statsTaskSuite) installJSONStatsSegment(manifest string) func() {
 			ManifestPath:   manifest,
 			StorageVersion: 3,
 		},
-	}
+	}})
+	s.mt.segmentPersist = newTestSegmentPersist()
+	seedTestSegmentPersist(s.T(), s.mt)
 	return func() {
-		s.mt.segments.segments[s.segID] = origSegment
+		s.mt.segments = origSegments
+		s.mt.segmentPersist = origSegmentPersist
 		s.mt.catalog = origCatalog
 	}
+}
+
+func (s *statsTaskSuite) getPersistedStatsSegment(segmentID int64) *datapb.SegmentInfo {
+	segment := s.mt.segments.GetSegment(segmentID)
+	s.Require().NotNil(segment)
+	_, values, _, err := s.mt.segmentPersist.Scan(
+		context.Background(),
+		s.mt.segmentKey(segment.GetCollectionID(), segment.GetPartitionID(), segmentID),
+	)
+	s.Require().NoError(err)
+	s.Require().Len(values, 1)
+	return values[0]
 }
 
 func (s *statsTaskSuite) newJSONStatsTask() *statsTask {

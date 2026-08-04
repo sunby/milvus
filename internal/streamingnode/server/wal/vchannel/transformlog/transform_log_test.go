@@ -204,6 +204,29 @@ func TestNewKeepsRecoveredChunksColdUntilRead(t *testing.T) {
 	assert.Equal(t, 1, store.readCount("v1", 0))
 }
 
+func TestSwitchIntoMetaAndDataKeepsRecoveredChunksCold(t *testing.T) {
+	store := newMemoryStore()
+	require.NoError(t, store.WriteTransformLogChunk(context.Background(), "v1", &streamingpb.TransformLogChunk{
+		ChunkId: 0,
+		Entries: []*streamingpb.TransformLogEntry{
+			testTransformLogDeleteEntry(10, 1),
+		},
+	}))
+	transformLog := New(Config{
+		VChannel: "v1",
+		Store:    store,
+		Meta: &streamingpb.VChannelTransformLogMeta{
+			CheckpointTimeTick: 10,
+			NextChunkId:        1,
+		},
+	})
+	store.resetReadCount()
+
+	transformLog.SwitchIntoMetaAndData()
+
+	assert.Equal(t, 0, store.readCount("v1", 0))
+}
+
 func TestMaterializeLoadsRecoveredColdChunk(t *testing.T) {
 	store := newMemoryStore()
 	require.NoError(t, store.WriteTransformLogChunk(context.Background(), "v1", &streamingpb.TransformLogChunk{

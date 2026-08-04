@@ -510,7 +510,7 @@ func (st *statsTask) SetJobInfo(ctx context.Context, result *workerpb.StatsResul
 	)
 	switch st.GetSubJobType() {
 	case indexpb.StatsSubJob_TextIndexJob:
-		err = st.meta.UpdateSegmentsInfo(ctx, updateStatsResultIfManifestMatches(ctx, st.GetSegmentID(), st.GetTaskID(), result))
+		err = st.updateStatsResultIfManifestMatches(ctx, result)
 		if err != nil {
 			mlog.Warn(ctx, "save text index stats result failed", mlog.FieldTaskID(st.GetTaskID()),
 				mlog.FieldSegmentID(st.GetSegmentID()), mlog.Err(err))
@@ -518,7 +518,7 @@ func (st *statsTask) SetJobInfo(ctx context.Context, result *workerpb.StatsResul
 		}
 		loadInfoChanged = queryViewTextLoadInfoChanged(result)
 	case indexpb.StatsSubJob_JsonKeyIndexJob:
-		err = st.meta.UpdateSegmentsInfo(ctx, updateStatsResultIfManifestMatches(ctx, st.GetSegmentID(), st.GetTaskID(), result))
+		err = st.updateStatsResultIfManifestMatches(ctx, result)
 		if err != nil {
 			mlog.Warn(ctx, "save json key index stats result failed", mlog.Int64("taskId", st.GetTaskID()),
 				mlog.FieldSegmentID(st.GetSegmentID()), mlog.Err(err))
@@ -614,36 +614,44 @@ func queryViewTextLoadInfoChanged(result *workerpb.StatsResult) bool {
 		len(result.GetTextStatsLogs()) > 0
 }
 
-func updateStatsResultIfManifestMatches(ctx context.Context, segmentID, taskID int64, result *workerpb.StatsResult) UpdateOperator {
-	return func(modPack *updateSegmentPack) bool {
-		current := modPack.meta.segments.GetSegment(segmentID)
-		if current == nil || !isSegmentHealthy(current) {
-			mlog.Warn(ctx, "discard stats result for missing or unhealthy segment",
-				mlog.FieldTaskID(taskID),
-				mlog.FieldSegmentID(segmentID),
-				mlog.Bool("segmentMissing", current == nil))
-			return modPack.fail(errStatsResultDiscarded)
+func (st *statsTask) updateStatsResultIfManifestMatches(ctx context.Context, result *workerpb.StatsResult) error {
+	segmentID := st.GetSegmentID()
+	taskID := st.GetTaskID()
+	current := st.meta.segments.GetSegment(segmentID)
+	if current == nil || !isSegmentHealthy(current) {
+		mlog.Warn(ctx, "discard stats result for missing or unhealthy segment",
+			mlog.FieldTaskID(taskID),
+			mlog.FieldSegmentID(segmentID),
+			mlog.Bool("segmentMissing", current == nil))
+		return errStatsResultDiscarded
+	}
+	if result.GetBaseManifest() == "" && result.GetManifest() == "" &&
+		len(result.GetTextStatsLogs()) == 0 && len(result.GetJsonKeyStatsLogs()) == 0 {
+		return nil
+	}
+
+	var mutationErr error
+	mutations := singleSegmentMutation(segmentID, func(segment *datapb.SegmentInfo) bool {
+		if !isSegmentHealthy(NewSegmentInfo(segment)) {
+			mutationErr = errStatsResultDiscarded
+			return false
 		}
-		if result.GetBaseManifest() != "" && current.GetManifestPath() != result.GetBaseManifest() {
+		if result.GetBaseManifest() != "" && segment.GetManifestPath() != result.GetBaseManifest() {
 			mlog.Info(ctx, "discard stale stats result",
 				mlog.FieldTaskID(taskID),
 				mlog.FieldSegmentID(segmentID),
 				mlog.String("baseManifest", result.GetBaseManifest()),
-				mlog.String("currentManifest", current.GetManifestPath()),
+				mlog.String("currentManifest", segment.GetManifestPath()),
 				mlog.String("resultManifest", result.GetManifest()))
-			return modPack.fail(errStatsResultStale)
+			mutationErr = errStatsResultStale
+			return false
 		}
 
 		hasTextStats := len(result.GetTextStatsLogs()) > 0
 		hasJSONStats := len(result.GetJsonKeyStatsLogs()) > 0
-		manifestChanged := result.GetManifest() != "" && current.GetManifestPath() != result.GetManifest()
+		manifestChanged := result.GetManifest() != "" && segment.GetManifestPath() != result.GetManifest()
 		if !hasTextStats && !hasJSONStats && !manifestChanged {
 			return false
-		}
-
-		segment := modPack.Get(segmentID)
-		if segment == nil {
-			return modPack.fail(errStatsResultDiscarded)
 		}
 
 		if hasTextStats {
@@ -667,5 +675,10 @@ func updateStatsResultIfManifestMatches(ctx context.Context, segmentID, taskID i
 			segment.ManifestPath = result.GetManifest()
 		}
 		return true
+	})
+
+	if err := st.meta.UpdateSegmentsInfo(ctx, mutations); err != nil {
+		return err
 	}
+	return mutationErr
 }

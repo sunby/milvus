@@ -50,7 +50,7 @@ func TestIndexInspectorGetUnIndexTaskSegmentsSkipsSegmentsCannotBuildIndexNow(t 
 		sortedSegmentID   = UniqueID(2002)
 	)
 	m := &meta{
-		segments:    NewSegmentsInfo(),
+		segments:    NewCachedSegmentsInfo(),
 		collections: typeutil.NewConcurrentMap[UniqueID, *collectionInfo](),
 		indexMeta: &indexMeta{
 			segmentBuildInfo: newSegmentIndexBuildInfo(),
@@ -82,14 +82,14 @@ func TestIndexInspectorGetUnIndexTaskSegmentsSkipsSegmentsCannotBuildIndexNow(t 
 		NumOfRows:    1025,
 		State:        commonpb.SegmentState_Flushed,
 		Level:        datapb.SegmentLevel_L0,
-	}})
+	}}, 0)
 	m.segments.SetSegment(unsortedSegmentID, &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
 		ID:           unsortedSegmentID,
 		CollectionID: collID,
 		PartitionID:  partID,
 		NumOfRows:    1025,
 		State:        commonpb.SegmentState_Flushed,
-	}})
+	}}, 0)
 	m.segments.SetSegment(sortedSegmentID, &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
 		ID:           sortedSegmentID,
 		CollectionID: collID,
@@ -97,7 +97,7 @@ func TestIndexInspectorGetUnIndexTaskSegmentsSkipsSegmentsCannotBuildIndexNow(t 
 		NumOfRows:    1025,
 		State:        commonpb.SegmentState_Flushed,
 		IsSorted:     true,
-	}})
+	}}, 0)
 
 	segments := (&indexInspector{meta: m}).getUnIndexTaskSegments(context.TODO())
 

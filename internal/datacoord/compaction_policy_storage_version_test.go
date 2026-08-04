@@ -79,14 +79,7 @@ func (s *StorageVersionUpgradePolicySuite) SetupTest() {
 }
 
 func (s *StorageVersionUpgradePolicySuite) setPolicyMeta(collID int64, coll *collectionInfo, segments map[UniqueID]*SegmentInfo) {
-	segmentsInfo := &SegmentsInfo{
-		segments: segments,
-		secondaryIndexes: segmentInfoIndexes{
-			coll2Segments: map[UniqueID]map[UniqueID]*SegmentInfo{
-				collID: segments,
-			},
-		},
-	}
+	segmentsInfo := newTestCachedSegmentsInfo(segments)
 
 	collections := typeutil.NewConcurrentMap[UniqueID, *collectionInfo]()
 	collections.Insert(collID, coll)
@@ -996,14 +989,7 @@ func (s *StorageVersionUpgradePolicySuite) TestTriggerSkippedDueToVersionRequire
 		},
 	}
 
-	segmentsInfo := &SegmentsInfo{
-		segments: segments,
-		secondaryIndexes: segmentInfoIndexes{
-			coll2Segments: map[UniqueID]map[UniqueID]*SegmentInfo{
-				collID: segments,
-			},
-		},
-	}
+	segmentsInfo := newTestCachedSegmentsInfo(segments)
 
 	collections := typeutil.NewConcurrentMap[UniqueID, *collectionInfo]()
 	collections.Insert(collID, coll)
@@ -1064,14 +1050,7 @@ func (s *StorageVersionUpgradePolicySuite) TestTriggerVersionRequirementSatisfie
 		},
 	}
 
-	segmentsInfo := &SegmentsInfo{
-		segments: segments,
-		secondaryIndexes: segmentInfoIndexes{
-			coll2Segments: map[UniqueID]map[UniqueID]*SegmentInfo{
-				collID: segments,
-			},
-		},
-	}
+	segmentsInfo := newTestCachedSegmentsInfo(segments)
 
 	collections := typeutil.NewConcurrentMap[UniqueID, *collectionInfo]()
 	collections.Insert(collID, coll)
@@ -1144,14 +1123,7 @@ func (s *StorageVersionUpgradePolicySuite) TestTriggerVersionExactlyEqual() {
 		},
 	}
 
-	segmentsInfo := &SegmentsInfo{
-		segments: segments,
-		secondaryIndexes: segmentInfoIndexes{
-			coll2Segments: map[UniqueID]map[UniqueID]*SegmentInfo{
-				collID: segments,
-			},
-		},
-	}
+	segmentsInfo := newTestCachedSegmentsInfo(segments)
 
 	collections := typeutil.NewConcurrentMap[UniqueID, *collectionInfo]()
 	collections.Insert(collID, coll)
