@@ -38,6 +38,7 @@
 #include "common/OpContext.h"
 #include "common/QueryInfo.h"
 #include "common/QueryResult.h"
+#include "common/RequestTrace.h"
 #include "common/Tracer.h"
 #include "common/Types.h"
 #include "common/Utils.h"
@@ -882,6 +883,45 @@ DropFieldData(CSegmentInterface c_segment, int64_t field_id) {
             dynamic_cast<milvus::segcore::SegmentSealed*>(segment_interface);
         AssertInfo(segment != nullptr, "segment conversion failed");
         segment->DropFieldData(milvus::FieldId(field_id));
+        return milvus::SuccessCStatus();
+    } catch (std::exception& e) {
+        return milvus::FailureCStatus(&e);
+    }
+}
+
+CStatus
+PrewarmSegment(CTraceContext c_trace,
+               CSegmentInterface c_segment,
+               const int64_t* field_ids,
+               int64_t field_count,
+               CLoadCancellationSource source) {
+    SCOPE_CGO_CALL_METRIC();
+    (void)c_trace;
+
+    try {
+        AssertInfo(field_count >= 0, "field count must be non-negative");
+        AssertInfo(field_count == 0 || field_ids != nullptr,
+                   "field ids are null");
+
+        auto segment =
+            reinterpret_cast<milvus::segcore::SegmentInterface*>(c_segment);
+        AssertInfo(segment != nullptr, "segment conversion failed");
+
+        std::vector<milvus::FieldId> fields;
+        fields.reserve(field_count);
+        for (int64_t i = 0; i < field_count; ++i) {
+            fields.emplace_back(field_ids[i]);
+        }
+
+        if (source) {
+            auto cancellation_source =
+                static_cast<folly::CancellationSource*>(source);
+            milvus::OpContext op_ctx(cancellation_source->getToken());
+            segment->Prewarm(&op_ctx, fields);
+        } else {
+            segment->Prewarm(nullptr, fields);
+        }
+
         return milvus::SuccessCStatus();
     } catch (std::exception& e) {
         return milvus::FailureCStatus(&e);

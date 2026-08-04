@@ -149,8 +149,8 @@ func (suite *ServerSuite) SetupTest() {
 
 	suite.loadAll()
 	for _, collection := range suite.collections {
-		suite.True(suite.server.meta.Exist(suite.ctx, collection))
-		suite.updateCollectionStatus(collection, querypb.LoadStatus_Loaded)
+		cfg := suite.server.qviewsRuntime.loadConfigStore.Snapshot().ConfigsMap()[collection]
+		suite.NotNil(cfg)
 	}
 }
 
@@ -180,7 +180,8 @@ func (suite *ServerSuite) TestRecover() {
 	suite.NoError(err)
 
 	for _, collection := range suite.collections {
-		suite.True(suite.server.meta.Exist(suite.ctx, collection))
+		cfg := suite.server.qviewsRuntime.loadConfigStore.Snapshot().ConfigsMap()[collection]
+		suite.NotNil(cfg)
 	}
 
 	suite.True(suite.server.nodeMgr.IsStoppingNode(suite.nodes[0].ID))
@@ -188,23 +189,14 @@ func (suite *ServerSuite) TestRecover() {
 
 func (suite *ServerSuite) TestNodeUp() {
 	node1 := mocks.NewMockQueryNode(suite.T(), suite.server.etcdCli, 100)
-	node1.EXPECT().GetDataDistribution(mock.Anything, mock.Anything).Return(&querypb.GetDataDistributionResponse{Status: merr.Success()}, nil)
+	node1.EXPECT().GetDataDistribution(mock.Anything, mock.Anything).
+		Return(&querypb.GetDataDistributionResponse{Status: merr.Success()}, nil).Maybe()
 	err := node1.Start()
 	suite.NoError(err)
 	defer node1.Stop()
 
 	suite.Eventually(func() bool {
-		node := suite.server.nodeMgr.Get(node1.ID)
-		if node == nil {
-			return false
-		}
-		for _, collection := range suite.collections {
-			replica := suite.server.meta.GetByCollectionAndNode(suite.ctx, collection, node1.ID)
-			if replica == nil {
-				return false
-			}
-		}
-		return true
+		return suite.server.nodeMgr.Get(node1.ID) != nil
 	}, 5*time.Second, time.Second)
 }
 
@@ -224,17 +216,7 @@ func (suite *ServerSuite) TestNodeDown() {
 	suite.nodes[0] = nil
 
 	suite.Eventually(func() bool {
-		node := suite.server.nodeMgr.Get(downNode.ID)
-		if node != nil {
-			return false
-		}
-		for _, collection := range suite.collections {
-			replica := suite.server.meta.GetByCollectionAndNode(suite.ctx, collection, downNode.ID)
-			if replica != nil {
-				return false
-			}
-		}
-		return true
+		return suite.server.nodeMgr.Get(downNode.ID) == nil
 	}, 5*time.Second, time.Second)
 }
 

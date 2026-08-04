@@ -249,6 +249,13 @@ LoadDeletedRecord(CSegmentInterface c_segment,
 CStatus
 DropFieldData(CSegmentInterface c_segment, int64_t field_id);
 
+CStatus
+PrewarmSegment(CTraceContext c_trace,
+               CSegmentInterface c_segment,
+               const int64_t* field_ids,
+               int64_t field_count,
+               CLoadCancellationSource source);
+
 //////////////////////////////    interfaces for SegmentInterface    //////////////////////////////
 CStatus
 ExistPk(CSegmentInterface c_segment,

@@ -300,89 +300,41 @@ func (kc *Catalog) AlterSegments(ctx context.Context, segments []*datapb.Segment
 	}
 
 	start := time.Now()
-	kvs := make(map[string]string)
-	for _, segment := range segments {
-		// we don't persist binlog fields, but instead store binlogs as independent kvs
-		cloned := proto.Clone(segment).(*datapb.SegmentInfo)
-		resetBinlogFields(cloned)
-
-		rowCount := segmentutil.CalcRowCountFromBinLog(segment)
-		if rowCount > 0 && cloned.GetNumOfRows() != rowCount {
-			cloned.NumOfRows = rowCount
-		}
-
-		if segment.GetState() == commonpb.SegmentState_Dropped {
-			binlogs, err := kc.handleDroppedSegment(ctx, segment)
-			if err != nil {
-				return err
-			}
-			maps.Copy(kvs, binlogs)
-		}
-
-		k, v, err := buildSegmentKv(cloned)
-		if err != nil {
-			return err
-		}
-		kvs[k] = v
-	}
-	buildSegmentKvsDur := time.Since(start)
-
-	var removals []string
-	stageStart := time.Now()
-	for _, b := range binlogs {
-		segment := b.Segment
-
-		binlogKvs, err := buildBinlogKvsWithLogID(
-			segment.GetCollectionID(),
-			segment.GetPartitionID(),
-			segment.GetID(),
-			b.GetUpdateBinlogs(),
-			b.GetUpdateDeltalogs(),
-			b.GetUpdateStatslogs(),
-			b.GetUpdateBm25Statslogs())
-		if err != nil {
-			return err
-		}
-
-		maps.Copy(kvs, binlogKvs)
-
-		for _, fid := range b.DroppedBinlogFieldIDs {
-			removals = append(removals,
-				buildFieldBinlogPath(
-					segment.GetCollectionID(),
-					segment.GetPartitionID(),
-					segment.GetID(),
-					fid))
-		}
-	}
-	buildBinlogKvsDur := time.Since(stageStart)
-
-	stageStart = time.Now()
-	err := kc.SaveByBatch(ctx, kvs)
-	saveByBatchDur := time.Since(stageStart)
+	kvs, removals, err := kc.buildAlterSegmentsKvs(ctx, segments, binlogs)
 	if err != nil {
 		return err
 	}
-	// Explicit removal is required: AlterSegments persists binlogs as
-	// independent per-FieldID KVs and listBinlogs rebuilds them via a prefix
-	// scan on restart. An operator that structurally drops a FieldBinlog
-	// from segment.Binlogs (e.g. when all ChildFields of a column group are
-	// claimed by a backfill commit) must also delete the orphan KV, otherwise
-	// the stripped group resurrects on the next datacoord start.
+	buildKvsDur := time.Since(start)
+
+	stageStart := time.Now()
+	err = kc.saveSegmentAndBinlogKVs(ctx, kvs, removals)
+	saveDur := time.Since(stageStart)
+	if err != nil {
+		return err
+	}
+	mlog.Info(ctx, "[AlterSegments] done",
+		mlog.Duration("total", time.Since(start)),
+		mlog.Duration("buildKvs", buildKvsDur),
+		mlog.Duration("save", saveDur),
+		mlog.Int("kvCount", len(kvs)),
+		mlog.Int("segmentCount", len(segments)),
+		mlog.Int("binlogIncrementCount", len(binlogs)),
+	)
+	return nil
+}
+
+func (kc *Catalog) saveSegmentAndBinlogKVs(ctx context.Context, kvs map[string]string, removals []string) error {
+	if err := kc.SaveByBatch(ctx, kvs); err != nil {
+		return err
+	}
+	// AlterSegments stores FieldBinlogs under independent keys. Remove keys for
+	// groups that were structurally dropped, otherwise a restart would recover
+	// the stale group from the prefix scan.
 	if len(removals) > 0 {
 		if err := kc.MetaKv.MultiSaveAndRemove(ctx, nil, removals); err != nil {
 			return err
 		}
 	}
-	mlog.Info(ctx, "[AlterSegments] done",
-		mlog.Duration("total", time.Since(start)),
-		mlog.Duration("buildSegmentKvs", buildSegmentKvsDur),
-		mlog.Duration("buildBinlogKvs", buildBinlogKvsDur),
-		mlog.Duration("saveByBatch", saveByBatchDur),
-		mlog.Int("kvCount", len(kvs)),
-		mlog.Int("segmentCount", len(segments)),
-		mlog.Int("binlogIncrementCount", len(binlogs)),
-	)
 	return nil
 }
 
@@ -612,6 +564,68 @@ func (kc *Catalog) listDataViewsWithPrefix(ctx context.Context, prefix string) (
 		return nil, err
 	}
 	return dataViews, nil
+}
+
+// ListDataViewsForRecovery loads DataViews for all requested collections with
+// one paginated walk over the global DataView prefix. It is intentionally not
+// part of metastore.DataCoordCatalog so callers can use it as an optional
+// recovery acceleration without expanding the catalog interface or mocks.
+func (kc *Catalog) ListDataViewsForRecovery(
+	ctx context.Context,
+	collectionIDs []int64,
+) (map[int64][]*viewpb.DataViewOfCollection, error) {
+	dataViewsByCollection := make(map[int64][]*viewpb.DataViewOfCollection)
+	if len(collectionIDs) == 0 {
+		return dataViewsByCollection, nil
+	}
+
+	requestedCollections := make(map[int64]struct{}, len(collectionIDs))
+	for _, collectionID := range collectionIDs {
+		requestedCollections[collectionID] = struct{}{}
+	}
+
+	prefix := DataViewPrefix + "/"
+	fullPrefix := kc.MetaKv.GetPath(prefix)
+	applyFn := func(key []byte, value []byte) error {
+		collectionID, ok := dataViewCollectionIDFromKey(fullPrefix, key)
+		if !ok {
+			// The global prefix may gain non-version metadata in future versions.
+			// Match the point-read behavior by considering only version subtrees.
+			return nil
+		}
+		if _, ok := requestedCollections[collectionID]; !ok {
+			return nil
+		}
+
+		dataView := &viewpb.DataViewOfCollection{}
+		if err := proto.Unmarshal(value, dataView); err != nil {
+			return merr.WrapErrDataIntegrity(err, "unmarshal DataView metadata during recovery")
+		}
+		dataViewsByCollection[collectionID] = append(dataViewsByCollection[collectionID], dataView)
+		return nil
+	}
+
+	if err := kc.MetaKv.WalkWithPrefix(ctx, prefix, kc.paginationSize, applyFn); err != nil {
+		return nil, err
+	}
+	return dataViewsByCollection, nil
+}
+
+func dataViewCollectionIDFromKey(fullPrefix string, key []byte) (int64, bool) {
+	keyString := string(key)
+	if !strings.HasPrefix(keyString, fullPrefix) {
+		return 0, false
+	}
+
+	parts := strings.Split(strings.TrimPrefix(keyString, fullPrefix), "/")
+	if len(parts) < 3 || parts[1] != "versions" {
+		return 0, false
+	}
+	collectionID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return collectionID, true
 }
 
 func (kc *Catalog) DropDataView(ctx context.Context, collectionID int64, dataVersion *viewpb.DataVersion) error {

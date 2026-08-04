@@ -25,6 +25,8 @@ const (
 	QueryCoord_ShowLoadCollections_FullMethodName           = "/milvus.proto.query.QueryCoord/ShowLoadCollections"
 	QueryCoord_ShowLoadPartitions_FullMethodName            = "/milvus.proto.query.QueryCoord/ShowLoadPartitions"
 	QueryCoord_LoadPartitions_FullMethodName                = "/milvus.proto.query.QueryCoord/LoadPartitions"
+	QueryCoord_Prewarm_FullMethodName                       = "/milvus.proto.query.QueryCoord/Prewarm"
+	QueryCoord_DescribePrewarmTask_FullMethodName           = "/milvus.proto.query.QueryCoord/DescribePrewarmTask"
 	QueryCoord_ReleasePartitions_FullMethodName             = "/milvus.proto.query.QueryCoord/ReleasePartitions"
 	QueryCoord_LoadCollection_FullMethodName                = "/milvus.proto.query.QueryCoord/LoadCollection"
 	QueryCoord_ReleaseCollection_FullMethodName             = "/milvus.proto.query.QueryCoord/ReleaseCollection"

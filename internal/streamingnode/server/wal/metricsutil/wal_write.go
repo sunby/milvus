@@ -2,6 +2,7 @@ package metricsutil
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"sync"
 	"time"
@@ -43,6 +44,7 @@ func NewWriteMetrics(pchannel types.PChannelInfo, walName message.WALName) *Writ
 		bytes:                        metrics.WALAppendMessageBytes.MustCurryWith(constLabel),
 		total:                        metrics.WALAppendMessageTotal.MustCurryWith(constLabel),
 		walDuration:                  metrics.WALAppendMessageDurationSeconds.MustCurryWith(constLabel),
+		walStageDuration:             metrics.WALAppendMessageStageDurationSeconds.MustCurryWith(constLabel),
 		walimplsRetryTotal:           metrics.WALImplsAppendRetryTotal.With(constLabel),
 		walimplsDuration:             metrics.WALImplsAppendMessageDurationSeconds.MustCurryWith(constLabel),
 		walBeforeInterceptorDuration: metrics.WALAppendMessageBeforeInterceptorDurationSeconds.MustCurryWith(constLabel),
@@ -84,6 +86,7 @@ type WriteMetrics struct {
 	bytes                        prometheus.ObserverVec
 	total                        *prometheus.CounterVec
 	walDuration                  prometheus.ObserverVec
+	walStageDuration             prometheus.ObserverVec
 	walimplsRetryTotal           prometheus.Counter
 	walimplsDuration             prometheus.ObserverVec
 	walBeforeInterceptorDuration prometheus.ObserverVec
@@ -107,22 +110,51 @@ func (m *WriteMetrics) done(ctx context.Context, appendMetrics *AppendMetrics) {
 	}
 	statusIndex, status := errorStatus(appendMetrics.err)
 	statusMetrics := m.status[statusIndex]
+	messageType := appendMetrics.msg.MessageType().String()
+	observeStage := func(stage string, duration time.Duration) {
+		if duration <= 0 {
+			return
+		}
+		m.walStageDuration.WithLabelValues(messageType, stage, status).Observe(duration.Seconds())
+	}
+	observeStage(AppendStageTotal, appendMetrics.appendDuration)
 	if appendMetrics.implAppendDuration != 0 {
 		statusMetrics.implDuration.Observe(appendMetrics.implAppendDuration.Seconds())
+		observeStage(AppendStageWALImpl, appendMetrics.implAppendDuration)
 	}
 	statusMetrics.bytes.Observe(float64(appendMetrics.msg.EstimateSize()))
-	m.totalCounter(appendMetrics.msg.MessageType().String(), statusIndex, status).Inc()
+	m.totalCounter(messageType, statusIndex, status).Inc()
 	statusMetrics.walDuration.Observe(appendMetrics.appendDuration.Seconds())
+	currentInterceptor := ""
+	var beforeDuration time.Duration
+	var afterDuration time.Duration
+	flushInterceptorStages := func() {
+		if currentInterceptor == "" {
+			return
+		}
+		observeStage(fmt.Sprintf("interceptor_%s_before", currentInterceptor), beforeDuration)
+		observeStage(fmt.Sprintf("interceptor_%s_after", currentInterceptor), afterDuration)
+	}
 	appendMetrics.rangeInterceptorMetrics(func(name string, _ int, im *InterceptorMetrics) bool {
+		if name != currentInterceptor {
+			flushInterceptorStages()
+			currentInterceptor = name
+			beforeDuration = 0
+			afterDuration = 0
+		}
 		observers := m.interceptorObservers(name)
 		if im.Before != 0 {
 			observers.before.Observe(im.Before.Seconds())
+			beforeDuration += im.Before
 		}
 		if im.After != 0 {
 			observers.after.Observe(im.After.Seconds())
+			afterDuration += im.After
 		}
 		return true
 	})
+	flushInterceptorStages()
+	appendMetrics.RangeOverStages(observeStage)
 	if appendMetrics.err != nil {
 		m.Logger().Warn(ctx, "append message into wal failed", appendMetrics.IntoLogFields()...)
 		return
@@ -171,6 +203,7 @@ func (m *WriteMetrics) Close() {
 	metrics.WALAppendMessageBytes.DeletePartialMatch(m.constLabel)
 	metrics.WALAppendMessageTotal.DeletePartialMatch(m.constLabel)
 	metrics.WALAppendMessageDurationSeconds.DeletePartialMatch(m.constLabel)
+	metrics.WALAppendMessageStageDurationSeconds.DeletePartialMatch(m.constLabel)
 	metrics.WALImplsAppendRetryTotal.DeletePartialMatch(m.constLabel)
 	metrics.WALImplsAppendMessageDurationSeconds.DeletePartialMatch(m.constLabel)
 	metrics.WALInfo.DeleteLabelValues(

@@ -99,7 +99,7 @@ func (s *analyzeTaskSuite) SetupSuite() {
 	collections := typeutil.NewConcurrentMap[int64, *collectionInfo]()
 	collections.Insert(s.collID, &collectionInfo{Schema: schema})
 
-	segments := NewSegmentsInfo()
+	segments := NewCachedSegmentsInfo()
 	segments.SetSegment(101, &SegmentInfo{
 		SegmentInfo: &datapb.SegmentInfo{
 			ID:           101,
@@ -111,7 +111,8 @@ func (s *analyzeTaskSuite) SetupSuite() {
 				{FieldID: s.fieldID, Binlogs: []*datapb.Binlog{{LogID: 1001}, {LogID: 1002}}},
 			},
 		},
-	})
+	}, 0)
+
 	segments.SetSegment(102, &SegmentInfo{
 		SegmentInfo: &datapb.SegmentInfo{
 			ID:           102,
@@ -123,7 +124,7 @@ func (s *analyzeTaskSuite) SetupSuite() {
 				{FieldID: s.fieldID, Binlogs: []*datapb.Binlog{{LogID: 2001}, {LogID: 2002}}},
 			},
 		},
-	})
+	}, 0)
 
 	s.mt = &meta{
 		analyzeMeta: analyzeMt,
@@ -216,7 +217,8 @@ func (s *analyzeTaskSuite) TestCreateTaskOnWorker_SegmentNil() {
 			ID:    102,
 			State: commonpb.SegmentState_Dropped,
 		},
-	})
+	}, 1)
+
 	defer func() {
 		s.mt.segments.SetSegment(102, &SegmentInfo{
 			SegmentInfo: &datapb.SegmentInfo{
@@ -229,7 +231,8 @@ func (s *analyzeTaskSuite) TestCreateTaskOnWorker_SegmentNil() {
 					{FieldID: s.fieldID, Binlogs: []*datapb.Binlog{{LogID: 2001}, {LogID: 2002}}},
 				},
 			},
-		})
+		}, 2)
+
 	}()
 
 	at := s.newTask()

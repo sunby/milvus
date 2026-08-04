@@ -90,17 +90,12 @@ func (t *createCollectionTask) validate(ctx context.Context) error {
 	}
 
 	// 2. check db-collection capacity
-	db2CollIDs := t.meta.ListAllAvailCollections(ctx)
-	if err := t.checkMaxCollectionsPerDB(ctx, db2CollIDs); err != nil {
+	dbCollectionCount, totalCollections, dbExists := t.meta.GetAvailableCollectionCount(ctx, t.header.DbId)
+	if err := t.checkMaxCollectionsPerDB(ctx, dbCollectionCount, dbExists); err != nil {
 		return err
 	}
 
 	// 3. check total collection number
-	totalCollections := 0
-	for _, collIDs := range db2CollIDs {
-		totalCollections += len(collIDs)
-	}
-
 	maxCollectionNum := Params.QuotaConfig.MaxCollectionNum.GetAsInt()
 	if totalCollections >= maxCollectionNum {
 		mlog.Warn(ctx, "unable to create collection because the number of collection has reached the limit", mlog.Int("max_collection_num", maxCollectionNum))
@@ -116,11 +111,10 @@ func (t *createCollectionTask) validate(ctx context.Context) error {
 }
 
 // checkMaxCollectionsPerDB DB properties take precedence over quota configurations for max collections.
-func (t *createCollectionTask) checkMaxCollectionsPerDB(ctx context.Context, db2CollIDs map[int64][]int64) error {
+func (t *createCollectionTask) checkMaxCollectionsPerDB(ctx context.Context, dbCollectionCount int, dbExists bool) error {
 	Params := paramtable.Get()
 
-	collIDs, ok := db2CollIDs[t.header.DbId]
-	if !ok {
+	if !dbExists {
 		mlog.Warn(ctx, "can not found DB ID", mlog.String("collection", t.Req.GetCollectionName()), mlog.String("dbName", t.Req.GetDbName()))
 		return merr.WrapErrDatabaseNotFound(t.Req.GetDbName(), "failed to create collection")
 	}
@@ -132,7 +126,7 @@ func (t *createCollectionTask) checkMaxCollectionsPerDB(ctx context.Context, db2
 	}
 
 	check := func(maxColNumPerDB int) error {
-		if len(collIDs) >= maxColNumPerDB {
+		if dbCollectionCount >= maxColNumPerDB {
 			mlog.Warn(ctx, "unable to create collection because the number of collection has reached the limit in DB", mlog.Int("maxCollectionNumPerDB", maxColNumPerDB))
 			return merr.WrapErrCollectionNumLimitExceeded(t.Req.GetDbName(), maxColNumPerDB)
 		}
@@ -795,7 +789,9 @@ func (t *createCollectionTask) Prepare(ctx context.Context) error {
 		MsgType: commonpb.MsgType_CreateCollection,
 	}
 
+	stageStart := time.Now()
 	db, err := t.meta.GetDatabaseByName(ctx, t.Req.GetDbName(), typeutil.MaxTimestamp)
+	observeCreateCollectionStage(createCollectionStagePrepareGetDatabase, stageStart)
 	if err != nil {
 		return err
 	}
@@ -815,27 +811,45 @@ func (t *createCollectionTask) Prepare(ctx context.Context) error {
 
 	t.header.DbId = db.ID
 	t.body.DbID = t.header.DbId
+	stageStart = time.Now()
 	if err := t.validate(ctx); err != nil {
+		observeCreateCollectionStage(createCollectionStagePrepareValidate, stageStart)
 		return err
 	}
+	observeCreateCollectionStage(createCollectionStagePrepareValidate, stageStart)
 
+	stageStart = time.Now()
 	if err := t.prepareSchema(ctx); err != nil {
+		observeCreateCollectionStage(createCollectionStagePrepareSchema, stageStart)
 		return err
 	}
+	observeCreateCollectionStage(createCollectionStagePrepareSchema, stageStart)
 
+	stageStart = time.Now()
 	if err := t.assignCollectionID(); err != nil {
+		observeCreateCollectionStage(createCollectionStagePrepareAssignCollectionID, stageStart)
 		return err
 	}
+	observeCreateCollectionStage(createCollectionStagePrepareAssignCollectionID, stageStart)
 
+	stageStart = time.Now()
 	if err := t.assignPartitionIDs(ctx); err != nil {
+		observeCreateCollectionStage(createCollectionStagePrepareAssignPartitionIDs, stageStart)
 		return err
 	}
+	observeCreateCollectionStage(createCollectionStagePrepareAssignPartitionIDs, stageStart)
 
+	stageStart = time.Now()
 	if err := t.assignChannels(ctx); err != nil {
+		observeCreateCollectionStage(createCollectionStagePrepareAllocVChannels, stageStart)
 		return err
 	}
+	observeCreateCollectionStage(createCollectionStagePrepareAllocVChannels, stageStart)
 
-	return t.validateIfCollectionExists(ctx)
+	stageStart = time.Now()
+	err = t.validateIfCollectionExists(ctx)
+	observeCreateCollectionStage(createCollectionStagePrepareValidateCollectionName, stageStart)
+	return err
 }
 
 func (t *createCollectionTask) validateIfCollectionExists(ctx context.Context) error {

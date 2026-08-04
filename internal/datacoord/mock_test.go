@@ -97,6 +97,42 @@ func newTestSegmentPersist() OptimisticTxnPersist[string, *datapb.SegmentInfo] {
 	return NewOptimisticTxnMemoryPersist[string, *datapb.SegmentInfo](&SegmentInfoMarshaler{})
 }
 
+func seedTestSegmentPersist(t testing.TB, m *meta) {
+	t.Helper()
+	if m.segmentPersist == nil {
+		m.segmentPersist = newTestSegmentPersist()
+	}
+	txn := m.segmentPersist.Txn(context.Background())
+	for _, segment := range m.segments.GetSegments() {
+		txn.Insert(m.segmentKey(segment.GetCollectionID(), segment.GetPartitionID(), segment.GetID()), segment.Clone().SegmentInfo)
+	}
+	if _, err := txn.Commit(); err != nil {
+		t.Fatalf("seed segment persist: %v", err)
+	}
+}
+
+type failingCommitSegmentPersist struct {
+	base OptimisticTxnPersist[string, *datapb.SegmentInfo]
+	err  error
+}
+
+func (p *failingCommitSegmentPersist) Txn(ctx context.Context) Txn[string, *datapb.SegmentInfo] {
+	return &failingCommitSegmentTxn{Txn: p.base.Txn(ctx), err: p.err}
+}
+
+func (p *failingCommitSegmentPersist) Scan(ctx context.Context, prefix string) ([]string, []*datapb.SegmentInfo, []int64, error) {
+	return p.base.Scan(ctx, prefix)
+}
+
+type failingCommitSegmentTxn struct {
+	Txn[string, *datapb.SegmentInfo]
+	err error
+}
+
+func (t *failingCommitSegmentTxn) Commit() ([]TxnResult[*datapb.SegmentInfo], error) {
+	return nil, t.err
+}
+
 func newMemoryMeta(t *testing.T) (*meta, error) {
 	catalog := datacoord.NewCatalog(NewMetaMemoryKV(), "", "")
 	broker := broker.NewMockBroker(t)
@@ -104,12 +140,17 @@ func newMemoryMeta(t *testing.T) (*meta, error) {
 	return newMeta(context.TODO(), catalog, nil, broker, newTestSegmentPersist())
 }
 
-func newMetaWithEtcd(t *testing.T, rootPath string) (*meta, error) {
+func newMetaWithEtcd(t *testing.T, rootPath string, collectionIDs ...int64) (*meta, error) {
 	etcdCli, _ := kvfactory.GetEtcdAndPath()
 	catalogKV := etcdkv.NewEtcdKV(etcdCli, rootPath)
 	catalog := datacoord.NewCatalog(catalogKV, "", rootPath)
 	broker := broker.NewMockBroker(t)
-	broker.EXPECT().ShowCollectionIDs(mock.Anything).Return(nil, nil)
+	broker.EXPECT().ShowCollectionIDs(mock.Anything).Return(&rootcoordpb.ShowCollectionIDsResponse{
+		DbCollections: []*rootcoordpb.DBCollections{{CollectionIDs: collectionIDs}},
+	}, nil)
+	if len(collectionIDs) > 0 {
+		broker.EXPECT().ShowPartitionsInternal(mock.Anything, mock.Anything).Return([]int64{}, nil).Maybe()
+	}
 	segmentPersist := NewOptimisticTxnEtcdPersist[string, *datapb.SegmentInfo](etcdCli, &SegmentInfoMarshaler{})
 	return newMeta(context.TODO(), catalog, nil, broker, segmentPersist, rootPath)
 }
@@ -187,6 +228,26 @@ func (m *mockMixCoord) DescribeDatabase(ctx context.Context, in *rootcoordpb.Des
 		DbName:           "default",
 		CreatedTimestamp: 1,
 	}, nil
+}
+
+func (m *mockMixCoord) CreateNamespace(ctx context.Context, req *milvuspb.CreateNamespaceRequest) (*rootcoordpb.CreateNamespaceResponse, error) {
+	return &rootcoordpb.CreateNamespaceResponse{Status: merr.Success()}, nil
+}
+
+func (m *mockMixCoord) DescribeNamespace(ctx context.Context, req *milvuspb.DescribeNamespaceRequest) (*milvuspb.DescribeNamespaceResponse, error) {
+	return &milvuspb.DescribeNamespaceResponse{Status: merr.Success()}, nil
+}
+
+func (m *mockMixCoord) ListNamespaces(ctx context.Context, req *milvuspb.ListNamespacesRequest) (*milvuspb.ListNamespacesResponse, error) {
+	return &milvuspb.ListNamespacesResponse{Status: merr.Success()}, nil
+}
+
+func (m *mockMixCoord) DropNamespace(ctx context.Context, req *milvuspb.DropNamespaceRequest) (*milvuspb.DropNamespaceResponse, error) {
+	return &milvuspb.DropNamespaceResponse{Status: merr.Success()}, nil
+}
+
+func (m *mockMixCoord) HasNamespace(ctx context.Context, req *milvuspb.HasNamespaceRequest) (*milvuspb.HasNamespaceResponse, error) {
+	return &milvuspb.HasNamespaceResponse{Status: merr.Success()}, nil
 }
 
 func (m *mockMixCoord) Close() error {
@@ -1205,11 +1266,11 @@ func newMockHandlerWithMeta(meta *meta) *mockHandler {
 }
 
 // newTestCachedSegmentsInfo creates a *CachedSegmentsInfo pre-populated with the given segments.
-// This replaces the old pattern of &SegmentsInfo{segments: map[int64]*SegmentInfo{...}} in tests.
+// Seed fixtures at version -1 so legacy test updates at version 0 can still replace them.
 func newTestCachedSegmentsInfo(segs map[int64]*SegmentInfo) *CachedSegmentsInfo {
 	s := NewCachedSegmentsInfo()
 	for id, seg := range segs {
-		s.SetSegment(id, seg, 0)
+		s.SetSegment(id, seg, -1)
 	}
 	return s
 }

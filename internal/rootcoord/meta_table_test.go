@@ -1224,6 +1224,7 @@ func TestMetaTable_GetCollectionByName(t *testing.T) {
 }
 
 func TestMetaTable_AddCollectionDoesNotBlockReadersDuringCatalogCreate(t *testing.T) {
+	ctx := context.Background()
 	channel.ResetStaticPChannelStatsManager()
 	channel.RecoverPChannelStatsManager([]string{})
 	t.Cleanup(channel.ResetStaticPChannelStatsManager)
@@ -1264,10 +1265,11 @@ func TestMetaTable_AddCollectionDoesNotBlockReadersDuringCatalogCreate(t *testin
 		fileResourceRefCnt: map[int64]int{},
 	}
 	meta.names.insert(util.DefaultDBName, existingColl.Name, existingColl.CollectionID)
+	meta.rebuildAvailableCollectionCountLocked()
 
 	addErr := make(chan error, 1)
 	go func() {
-		addErr <- meta.AddCollection(context.Background(), &model.Collection{
+		addErr <- meta.AddCollection(ctx, &model.Collection{
 			CollectionID: 101,
 			DBID:         util.DefaultDBID,
 			DBName:       util.DefaultDBName,
@@ -1286,28 +1288,36 @@ func TestMetaTable_AddCollectionDoesNotBlockReadersDuringCatalogCreate(t *testin
 		require.FailNow(t, "AddCollection did not enter catalog CreateCollection")
 	}
 
-	type readResponse struct {
-		collection *model.Collection
-		err        error
-	}
-	readResult := make(chan readResponse, 1)
+	readResult := make(chan *model.Collection, 1)
+	readErr := make(chan error, 1)
 	go func() {
-		coll, err := meta.GetCollectionByName(context.Background(), util.DefaultDBName, existingColl.Name, typeutil.MaxTimestamp, false)
-		readResult <- readResponse{collection: coll, err: err}
+		coll, err := meta.GetCollectionByName(ctx, util.DefaultDBName, existingColl.Name, typeutil.MaxTimestamp, false)
+		readResult <- coll
+		readErr <- err
 	}()
 
+	readTimedOut := false
 	select {
-	case result := <-readResult:
-		require.NoError(t, result.err)
-		require.Equal(t, existingColl.CollectionID, result.collection.CollectionID)
-	case <-time.After(time.Second):
-		close(unblockCatalog)
-		require.NoError(t, <-addErr)
-		require.FailNow(t, "GetCollectionByName blocked while catalog CreateCollection was in progress")
+	case err := <-readErr:
+		require.NoError(t, err)
+		coll := <-readResult
+		require.NotNil(t, coll)
+		require.Equal(t, existingColl.CollectionID, coll.CollectionID)
+	case <-time.After(200 * time.Millisecond):
+		readTimedOut = true
 	}
 
 	close(unblockCatalog)
 	require.NoError(t, <-addErr)
+
+	if readTimedOut {
+		select {
+		case <-readErr:
+		case <-time.After(time.Second):
+			require.FailNow(t, "GetCollectionByName remained blocked after catalog CreateCollection was unblocked")
+		}
+		require.Fail(t, "GetCollectionByName blocked while catalog CreateCollection was in progress")
+	}
 }
 
 func TestMetaTable_AddCollectionRechecksAfterCatalogCreate(t *testing.T) {
@@ -2154,6 +2164,23 @@ func TestMetaTable_RemovePartition(t *testing.T) {
 	})
 }
 
+type collectionRecoveryCatalogForTest struct {
+	metastore.RootCoordCatalog
+	collectionsByDB map[int64][]*model.Collection
+	requestedDBIDs  []int64
+	calls           int
+}
+
+func (c *collectionRecoveryCatalogForTest) ListCollectionsForRecovery(
+	_ context.Context,
+	dbIDs []int64,
+	_ typeutil.Timestamp,
+) (map[int64][]*model.Collection, error) {
+	c.calls++
+	c.requestedDBIDs = append([]int64(nil), dbIDs...)
+	return c.collectionsByDB, nil
+}
+
 func TestMetaTable_reload(t *testing.T) {
 	createMetaTableFn := func(catalogOpts ...func(*mocks.RootCoordCatalog)) *MetaTable {
 		catalog := mocks.NewRootCoordCatalog(t)
@@ -2359,6 +2386,50 @@ func TestMetaTable_reload(t *testing.T) {
 	})
 }
 
+func TestMetaTableReloadUsesCollectionRecoveryCatalog(t *testing.T) {
+	baseCatalog := mocks.NewRootCoordCatalog(t)
+	baseCatalog.On("ListDatabases", mock.Anything, mock.Anything).Return(
+		[]*model.Database{
+			model.NewDefaultDatabase(nil),
+			{ID: 2, Name: "db2"},
+		},
+		nil,
+	)
+	baseCatalog.On("ListAliases", mock.Anything, mock.Anything, mock.Anything).Return(
+		[]*model.Alias{}, nil,
+	)
+	baseCatalog.On("ListFileResource", mock.Anything).Return(nil, uint64(0), nil)
+
+	recoveryCatalog := &collectionRecoveryCatalogForTest{
+		RootCoordCatalog: baseCatalog,
+		collectionsByDB: map[int64][]*model.Collection{
+			util.NonDBID: {
+				{CollectionID: 50, DBID: util.DefaultDBID, Name: "legacy", State: pb.CollectionState_CollectionCreated},
+			},
+			util.DefaultDBID: {
+				{CollectionID: 100, DBID: util.DefaultDBID, Name: "default-coll", State: pb.CollectionState_CollectionCreated},
+			},
+			2: {
+				{CollectionID: 200, DBID: 2, Name: "db2-coll", State: pb.CollectionState_CollectionCreated},
+			},
+		},
+	}
+	meta := &MetaTable{
+		ctx:     context.Background(),
+		catalog: recoveryCatalog,
+	}
+
+	channel.ResetStaticPChannelStatsManager()
+	require.NoError(t, meta.reload())
+	assert.Equal(t, 1, recoveryCatalog.calls)
+	assert.ElementsMatch(t, []int64{util.NonDBID, util.DefaultDBID, 2}, recoveryCatalog.requestedDBIDs)
+	assert.Len(t, meta.collID2Meta, 3)
+	assert.Empty(t, meta.collID2Meta[50].DBName)
+	assert.Equal(t, util.DefaultDBName, meta.collID2Meta[100].DBName)
+	assert.Equal(t, "db2", meta.collID2Meta[200].DBName)
+	baseCatalog.AssertNotCalled(t, "ListCollections", mock.Anything, mock.Anything, mock.Anything)
+}
+
 func TestMetaTable_ListAllAvailCollections(t *testing.T) {
 	meta := &MetaTable{
 		dbName2Meta: map[string]*model.Database{
@@ -2418,6 +2489,150 @@ func TestMetaTable_ListAllAvailCollections(t *testing.T) {
 	db3, ok := ret[1111]
 	assert.True(t, ok)
 	assert.Equal(t, 0, len(db3))
+}
+
+func TestMetaTable_GetAvailableCollectionCount(t *testing.T) {
+	meta := &MetaTable{
+		dbName2Meta: map[string]*model.Database{
+			util.DefaultDBName: {ID: util.DefaultDBID},
+			"db2":              {ID: 11},
+			"db3":              {ID: 2},
+			"db4":              {ID: 1111},
+		},
+		collID2Meta: map[typeutil.UniqueID]*model.Collection{
+			111: {
+				CollectionID: 111,
+				DBID:         1111,
+				State:        pb.CollectionState_CollectionDropped,
+			},
+			2: {
+				CollectionID: 2,
+				DBID:         11,
+				State:        pb.CollectionState_CollectionCreated,
+			},
+			3: {
+				CollectionID: 3,
+				DBID:         11,
+				State:        pb.CollectionState_CollectionCreated,
+			},
+			4: {
+				CollectionID: 4,
+				DBID:         2,
+				State:        pb.CollectionState_CollectionCreated,
+			},
+			5: {
+				CollectionID: 5,
+				DBID:         util.NonDBID,
+				State:        pb.CollectionState_CollectionCreated,
+			},
+		},
+	}
+	meta.rebuildAvailableCollectionCountLocked()
+
+	dbCount, total, ok := meta.GetAvailableCollectionCount(context.TODO(), util.DefaultDBID)
+	assert.True(t, ok)
+	assert.Equal(t, 1, dbCount)
+	assert.Equal(t, 4, total)
+
+	dbCount, total, ok = meta.GetAvailableCollectionCount(context.TODO(), int64(11))
+	assert.True(t, ok)
+	assert.Equal(t, 2, dbCount)
+	assert.Equal(t, 4, total)
+
+	dbCount, total, ok = meta.GetAvailableCollectionCount(context.TODO(), int64(1111))
+	assert.True(t, ok)
+	assert.Equal(t, 0, dbCount)
+	assert.Equal(t, 4, total)
+
+	dbCount, total, ok = meta.GetAvailableCollectionCount(context.TODO(), int64(9999))
+	assert.False(t, ok)
+	assert.Equal(t, 0, dbCount)
+	assert.Equal(t, 4, total)
+}
+
+func TestMetaTable_AvailableCollectionCountTransitions(t *testing.T) {
+	ctx := context.Background()
+	channel.ResetStaticPChannelStatsManager()
+	channel.RecoverPChannelStatsManager([]string{})
+
+	catalog := mocks.NewRootCoordCatalog(t)
+	catalog.On("CreateCollection", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	catalog.On("AlterCollection", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	catalog.On("AlterCollectionDB", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	catalog.On("DeleteGrantByCollectionName", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	catalog.On("MigrateGrantCollectionName", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+	meta := &MetaTable{
+		catalog: catalog,
+		dbName2Meta: map[string]*model.Database{
+			util.DefaultDBName: {ID: util.DefaultDBID},
+			"db2":              {ID: 11},
+		},
+		collID2Meta:        map[typeutil.UniqueID]*model.Collection{},
+		partitionName2ID:   map[int64]map[string]int64{},
+		names:              newNameDb(),
+		aliases:            newNameDb(),
+		fileResourceRefCnt: map[int64]int{},
+	}
+	meta.names.createDbIfNotExist(util.DefaultDBName)
+	meta.names.createDbIfNotExist("db2")
+	meta.rebuildAvailableCollectionCountLocked()
+
+	err := meta.AddCollection(ctx, &model.Collection{
+		CollectionID: 100,
+		DBID:         util.DefaultDBID,
+		DBName:       util.DefaultDBName,
+		Name:         "c1",
+		State:        pb.CollectionState_CollectionCreated,
+		ShardsNum:    1,
+		Partitions: []*model.Partition{
+			{PartitionID: 10, PartitionName: "_default", State: pb.PartitionState_PartitionCreated},
+		},
+	})
+	require.NoError(t, err)
+	dbCount, total, ok := meta.GetAvailableCollectionCount(ctx, util.DefaultDBID)
+	require.True(t, ok)
+	assert.Equal(t, 1, dbCount)
+	assert.Equal(t, 1, total)
+
+	result := message.BroadcastResultAlterCollectionMessageV2{
+		Message: message.MustAsBroadcastAlterCollectionMessageV2(
+			message.NewAlterCollectionMessageBuilderV2().
+				WithHeader(&message.AlterCollectionMessageHeader{
+					CollectionId: 100,
+					UpdateMask:   &fieldmaskpb.FieldMask{Paths: []string{message.FieldMaskDB}},
+				}).
+				WithBody(&message.AlterCollectionMessageBody{
+					Updates: &message.AlterCollectionMessageUpdates{
+						DbId:   11,
+						DbName: "db2",
+					},
+				}).
+				WithBroadcast([]string{funcutil.GetControlChannel("by-dev-rootcoord-dml_1")}).
+				MustBuildBroadcast(),
+		),
+		Results: map[string]*message.AppendResult{
+			funcutil.GetControlChannel("by-dev-rootcoord-dml_1"): {TimeTick: 200},
+		},
+	}
+	err = meta.AlterCollection(ctx, result)
+	require.NoError(t, err)
+
+	dbCount, total, ok = meta.GetAvailableCollectionCount(ctx, util.DefaultDBID)
+	require.True(t, ok)
+	assert.Equal(t, 0, dbCount)
+	assert.Equal(t, 1, total)
+	dbCount, total, ok = meta.GetAvailableCollectionCount(ctx, int64(11))
+	require.True(t, ok)
+	assert.Equal(t, 1, dbCount)
+	assert.Equal(t, 1, total)
+
+	err = meta.DropCollection(ctx, 100, 300)
+	require.NoError(t, err)
+	dbCount, total, ok = meta.GetAvailableCollectionCount(ctx, int64(11))
+	require.True(t, ok)
+	assert.Equal(t, 0, dbCount)
+	assert.Equal(t, 0, total)
 }
 
 func TestMetaTable_AddPartition(t *testing.T) {

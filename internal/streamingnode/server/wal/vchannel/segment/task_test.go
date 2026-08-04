@@ -128,6 +128,46 @@ func TestFlushL1BufferEnsuresSegmentBeforeObjectWrite(t *testing.T) {
 	assert.Equal(t, []string{"ensure", "write", "write"}, recorder.events)
 }
 
+func TestPrunePendingFlushChunksClearsPayloadReferences(t *testing.T) {
+	msg := message.NewImmutableMesasge(walimplstest.NewTestMessageID(10), make([]byte, 128), nil)
+
+	t.Run("all chunks pruned", func(t *testing.T) {
+		segment := newDeferredTestSegment(&segmentTaskRecorder{})
+		segment.meta.DataCheckpointTimeTick = 20
+		segment.pendingFlushChunks = []writeOnlyInsertBuffer{
+			{toTimeTick: 10, entries: []message.ImmutableMessage{msg}},
+			{toTimeTick: 20, entries: []message.ImmutableMessage{msg, msg}},
+		}
+
+		segment.prunePendingFlushChunksLocked()
+
+		assert.Empty(t, segment.pendingFlushChunks)
+		assert.Equal(t, 2, cap(segment.pendingFlushChunks))
+		for _, chunk := range segment.pendingFlushChunks[:cap(segment.pendingFlushChunks)] {
+			assert.Zero(t, chunk)
+		}
+	})
+
+	t.Run("live chunks preserved", func(t *testing.T) {
+		segment := newDeferredTestSegment(&segmentTaskRecorder{})
+		segment.meta.DataCheckpointTimeTick = 20
+		segment.pendingFlushChunks = []writeOnlyInsertBuffer{
+			{toTimeTick: 10, entries: []message.ImmutableMessage{msg}},
+			{toTimeTick: 20, entries: []message.ImmutableMessage{msg}},
+			{toTimeTick: 30, entries: []message.ImmutableMessage{msg}},
+		}
+
+		segment.prunePendingFlushChunksLocked()
+
+		require.Len(t, segment.pendingFlushChunks, 1)
+		assert.Equal(t, uint64(30), segment.pendingFlushChunks[0].toTimeTick)
+		assert.Len(t, segment.pendingFlushChunks[0].entries[0].Payload(), 128)
+		for _, chunk := range segment.pendingFlushChunks[len(segment.pendingFlushChunks):cap(segment.pendingFlushChunks)] {
+			assert.Zero(t, chunk)
+		}
+	})
+}
+
 func TestCommitL1SegmentEnsuresEmptySegmentBeforeCommit(t *testing.T) {
 	recorder := &segmentTaskRecorder{}
 	segment := newDeferredTestSegment(recorder)

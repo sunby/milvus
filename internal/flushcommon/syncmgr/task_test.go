@@ -253,7 +253,6 @@ func (s *SyncTaskSuite) runTestRunNormal(storageVersion int64) {
 	seg := s.createSegment(storageVersion)
 
 	s.metacache.EXPECT().GetSegmentByID(s.segmentID).Return(seg, true)
-	s.metacache.EXPECT().GetSegmentsBy(mock.Anything, mock.Anything, mock.Anything).Return([]*metacache.SegmentInfo{seg})
 	s.metacache.EXPECT().UpdateSegments(mock.Anything, mock.Anything).Run(func(action metacache.SegmentAction, filters ...metacache.SegmentFilter) {
 		action(seg)
 	}).Return()
@@ -335,7 +334,6 @@ func (s *SyncTaskSuite) TestRunStorageV3WithFlush() {
 	seg := s.createSegment(storage.StorageV3)
 
 	s.metacache.EXPECT().GetSegmentByID(s.segmentID).Return(seg, true)
-	s.metacache.EXPECT().GetSegmentsBy(mock.Anything, mock.Anything, mock.Anything).Return([]*metacache.SegmentInfo{seg})
 	s.metacache.EXPECT().UpdateSegments(mock.Anything, mock.Anything).Run(func(action metacache.SegmentAction, filters ...metacache.SegmentFilter) {
 		action(seg)
 	}).Return()
@@ -370,7 +368,6 @@ func (s *SyncTaskSuite) TestRunStorageV3ManifestPathUpdated() {
 	originalManifestPath := seg.ManifestPath()
 
 	s.metacache.EXPECT().GetSegmentByID(s.segmentID).Return(seg, true)
-	s.metacache.EXPECT().GetSegmentsBy(mock.Anything, mock.Anything, mock.Anything).Return([]*metacache.SegmentInfo{seg})
 
 	var capturedManifestPath string
 	s.metacache.EXPECT().UpdateSegments(mock.Anything, mock.Anything).Run(func(action metacache.SegmentAction, filters ...metacache.SegmentFilter) {
@@ -409,7 +406,6 @@ func (s *SyncTaskSuite) TestRunL0Segment() {
 		bfs := pkoracle.NewBloomFilterSet()
 		seg := metacache.NewSegmentInfo(&datapb.SegmentInfo{Level: datapb.SegmentLevel_L0}, bfs, nil, metacache.NewEmptySegmentStats())
 		s.metacache.EXPECT().GetSegmentByID(s.segmentID).Return(seg, true)
-		s.metacache.EXPECT().GetSegmentsBy(mock.Anything, mock.Anything, mock.Anything).Return([]*metacache.SegmentInfo{seg})
 		s.metacache.EXPECT().UpdateSegments(mock.Anything, mock.Anything).Return()
 		task := s.getSuiteSyncTask(new(SyncPack).
 			WithDeleteData(s.getDeleteBuffer()).
@@ -430,7 +426,6 @@ func (s *SyncTaskSuite) TestRunL0Segment() {
 		bfs := pkoracle.NewBloomFilterSet()
 		seg := metacache.NewSegmentInfo(&datapb.SegmentInfo{Level: datapb.SegmentLevel_L0, StorageVersion: storage.StorageV2}, bfs, nil, metacache.NewEmptySegmentStats())
 		s.metacache.EXPECT().GetSegmentByID(s.segmentID).Return(seg, true)
-		s.metacache.EXPECT().GetSegmentsBy(mock.Anything, mock.Anything, mock.Anything).Return([]*metacache.SegmentInfo{seg})
 		s.metacache.EXPECT().UpdateSegments(mock.Anything, mock.Anything).Return()
 		task := s.getSuiteSyncTask(new(SyncPack).
 			WithDeleteData(s.getDeleteBuffer()).
@@ -467,7 +462,6 @@ func (s *SyncTaskSuite) TestRunError() {
 	seg := metacache.NewSegmentInfo(&datapb.SegmentInfo{}, pkoracle.NewBloomFilterSet(), nil, metacache.NewEmptySegmentStats())
 	metacache.UpdateNumOfRows(1000)(seg)
 	s.metacache.EXPECT().GetSegmentByID(s.segmentID).Return(seg, true)
-	s.metacache.EXPECT().GetSegmentsBy(mock.Anything, mock.Anything, mock.Anything).Return([]*metacache.SegmentInfo{seg})
 	s.metacache.EXPECT().Collection().Return(s.collectionID).Maybe()
 	s.metacache.EXPECT().GetSchema(mock.Anything).Return(s.schema).Maybe()
 

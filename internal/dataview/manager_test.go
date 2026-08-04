@@ -95,6 +95,41 @@ func (c *fakeDataViewCatalog) ListAllDataViews(ctx context.Context) ([]*viewpb.D
 	return views, nil
 }
 
+type fakeBatchDataViewCatalog struct {
+	*fakeDataViewCatalog
+	batchCalls int
+	batchErr   error
+}
+
+func (c *fakeBatchDataViewCatalog) ListDataViewsForRecovery(
+	ctx context.Context,
+	collectionIDs []int64,
+) (map[int64][]*viewpb.DataViewOfCollection, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.batchCalls++
+	if c.batchErr != nil {
+		return nil, c.batchErr
+	}
+
+	requested := make(map[int64]struct{}, len(collectionIDs))
+	for _, collectionID := range collectionIDs {
+		requested[collectionID] = struct{}{}
+	}
+	viewsByCollection := make(map[int64][]*viewpb.DataViewOfCollection)
+	for _, view := range c.views {
+		collectionID := view.GetCollectionId()
+		if _, ok := requested[collectionID]; !ok {
+			continue
+		}
+		viewsByCollection[collectionID] = append(
+			viewsByCollection[collectionID],
+			proto.Clone(view).(*viewpb.DataViewOfCollection),
+		)
+	}
+	return viewsByCollection, nil
+}
+
 func (c *fakeDataViewCatalog) DropDataView(ctx context.Context, collectionID int64, dataVersion *viewpb.DataVersion) error {
 	if collectionID == c.blockDropCollection && c.dropBlock != nil {
 		if c.dropStarted != nil {
@@ -869,6 +904,43 @@ func TestDataViewManagerRecoverPersistsEmptyViewWhenLatestHadMembership(t *testi
 	require.NoError(t, err)
 	require.NotNil(t, visible)
 	require.Empty(t, visible.GetShards())
+}
+
+func TestDataViewManagerRecoverCollectionsFallsBackToPointCatalog(t *testing.T) {
+	ctx := context.Background()
+	catalog := &fakeDataViewCatalog{}
+	store := &fakeDataViewSegmentStore{segments: make(map[int64]*Segment)}
+	manager := NewManager(catalog, store).(*dataViewManager)
+
+	observed := 0
+	err := manager.RecoverCollections(ctx, []int64{1, 2}, func(index int, collectionID int64, duration time.Duration, err error) {
+		require.NoError(t, err)
+		observed++
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 2, observed)
+	require.Equal(t, 2, catalog.listCalls)
+}
+
+func TestDataViewManagerRecoverCollectionsUsesBatchCatalog(t *testing.T) {
+	ctx := context.Background()
+	baseCatalog := &fakeDataViewCatalog{}
+	catalog := &fakeBatchDataViewCatalog{fakeDataViewCatalog: baseCatalog}
+	store := &fakeDataViewSegmentStore{segments: make(map[int64]*Segment)}
+	manager := NewManager(catalog, store).(*dataViewManager)
+
+	collectionIDs := []int64{1, 2}
+	observed := 0
+	err := manager.RecoverCollections(ctx, collectionIDs, func(index int, collectionID int64, duration time.Duration, err error) {
+		require.NoError(t, err)
+		observed++
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, len(collectionIDs), observed)
+	require.Zero(t, baseCatalog.listCalls)
+	require.Equal(t, 1, catalog.batchCalls)
 }
 
 func TestDataViewManagerRecoverCompactsFailedPublicationIntoOneView(t *testing.T) {

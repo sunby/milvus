@@ -25,11 +25,15 @@ import (
 )
 
 type testRecoveryModule struct {
+	name     moduleapi.ModuleName
 	result   moduleapi.ObserveResult
 	snapshot moduleapi.ModuleSnapshot
 }
 
 func (m *testRecoveryModule) Name() moduleapi.ModuleName {
+	if m.name != "" {
+		return m.name
+	}
 	return moduleapi.ModuleName("test")
 }
 

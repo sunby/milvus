@@ -551,16 +551,18 @@ func (t *l0CompactionTask) saveSegmentMeta(outputSegs []*datapb.CompactionSegmen
 	}
 
 	mutations := map[int64][]MutateFunc{}
+	var mutationErr error
 	for _, seg := range outputSegs {
 		deltalogs := seg.GetDeltalogs() // capture
 		manifest := seg.GetManifest()   // capture
 		mutations[seg.GetSegmentID()] = []MutateFunc{func(s *datapb.SegmentInfo) bool {
-			if manifest != "" {
-				s.ManifestPath = manifest
-			} else {
-				s.Deltalogs = mergeFieldBinlogs(s.GetDeltalogs(), deltalogs)
+			changed := addDeltalogsToSegment(s, deltalogs)
+			manifestChanged, err := updateManifestPathIfNewer(s, manifest)
+			if err != nil {
+				mutationErr = err
+				return false
 			}
-			return true
+			return changed || manifestChanged
 		}}
 	}
 
@@ -580,6 +582,9 @@ func (t *l0CompactionTask) saveSegmentMeta(outputSegs []*datapb.CompactionSegmen
 	ctx := context.TODO()
 	if err := t.meta.UpdateSegmentsInfo(ctx, mutations); err != nil {
 		return err
+	}
+	if mutationErr != nil {
+		return mutationErr
 	}
 	t.publishDataViewAfterL0Compact(ctx)
 	return nil
