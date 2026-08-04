@@ -124,10 +124,28 @@ func newTimeTickSync(initCtx context.Context, parentLoopCtx context.Context, sou
 	dmlChannels := newDmlChannels(initCtx, factory, Params.CommonCfg.RootCoordDml.GetValue(), int64(chanNum))
 
 	// recover physical channels for all collections
-	for collID, chanNames := range chanMap {
+	channelRecoveryStart := time.Now()
+	totalCollections := len(chanMap)
+	totalChannelAssignments := 0
+	mlog.Info(initCtx, "rootcoord physical channel recovery started",
+		mlog.Int("totalCollections", totalCollections))
+	completedCollections := 0
+	for _, chanNames := range chanMap {
 		dmlChannels.addChannels(chanNames...)
-		mlog.Info(initCtx, "recover physical channels", mlog.Int64("collectionID", collID), mlog.Strings("physical channels", chanNames))
+		completedCollections++
+		totalChannelAssignments += len(chanNames)
+		if completedCollections%metaRecoveryProgressLogInterval == 0 && completedCollections < totalCollections {
+			mlog.Info(initCtx, "rootcoord physical channel recovery progress",
+				mlog.Int("completedCollections", completedCollections),
+				mlog.Int("totalCollections", totalCollections),
+				mlog.Int("channelAssignments", totalChannelAssignments),
+				mlog.Duration("duration", time.Since(channelRecoveryStart)))
+		}
 	}
+	mlog.Info(initCtx, "rootcoord physical channel recovery done",
+		mlog.Int("totalCollections", totalCollections),
+		mlog.Int("channelAssignments", totalChannelAssignments),
+		mlog.Duration("duration", time.Since(channelRecoveryStart)))
 
 	return &timetickSync{
 		ctx:      parentLoopCtx,

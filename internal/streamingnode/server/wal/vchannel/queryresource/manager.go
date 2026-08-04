@@ -434,7 +434,7 @@ func (m *Manager) prepareReady(ctx context.Context, key qviews.QueryViewKey, onR
 			}
 			return nil
 		}
-		return errors.Mark(err, nodescheduler.ErrDelay)
+		return nodescheduler.MarkDelay(err)
 	}
 	m.mu.Lock()
 	_, ok = m.refs[key]

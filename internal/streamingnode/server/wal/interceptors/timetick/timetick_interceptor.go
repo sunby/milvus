@@ -10,6 +10,7 @@ import (
 	"github.com/milvus-io/milvus/internal/streamingnode/server/wal/interceptors"
 	"github.com/milvus-io/milvus/internal/streamingnode/server/wal/interceptors/timetick/ack"
 	"github.com/milvus-io/milvus/internal/streamingnode/server/wal/interceptors/txn"
+	"github.com/milvus-io/milvus/internal/streamingnode/server/wal/metricsutil"
 	"github.com/milvus-io/milvus/internal/streamingnode/server/wal/utility"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
@@ -38,7 +39,9 @@ func (impl *timeTickAppendInterceptor) DoAppend(ctx context.Context, msg message
 	defer func() {
 		if err == nil {
 			// the cursor manager should beready since the timetick interceptor is ready.
+			stageStart := time.Now()
 			cm.UpdateMVCC(msg)
+			utility.ObserveAppendStage(ctx, metricsutil.AppendStageMVCCUpdate, stageStart)
 		}
 	}()
 
@@ -49,13 +52,19 @@ func (impl *timeTickAppendInterceptor) DoAppend(ctx context.Context, msg message
 		// Allocate new timestamp acker for message.
 		var acker *ack.Acker
 		if msg.BarrierTimeTick() == 0 {
+			stageStart := time.Now()
 			if acker, err = ackManager.Allocate(ctx); err != nil {
+				utility.ObserveAppendStage(ctx, metricsutil.AppendStageTimeTickAllocate, stageStart)
 				return nil, errors.Wrap(err, "allocate timestamp failed")
 			}
+			utility.ObserveAppendStage(ctx, metricsutil.AppendStageTimeTickAllocate, stageStart)
 		} else {
+			stageStart := time.Now()
 			if acker, err = ackManager.AllocateWithBarrier(ctx, msg.BarrierTimeTick()); err != nil {
+				utility.ObserveAppendStage(ctx, metricsutil.AppendStageTimeTickAllocate, stageStart)
 				return nil, errors.Wrap(err, "allocate timestamp with barrier failed")
 			}
+			utility.ObserveAppendStage(ctx, metricsutil.AppendStageTimeTickAllocate, stageStart)
 		}
 
 		// Assign timestamp to message and call the append method.
@@ -64,6 +73,8 @@ func (impl *timeTickAppendInterceptor) DoAppend(ctx context.Context, msg message
 			WithLastConfirmed(acker.LastConfirmedMessageID()) // start consuming from these message id, the message which timetick greater than current timetick will never be lost.
 
 		defer func() {
+			stageStart := time.Now()
+			defer utility.ObserveAppendStage(ctx, metricsutil.AppendStageTimeTickAck, stageStart)
 			if err != nil {
 				acker.Ack(ack.OptError(err))
 				return
