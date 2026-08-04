@@ -131,7 +131,7 @@ func (f *BalancerFactory) GetBalancer() Balance {
 		mlog.Info(context.TODO(), "Unknown balancer type, using default",
 			mlog.String("requested", balanceKey),
 			mlog.String("default", meta.ChannelLevelScoreBalancerName))
-		balancer = NewChannelLevelScoreBalancer(f.scheduler, f.nodeManager, f.dist, f.targetMgr)
+		balancer = NewChannelLevelScoreBalancer(f.scheduler, f.nodeManager, f.dist, f.targetMgr, f.meta)
 	}
 
 	f.balancerMap[balanceKey] = balancer

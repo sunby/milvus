@@ -34,6 +34,7 @@ import (
 	"golang.org/x/exp/maps"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
+	"golang.org/x/time/rate"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
@@ -296,6 +297,11 @@ func showCollectionIDs(ctx context.Context, broker broker.Broker) ([]int64, erro
 	return collectionIDs, nil
 }
 
+const (
+	collectionRecoveryProgressLogInterval   = 10000
+	segmentCacheRecoveryProgressLogInterval = 100000
+)
+
 type partitionScanTarget struct {
 	collectionID    int64
 	partitionID     int64
@@ -318,26 +324,56 @@ func buildPartitionScanTargets(ctx context.Context, broker broker.Broker, collec
 		return nil
 	}
 	if broker == nil {
+		mlog.Info(ctx, "datacoord partition scan target recovery skipped",
+			mlog.Int("numCollections", len(collectionIDs)),
+			mlog.String("reason", "broker is nil"))
 		return collectionScanTargets(collectionIDs)
 	}
+
+	recoveryStart := time.Now()
+	totalCollections := int64(len(collectionIDs))
+	mlog.Info(ctx, "datacoord partition scan target recovery started",
+		mlog.Int64("totalCollections", totalCollections),
+		mlog.Int("readConcurrency", paramtable.Get().MetaStoreCfg.ReadConcurrency.GetAsInt()))
 
 	pool := conc.NewPool[any](paramtable.Get().MetaStoreCfg.ReadConcurrency.GetAsInt())
 	defer pool.Release()
 
 	partitionResults := make([][]int64, len(collectionIDs))
 	futures := make([]*conc.Future[any], 0, len(collectionIDs))
+	var completedCollections atomic.Int64
+	var fallbackCollections atomic.Int64
+	var totalPartitions atomic.Int64
+	var totalRPCDurationNanos atomic.Int64
 	for i, collectionID := range collectionIDs {
 		i := i
 		collectionID := collectionID
 		futures = append(futures, pool.Submit(func() (any, error) {
+			rpcStart := time.Now()
 			partitionIDs, err := broker.ShowPartitionsInternal(ctx, collectionID)
+			totalRPCDurationNanos.Add(int64(time.Since(rpcStart)))
 			if err != nil {
-				mlog.Warn(ctx, "failed to show partitions when preparing meta scan targets, fallback to collection scan",
+				fallbackCollections.Add(1)
+				mlog.RatedWarn(ctx, rate.Limit(1),
+					"failed to show partitions when preparing meta scan targets, fallback to collection scan",
 					mlog.FieldCollectionID(collectionID),
 					mlog.Err(err))
-				return nil, nil
+			} else {
+				partitionResults[i] = partitionIDs
+				totalPartitions.Add(int64(len(partitionIDs)))
 			}
-			partitionResults[i] = partitionIDs
+
+			completed := completedCollections.Add(1)
+			if completed%collectionRecoveryProgressLogInterval == 0 && completed < totalCollections {
+				averageRPCDuration := time.Duration(totalRPCDurationNanos.Load() / completed)
+				mlog.Info(ctx, "datacoord partition scan target recovery progress",
+					mlog.Int64("completedCollections", completed),
+					mlog.Int64("totalCollections", totalCollections),
+					mlog.Int64("numPartitions", totalPartitions.Load()),
+					mlog.Int64("fallbackCollections", fallbackCollections.Load()),
+					mlog.Duration("averageRPCDuration", averageRPCDuration),
+					mlog.Duration("duration", time.Since(recoveryStart)))
+			}
 			return nil, nil
 		}))
 	}
@@ -347,6 +383,7 @@ func buildPartitionScanTargets(ctx context.Context, broker broker.Broker, collec
 	}
 
 	targets := make([]partitionScanTarget, 0, len(collectionIDs))
+	partitionScopedTargets := 0
 	for i, collectionID := range collectionIDs {
 		partitionIDs := partitionResults[i]
 		if len(partitionIDs) == 0 {
@@ -359,8 +396,18 @@ func buildPartitionScanTargets(ctx context.Context, broker broker.Broker, collec
 				partitionID:     partitionID,
 				partitionScoped: true,
 			})
+			partitionScopedTargets++
 		}
 	}
+	mlog.Info(ctx, "datacoord partition scan target recovery done",
+		mlog.Int64("numCollections", totalCollections),
+		mlog.Int64("numPartitions", totalPartitions.Load()),
+		mlog.Int("numScanTargets", len(targets)),
+		mlog.Int("numPartitionScopedTargets", partitionScopedTargets),
+		mlog.Int64("fallbackCollections", fallbackCollections.Load()),
+		mlog.Duration("cumulativeRPCDuration", time.Duration(totalRPCDurationNanos.Load())),
+		mlog.Duration("averageRPCDuration", time.Duration(totalRPCDurationNanos.Load()/totalCollections)),
+		mlog.Duration("duration", time.Since(recoveryStart)))
 	return targets
 }
 
@@ -375,11 +422,22 @@ func newMeta(ctx context.Context, catalog metastore.DataCoordCatalog, chunkManag
 func newMetaWithPersist(ctx context.Context, catalog metastore.DataCoordCatalog, chunkManager storage.ChunkManager, broker broker.Broker,
 	segmentPersist OptimisticTxnPersist[string, *datapb.SegmentInfo], metaRootPath string,
 ) (*meta, error) {
+	metaRecoveryStart := time.Now()
+	mlog.Info(ctx, "datacoord meta recovery started")
+
 	// Fetch collection IDs first so both reloadFromKV and indexMeta can use them for per-collection loading.
+	collectionIDRecoveryStart := time.Now()
+	mlog.Info(ctx, "datacoord collection ID recovery started")
 	collectionIDs, err := showCollectionIDs(ctx, broker)
 	if err != nil {
+		mlog.Warn(ctx, "datacoord collection ID recovery failed",
+			mlog.Duration("duration", time.Since(collectionIDRecoveryStart)),
+			mlog.Err(err))
 		return nil, err
 	}
+	mlog.Info(ctx, "datacoord collection ID recovery done",
+		mlog.Int("numCollections", len(collectionIDs)),
+		mlog.Duration("duration", time.Since(collectionIDRecoveryStart)))
 
 	var (
 		im   *indexMeta
@@ -407,13 +465,22 @@ func newMetaWithPersist(ctx context.Context, catalog metastore.DataCoordCatalog,
 		stagedSegmentToGroup:     make(map[int64]int64),
 		supersededSegmentToGroup: make(map[int64]int64),
 	}
+	scanTargetRecoveryStart := time.Now()
 	scanTargets := collectionScanTargets(collectionIDs)
 	if segmentPersist != nil {
 		mt.segmentStore = newCASSegmentStore(segmentPersist, catalog, metaRootPath, mt.segments)
 		scanTargets = buildPartitionScanTargets(ctx, broker, collectionIDs)
 	}
+	mlog.Info(ctx, "datacoord meta scan targets prepared",
+		mlog.Int("numCollections", len(collectionIDs)),
+		mlog.Int("numScanTargets", len(scanTargets)),
+		mlog.Int("numPartitionTargets", lo.CountBy(scanTargets, func(target partitionScanTarget) bool {
+			return target.partitionScoped
+		})),
+		mlog.Duration("duration", time.Since(scanTargetRecoveryStart)))
 
 	g, _ := errgroup.WithContext(ctx)
+	parallelRecoveryStart := time.Now()
 
 	g.Go(func() error {
 		var err error
@@ -484,8 +551,13 @@ func newMetaWithPersist(ctx context.Context, catalog metastore.DataCoordCatalog,
 	})
 
 	if err := g.Wait(); err != nil {
+		mlog.Warn(ctx, "datacoord parallel metadata recovery failed",
+			mlog.Duration("duration", time.Since(parallelRecoveryStart)),
+			mlog.Err(err))
 		return nil, err
 	}
+	mlog.Info(ctx, "datacoord parallel metadata recovery done",
+		mlog.Duration("duration", time.Since(parallelRecoveryStart)))
 
 	// Assign sub-metas after all goroutines complete
 	mt.indexMeta = im
@@ -519,6 +591,9 @@ func newMetaWithPersist(ctx context.Context, catalog metastore.DataCoordCatalog,
 	mt.stagedSegmentToGroup = stag
 	mt.supersededSegmentToGroup = sup
 
+	mlog.Info(ctx, "datacoord meta recovery done",
+		mlog.Int("numCollections", len(collectionIDs)),
+		mlog.Duration("duration", time.Since(metaRecoveryStart)))
 	return mt, nil
 }
 
@@ -570,15 +645,19 @@ func (m *meta) reloadFromKV(ctx context.Context, collectionIDs []int64, scanTarg
 		return err
 	}
 
-	mlog.Info(ctx, "datacoord show segments done", mlog.Duration("dur", record.RecordSpan()))
+	mlog.Info(ctx, "datacoord segment catalog scan done",
+		mlog.Int64("numScanTargets", totalScanTargets),
+		mlog.Int64("numSegments", scannedSegments.Load()),
+		mlog.Duration("duration", time.Since(scanStart)))
 
+	segmentCacheBuildStart := time.Now()
 	metrics.DataCoordNumCollections.WithLabelValues().Set(0)
 	metrics.DataCoordNumSegments.Reset()
 	numStoredRows := int64(0)
-	numSegments := 0
+	numSegments := int(scannedSegments.Load())
+	recoveredSegments := 0
 	local, localStorage := m.chunkManager.(*storage.LocalChunkManager)
 	for _, result := range scanResults {
-		numSegments += len(result.segments)
 		for j, segment := range result.segments {
 			if localStorage && segment.GetStorageVersion() == storage.StorageV3 {
 				manifestPath, err := normalizeLocalManifestPath(segment.GetManifestPath(), local.RootPath(),
@@ -610,13 +689,30 @@ func (m *meta) reloadFromKV(ctx context.Context, collectionIDs []int64, scanTarg
 
 				metrics.FlushedSegmentFileNum.WithLabelValues(metrics.DeleteFileLabel).Observe(float64(stats.GetDeltaBinlogCount()))
 			}
+			recoveredSegments++
+			if recoveredSegments%segmentCacheRecoveryProgressLogInterval == 0 && recoveredSegments < numSegments {
+				mlog.Info(ctx, "datacoord segment cache rebuild progress",
+					mlog.Int("completedSegments", recoveredSegments),
+					mlog.Int("totalSegments", numSegments),
+					mlog.Duration("duration", time.Since(segmentCacheBuildStart)))
+			}
 		}
 	}
+	mlog.Info(ctx, "datacoord segment cache rebuild done",
+		mlog.Int("numSegments", numSegments),
+		mlog.Int64("numStoredRows", numStoredRows),
+		mlog.Duration("duration", time.Since(segmentCacheBuildStart)))
 
+	checkpointScanStart := time.Now()
+	mlog.Info(ctx, "datacoord channel checkpoint catalog scan started")
 	channelCPs, err := m.catalog.ListChannelCheckpoint(m.ctx)
 	if err != nil {
 		return err
 	}
+	mlog.Info(ctx, "datacoord channel checkpoint catalog scan done",
+		mlog.Int("numChannelCheckpoints", len(channelCPs)),
+		mlog.Duration("duration", time.Since(checkpointScanStart)))
+	checkpointCacheBuildStart := time.Now()
 	for vChannel, pos := range channelCPs {
 		// for 2.2.2 issue https://github.com/milvus-io/milvus/issues/22181
 		pos.ChannelName = vChannel
@@ -628,56 +724,149 @@ func (m *meta) reloadFromKV(ctx context.Context, collectionIDs []int64, scanTarg
 				Set(float64(ts.Unix()))
 		}
 	}
+	mlog.Info(ctx, "datacoord channel checkpoint cache rebuild done",
+		mlog.Int("numChannelCheckpoints", len(channelCPs)),
+		mlog.Duration("duration", time.Since(checkpointCacheBuildStart)))
 
-	mlog.Info(ctx, "DataCoord meta reloadFromKV done", mlog.Int("numSegments", numSegments), mlog.Duration("duration", record.ElapseSpan()))
+	mlog.Info(ctx, "DataCoord meta reloadFromKV done",
+		mlog.Int("numSegments", numSegments),
+		mlog.Duration("duration", record.ElapseSpan()))
 	return nil
 }
 
 func (m *meta) reloadCollectionsFromRootcoord(ctx context.Context, broker broker.Broker) error {
+	recoveryStart := time.Now()
+	mlog.Info(ctx, "datacoord collection cache recovery started")
+
+	listDatabasesStart := time.Now()
 	resp, err := broker.ListDatabases(ctx)
 	if err != nil {
+		mlog.Warn(ctx, "datacoord database list recovery failed",
+			mlog.Duration("duration", time.Since(listDatabasesStart)),
+			mlog.Err(err))
 		return err
 	}
+	mlog.Info(ctx, "datacoord database list recovery done",
+		mlog.Int("numDatabases", len(resp.GetDbNames())),
+		mlog.Duration("duration", time.Since(listDatabasesStart)))
+
+	var collectionIDs []int64
+	showCollectionsDuration := time.Duration(0)
 	for _, dbName := range resp.GetDbNames() {
+		showCollectionsStart := time.Now()
 		collectionsResp, err := broker.ShowCollectionIDs(ctx, dbName)
+		callDuration := time.Since(showCollectionsStart)
+		showCollectionsDuration += callDuration
 		if err != nil {
+			mlog.Warn(ctx, "datacoord collection list recovery failed",
+				mlog.FieldDbName(dbName),
+				mlog.Duration("duration", callDuration),
+				mlog.Err(err))
 			return err
 		}
-		var collectionIDs []int64
+		numCollections := 0
 		for _, collections := range collectionsResp.GetDbCollections() {
 			collectionIDs = append(collectionIDs, collections.GetCollectionIDs()...)
+			numCollections += len(collections.GetCollectionIDs())
 		}
-		for _, collectionID := range collectionIDs {
-			descResp, err := broker.DescribeCollectionInternal(ctx, collectionID)
-			if err != nil {
-				return err
-			}
-			partitionIDs, err := broker.ShowPartitionsInternal(ctx, collectionID)
-			if err != nil {
-				return err
-			}
-			collection := &collectionInfo{
-				ID:             collectionID,
-				Schema:         descResp.GetSchema(),
-				Partitions:     partitionIDs,
-				StartPositions: descResp.GetStartPositions(),
-				Properties:     funcutil.KeyValuePair2Map(descResp.GetProperties()),
-				CreatedAt:      descResp.GetCreatedTimestamp(),
-				DatabaseName:   descResp.GetDbName(),
-				DatabaseID:     descResp.GetDbId(),
-				VChannelNames:  descResp.GetVirtualChannelNames(),
-			}
-			m.AddCollection(collection)
+		mlog.Info(ctx, "datacoord collection list recovery done",
+			mlog.FieldDbName(dbName),
+			mlog.Int("numCollections", numCollections),
+			mlog.Duration("duration", callDuration))
+	}
+	mlog.Info(ctx, "datacoord collection lists recovered",
+		mlog.Int("numCollections", len(collectionIDs)),
+		mlog.Duration("showCollectionsRPCDuration", showCollectionsDuration),
+		mlog.Duration("duration", time.Since(recoveryStart)))
+
+	collectionCacheBuildStart := time.Now()
+	describeCollectionRPCDuration := time.Duration(0)
+	showPartitionsRPCDuration := time.Duration(0)
+	slowestCollectionID := int64(0)
+	slowestCollectionDuration := time.Duration(0)
+	for index, collectionID := range collectionIDs {
+		collectionStart := time.Now()
+
+		describeStart := time.Now()
+		descResp, err := broker.DescribeCollectionInternal(ctx, collectionID)
+		describeDuration := time.Since(describeStart)
+		describeCollectionRPCDuration += describeDuration
+		if err != nil {
+			mlog.Warn(ctx, "datacoord collection cache recovery failed",
+				mlog.String("stage", "DescribeCollectionInternal"),
+				mlog.FieldCollectionID(collectionID),
+				mlog.Int("completedCollections", index),
+				mlog.Int("totalCollections", len(collectionIDs)),
+				mlog.Duration("callDuration", describeDuration),
+				mlog.Err(err))
+			return err
+		}
+
+		showPartitionsStart := time.Now()
+		partitionIDs, err := broker.ShowPartitionsInternal(ctx, collectionID)
+		showPartitionsDuration := time.Since(showPartitionsStart)
+		showPartitionsRPCDuration += showPartitionsDuration
+		if err != nil {
+			mlog.Warn(ctx, "datacoord collection cache recovery failed",
+				mlog.String("stage", "ShowPartitionsInternal"),
+				mlog.FieldCollectionID(collectionID),
+				mlog.Int("completedCollections", index),
+				mlog.Int("totalCollections", len(collectionIDs)),
+				mlog.Duration("callDuration", showPartitionsDuration),
+				mlog.Err(err))
+			return err
+		}
+
+		m.addCollectionToCache(&collectionInfo{
+			ID:             collectionID,
+			Schema:         descResp.GetSchema(),
+			Partitions:     partitionIDs,
+			StartPositions: descResp.GetStartPositions(),
+			Properties:     funcutil.KeyValuePair2Map(descResp.GetProperties()),
+			CreatedAt:      descResp.GetCreatedTimestamp(),
+			DatabaseName:   descResp.GetDbName(),
+			DatabaseID:     descResp.GetDbId(),
+			VChannelNames:  descResp.GetVirtualChannelNames(),
+		})
+
+		if collectionDuration := time.Since(collectionStart); collectionDuration > slowestCollectionDuration {
+			slowestCollectionID = collectionID
+			slowestCollectionDuration = collectionDuration
+		}
+		completedCollections := index + 1
+		if completedCollections%collectionRecoveryProgressLogInterval == 0 && completedCollections < len(collectionIDs) {
+			mlog.Info(ctx, "datacoord collection cache recovery progress",
+				mlog.Int("completedCollections", completedCollections),
+				mlog.Int("totalCollections", len(collectionIDs)),
+				mlog.Duration("averageCollectionDuration", time.Since(collectionCacheBuildStart)/time.Duration(completedCollections)),
+				mlog.Duration("describeCollectionRPCDuration", describeCollectionRPCDuration),
+				mlog.Duration("showPartitionsRPCDuration", showPartitionsRPCDuration),
+				mlog.Int64("slowestCollectionID", slowestCollectionID),
+				mlog.Duration("slowestCollectionDuration", slowestCollectionDuration),
+				mlog.Duration("duration", time.Since(collectionCacheBuildStart)))
 		}
 	}
+	metrics.DataCoordNumCollections.WithLabelValues().Set(float64(m.collections.Len()))
+	mlog.Info(ctx, "datacoord collection cache recovery done",
+		mlog.Int("numCollections", len(collectionIDs)),
+		mlog.Duration("describeCollectionRPCDuration", describeCollectionRPCDuration),
+		mlog.Duration("showPartitionsRPCDuration", showPartitionsRPCDuration),
+		mlog.Int64("slowestCollectionID", slowestCollectionID),
+		mlog.Duration("slowestCollectionDuration", slowestCollectionDuration),
+		mlog.Duration("duration", time.Since(collectionCacheBuildStart)),
+		mlog.Duration("totalDuration", time.Since(recoveryStart)))
 	return nil
+}
+
+func (m *meta) addCollectionToCache(collection *collectionInfo) {
+	m.collections.Insert(collection.ID, collection)
 }
 
 // AddCollection adds a collection into meta
 // Note that collection info is just for caching and will not be set into etcd from datacoord
 func (m *meta) AddCollection(collection *collectionInfo) {
 	mlog.Info(m.ctx, "meta update: add collection", mlog.Int64("collectionID", collection.ID))
-	m.collections.Insert(collection.ID, collection)
+	m.addCollectionToCache(collection)
 	metrics.DataCoordNumCollections.WithLabelValues().Set(float64(m.collections.Len()))
 	mlog.Info(m.ctx, "meta update: add collection - complete", mlog.Int64("collectionID", collection.ID))
 }
@@ -3485,16 +3674,39 @@ func (m *meta) collectionHasTextFields(collectionID int64) bool {
 	return len(m.collectionTextFieldIDs(collectionID)) > 0
 }
 
+const (
+	updateChannelCheckpointStageTotal                   = "total"
+	updateChannelCheckpointStageValidate                = "validate"
+	updateChannelCheckpointStageGetMinGrowingCheckpoint = "get_min_growing_checkpoint"
+	updateChannelCheckpointStageLockWait                = "lock_wait"
+	updateChannelCheckpointStageCheckUpdateNeeded       = "check_update_needed"
+	updateChannelCheckpointStageSaveChannelCheckpoint   = "save_channel_checkpoint"
+	updateChannelCheckpointStageUpdateMemory            = "update_memory"
+	updateChannelCheckpointStageUpdateCheckpointMetric  = "update_checkpoint_metric"
+)
+
+func observeUpdateChannelCheckpointStage(stage string, start time.Time) {
+	metrics.DataCoordUpdateChannelCheckpointStageDuration.WithLabelValues(stage).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
+}
+
 // UpdateChannelCheckpoint updates and saves channel checkpoint.
 func (m *meta) UpdateChannelCheckpoint(ctx context.Context, vChannel string, pos *msgpb.MsgPosition) error {
+	totalStart := time.Now()
+	defer observeUpdateChannelCheckpointStage(updateChannelCheckpointStageTotal, totalStart)
+
+	stageStart := time.Now()
 	if pos == nil || pos.GetMsgID() == nil {
+		observeUpdateChannelCheckpointStage(updateChannelCheckpointStageValidate, stageStart)
 		return merr.WrapErrServiceInternalMsg("channelCP is nil, vChannel=%s", vChannel)
 	}
+	observeUpdateChannelCheckpointStage(updateChannelCheckpointStageValidate, stageStart)
 
 	// Clamp checkpoint to not advance beyond min growing segment checkpoint.
 	// This prevents TEXT collection data loss where StreamNode (L0 delete) checkpoint
 	// may advance beyond QueryNode's (L1 insert) unflushed data.
+	stageStart = time.Now()
 	minGrowingCP := m.GetMinGrowingSegmentCheckpoint(vChannel)
+	observeUpdateChannelCheckpointStage(updateChannelCheckpointStageGetMinGrowingCheckpoint, stageStart)
 	if minGrowingCP != nil && pos.GetTimestamp() > minGrowingCP.GetTimestamp() {
 		mlog.Info(ctx, "clamping channel checkpoint to min growing segment checkpoint",
 			mlog.String("vChannel", vChannel),
@@ -3503,20 +3715,30 @@ func (m *meta) UpdateChannelCheckpoint(ctx context.Context, vChannel string, pos
 		pos = minGrowingCP
 	}
 
+	stageStart = time.Now()
 	m.channelCPs.channelLocks.Lock(vChannel)
+	observeUpdateChannelCheckpointStage(updateChannelCheckpointStageLockWait, stageStart)
 	defer m.channelCPs.channelLocks.Unlock(vChannel)
 
+	stageStart = time.Now()
 	m.channelCPs.RLock()
 	oldPosition, ok := m.channelCPs.checkpoints[vChannel]
 	m.channelCPs.RUnlock()
-	if !ok || oldPosition.Timestamp < pos.Timestamp || (oldPosition.Timestamp == pos.Timestamp && !bytes.Equal(oldPosition.MsgID, pos.MsgID)) {
+	needUpdate := !ok || oldPosition.Timestamp < pos.Timestamp || (oldPosition.Timestamp == pos.Timestamp && !bytes.Equal(oldPosition.MsgID, pos.MsgID))
+	observeUpdateChannelCheckpointStage(updateChannelCheckpointStageCheckUpdateNeeded, stageStart)
+	if needUpdate {
+		stageStart = time.Now()
 		err := m.catalog.SaveChannelCheckpoint(ctx, vChannel, pos)
+		observeUpdateChannelCheckpointStage(updateChannelCheckpointStageSaveChannelCheckpoint, stageStart)
 		if err != nil {
 			return err
 		}
+		stageStart = time.Now()
 		m.channelCPs.Lock()
 		m.channelCPs.checkpoints[vChannel] = pos
 		m.channelCPs.Unlock()
+		observeUpdateChannelCheckpointStage(updateChannelCheckpointStageUpdateMemory, stageStart)
+		stageStart = time.Now()
 		ts, _ := tsoutil.ParseTS(pos.Timestamp)
 		mlog.Info(ctx, "UpdateChannelCheckpoint done",
 			mlog.String("vChannel", vChannel),
@@ -3526,6 +3748,7 @@ func (m *meta) UpdateChannelCheckpoint(ctx context.Context, vChannel string, pos
 			mlog.Time("time", ts))
 		metrics.DataCoordCheckpointUnixSeconds.WithLabelValues(paramtable.GetStringNodeID(), vChannel).
 			Set(float64(ts.Unix()))
+		observeUpdateChannelCheckpointStage(updateChannelCheckpointStageUpdateCheckpointMetric, stageStart)
 	}
 	return nil
 }
@@ -3605,6 +3828,9 @@ func (m *meta) UpdateChannelCheckpoints(ctx context.Context, positions []*msgpb.
 		return !ok || oldPosition.Timestamp < pos.Timestamp || (oldPosition.Timestamp == pos.Timestamp && !bytes.Equal(oldPosition.MsgID, pos.MsgID))
 	})
 	m.channelCPs.RUnlock()
+	if len(toUpdates) == 0 {
+		return nil
+	}
 	err := m.catalog.SaveChannelCheckpoints(ctx, toUpdates)
 	if err != nil {
 		return err
