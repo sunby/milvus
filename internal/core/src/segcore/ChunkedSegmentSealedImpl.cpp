@@ -3292,6 +3292,21 @@ ChunkedSegmentSealedImpl::load_column_group_data_internal(
                 milvus_field_ids.size(),
                 load_info.load_priority,
                 warmup_policy);
+        auto t_translator_ctor_done = std::chrono::steady_clock::now();
+        LOG_INFO(
+            "[xxx] segment {} column_group {} translator detail ctor done, "
+            "enable_mmap={}, mmap_populate={}, warmup_policy='{}', "
+            "duration={}ms",
+            id_,
+            column_group_id.get(),
+            info.enable_mmap,
+            mmap_config.GetMmapPopulate(),
+            info.warmup_policy,
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                t_translator_ctor_done - t_translator_ctor_start)
+                .count());
+
+        auto t_chunked_group_start = std::chrono::steady_clock::now();
         auto chunked_column_group =
             std::make_shared<ChunkedColumnGroup>(std::move(translator));
         auto t_chunked_group_done = std::chrono::steady_clock::now();
@@ -5236,11 +5251,23 @@ ChunkedSegmentSealedImpl::pk_range(milvus::OpContext* op_ctx,
     }
     if (!is_sorted_by_pk_) {
         auto pk_index = PinPkIndex(runtime, op_ctx);
+        const auto t1 = std::chrono::high_resolution_clock::now();
         auto* pk_cell = pk_index.get();
         AssertInfo(pk_cell != nullptr && pk_cell->has_pk2offset(),
                    "primary key index is not ready");
         pk_cell->pk2offset().find_range(
             pk, op, bitset, [](int64_t offset) { return true; });
+        const auto t2 = std::chrono::high_resolution_clock::now();
+        auto duration =
+            std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1)
+                .count();
+        LOG_INFO(
+            "[sss] pk_range. traceID: {}, partition: {}, segment: {}, "
+            "duration: {}",
+            milvus::tracer::GetRequestTraceID(op_ctx),
+            get_partition_id(),
+            get_segment_id(),
+            duration);
         return;
     }
 
@@ -7846,29 +7873,19 @@ ChunkedSegmentSealedImpl::load_field_data_common(
     milvus::OpContext* op_ctx,
     bool is_replace,
     StagedStateCommitter* committer) {
-    auto snapshot = CapturePublishedState();
-    auto t1 = std::chrono::steady_clock::now();
-
-    if (!enable_mmap) {
-        if (IsVariableDataType(data_type)) {
-            SegmentInternalInterface::set_field_avg_size(
-                field_id, num_rows, column->DataByteSize());
+    const auto start = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::duration snapshot_duration{};
+    std::shared_ptr<const PublishedSegmentState> snapshot;
+    auto capture_snapshot =
+        [&]() -> const std::shared_ptr<const PublishedSegmentState>& {
+        if (snapshot == nullptr) {
+            const auto capture_start = std::chrono::steady_clock::now();
+            snapshot = CapturePublishedState();
+            snapshot_duration +=
+                std::chrono::steady_clock::now() - capture_start;
         }
-    }
-    // Skip index construction: for proxy columns (external tables) with no
-    // statistics, skip building the skip index during load to avoid triggering
-    // S3 data fetches when warmup=disable. The skip index will be unavailable
-    // for these segments, which only affects skip-index-based pruning.
-    auto t2 = std::chrono::steady_clock::now();
-    if (!IsVariableDataType(data_type) || IsStringDataType(data_type)) {
-        if (statistics) {
-            LoadSkipIndexFromStatistics(
-                field_id, data_type, statistics.value());
-        } else if (!is_proxy_column) {
-            LoadSkipIndex(field_id, data_type, column);
-        }
-    }
-    auto t3 = std::chrono::steady_clock::now();
+        return snapshot;
+    };
 
     std::shared_ptr<CacheSlot<storagev2translator::PkIndexCell>> pk_index_slot;
     const bool is_primary_field =
@@ -7883,7 +7900,9 @@ ChunkedSegmentSealedImpl::load_field_data_common(
                              "");
     }
 
+    const auto prepare_done = std::chrono::steady_clock::now();
     generate_interim_index(field_id, num_rows, column, op_ctx, committer);
+    const auto interim_index_done = std::chrono::steady_clock::now();
 
     // Build the geometry cache OUTSIDE the publish lock (it decodes the whole
     // column), then stage it in the same immutable runtime snapshot as the
@@ -8007,6 +8026,30 @@ ChunkedSegmentSealedImpl::load_field_data_common(
             }
         };
 
+    auto log_load_done = [&]() {
+        const auto done = std::chrono::steady_clock::now();
+        LOG_INFO(
+            "[xxx] segment {} field {} load_field_data_common done, "
+            "snapshot={}ms, prepare={}ms, interim_index={}ms, "
+            "publish={}ms, total={}ms",
+            id_,
+            field_id.get(),
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                snapshot_duration)
+                .count(),
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                prepare_done - start)
+                .count(),
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                interim_index_done - prepare_done)
+                .count(),
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                done - interim_index_done)
+                .count(),
+            std::chrono::duration_cast<std::chrono::milliseconds>(done - start)
+                .count());
+    };
+
     if (committer != nullptr) {
         committer->Commit([&](RuntimeResourceState& target_runtime,
                               PublishedSegmentState& staged_state) {
@@ -8016,12 +8059,14 @@ ChunkedSegmentSealedImpl::load_field_data_common(
                 old_column = it->second;
             }
             if (old_column == nullptr) {
-                old_column = get_column(capture_snapshot()->runtime, field_id);
+                old_column =
+                    get_column(capture_snapshot()->runtime, field_id);
             }
 
             std::unique_lock lck(mutex_);
             apply_loaded_column(target_runtime, old_column, staged_state);
         });
+        log_load_done();
         return;
     }
 
@@ -8037,6 +8082,7 @@ ChunkedSegmentSealedImpl::load_field_data_common(
 
         std::unique_lock lck(mutex_);
         apply_loaded_column(*runtime, old_column, *capture_snapshot());
+        log_load_done();
         return;
     }
 
@@ -9635,6 +9681,7 @@ ChunkedSegmentSealedImpl::LoadBatchFieldData(
     milvus::OpContext* op_ctx,
     bool is_replace,
     StagedStateCommitter* committer) {
+    auto batch_start = std::chrono::steady_clock::now();
     LOG_INFO("Loading field binlog for {} fields in segment {}",
              field_binlog_to_load.size(),
              id_);
@@ -9776,6 +9823,16 @@ ChunkedSegmentSealedImpl::LoadBatchFieldData(
 
         field_data_to_load.emplace_back(group_id, load_field_data_info);
     }
+
+    auto prepare_done = std::chrono::steady_clock::now();
+    LOG_INFO(
+        "[xxx] segment {} prepare field metadata done, fields_to_load={}, "
+        "elapsed={}ms",
+        id_,
+        field_data_to_load.size(),
+        std::chrono::duration_cast<std::chrono::milliseconds>(prepare_done -
+                                                              batch_start)
+            .count());
 
     auto& pool = ThreadPools::GetThreadPool(milvus::ThreadPoolPriority::MIDDLE);
     std::vector<std::future<void>> load_field_futures;
@@ -10929,27 +10986,25 @@ void
 ChunkedSegmentSealedImpl::Prewarm(
     milvus::OpContext* op_ctx,
     const std::vector<FieldId>& requested_field_ids) const {
+    auto runtime = CaptureRuntimeResourceState();
     std::vector<FieldId> field_ids = requested_field_ids;
     if (field_ids.empty()) {
-        auto published = CapturePublishedState();
-        if (published != nullptr && published->schema != nullptr) {
-            field_ids.reserve(published->schema->get_fields().size());
-            for (const auto& field : published->schema->get_fields()) {
-                field_ids.push_back(field.first);
-            }
+        auto schema_snapshot = CaptureSchemaSnapshot();
+        field_ids.reserve(schema_snapshot->get_fields().size());
+        for (const auto& field : schema_snapshot->get_fields()) {
+            field_ids.push_back(field.first);
         }
     }
 
-    auto runtime = CaptureRuntimeResourceState();
     for (auto field_id : field_ids) {
         prefetch_chunks(op_ctx, field_id);
 
         std::vector<index::CacheIndexBasePtr> index_slots;
-        auto vector_iter = runtime->vector_indexings.find(field_id);
-        if (vector_iter != runtime->vector_indexings.end() &&
-            vector_iter->second != nullptr) {
-            index_slots.push_back(vector_iter->second->indexing_);
+        auto vector_entry = GetVectorIndexing(runtime, field_id);
+        if (vector_entry != nullptr && vector_entry->indexing_ != nullptr) {
+            index_slots.push_back(vector_entry->indexing_);
         }
+
         auto scalar_iter = runtime->scalar_indexings.find(field_id);
         if (scalar_iter != runtime->scalar_indexings.end()) {
             index_slots.push_back(scalar_iter->second);

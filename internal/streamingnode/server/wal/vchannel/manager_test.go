@@ -90,7 +90,6 @@ func TestGroupSegmentsByVChannel(t *testing.T) {
 		3: {SegmentId: 3, Vchannel: "v1"},
 		4: {SegmentId: 4},
 	}
-
 	grouped := groupSegmentsByVChannel(segments)
 	require.Len(t, grouped, 2)
 	assert.ElementsMatch(t, []int64{1, 3}, mapKeys(grouped["v1"]))

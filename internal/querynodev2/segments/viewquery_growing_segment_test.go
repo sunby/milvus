@@ -3,6 +3,7 @@
 package segments
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,6 +13,7 @@ import (
 
 func TestViewQueryGrowingSegmentBatchPkExistIsConservative(t *testing.T) {
 	segment := NewGrowingSegmentForViewQuery(ViewQueryGrowingSegmentInfo{CollectionID: 10}, nil)
+	assert.NoError(t, segment.Prewarm(context.Background(), []int64{100}))
 
 	hits := segment.BatchPkExist(storage.NewBatchLocationsCache([]storage.PrimaryKey{
 		storage.NewInt64PrimaryKey(1),

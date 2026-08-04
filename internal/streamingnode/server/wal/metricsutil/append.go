@@ -17,6 +17,21 @@ const (
 	inlineInterceptorOccurrences = 2
 )
 
+const (
+	AppendStageTotal                    = "total"
+	AppendStageWALImpl                  = "wal_impl"
+	AppendStageWALImplAttempt           = "wal_impl_attempt"
+	AppendStageWALImplBackoff           = "wal_impl_backoff"
+	AppendStageRedoWaitGrowingSegment   = "redo_wait_growing_segment"
+	AppendStageLockAcquire              = "lock_acquire"
+	AppendStageTimeTickAllocate         = "timetick_allocate"
+	AppendStageTimeTickAck              = "timetick_ack"
+	AppendStageShardSchemaCheck         = "shard_schema_check"
+	AppendStageShardFunctionMaterialize = "shard_function_materialize"
+	AppendStageShardAssignSegment       = "shard_assign_segment"
+	AppendStageMVCCUpdate               = "mvcc_update"
+)
+
 type InterceptorMetrics struct {
 	Before    time.Duration
 	BeforeErr error
@@ -43,6 +58,7 @@ type AppendMetrics struct {
 	interceptorGroups  [inlineInterceptorGroups]interceptorMetricsGroup
 	interceptorCount   int
 	extraInterceptors  map[string][]*InterceptorMetrics
+	stages             map[string]time.Duration
 }
 
 type interceptorMetricsGroup struct {
@@ -96,6 +112,18 @@ func (g *interceptorMetricsGroup) next() *InterceptorMetrics {
 	metric := &InterceptorMetrics{}
 	g.extra = append(g.extra, metric)
 	return metric
+}
+
+// ObserveStage adds duration to a low-cardinality append stage. Multiple
+// observations of the same stage in one append are aggregated before export.
+func (m *AppendMetrics) ObserveStage(stage string, duration time.Duration) {
+	if stage == "" || duration <= 0 {
+		return
+	}
+	if m.stages == nil {
+		m.stages = make(map[string]time.Duration)
+	}
+	m.stages[stage] += duration
 }
 
 // StartAppendGuard start the append operation.
@@ -189,6 +217,13 @@ func (m *AppendMetrics) rangeInterceptorMetrics(f func(name string, occurrence i
 				return
 			}
 		}
+	}
+}
+
+// RangeOverStages ranges over explicitly instrumented append stages.
+func (m *AppendMetrics) RangeOverStages(f func(stage string, duration time.Duration)) {
+	for stage, duration := range m.stages {
+		f(stage, duration)
 	}
 }
 

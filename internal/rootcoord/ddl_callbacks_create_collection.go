@@ -18,6 +18,7 @@ package rootcoord
 
 import (
 	"context"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	streamingbroadcaster "github.com/milvus-io/milvus/internal/streamingcoord/server/broadcaster"
 	"github.com/milvus-io/milvus/pkg/v3/common"
+	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/etcdpb"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
@@ -41,6 +43,30 @@ import (
 
 type collectionDataViewCreator interface {
 	CreateCollectionDataView(ctx context.Context, collectionID int64, vchannels []string) error
+}
+
+const (
+	createCollectionStageStartBroadcastLock             = "start_broadcast_lock"
+	createCollectionStagePrepareTotal                   = "prepare_total"
+	createCollectionStageBroadcastCall                  = "broadcast_call"
+	createCollectionStageWatchChannel                   = "watch_channel"
+	createCollectionStageWatchChannelsTotal             = "watch_channels_total"
+	createCollectionStageWatchChannelBuildStartPosition = "watch_channel_build_start_position"
+	createCollectionStageWatchChannelRPC                = "watch_channel_rpc"
+	createCollectionStageWatchChannelCheckStatus        = "watch_channel_check_status"
+	createCollectionStageAddMeta                        = "add_meta"
+	createCollectionStageExpireCaches                   = "expire_caches"
+	createCollectionStagePrepareGetDatabase             = "prepare_get_database"
+	createCollectionStagePrepareValidate                = "prepare_validate"
+	createCollectionStagePrepareSchema                  = "prepare_schema"
+	createCollectionStagePrepareAssignCollectionID      = "prepare_assign_collection_id"
+	createCollectionStagePrepareAssignPartitionIDs      = "prepare_assign_partition_ids"
+	createCollectionStagePrepareAllocVChannels          = "prepare_alloc_vchannels"
+	createCollectionStagePrepareValidateCollectionName  = "prepare_validate_collection_name"
+)
+
+func observeCreateCollectionStage(stage string, start time.Time) {
+	metrics.RootCoordDDLCallbackDuration.WithLabelValues("CreateCollection", stage).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
 }
 
 func (c *Core) broadcastCreateCollectionV1(ctx context.Context, req *milvuspb.CreateCollectionRequest) error {
@@ -60,7 +86,9 @@ func (c *Core) broadcastCreateCollectionV1(ctx context.Context, req *milvuspb.Cr
 		req.NumPartitions = int64(1)
 	}
 
+	stageStart := time.Now()
 	broadcaster, err := c.startBroadcastWithCollectionLock(ctx, req.GetDbName(), req.GetCollectionName())
+	observeCreateCollectionStage(createCollectionStageStartBroadcastLock, stageStart)
 	if err != nil {
 		return err
 	}
@@ -82,10 +110,13 @@ func (c *Core) broadcastCreateCollectionV1(ctx context.Context, req *milvuspb.Cr
 		},
 		preserveFieldID: preserveFieldID == "true",
 	}
+	stageStart = time.Now()
 	if err := createCollectionTask.Prepare(ctx); err != nil {
+		observeCreateCollectionStage(createCollectionStagePrepareTotal, stageStart)
 		createCollectionTask.releaseFileResources()
 		return err
 	}
+	observeCreateCollectionStage(createCollectionStagePrepareTotal, stageStart)
 
 	// set up the broadcast virtual channels and control channel, then make a broadcast message.
 	broadcastChannel := make([]string, 0, createCollectionTask.Req.ShardsNum+1)
@@ -98,7 +129,9 @@ func (c *Core) broadcastCreateCollectionV1(ctx context.Context, req *milvuspb.Cr
 		WithBody(createCollectionTask.body).
 		WithBroadcast(broadcastChannel).
 		MustBuildBroadcast()
+	stageStart = time.Now()
 	if _, err := broadcaster.Broadcast(ctx, msg); err != nil {
+		observeCreateCollectionStage(createCollectionStageBroadcastCall, stageStart)
 		// Once the broadcast task is created, it will retry until success and owns
 		// the reserved refs. If the task was not created, release the reservation.
 		if streamingbroadcaster.IsBroadcastTaskNotCreated(err) {
@@ -106,6 +139,7 @@ func (c *Core) broadcastCreateCollectionV1(ctx context.Context, req *milvuspb.Cr
 		}
 		return err
 	}
+	observeCreateCollectionStage(createCollectionStageBroadcastCall, stageStart)
 	return nil
 }
 
@@ -113,36 +147,51 @@ func (c *DDLCallback) createCollectionV1AckCallback(ctx context.Context, result 
 	msg := result.Message
 	header := msg.Header()
 	body := msg.MustBody()
+	watchChannelsStart := time.Now()
 	for vchannel, result := range result.Results {
 		if !funcutil.IsControlChannel(vchannel) {
 			// create shard info when virtual channel is created.
-			if err := c.createCollectionShard(ctx, header, body, vchannel, result); err != nil {
+			stageStart := time.Now()
+			err := c.createCollectionShard(ctx, header, body, vchannel, result)
+			observeCreateCollectionStage(createCollectionStageWatchChannel, stageStart)
+			if err != nil {
+				observeCreateCollectionStage(createCollectionStageWatchChannelsTotal, watchChannelsStart)
 				return merr.Wrap(err, "failed to create collection shard")
 			}
 		}
 	}
+	observeCreateCollectionStage(createCollectionStageWatchChannelsTotal, watchChannelsStart)
 	if creator, ok := c.mixCoord.(collectionDataViewCreator); ok {
 		if err := creator.CreateCollectionDataView(ctx, header.CollectionId, body.VirtualChannelNames); err != nil {
 			return merr.Wrap(err, "failed to create collection data view")
 		}
 	}
 	newCollInfo := newCollectionModelWithMessage(header, body, result)
-	if err := c.meta.AddCollection(ctx, newCollInfo); err != nil {
+	stageStart := time.Now()
+	err := c.meta.AddCollection(ctx, newCollInfo)
+	observeCreateCollectionStage(createCollectionStageAddMeta, stageStart)
+	if err != nil {
 		return merr.Wrap(err, "failed to add collection to meta table")
 	}
 
-	return c.ExpireCaches(ctx, ce.NewBuilder().WithLegacyProxyCollectionMetaCache(
+	stageStart = time.Now()
+	err = c.ExpireCaches(ctx, ce.NewBuilder().WithLegacyProxyCollectionMetaCache(
 		ce.OptLPCMDBName(body.DbName),
 		ce.OptLPCMCollectionName(body.CollectionName),
 		ce.OptLPCMCollectionID(header.CollectionId),
 		ce.OptLPCMMsgType(commonpb.MsgType_CreateCollection)))
+	observeCreateCollectionStage(createCollectionStageExpireCaches, stageStart)
+	return err
 }
 
 func (c *DDLCallback) createCollectionShard(ctx context.Context, header *message.CreateCollectionMessageHeader, body *message.CreateCollectionRequest, vchannel string, appendResult *message.AppendResult) error {
 	// TODO: redundant channel watch by now, remove it in future.
+	stageStart := time.Now()
 	startPosition, walName := adaptor.MustGetMQWrapperIDAndWALNameFromMessage(appendResult.MessageID)
+	observeCreateCollectionStage(createCollectionStageWatchChannelBuildStartPosition, stageStart)
 	// semantically, we should use the last confirmed message id to setup the start position.
 	// same as following `newCollectionModelWithMessage`.
+	stageStart = time.Now()
 	resp, err := c.mixCoord.WatchChannels(ctx, &datapb.WatchChannelsRequest{
 		CollectionID:    header.CollectionId,
 		ChannelNames:    []string{vchannel},
@@ -151,7 +200,11 @@ func (c *DDLCallback) createCollectionShard(ctx context.Context, header *message
 		CreateTimestamp: appendResult.TimeTick,
 		ChannelWalNames: map[string]commonpb.WALName{funcutil.ToPhysicalChannel(vchannel): walName},
 	})
-	return merr.CheckRPCCall(resp.GetStatus(), err)
+	observeCreateCollectionStage(createCollectionStageWatchChannelRPC, stageStart)
+	stageStart = time.Now()
+	err = merr.CheckRPCCall(resp.GetStatus(), err)
+	observeCreateCollectionStage(createCollectionStageWatchChannelCheckStatus, stageStart)
+	return err
 }
 
 // newCollectionModelWithMessage creates a collection model with the given message.

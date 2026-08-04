@@ -97,7 +97,7 @@ func TestServerSnapshotReturnsEmptyWithoutDataViewManager(t *testing.T) {
 func TestDataViewSegmentStoreSelectSegmentsSkipsDroppedPartition(t *testing.T) {
 	m := &meta{
 		collections: typeutil.NewConcurrentMap[UniqueID, *collectionInfo](),
-		segments:    NewSegmentsInfo(),
+		segments:    NewCachedSegmentsInfo(),
 	}
 	m.collections.Insert(1, &collectionInfo{
 		ID:         1,
@@ -116,7 +116,7 @@ func TestDataViewSegmentStoreSelectSegmentsSkipsDroppedPartition(t *testing.T) {
 		StartPosition:                 &msgpb.MsgPosition{ChannelName: "ch-1", Timestamp: 500},
 		DmlPosition:                   &msgpb.MsgPosition{ChannelName: "ch-1", Timestamp: 1000},
 		DeleteApplyStartAfterTimetick: 500,
-	}))
+	}), 0)
 	m.segments.SetSegment(101, NewSegmentInfo(&datapb.SegmentInfo{
 		ID:            101,
 		CollectionID:  1,
@@ -125,7 +125,7 @@ func TestDataViewSegmentStoreSelectSegmentsSkipsDroppedPartition(t *testing.T) {
 		State:         commonpb.SegmentState_Flushed,
 		Level:         datapb.SegmentLevel_L1,
 		DmlPosition:   &msgpb.MsgPosition{ChannelName: "ch-1", Timestamp: 1000},
-	}))
+	}), 0)
 
 	store := &dataViewSegmentStore{meta: m}
 	segments := store.SelectSegments(context.Background(), 1)
@@ -141,7 +141,7 @@ func TestDataViewSegmentStoreSelectSegmentsSkipsDroppedPartition(t *testing.T) {
 func TestDataViewSegmentStoreGetSegmentsMapsBatch(t *testing.T) {
 	m := &meta{
 		collections: typeutil.NewConcurrentMap[UniqueID, *collectionInfo](),
-		segments:    NewSegmentsInfo(),
+		segments:    NewCachedSegmentsInfo(),
 	}
 	first := NewSegmentInfo(&datapb.SegmentInfo{
 		ID:                            100,
@@ -162,8 +162,8 @@ func TestDataViewSegmentStoreGetSegmentsMapsBatch(t *testing.T) {
 		State:         commonpb.SegmentState_Flushed,
 		Level:         datapb.SegmentLevel_L1,
 	})
-	m.segments.SetSegment(100, first)
-	m.segments.SetSegment(101, second)
+	m.segments.SetSegment(100, first, 0)
+	m.segments.SetSegment(101, second, 0)
 
 	segments := (&dataViewSegmentStore{meta: m}).GetSegments(context.Background(), []int64{101, 404, 100})
 
@@ -219,7 +219,7 @@ func TestDataViewRecoveryUsesCollectionPartitions(t *testing.T) {
 func TestGetCollectionIDsByPartitionUsesSegmentMeta(t *testing.T) {
 	m := &meta{
 		collections: typeutil.NewConcurrentMap[UniqueID, *collectionInfo](),
-		segments:    NewSegmentsInfo(),
+		segments:    NewCachedSegmentsInfo(),
 	}
 	m.collections.Insert(1, &collectionInfo{
 		ID:         1,
@@ -233,7 +233,7 @@ func TestGetCollectionIDsByPartitionUsesSegmentMeta(t *testing.T) {
 		State:         commonpb.SegmentState_Flushed,
 		Level:         datapb.SegmentLevel_L1,
 		DmlPosition:   &msgpb.MsgPosition{ChannelName: "ch-1", Timestamp: 1000},
-	}))
+	}), 0)
 
 	collectionIDs := m.GetCollectionIDsByPartition(context.Background(), []int64{11})
 

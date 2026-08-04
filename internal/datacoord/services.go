@@ -665,19 +665,108 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 	mutations := map[int64][]MutateFunc{}
 	var newSegments []*datapb.SegmentInfo
 	var validationSkipped bool
+	var mutationErr error
 
 	if req.GetSegLevel() == datapb.SegmentLevel_L0 {
 		// Insert new L0 segment if it doesn't exist
 		segment := s.meta.GetSegment(ctx, req.GetSegmentID())
 		if segment == nil {
-			newSegments = append(newSegments, &datapb.SegmentInfo{
-				ID:            req.GetSegmentID(),
-				CollectionID:  req.GetCollectionID(),
-				PartitionID:   req.GetPartitionID(),
-				InsertChannel: req.GetChannel(),
-				State:         commonpb.SegmentState_Flushed,
-				Level:         datapb.SegmentLevel_L0,
-			})
+			newSegment := &datapb.SegmentInfo{
+				ID:             req.GetSegmentID(),
+				CollectionID:   req.GetCollectionID(),
+				PartitionID:    req.GetPartitionID(),
+				InsertChannel:  req.GetChannel(),
+				State:          commonpb.SegmentState_Flushed,
+				Level:          datapb.SegmentLevel_L0,
+				StorageVersion: req.GetStorageVersion(),
+				Binlogs:        mergeFieldBinlogs(nil, req.GetField2BinlogPaths()),
+				Statslogs:      mergeFieldBinlogs(nil, req.GetField2StatslogPaths()),
+				Deltalogs:      mergeFieldBinlogs(nil, req.GetDeltalogs()),
+				Bm25Statslogs:  mergeFieldBinlogs(nil, req.GetField2Bm25LogPaths()),
+				ManifestPath:   req.GetManifestPath(),
+				Stats:          req.GetStats(),
+			}
+			if newSegment.Stats == nil {
+				newSegment.Stats = storage.BuildStatsFromFieldBinlogs(
+					newSegment.GetBinlogs(), newSegment.GetStatslogs(), newSegment.GetBm25Statslogs(), newSegment.GetDeltalogs())
+			}
+			for _, cp := range req.GetCheckPoints() {
+				if cp.GetSegmentID() == newSegment.GetID() {
+					newSegment.DmlPosition = cp.GetPosition()
+					newSegment.NumOfRows = cp.GetNumOfRows()
+				}
+			}
+			for _, pos := range req.GetStartPositions() {
+				if pos.GetSegmentID() == newSegment.GetID() {
+					newSegment.StartPosition = pos.GetStartPosition()
+				}
+			}
+			deleteApplyStartAfterTimetick := req.GetDeleteApplyStartAfterTimetick()
+			if deleteApplyStartAfterTimetick == 0 && newSegment.GetStartPosition() != nil {
+				deleteApplyStartAfterTimetick = newSegment.GetStartPosition().GetTimestamp()
+			}
+			newSegment.DeleteApplyStartAfterTimetick = deleteApplyStartAfterTimetick
+			newSegments = append(newSegments, newSegment)
+		} else {
+			reqCopy := req
+			mutations[req.GetSegmentID()] = []MutateFunc{func(seg *datapb.SegmentInfo) bool {
+				if reqCopy.GetWithFullBinlogs() {
+					seg.Binlogs = mergeFieldBinlogs(nil, reqCopy.GetField2BinlogPaths())
+					seg.Statslogs = mergeFieldBinlogs(nil, reqCopy.GetField2StatslogPaths())
+					seg.Deltalogs = mergeFieldBinlogs(nil, reqCopy.GetDeltalogs())
+					seg.Bm25Statslogs = mergeFieldBinlogs(nil, reqCopy.GetField2Bm25LogPaths())
+				} else {
+					seg.Binlogs = mergeFieldBinlogs(seg.GetBinlogs(), reqCopy.GetField2BinlogPaths())
+					seg.Statslogs = mergeFieldBinlogs(seg.GetStatslogs(), reqCopy.GetField2StatslogPaths())
+					seg.Deltalogs = mergeFieldBinlogs(seg.GetDeltalogs(), reqCopy.GetDeltalogs())
+					seg.Bm25Statslogs = mergeFieldBinlogs(seg.GetBm25Statslogs(), reqCopy.GetField2Bm25LogPaths())
+				}
+				if reqCopy.GetManifestPath() != "" {
+					seg.ManifestPath = reqCopy.GetManifestPath()
+				}
+				if reqCopy.GetStats() != nil {
+					seg.Stats = reqCopy.GetStats()
+				} else {
+					seg.Stats = storage.BuildStatsFromFieldBinlogs(
+						seg.GetBinlogs(), seg.GetStatslogs(), seg.GetBm25Statslogs(), seg.GetDeltalogs())
+				}
+
+				var checkpointRows int64
+				for _, cp := range reqCopy.GetCheckPoints() {
+					if cp.GetSegmentID() != seg.GetID() || cp.GetPosition() == nil {
+						continue
+					}
+					if !reqCopy.GetWithFullBinlogs() && seg.GetDmlPosition() != nil &&
+						seg.GetDmlPosition().GetTimestamp() >= cp.GetPosition().GetTimestamp() {
+						continue
+					}
+					checkpointRows = cp.GetNumOfRows()
+					seg.DmlPosition = cp.GetPosition()
+				}
+				if count := segmentutil.CalcRowCountFromBinLog(seg); count > 0 {
+					seg.NumOfRows = count
+				} else if checkpointRows > 0 && seg.GetStorageVersion() == storage.StorageV3 {
+					seg.NumOfRows = checkpointRows
+				}
+
+				for _, pos := range reqCopy.GetStartPositions() {
+					if pos.GetSegmentID() == seg.GetID() {
+						seg.StartPosition = pos.GetStartPosition()
+					}
+				}
+				deleteApplyStartAfterTimetick := reqCopy.GetDeleteApplyStartAfterTimetick()
+				if deleteApplyStartAfterTimetick == 0 && seg.GetDeleteApplyStartAfterTimetick() == 0 {
+					if ts := seg.GetCommitTimestamp(); ts != 0 {
+						deleteApplyStartAfterTimetick = ts
+					} else if seg.GetStartPosition() != nil {
+						deleteApplyStartAfterTimetick = seg.GetStartPosition().GetTimestamp()
+					}
+				}
+				if deleteApplyStartAfterTimetick != 0 {
+					seg.DeleteApplyStartAfterTimetick = deleteApplyStartAfterTimetick
+				}
+				return true
+			}}
 		}
 	} else {
 		startGetSegment := time.Now()
@@ -718,8 +807,6 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 			return merr.Status(err), nil
 		}
 
-		operators = append(operators, ValidateSaveBinlogStorageVersion(req.GetSegmentID(), incomingStorageVersion))
-
 		// Set segment state
 		if req.GetDropped() {
 			s.segmentManager.DropSegment(ctx, req.GetChannel(), req.GetSegmentID())
@@ -733,6 +820,12 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 		// Validate inside MutateFunc: check against persist value (lock-free CAS)
 		reqCopy := req // capture for closure
 		validate := func(seg *datapb.SegmentInfo) bool {
+			if incomingStorageVersion != seg.GetStorageVersion() {
+				mutationErr = merr.WrapErrDataIntegrityMsg(
+					"segment %d storage version mismatch, current=%d incoming=%d",
+					seg.GetID(), seg.GetStorageVersion(), incomingStorageVersion)
+				return false
+			}
 			if !reqCopy.GetWithFullBinlogs() {
 				return true
 			}
@@ -758,8 +851,6 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 
 		// Build mutation for the main segment
 		mutate := func(seg *datapb.SegmentInfo) bool {
-			seg.StorageVersion = reqCopy.GetStorageVersion()
-
 			if reqCopy.GetDropped() {
 				seg.State = commonpb.SegmentState_Dropped
 				seg.DroppedAt = uint64(time.Now().UnixNano())
@@ -781,6 +872,12 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 				seg.Statslogs = mergeFieldBinlogs(seg.GetStatslogs(), reqCopy.GetField2StatslogPaths())
 				seg.Deltalogs = mergeFieldBinlogs(seg.GetDeltalogs(), reqCopy.GetDeltalogs())
 				seg.Bm25Statslogs = mergeFieldBinlogs(seg.GetBm25Statslogs(), reqCopy.GetField2Bm25LogPaths())
+			}
+			if reqCopy.GetStats() != nil {
+				seg.Stats = reqCopy.GetStats()
+			} else {
+				seg.Stats = storage.BuildStatsFromFieldBinlogs(
+					seg.GetBinlogs(), seg.GetStatslogs(), seg.GetBm25Statslogs(), seg.GetDeltalogs())
 			}
 
 			// Checkpoint
@@ -856,6 +953,10 @@ func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPath
 	if err := s.meta.UpdateSegmentsInfo(ctx, mutations, newSegments...); err != nil {
 		logger.Error(ctx, "save binlog and checkpoints failed", mlog.Err(err))
 		return merr.Status(err), nil
+	}
+	if mutationErr != nil {
+		logger.Warn(ctx, "save binlog validation failed", mlog.Err(mutationErr))
+		return merr.Status(mutationErr), nil
 	}
 	updateSegmentsInfoDur := time.Since(stageStart)
 
@@ -1888,34 +1989,62 @@ func (s *Server) GetCompactionStateWithPlans(ctx context.Context, req *milvuspb.
 	return resp, nil
 }
 
+const (
+	watchChannelsStageTotal                   = "total"
+	watchChannelsStageCheckHealthy            = "check_healthy"
+	watchChannelsStageMarkChannelAdded        = "mark_channel_added"
+	watchChannelsStageBuildStartPosition      = "build_start_position"
+	watchChannelsStageUpdateChannelCheckpoint = "update_channel_checkpoint"
+)
+
+func observeWatchChannelsStage(stage string, start time.Time) {
+	metrics.DataCoordWatchChannelsStageDuration.WithLabelValues(stage).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
+}
+
 // WatchChannels notifies DataCoord to watch vchannels of a collection.
 // Deprecated: Redundant design by now, remove it in future.
 func (s *Server) WatchChannels(ctx context.Context, req *datapb.WatchChannelsRequest) (*datapb.WatchChannelsResponse, error) {
+	totalStart := time.Now()
+	defer observeWatchChannelsStage(watchChannelsStageTotal, totalStart)
+
 	mlog.Info(context.TODO(), "receive watch channels request")
 	resp := &datapb.WatchChannelsResponse{
 		Status: merr.Success(),
 	}
 
+	stageStart := time.Now()
 	if err := merr.CheckHealthy(s.GetStateCode()); err != nil {
+		observeWatchChannelsStage(watchChannelsStageCheckHealthy, stageStart)
 		return &datapb.WatchChannelsResponse{
 			Status: merr.Status(err),
 		}, nil
 	}
+	observeWatchChannelsStage(watchChannelsStageCheckHealthy, stageStart)
+
 	for _, channelName := range req.GetChannelNames() {
 		// TODO: redundant channel mark by now, remove it in future.
+		stageStart = time.Now()
 		if err := s.meta.catalog.MarkChannelAdded(ctx, channelName); err != nil {
+			observeWatchChannelsStage(watchChannelsStageMarkChannelAdded, stageStart)
 			// TODO: add background task to periodically cleanup the orphaned channel add marks.
 			mlog.Error(context.TODO(), "failed to mark channel added", mlog.Err(err))
 			resp.Status = merr.Status(err)
 			return resp, nil
 		}
+		observeWatchChannelsStage(watchChannelsStageMarkChannelAdded, stageStart)
 
 		// try to init channel checkpoint, if failed, we will log it and continue
+		stageStart = time.Now()
 		startPos := toMsgPositionWithWALNames(channelName, req.GetStartPositions(), req.ChannelWalNames)
+		observeWatchChannelsStage(watchChannelsStageBuildStartPosition, stageStart)
 		if startPos != nil {
 			startPos.Timestamp = req.GetCreateTimestamp()
+			stageStart = time.Now()
 			if err := s.meta.UpdateChannelCheckpoint(ctx, channelName, startPos); err != nil {
+				observeWatchChannelsStage(watchChannelsStageUpdateChannelCheckpoint, stageStart)
 				mlog.Warn(context.TODO(), "failed to init channel checkpoint, meta update error", mlog.String("channel", channelName), mlog.Err(err))
+			} else {
+				observeWatchChannelsStage(watchChannelsStageUpdateChannelCheckpoint, stageStart)
 			}
 		} else {
 			mlog.Info(context.TODO(), "skip to init channel checkpoint for nil startPosition", mlog.String("channel", channelName))
@@ -2595,14 +2724,12 @@ func (s *Server) DropSegmentsByTime(ctx context.Context, collectionID int64, flu
 		mlog.Int64("collectionID", collectionID))
 
 	for channelName, flushTs := range flushTsList {
-		// wait until the checkpoint reaches or exceeds the flush timestamp
-		err := s.meta.WatchChannelCheckpoint(ctx, channelName, flushTs)
-		if err != nil {
-			mlog.Warn(ctx, "WatchChannelCheckpoint failed", mlog.Err(err))
-			return err
-		}
+		// TruncateCollection invokes this callback only after its AckSyncUp
+		// barrier reaches the durable data frontier. StreamingNode does not
+		// advance DataCoord's legacy channel checkpoint during normal WAL
+		// consumption, so waiting on that checkpoint here would deadlock.
 		if s.dataViewManager != nil {
-			_, err = s.dataViewManager.OnTruncate(ctx, TruncateDataViewEvent{
+			_, err := s.dataViewManager.OnTruncate(ctx, TruncateDataViewEvent{
 				CollectionID: collectionID,
 				VChannel:     channelName,
 				FlushTs:      flushTs,
@@ -2613,7 +2740,7 @@ func (s *Server) DropSegmentsByTime(ctx context.Context, collectionID int64, flu
 			}
 		}
 		// drop segments that were updated before the flush timestamp
-		err = s.meta.TruncateChannelByTime(ctx, channelName, flushTs)
+		err := s.meta.TruncateChannelByTime(ctx, channelName, flushTs)
 		if err != nil {
 			mlog.Warn(context.TODO(), "TruncateChannelByTime failed", mlog.Err(err))
 			return err
@@ -3636,24 +3763,40 @@ func (s *Server) HandleCommitVchannel(ctx context.Context, req *datapb.HandleCom
 	err := s.importMeta.HandleCommitVchannel(ctx, jobID, vchannel, func() error {
 		// Only access s.meta (segment meta) here, NOT s.importMeta.
 		// Set CommitTimestamp and clear isImporting in a single call per segment.
+		if commitTs != 0 {
+			for _, segID := range segIDs {
+				segment := s.meta.GetSegment(ctx, segID)
+				if segment == nil {
+					continue
+				}
+				maxTsTo := maxBinlogTimestampTo(segment.GetBinlogs())
+				if commitTs < maxTsTo {
+					mlog.Error(ctx, "meta update: update commit timestamp rejected - commit_ts < max(binlog.TimestampTo)",
+						mlog.FieldSegmentID(segID),
+						mlog.Uint64("commitTs", commitTs),
+						mlog.Uint64("maxBinlogTimestampTo", maxTsTo))
+					return merr.WrapErrImportSysFailedMsg(
+						"commit timestamp %d is less than max binlog timestamp %d for import segment %d",
+						commitTs, maxTsTo, segID)
+				}
+			}
+		}
+
+		var mutationErr error
 		mutations := make(map[int64][]MutateFunc, len(segIDs))
 		for _, segID := range segIDs {
 			segID := segID
 			mutations[segID] = []MutateFunc{func(seg *datapb.SegmentInfo) bool {
 				if commitTs != 0 {
-					var maxTsTo uint64
-					for _, fieldBinlogs := range seg.GetBinlogs() {
-						for _, l := range fieldBinlogs.GetBinlogs() {
-							if l.GetTimestampTo() > maxTsTo {
-								maxTsTo = l.GetTimestampTo()
-							}
-						}
-					}
+					maxTsTo := maxBinlogTimestampTo(seg.GetBinlogs())
 					if commitTs < maxTsTo {
 						mlog.Error(ctx, "meta update: update commit timestamp rejected - commit_ts < max(binlog.TimestampTo)",
 							mlog.FieldSegmentID(segID),
 							mlog.Uint64("commitTs", commitTs),
 							mlog.Uint64("maxBinlogTimestampTo", maxTsTo))
+						mutationErr = merr.WrapErrImportSysFailedMsg(
+							"commit timestamp %d is less than max binlog timestamp %d for import segment %d",
+							commitTs, maxTsTo, segID)
 						return false
 					}
 				}
@@ -3670,6 +3813,9 @@ func (s *Server) HandleCommitVchannel(ctx context.Context, req *datapb.HandleCom
 		}
 		if err := s.meta.UpdateSegmentsInfo(ctx, mutations); err != nil {
 			return err
+		}
+		if mutationErr != nil {
+			return mutationErr
 		}
 		if s.dataViewManager != nil && collectionID != 0 {
 			if _, err := s.dataViewManager.OnImport(ctx, ImportDataViewEvent{

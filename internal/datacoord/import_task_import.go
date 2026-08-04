@@ -263,6 +263,7 @@ func (t *importTask) QueryTaskOnWorker(cluster session.Cluster) {
 					seg.Statslogs = segInfo.GetStatslogs()
 					seg.Deltalogs = segInfo.GetDeltalogs()
 					seg.Bm25Statslogs = segInfo.GetBm25Logs()
+					seg.Stats = importStats
 					if segInfo.GetManifestPath() != "" {
 						seg.ManifestPath = segInfo.GetManifestPath()
 					}

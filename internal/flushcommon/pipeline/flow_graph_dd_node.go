@@ -105,8 +105,8 @@ func (ddn *ddNode) Operate(in []Msg) []Msg {
 		mlog.Warn(ddn.ctx, "type assertion failed for MsgStreamMsg", mlog.String("channel", ddn.vChannelName), mlog.String("name", reflect.TypeOf(in[0]).Name()))
 		return []Msg{}
 	}
-	msgCount := len(msMsg.TsMessages())
-	mlog.Info(ddn.ctx, "ddNode operate", mlog.String("channel", ddn.vChannelName), mlog.Int("msgCount", msgCount))
+	// msgCount := len(msMsg.TsMessages())
+	// mlog.Info(ddn.ctx, "ddNode operate", mlog.String("channel", ddn.vChannelName), mlog.Int("msgCount", msgCount))
 
 	if msMsg.IsCloseMsg() {
 		fgMsg := FlowGraphMsg{
@@ -249,6 +249,7 @@ func (ddn *ddNode) Operate(in []Msg) []Msg {
 				mlog.Uint64("timetick", createSegment.CreateSegmentMessage.TimeTick()),
 			)
 			logger.Info(msgCtx, "receive create segment message")
+			t0 := time.Now()
 			if err := ddn.msgHandler.HandleCreateSegment(msgCtx, createSegment.CreateSegmentMessage); err != nil {
 				logger.Warn(msgCtx, "handle create segment message failed", mlog.Err(err))
 			} else {

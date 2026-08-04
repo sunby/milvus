@@ -1220,7 +1220,7 @@ func (s *CompactionPlanHandlerSuite) TestCreateCompactTaskRejectsSnapshotProtect
 			snapshotMeta := createTestSnapshotMetaLoaded(s.T())
 			test.block(snapshotMeta)
 			meta := &meta{
-				segments:     NewSegmentsInfo(),
+				segments:     NewCachedSegmentsInfo(),
 				snapshotMeta: snapshotMeta,
 			}
 			meta.segments.SetSegment(1, &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
@@ -1228,7 +1228,8 @@ func (s *CompactionPlanHandlerSuite) TestCreateCompactTaskRejectsSnapshotProtect
 				CollectionID: 100,
 				State:        commonpb.SegmentState_Flushed,
 				Level:        datapb.SegmentLevel_L1,
-			}})
+			}}, 0)
+
 			inspector := newCompactionInspector(meta, nil, nil, nil, nil, newMockVersionManager())
 
 			compactTask, err := inspector.createCompactTask(&datapb.CompactionTask{

@@ -1444,18 +1444,11 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 	}
 	defer node.lifetime.Done()
 
+	cacheShardDiskUsageStats := getCacheShardDiskUsageStatsProto()
 	node.distDeltaTracker.mu.Lock()
 	lastModifyTs := node.getDistributionModifyTS()
-	cacheShardDiskUsageStats := getCacheShardDiskUsageStatsProto()
-	distributionChange := func() bool {
-		if req.GetLastUpdateTs() == 0 {
-			return true
-		}
-
-		return req.GetLastUpdateTs() < lastModifyTs
-	}
-
-	if !distributionChange() {
+	if !hasDataDistributionChange(req, lastModifyTs) {
+		node.distDeltaTracker.mu.Unlock()
 		return &querypb.GetDataDistributionResponse{
 			Status:                   merr.Success(),
 			NodeID:                   node.GetNodeID(),
@@ -1571,6 +1564,30 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 		}
 	}
 
+	channelVersionInfos := make([]*querypb.ChannelVersionInfo, 0, len(reportChannelNames))
+	leaderViews := make([]*querypb.LeaderView, 0, len(reportChannelNames))
+	for _, key := range reportChannelNames {
+		shardDelegator, ok := node.delegators.Get(key)
+		if !ok {
+			continue
+		}
+		channelVersionInfos = append(channelVersionInfos, &querypb.ChannelVersionInfo{
+			Channel:    key,
+			Collection: shardDelegator.Collection(),
+			Version:    shardDelegator.Version(),
+		})
+
+		sealed, growing := shardDelegator.GetSegmentInfo(false)
+		leaderViews = append(leaderViews, buildLeaderView(key, shardDelegator, buildFullSegmentDist(sealed), growing))
+	}
+
+	node.distDeltaTracker.mu.Lock()
+	// Another report may have reset the marker set while this response was built.
+	if node.distDeltaTracker.deltaGeneration == reportDeltaGeneration {
+		node.distDeltaTracker.lastReportedTs = lastModifyTs
+	}
+	node.distDeltaTracker.mu.Unlock()
+
 	return &querypb.GetDataDistributionResponse{
 		Status:                   merr.Success(),
 		NodeID:                   node.GetNodeID(),
@@ -1580,6 +1597,11 @@ func (node *QueryNode) GetDataDistribution(ctx context.Context, req *querypb.Get
 		LastModifyTs:             lastModifyTs,
 		MemCapacityInMB:          float64(hardware.GetMemoryCount() / 1024 / 1024),
 		CpuNum:                   int64(hardware.GetCPUNum()),
+		IsDelta:                  !fullReport,
+		RemovedSegmentIds:        removedSegmentIDs,
+		RemovedChannelNames:      removedChannelNames,
+		TotalSegmentCount:        int64(totalSegmentCount),
+		TotalChannelCount:        int64(totalChannelCount),
 		CacheShardDiskUsageStats: cacheShardDiskUsageStats,
 	}, nil
 }

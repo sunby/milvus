@@ -2595,7 +2595,7 @@ func TestServer_DropIndex_DroppedField(t *testing.T) {
 				},
 				segmentIndexes: typeutil.NewConcurrentMap[UniqueID, *typeutil.ConcurrentMap[UniqueID, *model.SegmentIndex]](),
 			},
-			segments: NewSegmentsInfo(),
+			segments: NewCachedSegmentsInfo(),
 		},
 		broker:          b,
 		allocator:       newMockAllocator(t),

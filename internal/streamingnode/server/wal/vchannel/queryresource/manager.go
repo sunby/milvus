@@ -214,7 +214,7 @@ func (m *Manager) startBuildLocked(meta *viewpb.QueryViewMeta, build ViewBuilder
 		}
 		resolved, err := m.resolveLoadInfo(ctx, view)
 		if err != nil {
-			return runtime, errors.Mark(err, nodescheduler.ErrDelay)
+			return runtime, nodescheduler.MarkDelay(err)
 		}
 		if err := runtime.Initialize(ctx, resolved); err != nil {
 			return runtime, err
@@ -337,7 +337,7 @@ func (m *Manager) prepareReady(ctx context.Context, key qviews.QueryViewKey, onR
 		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 			return err
 		}
-		return errors.Mark(err, nodescheduler.ErrDelay)
+		return nodescheduler.MarkDelay(err)
 	}
 	m.mu.Lock()
 	_, ok = m.refs[key]

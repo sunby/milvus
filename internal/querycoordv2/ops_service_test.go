@@ -756,7 +756,7 @@ func (suite *OpsServiceSuite) TestTransferSegmentToSQN() {
 		}
 	}()
 
-	balance.InitGlobalBalancerFactory(suite.taskScheduler, suite.nodeMgr, suite.dist, suite.meta, suite.targetMgr)
+	balance.InitGlobalBalancerFactory(suite.taskScheduler, suite.nodeMgr, suite.dist, suite.targetMgr, suite.meta)
 
 	for _, nodeID := range []int64{1, 2, 11} {
 		suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
@@ -804,7 +804,8 @@ func (suite *OpsServiceSuite) TestTransferSegmentToSQN() {
 	})
 
 	suite.taskScheduler.ExpectedCalls = nil
-	suite.taskScheduler.EXPECT().GetSegmentTaskDelta(mock.Anything, mock.Anything).Return(0).Maybe()
+	suite.taskScheduler.EXPECT().GetSegmentTaskDeltaSnapshot(mock.Anything, mock.Anything).
+		Return(task.NewSegmentTaskDeltaSnapshot(nil, nil)).Maybe()
 	suite.taskScheduler.EXPECT().GetChannelTaskDelta(mock.Anything, mock.Anything).Return(0).Maybe()
 	suite.taskScheduler.EXPECT().Add(mock.Anything).RunAndReturn(func(t task.Task) error {
 		actions := t.Actions()

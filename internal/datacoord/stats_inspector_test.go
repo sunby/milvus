@@ -172,7 +172,6 @@ func (s *statsInspectorSuite) SetupTest() {
 					MaxRowNum:    2000,
 					Level:        2,
 				},
-				channel2Segments: map[string]map[UniqueID]*SegmentInfo{},
 			},
 			30: {
 				SegmentInfo: &datapb.SegmentInfo{
@@ -232,7 +231,8 @@ func (s *statsInspectorSuite) putExternalSegment(segmentID UniqueID, sorted bool
 			StorageVersion: storageVersion,
 			ManifestPath:   manifestPath,
 		},
-	})
+	}, 0)
+
 }
 
 func (s *statsInspectorSuite) putExternalStatsTask(taskID, segmentID UniqueID, subJobType indexpb.StatsSubJob) {
@@ -612,10 +612,7 @@ func (s *statsInspectorSuite) TestTriggerTextStatsTaskExternalCollection() {
 			Level:         2,
 		},
 	}
-	s.mt.segments.segments[segmentID] = seg
-	s.mt.segments.secondaryIndexes.coll2Segments[2] = map[UniqueID]*SegmentInfo{
-		segmentID: seg,
-	}
+	s.mt.segments.SetSegment(segmentID, seg, 0)
 
 	s.inspector.triggerTextStatsTask()
 

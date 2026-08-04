@@ -2438,7 +2438,7 @@ func TestServer_DropSegmentsByTime(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("watch channel checkpoint failed", func(t *testing.T) {
+	t.Run("does not wait for legacy channel checkpoint", func(t *testing.T) {
 		s := &Server{}
 		s.stateCode.Store(commonpb.StateCode_Healthy)
 
@@ -2446,12 +2446,11 @@ func TestServer_DropSegmentsByTime(t *testing.T) {
 		assert.NoError(t, err)
 		s.meta = meta
 
-		// WatchChannelCheckpoint will wait indefinitely, so we use a context with timeout
 		ctxWithTimeout, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 		defer cancel()
 
 		err = s.DropSegmentsByTime(ctxWithTimeout, collectionID, map[string]uint64{channelName: flushTs})
-		assert.Error(t, err)
+		assert.NoError(t, err)
 	})
 
 	t.Run("success - drop segments", func(t *testing.T) {
@@ -2461,15 +2460,6 @@ func TestServer_DropSegmentsByTime(t *testing.T) {
 		meta, err := newMemoryMeta(t)
 		assert.NoError(t, err)
 		s.meta = meta
-
-		// Set channel checkpoint to satisfy WatchChannelCheckpoint
-		pos := &msgpb.MsgPosition{
-			ChannelName: channelName,
-			MsgID:       []byte{0, 0, 0, 0, 0, 0, 0, 0},
-			Timestamp:   flushTs,
-		}
-		err = meta.UpdateChannelCheckpoint(ctx, channelName, pos)
-		assert.NoError(t, err)
 
 		// Add segments to drop (timestamp <= flushTs)
 		seg1 := &SegmentInfo{
@@ -5154,7 +5144,7 @@ func TestServer_BatchUpdateManifest_Callback(t *testing.T) {
 
 		server := &Server{
 			ctx:  ctx,
-			meta: &meta{segments: NewSegmentsInfo()},
+			meta: &meta{segments: NewCachedSegmentsInfo()},
 		}
 		server.stateCode.Store(commonpb.StateCode_Healthy)
 		RegisterDDLCallbacks(server)
@@ -5190,7 +5180,7 @@ func TestServer_BatchUpdateManifest_Callback(t *testing.T) {
 
 		server := &Server{
 			ctx:  ctx,
-			meta: &meta{segments: NewSegmentsInfo()},
+			meta: &meta{segments: NewCachedSegmentsInfo()},
 		}
 		server.stateCode.Store(commonpb.StateCode_Healthy)
 		RegisterDDLCallbacks(server)
@@ -5228,7 +5218,7 @@ func TestServer_BatchUpdateManifest_Callback(t *testing.T) {
 
 		server := &Server{
 			ctx:  ctx,
-			meta: &meta{segments: NewSegmentsInfo()},
+			meta: &meta{segments: NewCachedSegmentsInfo()},
 		}
 		server.stateCode.Store(commonpb.StateCode_Healthy)
 		RegisterDDLCallbacks(server)
@@ -5263,15 +5253,15 @@ func TestServer_BatchUpdateManifest_Callback(t *testing.T) {
 
 		var capturedOps int
 		mockUpdate := mockey.Mock((*meta).UpdateSegmentsInfo).To(
-			func(m *meta, ctx context.Context, operators ...UpdateOperator) error {
-				capturedOps = len(operators)
+			func(m *meta, ctx context.Context, mutations map[int64][]MutateFunc, newSegments ...*datapb.SegmentInfo) error {
+				capturedOps = len(mutations) + len(newSegments)
 				return nil
 			}).Build()
 		defer mockUpdate.UnPatch()
 
 		server := &Server{
 			ctx:  ctx,
-			meta: &meta{segments: NewSegmentsInfo()},
+			meta: &meta{segments: NewCachedSegmentsInfo()},
 		}
 		server.stateCode.Store(commonpb.StateCode_Healthy)
 		RegisterDDLCallbacks(server)
@@ -5317,15 +5307,15 @@ func TestServer_BatchUpdateManifest_Callback(t *testing.T) {
 
 		var capturedOps int
 		mockUpdate := mockey.Mock((*meta).UpdateSegmentsInfo).To(
-			func(m *meta, ctx context.Context, operators ...UpdateOperator) error {
-				capturedOps = len(operators)
+			func(m *meta, ctx context.Context, mutations map[int64][]MutateFunc, newSegments ...*datapb.SegmentInfo) error {
+				capturedOps = len(mutations) + len(newSegments)
 				return nil
 			}).Build()
 		defer mockUpdate.UnPatch()
 
 		server := &Server{
 			ctx:  ctx,
-			meta: &meta{segments: NewSegmentsInfo()},
+			meta: &meta{segments: NewCachedSegmentsInfo()},
 		}
 		server.stateCode.Store(commonpb.StateCode_Healthy)
 		RegisterDDLCallbacks(server)
@@ -6267,6 +6257,9 @@ func TestHandleCommitVchannelRPC(t *testing.T) {
 	ctx := context.Background()
 
 	importMetaMock := NewMockImportMeta(t)
+	importMetaMock.EXPECT().GetJob(mock.Anything, int64(3001)).Return(&importJob{
+		ImportJob: &datapb.ImportJob{JobID: 3001, CollectionID: 100},
+	})
 	importMetaMock.EXPECT().HandleCommitVchannel(mock.Anything, int64(3001), "vchan-0", mock.AnythingOfType("func() error")).
 		RunAndReturn(func(ctx context.Context, jobID int64, vchannel string, callback func() error) error {
 			// Execute the callback to verify it works correctly.
@@ -6317,7 +6310,7 @@ func TestHandleCommitVchannelRPC_StoresCommitTimestamp(t *testing.T) {
 		Return(segIDs).Build()
 	defer getSegIDsMock.UnPatch()
 
-	segments := NewSegmentsInfo()
+	segments := NewCachedSegmentsInfo()
 	for _, segID := range segIDs {
 		segments.SetSegment(segID, &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
 			ID:            segID,
@@ -6333,15 +6326,13 @@ func TestHandleCommitVchannelRPC_StoresCommitTimestamp(t *testing.T) {
 					TimestampTo: 100,
 				}},
 			}},
-		}})
+		}}, 0)
+
 	}
 
 	server := &Server{
 		importMeta: importMetaMock,
-		meta: &meta{
-			catalog:  &datacoordkv.Catalog{MetaKv: NewMetaMemoryKV()},
-			segments: segments,
-		},
+		meta:       newTestMetaWithSegments(t, segments, nil),
 	}
 	server.stateCode.Store(commonpb.StateCode_Healthy)
 
@@ -6375,7 +6366,7 @@ func TestHandleCommitVchannelRPC_RejectsCommitTimestampBelowBinlogTimestamp(t *t
 		Return(segIDs).Build()
 	defer getSegIDsMock.UnPatch()
 
-	segments := NewSegmentsInfo()
+	segments := NewCachedSegmentsInfo()
 	segments.SetSegment(10, &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
 		ID:            10,
 		CollectionID:  100,
@@ -6390,15 +6381,17 @@ func TestHandleCommitVchannelRPC_RejectsCommitTimestampBelowBinlogTimestamp(t *t
 				TimestampTo: 500,
 			}},
 		}},
-	}})
+	}}, 0)
 
 	server := &Server{
 		importMeta: importMetaMock,
 		meta: &meta{
-			catalog:  &datacoordkv.Catalog{MetaKv: NewMetaMemoryKV()},
-			segments: segments,
+			catalog:        &datacoordkv.Catalog{MetaKv: NewMetaMemoryKV()},
+			segments:       segments,
+			segmentPersist: newTestSegmentPersist(),
 		},
 	}
+	seedTestSegmentPersist(t, server.meta)
 	server.stateCode.Store(commonpb.StateCode_Healthy)
 
 	resp, err := server.HandleCommitVchannel(ctx, &datapb.HandleCommitVchannelRequest{
@@ -6539,7 +6532,7 @@ func TestHandleCommitVchannelRPC_V3SegmentIsNotFencedYet(t *testing.T) {
 		Return(segIDs).Build()
 	defer getSegIDsMock.UnPatch()
 
-	segments := NewSegmentsInfo()
+	segments := NewCachedSegmentsInfo()
 	// Exactly the shape a reloaded V3 import segment has: a manifest, no binlog
 	// arrays, and Stats carrying the row timestamps that did survive the restart.
 	segments.SetSegment(11, &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
@@ -6551,15 +6544,17 @@ func TestHandleCommitVchannelRPC_V3SegmentIsNotFencedYet(t *testing.T) {
 		IsImporting:   true,
 		ManifestPath:  "files/insert_log/100/10/11/manifest",
 		Stats:         &datapb.Statistics{TimestampTo: 500},
-	}})
+	}}, 0)
 
 	server := &Server{
 		importMeta: importMetaMock,
 		meta: &meta{
-			catalog:  &datacoordkv.Catalog{MetaKv: NewMetaMemoryKV()},
-			segments: segments,
+			catalog:        &datacoordkv.Catalog{MetaKv: NewMetaMemoryKV()},
+			segments:       segments,
+			segmentPersist: newTestSegmentPersist(),
 		},
 	}
+	seedTestSegmentPersist(t, server.meta)
 	server.stateCode.Store(commonpb.StateCode_Healthy)
 
 	resp, err := server.HandleCommitVchannel(ctx, &datapb.HandleCommitVchannelRequest{

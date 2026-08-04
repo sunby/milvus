@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"go.opentelemetry.io/otel"
 
@@ -34,7 +35,9 @@ func (it *insertTask) Execute(ctx context.Context) error {
 	tr := timerecord.NewTimeRecorder(fmt.Sprintf("proxy execute insert streaming %d", it.ID()))
 
 	collectionName := it.insertMsg.CollectionName
+	stageStart := time.Now()
 	collID, err := it.getMetaCache().GetCollectionID(it.ctx, it.insertMsg.GetDbName(), collectionName)
+	observeProxyInsertStage(proxyInsertStageExecuteGetCollectionID, stageStart, err)
 	if err != nil {
 		mlog.Warn(ctx, "fail to get collection id", mlog.Err(err))
 		return err
@@ -42,7 +45,9 @@ func (it *insertTask) Execute(ctx context.Context) error {
 	it.insertMsg.CollectionID = collID
 
 	getCacheDur := tr.RecordSpan()
+	stageStart = time.Now()
 	channelNames, err := it.chMgr.GetVChannels(collID)
+	observeProxyInsertStage(proxyInsertStageExecuteGetVChannels, stageStart, err)
 	if err != nil {
 		mlog.Warn(ctx, "get vChannels failed", mlog.FieldCollectionID(collID), mlog.Err(err))
 		it.result.Status = merr.Status(err)
@@ -64,23 +69,28 @@ func (it *insertTask) Execute(ctx context.Context) error {
 
 	// start to repack insert data
 	var msgs []message.MutableMessage
+	stageStart = time.Now()
 	if it.partitionKeys == nil {
 		msgs, err = repackInsertDataForStreamingService(it.TraceCtx(), it.getMetaCache(), channelNames, it.insertMsg, it.result, ez, it.schemaVersion, nil)
 	} else {
 		msgs, err = repackInsertDataWithPartitionKeyForStreamingService(it.TraceCtx(), it.getMetaCache(), channelNames, it.insertMsg, it.result, it.partitionKeys, ez, it.schema, it.schemaVersion, nil)
 	}
+	observeProxyInsertStage(proxyInsertStageExecuteRepack, stageStart, err)
 	if err != nil {
 		mlog.Warn(ctx, "assign segmentID and repack insert data failed", mlog.Err(err))
 		it.result.Status = merr.Status(err)
 		return err
 	}
+	stageStart = time.Now()
 	resp := streaming.WAL().AppendMessages(ctx, msgs...)
-	if err := resp.UnwrapFirstError(); err != nil {
-		mlog.Warn(ctx, "append messages to wal failed", mlog.Err(err))
-		if status.AsStreamingError(err).IsSchemaVersionMismatch() {
+	appendErr := resp.UnwrapFirstError()
+	observeProxyInsertStage(proxyInsertStageExecuteWALAppend, stageStart, appendErr)
+	if appendErr != nil {
+		mlog.Warn(ctx, "append messages to wal failed", mlog.Err(appendErr))
+		if status.AsStreamingError(appendErr).IsSchemaVersionMismatch() {
 			it.result.Status = merr.Status(merr.ErrCollectionSchemaMismatch)
 		} else {
-			it.result.Status = merr.Status(err)
+			it.result.Status = merr.Status(appendErr)
 		}
 	}
 	// Update result.Timestamp for session consistency.

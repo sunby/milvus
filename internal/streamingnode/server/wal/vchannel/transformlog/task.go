@@ -3,7 +3,6 @@ package transformlog
 import (
 	"context"
 
-	"github.com/cockroachdb/errors"
 	"go.uber.org/atomic"
 
 	"github.com/milvus-io/milvus/internal/streamingnode/server/wal/moduleapi"
@@ -44,7 +43,7 @@ func (t *transformTaskBase) execute(ctx context.Context, ready bool, fn func(con
 		t.done.Store(true)
 		return nil
 	}
-	return errors.Mark(err, nodescheduler.ErrDelay)
+	return nodescheduler.MarkDelay(err)
 }
 
 type transformFlushTask struct {

@@ -447,8 +447,6 @@ func (s *CopySegmentCheckerSuite) TestCheckCopyingJob_AllTasksCompleted() {
 	// One call for AddJob, one for update progress, one for finishJob
 	s.catalog.EXPECT().SaveCopySegmentJob(mock.Anything, mock.Anything).Return(nil).Times(3)
 	s.catalog.EXPECT().SaveCopySegmentTask(mock.Anything, mock.Anything).Return(nil)
-	s.catalog.EXPECT().AddSegment(mock.Anything, mock.Anything).Return(nil)
-	s.catalog.EXPECT().AlterSegments(mock.Anything, mock.Anything).Return(nil)
 
 	// Create segments
 	seg1 := NewSegmentInfo(&datapb.SegmentInfo{
@@ -781,8 +779,6 @@ func (s *CopySegmentCheckerSuite) TestClose() {
 func (s *CopySegmentCheckerSuite) TestFinishJob_UpdateSegmentStates() {
 	s.catalog.EXPECT().SaveCopySegmentJob(mock.Anything, mock.Anything).Return(nil).Times(2)
 	s.catalog.EXPECT().SaveCopySegmentTask(mock.Anything, mock.Anything).Return(nil)
-	s.catalog.EXPECT().AddSegment(mock.Anything, mock.Anything).Return(nil)
-	s.catalog.EXPECT().AlterSegments(mock.Anything, mock.Anything).Return(nil)
 
 	// Create target segments in Importing state
 	seg1 := NewSegmentInfo(&datapb.SegmentInfo{
@@ -1068,9 +1064,6 @@ func (s *CopySegmentCheckerSuite) TestFinishJob_FlushFailure_FailsJob() {
 	// Setup mocks
 	s.catalog.EXPECT().SaveCopySegmentJob(mock.Anything, mock.Anything).Return(nil)
 	s.catalog.EXPECT().SaveCopySegmentTask(mock.Anything, mock.Anything).Return(nil).Maybe()
-	s.catalog.EXPECT().AddSegment(mock.Anything, mock.Anything).Return(nil).Maybe()
-	// AlterSegments returns error to simulate flush failure
-	s.catalog.EXPECT().AlterSegments(mock.Anything, mock.Anything).Return(errors.New("etcd unavailable"))
 
 	// Setup: Create job in Executing state
 	job := &copySegmentJob{
@@ -1098,7 +1091,8 @@ func (s *CopySegmentCheckerSuite) TestFinishJob_FlushFailure_FailsJob() {
 			InsertChannel: "ch1",
 		},
 	}
-	s.meta.AddSegment(context.TODO(), segment)
+	s.Require().NoError(s.meta.AddSegment(context.TODO(), segment))
+	s.meta.segmentPersist = &failingCommitSegmentPersist{base: s.meta.segmentPersist, err: errors.New("etcd unavailable")}
 
 	// Create a completed task
 	task := &copySegmentTask{
