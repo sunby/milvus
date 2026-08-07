@@ -192,6 +192,7 @@ func (s *mixCoordImpl) initInternal() error {
 
 	// Create DC server with MetaStore injected via constructor option.
 	s.datacoordServer = datacoord.CreateServer(s.ctx, s.factory, datacoord.WithMetaStore(s.metaStore), datacoord.WithCatalog(catalog))
+	s.datacoordServer.SetQueryViewLoadInfoNotifier(s.queryCoordServer)
 	s.datacoordServer.SetDataViewCollectionRecoveryValidator(s.rootcoordServer.ValidateDataViewCollectionForRecovery)
 	s.datacoordServer.SetSession(s.session)
 	s.datacoordServer.SetAddress(s.address)
@@ -1651,4 +1652,6 @@ func (s *mixCoordImpl) GetStreamingNodeQueryViewResources(ctx context.Context, r
 	return s.datacoordServer.GetStreamingNodeQueryViewResources(ctx, req)
 }
 
-func (s *mixCoordImpl) DataViewProvider() balancer.DataViewProvider { return s.datacoordServer.DataViewProvider() }
+func (s *mixCoordImpl) DataViewProvider() balancer.DataViewProvider {
+	return s.datacoordServer.DataViewProvider()
+}
