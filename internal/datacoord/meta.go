@@ -34,7 +34,6 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/exp/maps"
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/time/rate"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
@@ -51,7 +50,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/rootcoordpb"
-	"github.com/milvus-io/milvus/pkg/v3/util/conc"
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/lock"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
@@ -238,37 +236,42 @@ func segmentMetricFormatLabel(segment *SegmentInfo) string {
 		return segmentMetricFormatUnknown
 	}
 
-	formats := make(map[string]struct{})
+	format := ""
 	for _, fieldBinlog := range segment.GetBinlogs() {
-		format := strings.TrimSpace(fieldBinlog.GetFormat())
-		if format == "" {
+		fieldFormat := strings.TrimSpace(fieldBinlog.GetFormat())
+		if fieldFormat == "" {
 			continue
 		}
-		formats[format] = struct{}{}
+		if format == "" {
+			format = fieldFormat
+			continue
+		}
+		if format != fieldFormat {
+			return segmentMetricFormatMixed
+		}
 	}
-	if len(formats) == 0 {
+	if format == "" {
 		if segment.GetStorageVersion() < storage.StorageV2 {
 			return segmentMetricFormatLegacy
 		}
 		return segmentMetricFormatUnknown
 	}
-	if len(formats) > 1 {
-		return segmentMetricFormatMixed
-	}
-	for format := range formats {
-		return format
-	}
-	return segmentMetricFormatUnknown
+	return format
 }
 
-func segmentMetricLabelValues(segment *SegmentInfo) []string {
-	return []string{
+func segmentMetricLabelKey(segment *SegmentInfo) [5]string {
+	return [5]string{
 		segment.GetState().String(),
 		segment.GetLevel().String(),
 		getSortStatus(segment.GetIsSorted()),
 		fmt.Sprint(segment.GetStorageVersion()),
 		segmentMetricFormatLabel(segment),
 	}
+}
+
+func segmentMetricLabelValues(segment *SegmentInfo) []string {
+	labels := segmentMetricLabelKey(segment)
+	return labels[:]
 }
 
 // IsExternal returns true when the collection schema references an external source or spec.
@@ -324,18 +327,8 @@ func (m *meta) segmentKey(collectionID, partitionID, segmentID int64) string {
 	return m.joinMetaRootPath(segmentKey(collectionID, partitionID, segmentID))
 }
 
-func (m *meta) segmentCollectionPrefix(collectionID int64) string {
-	return m.joinMetaRootPath(fmt.Sprintf("%s%d/", segmentMetaPrefix, collectionID))
-}
-
-func (m *meta) segmentPartitionPrefix(collectionID, partitionID int64) string {
-	return m.joinMetaRootPath(fmt.Sprintf("%s%d/%d/", segmentMetaPrefix, collectionID, partitionID))
-}
-
-type partitionScanTarget struct {
-	collectionID    int64
-	partitionID     int64
-	partitionScoped bool
+func (m *meta) segmentPrefix() string {
+	return m.joinMetaRootPath(segmentMetaPrefix)
 }
 
 const (
@@ -343,118 +336,11 @@ const (
 	segmentCacheRecoveryProgressLogInterval = 100000
 )
 
-func collectionScanTargets(collectionIDs []int64) []partitionScanTarget {
-	targets := make([]partitionScanTarget, 0, len(collectionIDs))
-	for _, collectionID := range collectionIDs {
-		targets = append(targets, partitionScanTarget{collectionID: collectionID})
-	}
-	return targets
-}
-
-func buildPartitionScanTargets(ctx context.Context, broker broker.Broker, collectionIDs []int64) []partitionScanTarget {
-	if len(collectionIDs) == 0 {
-		return nil
-	}
-	if broker == nil {
-		mlog.Info(ctx, "datacoord partition scan target recovery skipped",
-			mlog.Int("numCollections", len(collectionIDs)),
-			mlog.String("reason", "broker is nil"))
-		return collectionScanTargets(collectionIDs)
-	}
-
-	recoveryStart := time.Now()
-	totalCollections := int64(len(collectionIDs))
-	mlog.Info(ctx, "datacoord partition scan target recovery started",
-		mlog.Int64("totalCollections", totalCollections),
-		mlog.Int("readConcurrency", paramtable.Get().MetaStoreCfg.ReadConcurrency.GetAsInt()))
-
-	pool := conc.NewPool[any](paramtable.Get().MetaStoreCfg.ReadConcurrency.GetAsInt())
-	defer pool.Release()
-
-	partitionResults := make([][]int64, len(collectionIDs))
-	futures := make([]*conc.Future[any], 0, len(collectionIDs))
-	var completedCollections atomic.Int64
-	var fallbackCollections atomic.Int64
-	var totalPartitions atomic.Int64
-	var totalRPCDurationNanos atomic.Int64
-	for i, collectionID := range collectionIDs {
-		i := i
-		collectionID := collectionID
-		futures = append(futures, pool.Submit(func() (any, error) {
-			rpcStart := time.Now()
-			partitionIDs, err := broker.ShowPartitionsInternal(ctx, collectionID)
-			totalRPCDurationNanos.Add(int64(time.Since(rpcStart)))
-			if err != nil {
-				fallbackCollections.Add(1)
-				mlog.RatedWarn(ctx, rate.Limit(1),
-					"failed to show partitions when preparing meta scan targets, fallback to collection scan",
-					mlog.FieldCollectionID(collectionID),
-					mlog.Err(err))
-			} else {
-				partitionResults[i] = partitionIDs
-				totalPartitions.Add(int64(len(partitionIDs)))
-			}
-
-			completed := completedCollections.Add(1)
-			if completed%collectionRecoveryProgressLogInterval == 0 && completed < totalCollections {
-				averageRPCDuration := time.Duration(0)
-				if completed > 0 {
-					averageRPCDuration = time.Duration(totalRPCDurationNanos.Load() / completed)
-				}
-				mlog.Info(ctx, "datacoord partition scan target recovery progress",
-					mlog.Int64("completedCollections", completed),
-					mlog.Int64("totalCollections", totalCollections),
-					mlog.Int64("numPartitions", totalPartitions.Load()),
-					mlog.Int64("fallbackCollections", fallbackCollections.Load()),
-					mlog.Duration("averageRPCDuration", averageRPCDuration),
-					mlog.Duration("duration", time.Since(recoveryStart)))
-			}
-			return nil, nil
-		}))
-	}
-	if err := conc.AwaitAll(futures...); err != nil {
-		mlog.Warn(ctx, "failed to prepare meta scan targets, fallback to collection scan", zap.Error(err))
-		return collectionScanTargets(collectionIDs)
-	}
-
-	targets := make([]partitionScanTarget, 0, len(collectionIDs))
-	partitionScopedTargets := 0
-	for i, collectionID := range collectionIDs {
-		partitionIDs := partitionResults[i]
-		if len(partitionIDs) == 0 {
-			targets = append(targets, partitionScanTarget{collectionID: collectionID})
-			continue
-		}
-		for _, partitionID := range partitionIDs {
-			targets = append(targets, partitionScanTarget{
-				collectionID:    collectionID,
-				partitionID:     partitionID,
-				partitionScoped: true,
-			})
-			partitionScopedTargets++
-		}
-	}
-	averageRPCDuration := time.Duration(0)
-	if totalCollections > 0 {
-		averageRPCDuration = time.Duration(totalRPCDurationNanos.Load() / totalCollections)
-	}
-	mlog.Info(ctx, "datacoord partition scan target recovery done",
-		mlog.Int64("numCollections", totalCollections),
-		mlog.Int64("numPartitions", totalPartitions.Load()),
-		mlog.Int("numScanTargets", len(targets)),
-		mlog.Int("numPartitionScopedTargets", partitionScopedTargets),
-		mlog.Int64("fallbackCollections", fallbackCollections.Load()),
-		mlog.Duration("cumulativeRPCDuration", time.Duration(totalRPCDurationNanos.Load())),
-		mlog.Duration("averageRPCDuration", averageRPCDuration),
-		mlog.Duration("duration", time.Since(recoveryStart)))
-	return targets
-}
-
 func newMeta(ctx context.Context, catalog metastore.DataCoordCatalog, chunkManager storage.ChunkManager, broker broker.Broker, segmentPersist OptimisticTxnPersist[string, *datapb.SegmentInfo], metaRootPaths ...string) (*meta, error) {
 	metaRecoveryStart := time.Now()
 	mlog.Info(ctx, "datacoord meta recovery started")
 
-	// Fetch collection IDs first so both reloadFromKV and indexMeta can use them for per-collection loading.
+	// Collection IDs are retained for DataView repair and collection cache recovery.
 	collectionIDRecoveryStart := time.Now()
 	mlog.Info(ctx, "datacoord collection ID recovery started")
 	collectionIDs, err := showCollectionIDs(ctx, broker)
@@ -478,8 +364,7 @@ func newMeta(ctx context.Context, catalog metastore.DataCoordCatalog, chunkManag
 		spm  *snapshotMeta
 	)
 
-	// Construct meta struct first so reloadFromKV can run in parallel with sub-meta loading.
-	// reloadFromKV uses m.catalog/m.segments/m.channelCPs which are independent of sub-metas.
+	// Construct meta first so segment recovery can run in parallel with sub-meta loading.
 	metaRootPath := ""
 	if len(metaRootPaths) > 0 {
 		metaRootPath = metaRootPaths[0]
@@ -500,22 +385,12 @@ func newMeta(ctx context.Context, catalog metastore.DataCoordCatalog, chunkManag
 		resourceLock:           lock.RWMutex{},
 	}
 
-	scanTargetRecoveryStart := time.Now()
-	scanTargets := buildPartitionScanTargets(ctx, broker, collectionIDs)
-	mlog.Info(ctx, "datacoord meta scan targets prepared",
-		mlog.Int("numCollections", len(collectionIDs)),
-		mlog.Int("numScanTargets", len(scanTargets)),
-		mlog.Int("numPartitionTargets", lo.CountBy(scanTargets, func(target partitionScanTarget) bool {
-			return target.partitionScoped
-		})),
-		mlog.Duration("duration", time.Since(scanTargetRecoveryStart)))
-
 	g, _ := errgroup.WithContext(ctx)
 	parallelRecoveryStart := time.Now()
 
 	g.Go(func() error {
 		var err error
-		im, err = newIndexMeta(ctx, catalog, scanTargets)
+		im, err = newIndexMeta(ctx, catalog)
 		return err
 	})
 
@@ -555,10 +430,8 @@ func newMeta(ctx context.Context, catalog metastore.DataCoordCatalog, chunkManag
 		return err
 	})
 
-	// reloadFromKV (ListSegments, ListChannelCheckpoint) runs in parallel with sub-meta loading.
-	// It only uses mt.catalog/mt.segments/mt.channelCPs, which are independent of sub-metas.
 	g.Go(func() error {
-		return mt.reloadFromKV(ctx, collectionIDs, scanTargets)
+		return mt.reloadFromKV(ctx, collectionIDs)
 	})
 
 	if err := g.Wait(); err != nil {
@@ -585,111 +458,117 @@ func newMeta(ctx context.Context, catalog metastore.DataCoordCatalog, chunkManag
 	return mt, nil
 }
 
-const segmentScanProgressLogInterval = 10000
+type segmentRecoveryMetricAggregates struct {
+	segmentCounts            map[[5]string]int64
+	insertFileCountFrequency map[int]int64
+	statFileCountFrequency   map[int]int64
+	deleteFileCountFrequency map[int]int64
+	numStoredRows            int64
+}
 
-func (m *meta) segmentScanPrefix(target partitionScanTarget) string {
-	if target.partitionScoped {
-		return m.segmentPartitionPrefix(target.collectionID, target.partitionID)
+func newSegmentRecoveryMetricAggregates() *segmentRecoveryMetricAggregates {
+	return &segmentRecoveryMetricAggregates{
+		segmentCounts:            make(map[[5]string]int64),
+		insertFileCountFrequency: make(map[int]int64),
+		statFileCountFrequency:   make(map[int]int64),
+		deleteFileCountFrequency: make(map[int]int64),
 	}
-	return m.segmentCollectionPrefix(target.collectionID)
+}
+
+func (a *segmentRecoveryMetricAggregates) Add(info *SegmentInfo) {
+	a.segmentCounts[segmentMetricLabelKey(info)]++
+	if info.GetState() != commonpb.SegmentState_Flushed {
+		return
+	}
+
+	a.numStoredRows += info.GetNumOfRows()
+	insertFileCount := 0
+	for _, fieldBinlog := range info.GetBinlogs() {
+		insertFileCount += len(fieldBinlog.GetBinlogs())
+	}
+	a.insertFileCountFrequency[insertFileCount]++
+
+	statFileCount := 0
+	for _, fieldBinlog := range info.GetStatslogs() {
+		statFileCount += len(fieldBinlog.GetBinlogs())
+	}
+	a.statFileCountFrequency[statFileCount]++
+
+	deleteFileCount := 0
+	for _, fieldBinlog := range info.GetDeltalogs() {
+		deleteFileCount += len(fieldBinlog.GetBinlogs())
+	}
+	a.deleteFileCountFrequency[deleteFileCount]++
+}
+
+func (a *segmentRecoveryMetricAggregates) PublishSegmentCounts() {
+	metrics.DataCoordNumSegments.Reset()
+	for labels, count := range a.segmentCounts {
+		metrics.DataCoordNumSegments.WithLabelValues(labels[:]...).Add(float64(count))
+	}
+}
+
+func (a *segmentRecoveryMetricAggregates) ReplayFileHistogramsAsync() {
+	go func() {
+		for fileCount, frequency := range a.insertFileCountFrequency {
+			for range frequency {
+				metrics.FlushedSegmentFileNum.WithLabelValues(metrics.InsertFileLabel).Observe(float64(fileCount))
+			}
+		}
+		for fileCount, frequency := range a.statFileCountFrequency {
+			for range frequency {
+				metrics.FlushedSegmentFileNum.WithLabelValues(metrics.StatFileLabel).Observe(float64(fileCount))
+			}
+		}
+		for fileCount, frequency := range a.deleteFileCountFrequency {
+			for range frequency {
+				metrics.FlushedSegmentFileNum.WithLabelValues(metrics.DeleteFileLabel).Observe(float64(fileCount))
+			}
+		}
+	}()
 }
 
 // reloadFromKV loads meta from KV storage
-func (m *meta) reloadFromKV(ctx context.Context, collectionIDs []int64, scanTargets []partitionScanTarget) error {
+func (m *meta) reloadFromKV(ctx context.Context, collectionIDs []int64) error {
 	record := timerecord.NewTimeRecorder("datacoord")
-
-	pool := conc.NewPool[any](paramtable.Get().MetaStoreCfg.ReadConcurrency.GetAsInt())
-	defer pool.Release()
-	type scanResult struct {
-		segments []*datapb.SegmentInfo
-		versions []int64
-	}
-	totalScanTargets := int64(len(scanTargets))
-	mlog.Info(ctx, "datacoord segment scan targets prepared",
-		zap.Int("numCollections", len(collectionIDs)),
-		zap.Int64("numScanTargets", totalScanTargets),
-		zap.Int("readConcurrency", paramtable.Get().MetaStoreCfg.ReadConcurrency.GetAsInt()))
-
-	futures := make([]*conc.Future[any], 0, len(scanTargets))
-	scanResults := make([]scanResult, len(scanTargets))
 	scanStart := time.Now()
-	var completedScanTargets atomic.Int64
-	var scannedSegments atomic.Int64
-	for i, target := range scanTargets {
-		i := i
-		target := target
-		futures = append(futures, pool.Submit(func() (any, error) {
-			_, values, versions, err := m.segmentPersist.Scan(m.ctx, m.segmentScanPrefix(target))
-			if err != nil {
-				return nil, err
-			}
-			scanResults[i] = scanResult{segments: values, versions: versions}
-			scannedSegments.Add(int64(len(values)))
-			completed := completedScanTargets.Add(1)
-			if completed == totalScanTargets || completed%segmentScanProgressLogInterval == 0 {
-				mlog.Info(ctx, "datacoord segment scan progress",
-					zap.Int64("completedScanTargets", completed),
-					zap.Int64("totalScanTargets", totalScanTargets),
-					zap.Int64("numSegments", scannedSegments.Load()),
-					zap.Duration("duration", time.Since(scanStart)))
-			}
-			return nil, nil
-		}))
-	}
-	if err := conc.AwaitAll(futures...); err != nil {
+	prefix := m.segmentPrefix()
+	mlog.Info(ctx, "datacoord global segment catalog scan started",
+		mlog.Int("numCollections", len(collectionIDs)),
+		mlog.String("prefix", prefix))
+	_, segments, versions, err := m.segmentPersist.Scan(ctx, prefix)
+	if err != nil {
 		return err
 	}
-
-	mlog.Info(ctx, "datacoord segment catalog scan done",
-		mlog.Int64("numScanTargets", totalScanTargets),
-		mlog.Int64("numSegments", scannedSegments.Load()),
+	totalScannedSegments := int64(len(segments))
+	mlog.Info(ctx, "datacoord global segment catalog scan done",
+		mlog.Int64("numSegments", totalScannedSegments),
 		mlog.Duration("duration", time.Since(scanStart)))
 
-	segmentCacheBuildStart := time.Now()
-	metrics.DataCoordNumCollections.WithLabelValues().Set(0)
-	metrics.DataCoordNumSegments.Reset()
-	numStoredRows := int64(0)
-	numSegments := int(scannedSegments.Load())
-	recoveredSegments := 0
-	for _, result := range scanResults {
-		for j, segment := range result.segments {
-			info := NewSegmentInfo(segment)
-			m.segments.SetSegment(segment.ID, info, result.versions[j])
-			metrics.DataCoordNumSegments.WithLabelValues(segmentMetricLabelValues(info)...).Inc()
-			if segment.State == commonpb.SegmentState_Flushed {
-				numStoredRows += segment.NumOfRows
-
-				insertFileNum := 0
-				for _, fieldBinlog := range segment.GetBinlogs() {
-					insertFileNum += len(fieldBinlog.GetBinlogs())
-				}
-				metrics.FlushedSegmentFileNum.WithLabelValues(metrics.InsertFileLabel).Observe(float64(insertFileNum))
-
-				statFileNum := 0
-				for _, fieldBinlog := range segment.GetStatslogs() {
-					statFileNum += len(fieldBinlog.GetBinlogs())
-				}
-				metrics.FlushedSegmentFileNum.WithLabelValues(metrics.StatFileLabel).Observe(float64(statFileNum))
-
-				deleteFileNum := 0
-				for _, filedBinlog := range segment.GetDeltalogs() {
-					deleteFileNum += len(filedBinlog.GetBinlogs())
-				}
-				metrics.FlushedSegmentFileNum.WithLabelValues(metrics.DeleteFileLabel).Observe(float64(deleteFileNum))
-			}
-			recoveredSegments++
-			if recoveredSegments%segmentCacheRecoveryProgressLogInterval == 0 && recoveredSegments < numSegments {
-				mlog.Info(ctx, "datacoord segment cache rebuild progress",
-					mlog.Int("completedSegments", recoveredSegments),
-					mlog.Int("totalSegments", numSegments),
-					mlog.Duration("duration", time.Since(segmentCacheBuildStart)))
-			}
+	aggregates := newSegmentRecoveryMetricAggregates()
+	cacheBuildStart := time.Now()
+	var recoveredSegments int64
+	for i, segment := range segments {
+		info := NewSegmentInfo(segment)
+		m.segments.SetSegment(segment.GetID(), info, versions[i])
+		aggregates.Add(info)
+		recoveredSegments++
+		if recoveredSegments%segmentCacheRecoveryProgressLogInterval == 0 && recoveredSegments < totalScannedSegments {
+			mlog.Info(ctx, "datacoord segment cache rebuild progress",
+				mlog.Int64("completedSegments", recoveredSegments),
+				mlog.Int64("totalSegments", totalScannedSegments),
+				mlog.Duration("duration", time.Since(cacheBuildStart)))
 		}
 	}
-	mlog.Info(ctx, "datacoord segment cache rebuild done",
-		mlog.Int("numSegments", numSegments),
-		mlog.Int64("numStoredRows", numStoredRows),
-		mlog.Duration("duration", time.Since(segmentCacheBuildStart)))
+
+	mlog.Info(ctx, "datacoord segment catalog recovery done",
+		mlog.Int64("numScannedSegments", totalScannedSegments),
+		mlog.Int64("numRecoveredSegments", recoveredSegments),
+		mlog.Int64("numStoredRows", aggregates.numStoredRows),
+		mlog.Duration("duration", time.Since(scanStart)))
+	metrics.DataCoordNumCollections.WithLabelValues().Set(0)
+	aggregates.PublishSegmentCounts()
+	numSegments := int(recoveredSegments)
 
 	checkpointScanStart := time.Now()
 	mlog.Info(ctx, "datacoord channel checkpoint catalog scan started")
@@ -715,6 +594,7 @@ func (m *meta) reloadFromKV(ctx context.Context, collectionIDs []int64, scanTarg
 	mlog.Info(ctx, "datacoord channel checkpoint cache rebuild done",
 		mlog.Int("numChannelCheckpoints", len(channelCPs)),
 		mlog.Duration("duration", time.Since(checkpointCacheBuildStart)))
+	aggregates.ReplayFileHistogramsAsync()
 
 	mlog.Info(ctx, "DataCoord meta reloadFromKV done",
 		mlog.Int("numSegments", numSegments),

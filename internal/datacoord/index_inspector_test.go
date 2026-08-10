@@ -719,7 +719,7 @@ func TestIndexInspector_FunctionOutputSchemaVersionGate(t *testing.T) {
 				},
 			},
 		}
-		m.segments.SetSegment(segment.GetID(), segment)
+		m.segments.SetSegment(segment.GetID(), segment, 0)
 
 		alloc.EXPECT().AllocID(mock.Anything).Return(int64(12349), nil).Once()
 		catalog.EXPECT().CreateSegmentIndex(mock.Anything, mock.Anything).Return(nil).Once()
@@ -749,7 +749,7 @@ func TestIndexInspector_FunctionOutputSchemaVersionGate(t *testing.T) {
 				},
 			},
 		}
-		m.segments.SetSegment(segment.GetID(), segment)
+		m.segments.SetSegment(segment.GetID(), segment, 0)
 
 		err := inspector.createIndexesForSegment(ctx, segment)
 		assert.NoError(t, err)
@@ -775,7 +775,7 @@ func TestIndexInspector_FunctionOutputSchemaVersionGate(t *testing.T) {
 				},
 			},
 		}
-		m.segments.SetSegment(segment.GetID(), segment)
+		m.segments.SetSegment(segment.GetID(), segment, 0)
 
 		alloc.EXPECT().AllocID(mock.Anything).Return(int64(12350), nil).Once()
 		catalog.EXPECT().CreateSegmentIndex(mock.Anything, mock.Anything).Return(nil).Once()

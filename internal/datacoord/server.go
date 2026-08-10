@@ -644,7 +644,13 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 		}
 		dataViewRecoveryCh := make(chan dataViewRecoveryResult, 1)
 		go func() {
+			recoveryStart := time.Now()
+			mlog.Info(s.ctx, "datacoord DataView catalog recovery started")
 			manager, err := dataview.RecoverManager(s.ctx, catalog, dataViewStore)
+			if err == nil {
+				mlog.Info(s.ctx, "datacoord DataView catalog recovery done",
+					mlog.Duration("duration", time.Since(recoveryStart)))
+			}
 			dataViewRecoveryCh <- dataViewRecoveryResult{manager: manager, err: err}
 		}()
 		marshaler := &SegmentInfoMarshaler{}

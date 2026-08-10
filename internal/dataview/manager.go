@@ -144,11 +144,35 @@ type dataViewManager struct {
 	recoveredViews map[int64][]*viewpb.DataViewOfCollection
 }
 
-type dataViewRecoveryCatalog interface {
+type dataViewRecoveryReadCatalog interface {
 	ListDataViewsForRecovery(
 		ctx context.Context,
 		collectionIDs []int64,
 	) (map[int64][]*viewpb.DataViewOfCollection, error)
+}
+
+type dataViewRecoveryWriteCatalog interface {
+	SaveDataViewsForRecovery(ctx context.Context, dataViews []*viewpb.DataViewOfCollection) error
+}
+
+const dataViewRecoveryWriteBatchSize = 1024
+
+type dataViewRecoveryPlan struct {
+	state          *collectionDataViewState
+	latestResident *viewpb.DataViewOfCollection
+	latestVisible  *viewpb.DataViewOfCollection
+	toPersist      *viewpb.DataViewOfCollection
+}
+
+func (p *dataViewRecoveryPlan) commit() {
+	p.state.dropped = false
+	p.state.latestResident = p.latestResident
+	p.state.latestVisible = p.latestVisible
+	p.state.mu.Unlock()
+}
+
+func (p *dataViewRecoveryPlan) abort() {
+	p.state.mu.Unlock()
 }
 
 type Segment struct {
@@ -470,15 +494,19 @@ func (m *dataViewManager) OnDropCollection(ctx context.Context, collectionID int
 }
 
 func (m *dataViewManager) RepairCollection(ctx context.Context, collectionID int64) error {
+	state := m.getOrCreateState(collectionID)
+	state.mu.Lock()
 	persistedViews, ok := m.recoveredDataViews(collectionID)
-	if ok {
-		return m.repairCollectionWithDataViews(ctx, collectionID, persistedViews)
+	if !ok {
+		var err error
+		persistedViews, err = m.catalog.ListDataViews(ctx, collectionID)
+		if err != nil {
+			state.mu.Unlock()
+			return err
+		}
 	}
-	persistedViews, err := m.catalog.ListDataViews(ctx, collectionID)
-	if err != nil {
-		return err
-	}
-	return m.repairCollectionWithDataViews(ctx, collectionID, persistedViews)
+	plan := m.prepareCollectionRecoveryLocked(ctx, state, collectionID, persistedViews)
+	return m.persistCollectionRecovery(ctx, plan)
 }
 
 func (m *dataViewManager) RepairCollections(ctx context.Context, collectionIDs []int64) error {
@@ -502,16 +530,29 @@ func (m *dataViewManager) RecoverCollections(
 	m.mu.RLock()
 	recoveredAll := m.recoveredAll
 	m.mu.RUnlock()
+	recoveryWriteCatalog, batchWriteSupported := m.catalog.(dataViewRecoveryWriteCatalog)
 	if recoveredAll {
 		mlog.Info(ctx, "DataView recovery path selected",
 			mlog.String("selectedMode", "memory"),
 			mlog.Int("numCollections", len(collectionIDs)))
+		if batchWriteSupported {
+			return m.recoverCollectionBatches(
+				ctx,
+				recoveryWriteCatalog,
+				collectionIDs,
+				func(collectionID int64) []*viewpb.DataViewOfCollection {
+					dataViews, _ := m.recoveredDataViews(collectionID)
+					return dataViews
+				},
+				observe,
+			)
+		}
 		return m.recoverCollectionList(ctx, collectionIDs, observe, func(collectionID int64) error {
 			return m.RepairCollection(ctx, collectionID)
 		})
 	}
 
-	recoveryCatalog, batchSupported := m.catalog.(dataViewRecoveryCatalog)
+	recoveryCatalog, batchSupported := m.catalog.(dataViewRecoveryReadCatalog)
 	if !batchSupported {
 		mlog.Info(ctx, "DataView recovery path selected",
 			mlog.String("selectedMode", "point"),
@@ -542,9 +583,20 @@ func (m *dataViewManager) RecoverCollections(
 		mlog.Int("numDataViews", numDataViews),
 		mlog.Duration("duration", time.Since(scanStart)))
 
-	return m.recoverCollectionList(ctx, collectionIDs, observe, func(collectionID int64) error {
-		return m.repairCollectionWithDataViews(ctx, collectionID, dataViewsByCollection[collectionID])
-	})
+	if !batchWriteSupported {
+		return m.recoverCollectionList(ctx, collectionIDs, observe, func(collectionID int64) error {
+			return m.repairCollectionWithDataViews(ctx, collectionID, dataViewsByCollection[collectionID])
+		})
+	}
+	return m.recoverCollectionBatches(
+		ctx,
+		recoveryWriteCatalog,
+		collectionIDs,
+		func(collectionID int64) []*viewpb.DataViewOfCollection {
+			return dataViewsByCollection[collectionID]
+		},
+		observe,
+	)
 }
 
 func (m *dataViewManager) recoverCollectionList(
@@ -567,6 +619,87 @@ func (m *dataViewManager) recoverCollectionList(
 		}
 	}
 	return nil
+}
+
+func (m *dataViewManager) recoverCollectionBatches(
+	ctx context.Context,
+	catalog dataViewRecoveryWriteCatalog,
+	collectionIDs []int64,
+	dataViewsForCollection func(collectionID int64) []*viewpb.DataViewOfCollection,
+	observe func(index int, collectionID int64, duration time.Duration, err error),
+) error {
+	for batchStart := 0; batchStart < len(collectionIDs); batchStart += dataViewRecoveryWriteBatchSize {
+		batchEnd := min(batchStart+dataViewRecoveryWriteBatchSize, len(collectionIDs))
+		plans := make([]*dataViewRecoveryPlan, 0, batchEnd-batchStart)
+		prepareDurations := make([]time.Duration, 0, batchEnd-batchStart)
+		dataViewsToPersist := make([]*viewpb.DataViewOfCollection, 0, batchEnd-batchStart)
+		firstPersistOffset := -1
+
+		for index := batchStart; index < batchEnd; index++ {
+			if err := ctx.Err(); err != nil {
+				abortDataViewRecoveryPlans(plans)
+				return err
+			}
+
+			collectionID := collectionIDs[index]
+			start := time.Now()
+			plan := m.prepareCollectionRecovery(ctx, collectionID, dataViewsForCollection(collectionID))
+			plans = append(plans, plan)
+			prepareDurations = append(prepareDurations, time.Since(start))
+			if plan.toPersist != nil {
+				if firstPersistOffset < 0 {
+					firstPersistOffset = len(plans) - 1
+				}
+				dataViewsToPersist = append(dataViewsToPersist, plan.toPersist)
+			}
+		}
+
+		persistDuration := time.Duration(0)
+		if len(dataViewsToPersist) > 0 {
+			persistStart := time.Now()
+			err := catalog.SaveDataViewsForRecovery(ctx, dataViewsToPersist)
+			persistDuration = time.Since(persistStart)
+			if err != nil {
+				abortDataViewRecoveryPlans(plans)
+				if observe != nil {
+					failedIndex := batchStart + firstPersistOffset
+					observe(
+						failedIndex,
+						collectionIDs[failedIndex],
+						prepareDurations[firstPersistOffset]+persistDuration,
+						err,
+					)
+				}
+				return err
+			}
+		}
+
+		persistDurationShare := time.Duration(0)
+		if len(dataViewsToPersist) > 0 {
+			persistDurationShare = persistDuration / time.Duration(len(dataViewsToPersist))
+		}
+		for _, plan := range plans {
+			m.rememberRecoveredDataView(plan.toPersist)
+			plan.commit()
+		}
+		for offset, plan := range plans {
+			if observe != nil {
+				duration := prepareDurations[offset]
+				if plan.toPersist != nil {
+					duration += persistDurationShare
+				}
+				index := batchStart + offset
+				observe(index, collectionIDs[index], duration, nil)
+			}
+		}
+	}
+	return nil
+}
+
+func abortDataViewRecoveryPlans(plans []*dataViewRecoveryPlan) {
+	for _, plan := range plans {
+		plan.abort()
+	}
 }
 
 func (m *dataViewManager) recoverFromDataViews(dataViews []*viewpb.DataViewOfCollection) {
@@ -637,45 +770,75 @@ func (m *dataViewManager) recoverCollectionFromDataViews(collectionID int64, per
 }
 
 func (m *dataViewManager) repairCollectionWithDataViews(ctx context.Context, collectionID int64, persistedViews []*viewpb.DataViewOfCollection) error {
+	plan := m.prepareCollectionRecovery(ctx, collectionID, persistedViews)
+	return m.persistCollectionRecovery(ctx, plan)
+}
+
+func (m *dataViewManager) persistCollectionRecovery(ctx context.Context, plan *dataViewRecoveryPlan) error {
+	if plan.toPersist != nil {
+		if err := m.catalog.SaveDataView(ctx, plan.toPersist); err != nil {
+			plan.abort()
+			return err
+		}
+		m.rememberRecoveredDataView(plan.toPersist)
+	}
+	plan.commit()
+	return nil
+}
+
+func (m *dataViewManager) prepareCollectionRecovery(
+	ctx context.Context,
+	collectionID int64,
+	persistedViews []*viewpb.DataViewOfCollection,
+) *dataViewRecoveryPlan {
 	state := m.getOrCreateState(collectionID)
 	state.mu.Lock()
-	defer state.mu.Unlock()
-	state.dropped = false
+	return m.prepareCollectionRecoveryLocked(ctx, state, collectionID, persistedViews)
+}
+
+func (m *dataViewManager) prepareCollectionRecoveryLocked(
+	ctx context.Context,
+	state *collectionDataViewState,
+	collectionID int64,
+	persistedViews []*viewpb.DataViewOfCollection,
+) *dataViewRecoveryPlan {
+	plan := &dataViewRecoveryPlan{
+		state:          state,
+		latestResident: state.latestResident,
+		latestVisible:  state.latestVisible,
+	}
+
 	latestPersisted := latestDataView(persistedViews)
 	segments := m.segments.SelectSegments(ctx, collectionID)
 	pendingRetainedInputs := pendingRetainedCompactionInputs(segments)
 	residentExpected := buildDataViewFromSegments(collectionID, segments, true)
 	if isDataViewMembershipEqual(latestPersisted, residentExpected) {
-		state.latestResident = canonicalDataViewClone(latestPersisted)
-		state.latestVisible = m.latestVisiblePersistedView(ctx, persistedViews)
-		return nil
+		plan.latestResident = canonicalDataViewClone(latestPersisted)
+		plan.latestVisible = m.latestVisiblePersistedView(ctx, persistedViews)
+		return plan
 	}
 	expected := buildRecoverExpectedDataView(collectionID, latestPersisted, segments, pendingRetainedInputs)
 	pruneHistoricallyRemovedSegments(latestPersisted, expected, persistedViews)
 	if isDataViewMembershipEqual(latestPersisted, expected) {
-		state.latestResident = canonicalDataViewClone(latestPersisted)
-		state.latestVisible = m.latestVisiblePersistedView(ctx, persistedViews)
-		return nil
+		plan.latestResident = canonicalDataViewClone(latestPersisted)
+		plan.latestVisible = m.latestVisiblePersistedView(ctx, persistedViews)
+		return plan
 	}
 	if latestPersisted == nil && isDataViewEmpty(expected) {
-		return nil
+		return plan
 	}
 
 	advance := classifyRecoverAdvance(latestPersisted, expected, m.segments)
 	expected.DataVersion = nextDataVersion(latestPersisted, advance)
 	toPersist := cloneDataViewWithoutDeleteTimetick(expected)
-	if err := m.catalog.SaveDataView(ctx, toPersist); err != nil {
-		return err
-	}
-	m.rememberRecoveredDataView(toPersist)
-
-	state.latestResident = canonicalDataViewClone(toPersist)
-	if m.isDataViewVisibleFromBase(ctx, latestPersisted, state.latestResident, pendingRetainedInputs) {
-		state.latestVisible = m.withDeleteTimetick(ctx, state.latestResident)
+	plan.toPersist = toPersist
+	plan.latestResident = canonicalDataViewClone(toPersist)
+	if m.isDataViewVisibleFromBase(ctx, latestPersisted, plan.latestResident, pendingRetainedInputs) {
+		plan.latestVisible = m.withDeleteTimetick(ctx, plan.latestResident)
 	} else {
-		state.latestVisible = m.latestVisiblePersistedView(ctx, persistedViews)
+		plan.latestVisible = m.latestVisiblePersistedView(ctx, persistedViews)
 	}
-	return nil
+	return plan
 }
 
 func (m *dataViewManager) LatestVisibleDataView(ctx context.Context, collectionID int64) (*viewpb.DataViewOfCollection, error) {

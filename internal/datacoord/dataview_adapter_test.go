@@ -141,7 +141,7 @@ func TestDataViewSegmentStoreSelectSegmentsSkipsDroppedPartition(t *testing.T) {
 func TestDataViewSegmentStoreGetSegmentsMapsBatch(t *testing.T) {
 	m := &meta{
 		collections: typeutil.NewConcurrentMap[UniqueID, *collectionInfo](),
-		segments:    NewSegmentsInfo(),
+		segments:    NewCachedSegmentsInfo(),
 	}
 	first := NewSegmentInfo(&datapb.SegmentInfo{
 		ID:                            100,
@@ -162,8 +162,8 @@ func TestDataViewSegmentStoreGetSegmentsMapsBatch(t *testing.T) {
 		State:         commonpb.SegmentState_Flushed,
 		Level:         datapb.SegmentLevel_L1,
 	})
-	m.segments.SetSegment(100, first)
-	m.segments.SetSegment(101, second)
+	m.segments.SetSegment(100, first, 0)
+	m.segments.SetSegment(101, second, 0)
 
 	segments := (&dataViewSegmentStore{meta: m}).GetSegments(context.Background(), []int64{101, 404, 100})
 

@@ -4434,7 +4434,7 @@ func TestGarbageCollector_recycleDroppedSegments_V3(t *testing.T) {
 	// Both segments should be dropped from meta
 	assert.Nil(t, m.GetSegment(ctx, 2001))
 	assert.Nil(t, m.GetSegment(ctx, 2002))
-	_, persisted, _, err := m.segmentPersist.Scan(ctx, m.segmentScanPrefix(partitionScanTarget{collectionID: 100, partitionID: 10, partitionScoped: true}))
+	_, persisted, _, err := m.segmentPersist.Scan(ctx, m.joinMetaRootPath(segmentMetaPrefix+"100/10/"))
 	require.NoError(t, err)
 	assert.Empty(t, persisted)
 }

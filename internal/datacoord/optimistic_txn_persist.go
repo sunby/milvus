@@ -8,19 +8,20 @@ import (
 	"strings"
 	"time"
 
-	"go.uber.org/zap"
-
-	"github.com/milvus-io/milvus/pkg/v3/mlog"
-	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
-	"github.com/milvus-io/milvus/pkg/v3/util/retry"
 	tikverr "github.com/tikv/client-go/v2/error"
 	tikvkv "github.com/tikv/client-go/v2/kv"
 	"github.com/tikv/client-go/v2/txnkv"
 	"github.com/tikv/client-go/v2/txnkv/transaction"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 
+	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/retry"
 )
 
 var (
@@ -137,34 +138,28 @@ func (p *etcdPersist[K, V]) Txn(ctx context.Context) Txn[K, V] {
 }
 
 func (p *etcdPersist[K, V]) Scan(ctx context.Context, prefix K) ([]K, []V, []int64, error) {
-	const batchSize int64 = 10000
-	key := string(prefix)
-	end := clientv3.GetPrefixRangeEnd(key)
-
 	var ks []K
 	var vals []V
 	var vers []int64
-
-	for {
-		resp, err := p.cli.Get(ctx, key, clientv3.WithRange(end), clientv3.WithLimit(batchSize), clientv3.WithSerializable())
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		for _, kv := range resp.Kvs {
-			v, err := p.marshaler.Unmarshal(kv.Value)
+	err := etcdkv.WalkPrefix(
+		ctx,
+		p.cli,
+		string(prefix),
+		paramtable.Get().MetaStoreCfg.PaginationSize.GetAsInt(),
+		0,
+		func(keyValue *mvccpb.KeyValue) error {
+			value, err := p.marshaler.Unmarshal(keyValue.Value)
 			if err != nil {
-				return nil, nil, nil, err
+				return err
 			}
-			ks = append(ks, K(kv.Key))
-			vals = append(vals, v)
-			vers = append(vers, kv.ModRevision)
-		}
-		if !resp.More {
-			break
-		}
-		// Next batch starts after the last key
-		key = string(resp.Kvs[len(resp.Kvs)-1].Key) + "\x00"
-		mlog.Info(ctx, "etcdPersist.Scan next batch", zap.String("key", key))
+			ks = append(ks, K(keyValue.Key))
+			vals = append(vals, value)
+			vers = append(vers, keyValue.ModRevision)
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	return ks, vals, vers, nil
 }
