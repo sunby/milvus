@@ -66,6 +66,16 @@ func NewCatalog(MetaKv kv.MetaKv, chunkManagerRootPath string, metaRootpath stri
 }
 
 func (kc *Catalog) ListSegments(ctx context.Context, collectionID int64) ([]*datapb.SegmentInfo, error) {
+	return kc.listCollectionSegments(ctx, collectionID, false)
+}
+
+// ListAllSegments uses one scan per metadata family during coordinator recovery.
+// It retains the same legacy binlog assembly and path normalization as ListSegments.
+func (kc *Catalog) ListAllSegments(ctx context.Context) ([]*datapb.SegmentInfo, error) {
+	return kc.listCollectionSegments(ctx, 0, true)
+}
+
+func (kc *Catalog) listCollectionSegments(ctx context.Context, collectionID int64, global bool) ([]*datapb.SegmentInfo, error) {
 	group, _ := errgroup.WithContext(ctx)
 	segments := make([]*datapb.SegmentInfo, 0)
 	insertLogs := make(map[typeutil.UniqueID][]*datapb.FieldBinlog, 1)
@@ -75,7 +85,7 @@ func (kc *Catalog) ListSegments(ctx context.Context, collectionID int64) ([]*dat
 
 	executeFn := func(binlogType storage.BinlogType, result map[typeutil.UniqueID][]*datapb.FieldBinlog) {
 		group.Go(func() error {
-			ret, err := kc.listBinlogs(ctx, binlogType, collectionID)
+			ret, err := kc.listBinlogs(ctx, binlogType, collectionID, global)
 			if err != nil {
 				return err
 			}
@@ -91,7 +101,7 @@ func (kc *Catalog) ListSegments(ctx context.Context, collectionID int64) ([]*dat
 	executeFn(storage.StatsBinlog, statsLogs)
 	executeFn(storage.BM25Binlog, bm25Logs)
 	group.Go(func() error {
-		ret, err := kc.listSegments(ctx, collectionID)
+		ret, err := kc.listSegments(ctx, collectionID, global)
 		if err != nil {
 			return err
 		}
@@ -111,7 +121,7 @@ func (kc *Catalog) ListSegments(ctx context.Context, collectionID int64) ([]*dat
 	return segments, nil
 }
 
-func (kc *Catalog) listSegments(ctx context.Context, collectionID int64) ([]*datapb.SegmentInfo, error) {
+func (kc *Catalog) listSegments(ctx context.Context, collectionID int64, global ...bool) ([]*datapb.SegmentInfo, error) {
 	segments := make([]*datapb.SegmentInfo, 0)
 
 	applyFn := func(key []byte, value []byte) error {
@@ -148,7 +158,11 @@ func (kc *Catalog) listSegments(ctx context.Context, collectionID int64) ([]*dat
 		return nil
 	}
 
-	err := kc.MetaKv.WalkWithPrefix(ctx, buildCollectionPrefix(collectionID), kc.paginationSize, applyFn)
+	prefix := buildCollectionPrefix(collectionID)
+	if len(global) > 0 && global[0] {
+		prefix = SegmentPrefix + "/"
+	}
+	err := kc.MetaKv.WalkWithPrefix(ctx, prefix, kc.paginationSize, applyFn)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +187,7 @@ func (kc *Catalog) parseBinlogKey(key string) (int64, error) {
 	return segmentID, nil
 }
 
-func (kc *Catalog) listBinlogs(ctx context.Context, binlogType storage.BinlogType, collectionID int64) (map[typeutil.UniqueID][]*datapb.FieldBinlog, error) {
+func (kc *Catalog) listBinlogs(ctx context.Context, binlogType storage.BinlogType, collectionID int64, global ...bool) (map[typeutil.UniqueID][]*datapb.FieldBinlog, error) {
 	ret := make(map[typeutil.UniqueID][]*datapb.FieldBinlog)
 
 	var err error
@@ -192,6 +206,10 @@ func (kc *Catalog) listBinlogs(ctx context.Context, binlogType storage.BinlogTyp
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	if len(global) > 0 && global[0] {
+		logPathPrefix = strings.TrimSuffix(logPathPrefix, fmt.Sprintf("/%d", collectionID)) + "/"
 	}
 
 	applyFn := func(key []byte, value []byte) error {
@@ -778,6 +796,14 @@ func (kc *Catalog) CreateSegmentIndex(ctx context.Context, segIdx *model.Segment
 }
 
 func (kc *Catalog) ListSegmentIndexes(ctx context.Context, collectionID int64) ([]*model.SegmentIndex, error) {
+	return kc.listSegmentIndexesWithPrefix(ctx, buildSegmentIndexCollectionPrefix(collectionID))
+}
+
+func (kc *Catalog) ListAllSegmentIndexes(ctx context.Context) ([]*model.SegmentIndex, error) {
+	return kc.listSegmentIndexesWithPrefix(ctx, util.SegmentIndexPrefix+"/")
+}
+
+func (kc *Catalog) listSegmentIndexesWithPrefix(ctx context.Context, prefix string) ([]*model.SegmentIndex, error) {
 	segIndexes := make([]*model.SegmentIndex, 0)
 	applyFn := func(key []byte, value []byte) error {
 		segmentIndexInfo := &indexpb.SegmentIndex{}
@@ -791,7 +817,6 @@ func (kc *Catalog) ListSegmentIndexes(ctx context.Context, collectionID int64) (
 		return nil
 	}
 
-	prefix := buildSegmentIndexCollectionPrefix(collectionID)
 	err := kc.MetaKv.WalkWithPrefix(ctx, prefix, kc.paginationSize, applyFn)
 	if err != nil {
 		return nil, err

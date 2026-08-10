@@ -421,24 +421,44 @@ func newMeta(ctx context.Context, catalog metastore.DataCoordCatalog, chunkManag
 func (m *meta) reloadFromKV(ctx context.Context, collectionIDs []int64) error {
 	record := timerecord.NewTimeRecorder("datacoord")
 
-	pool := conc.NewPool[any](paramtable.Get().MetaStoreCfg.ReadConcurrency.GetAsInt())
-	defer pool.Release()
-	futures := make([]*conc.Future[any], 0, len(collectionIDs))
-	collectionSegments := make([][]*datapb.SegmentInfo, len(collectionIDs))
-	for i, collectionID := range collectionIDs {
-		i := i
-		collectionID := collectionID
-		futures = append(futures, pool.Submit(func() (any, error) {
-			segments, err := m.catalog.ListSegments(m.ctx, collectionID)
-			if err != nil {
-				return nil, err
+	var collectionSegments [][]*datapb.SegmentInfo
+	if catalog, ok := m.catalog.(interface {
+		ListAllSegments(context.Context) ([]*datapb.SegmentInfo, error)
+	}); ok {
+		allSegments, err := catalog.ListAllSegments(ctx)
+		if err != nil {
+			return err
+		}
+		requested := typeutil.NewSet(collectionIDs...)
+		selected := allSegments[:0]
+		for _, segment := range allSegments {
+			if requested.Contain(segment.GetCollectionID()) {
+				selected = append(selected, segment)
 			}
-			collectionSegments[i] = segments
-			return nil, nil
-		}))
-	}
-	if err := conc.AwaitAll(futures...); err != nil {
-		return err
+		}
+		clear(allSegments[len(selected):])
+		collectionSegments = [][]*datapb.SegmentInfo{selected}
+	} else {
+		collectionSegments = make([][]*datapb.SegmentInfo, len(collectionIDs))
+		pool := conc.NewPool[any](paramtable.Get().MetaStoreCfg.ReadConcurrency.GetAsInt())
+		defer pool.Release()
+		futures := make([]*conc.Future[any], 0, len(collectionIDs))
+		for i, collectionID := range collectionIDs {
+			i := i
+			collectionID := collectionID
+			futures = append(futures, pool.Submit(func() (any, error) {
+				segments, err := m.catalog.ListSegments(m.ctx, collectionID)
+				if err != nil {
+					return nil, err
+				}
+				collectionSegments[i] = segments
+				return nil, nil
+			}))
+		}
+		if err := conc.AwaitAll(futures...); err != nil {
+			return err
+		}
+
 	}
 
 	mlog.Info(ctx, "datacoord show segments done", mlog.Duration("dur", record.RecordSpan()))

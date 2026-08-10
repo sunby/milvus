@@ -198,23 +198,42 @@ func (m *indexMeta) reloadFromKV(collectionIDs []int64) error {
 		return nil
 	})
 	g.Go(func() error {
-		pool := conc.NewPool[any](paramtable.Get().MetaStoreCfg.ReadConcurrency.GetAsInt())
-		defer pool.Release()
-		futures := make([]*conc.Future[any], 0, len(collectionIDs))
-		for i, collID := range collectionIDs {
-			i, collID := i, collID
-			futures = append(futures, pool.Submit(func() (any, error) {
-				segIdxes, err := m.catalog.ListSegmentIndexes(m.ctx, collID)
-				if err != nil {
-					return nil, err
+		if catalog, ok := m.catalog.(interface {
+			ListAllSegmentIndexes(context.Context) ([]*model.SegmentIndex, error)
+		}); ok {
+			allIndexes, err := catalog.ListAllSegmentIndexes(m.ctx)
+			if err != nil {
+				return err
+			}
+			requested := typeutil.NewSet(collectionIDs...)
+			selected := allIndexes[:0]
+			for _, index := range allIndexes {
+				if requested.Contain(index.CollectionID) {
+					selected = append(selected, index)
 				}
-				collectionSegIdxes[i] = segIdxes
-				return nil, nil
-			}))
+			}
+			clear(allIndexes[len(selected):])
+			collectionSegIdxes = [][]*model.SegmentIndex{selected}
+		} else {
+			pool := conc.NewPool[any](paramtable.Get().MetaStoreCfg.ReadConcurrency.GetAsInt())
+			defer pool.Release()
+			futures := make([]*conc.Future[any], 0, len(collectionIDs))
+			for i, collID := range collectionIDs {
+				i, collID := i, collID
+				futures = append(futures, pool.Submit(func() (any, error) {
+					segIdxes, err := m.catalog.ListSegmentIndexes(m.ctx, collID)
+					if err != nil {
+						return nil, err
+					}
+					collectionSegIdxes[i] = segIdxes
+					return nil, nil
+				}))
+			}
+			if err := conc.AwaitAll(futures...); err != nil {
+				return err
+			}
 		}
-		if err := conc.AwaitAll(futures...); err != nil {
-			return err
-		}
+
 		for _, segIdxes := range collectionSegIdxes {
 			for _, segIdx := range segIdxes {
 				if segIdx.IndexMemSize == 0 {
