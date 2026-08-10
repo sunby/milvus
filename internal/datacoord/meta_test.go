@@ -136,6 +136,22 @@ func (p *recordingSegmentPersist) scanPrefixes() []string {
 	return append([]string(nil), p.prefixes...)
 }
 
+type blockingSegmentRecoveryPersist struct {
+	OptimisticTxnPersist[string, *datapb.SegmentInfo]
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingSegmentRecoveryPersist) Scan(ctx context.Context, prefix string) ([]string, []*datapb.SegmentInfo, []int64, error) {
+	close(p.started)
+	select {
+	case <-ctx.Done():
+		return nil, nil, nil, ctx.Err()
+	case <-p.release:
+		return nil, nil, nil, nil
+	}
+}
+
 func (suite *MetaReloadSuite) SetupTest() {
 	catalog := mocks2.NewDataCoordCatalog(suite.T())
 	suite.catalog = catalog
@@ -163,7 +179,7 @@ func (suite *MetaReloadSuite) TestReloadFromKV() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	suite.Run("scan segments by partition", func() {
+	suite.Run("metadata walkers run concurrently", func() {
 		defer suite.resetMock()
 		brk := broker.NewMockBroker(suite.T())
 		brk.EXPECT().ShowCollectionIDs(mock.Anything).Return(&rootcoordpb.ShowCollectionIDsResponse{
@@ -175,21 +191,85 @@ func (suite *MetaReloadSuite) TestReloadFromKV() {
 				},
 			},
 		}, nil)
-		brk.EXPECT().ShowPartitionsInternal(mock.Anything, int64(10)).Return([]int64{100, 101}, nil)
+		fieldIndexStarted := make(chan struct{})
+		suite.catalog.EXPECT().ListIndexes(mock.Anything).RunAndReturn(func(context.Context) ([]*model.Index, error) {
+			close(fieldIndexStarted)
+			return nil, nil
+		})
+		suite.catalog.EXPECT().ListSegmentIndexes(mock.Anything, int64(0)).Return(nil, nil)
+		suite.catalog.EXPECT().ListAnalyzeTasks(mock.Anything).Return(nil, nil)
+		suite.catalog.EXPECT().ListCompactionTask(mock.Anything).Return(nil, nil)
+		suite.catalog.EXPECT().ListPartitionStatsInfos(mock.Anything).Return(nil, nil)
+		suite.catalog.EXPECT().ListStatsTasks(mock.Anything).Return(nil, nil)
+		suite.catalog.EXPECT().ListSnapshots(mock.Anything).Return(nil, nil)
+		suite.catalog.EXPECT().ListExternalCollectionRefreshJobs(mock.Anything).Return(nil, nil)
+		suite.catalog.EXPECT().ListExternalCollectionRefreshTasks(mock.Anything).Return(nil, nil)
+		suite.catalog.EXPECT().ListChannelCheckpoint(mock.Anything).Return(nil, nil)
+
+		segmentStarted := make(chan struct{})
+		releaseSegment := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() {
+			releaseOnce.Do(func() { close(releaseSegment) })
+		}
+		defer release()
+		segmentPersist := &blockingSegmentRecoveryPersist{
+			OptimisticTxnPersist: newTestSegmentPersist(),
+			started:              segmentStarted,
+			release:              releaseSegment,
+		}
+
+		result := make(chan error, 1)
+		go func() {
+			_, err := newMeta(ctx, suite.catalog, nil, brk, segmentPersist)
+			result <- err
+		}()
+
+		select {
+		case <-segmentStarted:
+		case <-time.After(5 * time.Second):
+			suite.FailNow("segment recovery did not start")
+		}
+
+		select {
+		case <-fieldIndexStarted:
+		case <-time.After(5 * time.Second):
+			release()
+			suite.FailNow("field index recovery did not start while segment recovery was blocked")
+		}
+		release()
+
+		select {
+		case err := <-result:
+			suite.NoError(err)
+		case <-time.After(5 * time.Second):
+			suite.FailNow("concurrent metadata recovery did not complete")
+		}
+	})
+
+	suite.Run("scan segments with one global walker", func() {
+		defer suite.resetMock()
+		brk := broker.NewMockBroker(suite.T())
+		brk.EXPECT().ShowCollectionIDs(mock.Anything).Return(&rootcoordpb.ShowCollectionIDsResponse{
+			Status: merr.Success(),
+			DbCollections: []*rootcoordpb.DBCollections{
+				{
+					DbName:        "db_1",
+					CollectionIDs: []int64{10},
+				},
+			},
+		}, nil)
 		suite.expectEmptySubMetaReloads()
 
-		partition100Prefix := segmentMetaPrefix + "10/100/"
-		partition101Prefix := segmentMetaPrefix + "10/101/"
+		globalPrefix := segmentMetaPrefix
 		segmentPersist := newRecordingSegmentPersist(map[string][]*datapb.SegmentInfo{
-			partition100Prefix: {
+			globalPrefix: {
 				{
 					ID:           1,
 					CollectionID: 10,
 					PartitionID:  100,
 					State:        commonpb.SegmentState_Flushed,
 				},
-			},
-			partition101Prefix: {
 				{
 					ID:           2,
 					CollectionID: 10,
@@ -201,42 +281,9 @@ func (suite *MetaReloadSuite) TestReloadFromKV() {
 
 		meta, err := newMeta(ctx, suite.catalog, nil, brk, segmentPersist)
 		suite.NoError(err)
-		suite.ElementsMatch([]string{partition100Prefix, partition101Prefix}, segmentPersist.scanPrefixes())
+		suite.Equal([]string{globalPrefix}, segmentPersist.scanPrefixes())
 		suite.NotNil(meta.GetSegment(ctx, 1))
 		suite.NotNil(meta.GetSegment(ctx, 2))
-	})
-
-	suite.Run("fallback to collection scan when show partitions fails", func() {
-		defer suite.resetMock()
-		brk := broker.NewMockBroker(suite.T())
-		brk.EXPECT().ShowCollectionIDs(mock.Anything).Return(&rootcoordpb.ShowCollectionIDsResponse{
-			Status: merr.Success(),
-			DbCollections: []*rootcoordpb.DBCollections{
-				{
-					DbName:        "db_1",
-					CollectionIDs: []int64{10},
-				},
-			},
-		}, nil)
-		brk.EXPECT().ShowPartitionsInternal(mock.Anything, int64(10)).Return(nil, errors.New("mock"))
-		suite.expectEmptySubMetaReloads()
-
-		collectionPrefix := segmentMetaPrefix + "10/"
-		segmentPersist := newRecordingSegmentPersist(map[string][]*datapb.SegmentInfo{
-			collectionPrefix: {
-				{
-					ID:           1,
-					CollectionID: 10,
-					PartitionID:  100,
-					State:        commonpb.SegmentState_Flushed,
-				},
-			},
-		})
-
-		meta, err := newMeta(ctx, suite.catalog, nil, brk, segmentPersist)
-		suite.NoError(err)
-		suite.Equal([]string{collectionPrefix}, segmentPersist.scanPrefixes())
-		suite.NotNil(meta.GetSegment(ctx, 1))
 	})
 
 	suite.Run("ScanSegments_fail", func() {
@@ -251,7 +298,6 @@ func (suite *MetaReloadSuite) TestReloadFromKV() {
 				},
 			},
 		}, nil)
-		brk.EXPECT().ShowPartitionsInternal(mock.Anything, int64(100)).Return([]int64{1}, nil)
 		suite.catalog.EXPECT().ListIndexes(mock.Anything).Return([]*model.Index{}, nil)
 		suite.catalog.EXPECT().ListSegmentIndexes(mock.Anything, mock.Anything).Return([]*model.SegmentIndex{}, nil).Maybe()
 		suite.catalog.EXPECT().ListPartitionSegmentIndexes(mock.Anything, mock.Anything, mock.Anything).Return([]*model.SegmentIndex{}, nil).Maybe()
@@ -306,8 +352,6 @@ func (suite *MetaReloadSuite) TestReloadFromKV() {
 				},
 			},
 		}, nil)
-		brk.EXPECT().ShowPartitionsInternal(mock.Anything, int64(1)).Return([]int64{1}, nil)
-
 		suite.catalog.EXPECT().ListIndexes(mock.Anything).Return([]*model.Index{}, nil)
 		suite.catalog.EXPECT().ListSegmentIndexes(mock.Anything, mock.Anything).Return([]*model.SegmentIndex{}, nil).Maybe()
 		suite.catalog.EXPECT().ListPartitionSegmentIndexes(mock.Anything, mock.Anything, mock.Anything).Return([]*model.SegmentIndex{}, nil).Maybe()
@@ -494,11 +538,6 @@ func (suite *MetaReloadSuite) TestReloadFromKV() {
 				},
 			},
 		}, nil)
-		brk.EXPECT().ShowPartitionsInternal(mock.Anything, mock.Anything).RunAndReturn(
-			func(ctx context.Context, collectionID int64) ([]int64, error) {
-				return []int64{1}, nil
-			})
-
 		suite.catalog.EXPECT().ListIndexes(mock.Anything).Return([]*model.Index{}, nil)
 		suite.catalog.EXPECT().ListSegmentIndexes(mock.Anything, mock.Anything).Return([]*model.SegmentIndex{}, nil).Maybe()
 		suite.catalog.EXPECT().ListPartitionSegmentIndexes(mock.Anything, mock.Anything, mock.Anything).Return([]*model.SegmentIndex{}, nil).Maybe()

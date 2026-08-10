@@ -41,6 +41,7 @@ type fakeDataViewCatalog struct {
 	views               []*viewpb.DataViewOfCollection
 	listCalls           int
 	listAllCalls        int
+	saveCalls           int
 	saveErrOnce         error
 	blockCollection     int64
 	saveStarted         chan struct{}
@@ -63,6 +64,7 @@ func (c *fakeDataViewCatalog) SaveDataView(ctx context.Context, dataView *viewpb
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.saveCalls++
 	if c.saveErrOnce != nil {
 		err := c.saveErrOnce
 		c.saveErrOnce = nil
@@ -98,8 +100,25 @@ func (c *fakeDataViewCatalog) ListAllDataViews(ctx context.Context) ([]*viewpb.D
 
 type fakeBatchDataViewCatalog struct {
 	*fakeDataViewCatalog
+	batchCalls                  int
+	batchErr                    error
+	batchSaveCalls              int
+	batchSaveSizes              []int
+	batchSaveErrOnce            error
+	batchSavePersistBeforeError int
+}
+
+type fakeBatchReadOnlyDataViewCatalog struct {
+	*fakeDataViewCatalog
 	batchCalls int
-	batchErr   error
+}
+
+func (c *fakeBatchReadOnlyDataViewCatalog) ListDataViewsForRecovery(
+	ctx context.Context,
+	collectionIDs []int64,
+) (map[int64][]*viewpb.DataViewOfCollection, error) {
+	c.batchCalls++
+	return make(map[int64][]*viewpb.DataViewOfCollection), nil
 }
 
 func (c *fakeBatchDataViewCatalog) ListDataViewsForRecovery(
@@ -129,6 +148,30 @@ func (c *fakeBatchDataViewCatalog) ListDataViewsForRecovery(
 		)
 	}
 	return viewsByCollection, nil
+}
+
+func (c *fakeBatchDataViewCatalog) SaveDataViewsForRecovery(
+	ctx context.Context,
+	dataViews []*viewpb.DataViewOfCollection,
+) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.batchSaveCalls++
+	c.batchSaveSizes = append(c.batchSaveSizes, len(dataViews))
+
+	dataViewsToPersist := dataViews
+	if c.batchSaveErrOnce != nil && c.batchSavePersistBeforeError < len(dataViewsToPersist) {
+		dataViewsToPersist = dataViewsToPersist[:c.batchSavePersistBeforeError]
+	}
+	for _, dataView := range dataViewsToPersist {
+		c.views = append(c.views, proto.Clone(dataView).(*viewpb.DataViewOfCollection))
+	}
+	if c.batchSaveErrOnce != nil {
+		err := c.batchSaveErrOnce
+		c.batchSaveErrOnce = nil
+		return err
+	}
+	return nil
 }
 
 func (c *fakeDataViewCatalog) DropDataView(ctx context.Context, collectionID int64, dataVersion *viewpb.DataVersion) error {
@@ -1017,6 +1060,8 @@ func TestDataViewManagerRecoverCollectionsUsesBatchCatalog(t *testing.T) {
 	catalog := &fakeBatchDataViewCatalog{fakeDataViewCatalog: baseCatalog}
 	store := &fakeDataViewSegmentStore{segments: make(map[int64]*Segment)}
 	manager := NewManager(catalog, store).(*dataViewManager)
+	store.segments[100] = newDataViewTestSegment(1, 10, 100, "ch-1", 1000)
+	store.segments[200] = newDataViewTestSegment(2, 20, 200, "ch-2", 2000)
 
 	collectionIDs := []int64{1, 2}
 	observed := 0
@@ -1028,7 +1073,78 @@ func TestDataViewManagerRecoverCollectionsUsesBatchCatalog(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, len(collectionIDs), observed)
 	require.Zero(t, baseCatalog.listCalls)
+	require.Zero(t, baseCatalog.saveCalls)
 	require.Equal(t, 1, catalog.batchCalls)
+	require.Equal(t, 1, catalog.batchSaveCalls)
+	require.Equal(t, []int{2}, catalog.batchSaveSizes)
+	require.Len(t, baseCatalog.views, 2)
+}
+
+func TestDataViewManagerRecoverCollectionsRetainsBatchReadWithPointWriter(t *testing.T) {
+	ctx := context.Background()
+	baseCatalog := &fakeDataViewCatalog{}
+	catalog := &fakeBatchReadOnlyDataViewCatalog{fakeDataViewCatalog: baseCatalog}
+	store := &fakeDataViewSegmentStore{segments: make(map[int64]*Segment)}
+	manager := NewManager(catalog, store).(*dataViewManager)
+	store.segments[100] = newDataViewTestSegment(1, 10, 100, "ch-1", 1000)
+
+	require.NoError(t, manager.RecoverCollections(ctx, []int64{1}, nil))
+	require.Equal(t, 1, catalog.batchCalls)
+	require.Zero(t, baseCatalog.listCalls)
+	require.Equal(t, 1, baseCatalog.saveCalls)
+	require.Len(t, baseCatalog.views, 1)
+}
+
+func TestDataViewManagerRecoverCollectionsRetriesAfterPartialBatchSave(t *testing.T) {
+	ctx := context.Background()
+	baseCatalog := &fakeDataViewCatalog{}
+	catalog := &fakeBatchDataViewCatalog{
+		fakeDataViewCatalog:         baseCatalog,
+		batchSaveErrOnce:            errors.New("batch persistence failed"),
+		batchSavePersistBeforeError: 1,
+	}
+	store := &fakeDataViewSegmentStore{segments: make(map[int64]*Segment)}
+	manager := NewManager(catalog, store).(*dataViewManager)
+	store.segments[100] = newDataViewTestSegment(1, 10, 100, "ch-1", 1000)
+	store.segments[200] = newDataViewTestSegment(2, 20, 200, "ch-2", 2000)
+
+	err := manager.RecoverCollections(ctx, []int64{1, 2}, nil)
+	require.Error(t, err)
+	require.Len(t, baseCatalog.views, 1)
+	require.Nil(t, manager.states[1].latestResident)
+	require.Nil(t, manager.states[2].latestResident)
+
+	require.NoError(t, manager.RecoverCollections(ctx, []int64{1, 2}, nil))
+	require.Equal(t, 2, catalog.batchSaveCalls)
+	require.Equal(t, []int{2, 1}, catalog.batchSaveSizes)
+	require.Len(t, baseCatalog.views, 2)
+	require.NotNil(t, manager.states[1].latestResident)
+	require.NotNil(t, manager.states[2].latestResident)
+}
+
+func TestDataViewManagerRecoverCollectionsBoundsPlanningBatches(t *testing.T) {
+	ctx := context.Background()
+	baseCatalog := &fakeDataViewCatalog{}
+	catalog := &fakeBatchDataViewCatalog{fakeDataViewCatalog: baseCatalog}
+	store := &fakeDataViewSegmentStore{segments: make(map[int64]*Segment)}
+	manager := NewManager(catalog, store).(*dataViewManager)
+	collectionIDs := make([]int64, 0, dataViewRecoveryWriteBatchSize+1)
+	for i := 0; i < dataViewRecoveryWriteBatchSize+1; i++ {
+		collectionID := int64(i + 1)
+		segmentID := int64(i + 10000)
+		collectionIDs = append(collectionIDs, collectionID)
+		store.segments[segmentID] = newDataViewTestSegment(
+			collectionID,
+			collectionID,
+			segmentID,
+			"ch",
+			uint64(i+1),
+		)
+	}
+
+	require.NoError(t, manager.RecoverCollections(ctx, collectionIDs, nil))
+	require.Equal(t, []int{dataViewRecoveryWriteBatchSize, 1}, catalog.batchSaveSizes)
+	require.Len(t, baseCatalog.views, len(collectionIDs))
 }
 
 func TestDataViewManagerRecoverCompactsFailedPublicationIntoOneView(t *testing.T) {
@@ -1149,6 +1265,35 @@ func TestRecoverManagerLoadsAllDataViewsWithoutSegmentMetaRepair(t *testing.T) {
 	require.Equal(t, int64(1), snapshot[0].GetCollectionId())
 	require.Equal(t, int64(2), snapshot[1].GetCollectionId())
 	require.Len(t, catalog.views, 2)
+}
+
+func TestRecoverManagerRecoverCollectionsUsesMemoryBatchWriter(t *testing.T) {
+	ctx := context.Background()
+	baseCatalog := &fakeDataViewCatalog{}
+	catalog := &fakeBatchDataViewCatalog{fakeDataViewCatalog: baseCatalog}
+	store := &fakeDataViewSegmentStore{segments: map[int64]*Segment{
+		100: newDataViewTestSegment(1, 10, 100, "ch-1", 1000),
+		200: newDataViewTestSegment(2, 20, 200, "ch-2", 2000),
+	}}
+	recoveredManager, err := RecoverManager(ctx, catalog, store)
+	require.NoError(t, err)
+	manager := recoveredManager.(*dataViewManager)
+
+	require.NoError(t, manager.RecoverCollections(ctx, []int64{1, 2}, nil))
+
+	require.Equal(t, 1, baseCatalog.listAllCalls)
+	require.Zero(t, baseCatalog.listCalls)
+	require.Zero(t, baseCatalog.saveCalls)
+	require.Zero(t, catalog.batchCalls)
+	require.Equal(t, 1, catalog.batchSaveCalls)
+	require.Equal(t, []int{2}, catalog.batchSaveSizes)
+	require.Len(t, baseCatalog.views, 2)
+	views1, ok := manager.recoveredDataViews(1)
+	require.True(t, ok)
+	require.Len(t, views1, 1)
+	views2, ok := manager.recoveredDataViews(2)
+	require.True(t, ok)
+	require.Len(t, views2, 1)
 }
 
 func TestDataViewManagerRepairCollectionsAlignsSegmentMetaAfterRecover(t *testing.T) {
