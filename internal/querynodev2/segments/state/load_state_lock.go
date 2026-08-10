@@ -168,13 +168,13 @@ func (ls *LoadStateLock) StartReleaseAll() (g LoadStateLockGuard) {
 	return g
 }
 
-// blockUntilDataLoadedOrReleased blocks until the segment is loaded or released.
-func (ls *LoadStateLock) BlockUntilDataLoadedOrReleased() bool {
-	var ok bool
+// BlockUntilDataLoadedOrReleased blocks until the segment is loaded or released.
+// It has no return value on purpose: waitOrPanic no longer gives up, so any
+// status it could report would be a constant.
+func (ls *LoadStateLock) BlockUntilDataLoadedOrReleased() {
 	ls.waitOrPanic(func(state loadStateEnum) bool {
 		return state == LoadStateDataLoaded || state == LoadStateReleased
-	}, func() { ok = true })
-	return ok
+	}, func() {})
 }
 
 // waitUntilCanReleaseData waits until segment is release data able.
@@ -189,7 +189,13 @@ func (ls *LoadStateLock) canReleaseAll(state loadStateEnum) bool {
 
 func (ls *LoadStateLock) waitOrPanic(ready func(state loadStateEnum) bool, then func()) {
 	maxWaitTime := paramtable.Get().CommonCfg.MaxWLockConditionalWaitTime.GetAsDuration(time.Second)
-	timer := time.NewTimer(maxWaitTime)
+	// Watchdog only: the wait below is deliberately unbounded so that then() always
+	// runs and native cleanup is never skipped. This fires once, purely to surface
+	// a release that is taking longer than expected.
+	timer := time.AfterFunc(maxWaitTime, func() {
+		mlog.Warn(context.TODO(), "load state lock still waiting, the wait is not bounded and continues until the state is ready",
+			mlog.Duration("maxWaitTime", maxWaitTime))
+	})
 	defer timer.Stop()
 
 	for {
@@ -201,13 +207,7 @@ func (ls *LoadStateLock) waitOrPanic(ready func(state loadStateEnum) bool, then 
 		}
 		changed := ls.changed
 		ls.mu.Unlock()
-
-		select {
-		case <-changed:
-		case <-timer.C:
-			mlog.Error(context.TODO(), "load state lock wait timeout", mlog.Duration("maxWaitTime", maxWaitTime))
-			return
-		}
+		<-changed
 	}
 }
 
