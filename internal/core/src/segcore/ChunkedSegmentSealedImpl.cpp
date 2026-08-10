@@ -8939,7 +8939,9 @@ ChunkedSegmentSealedImpl::LoadColumnGroups(
     size_estimate_states.reserve(cg_field_ids.size());
     auto& pool = ThreadPools::GetThreadPool(milvus::ThreadPoolPriority::MIDDLE);
     std::vector<std::future<void>> load_group_futures;
-    for (const auto& [cg_index, field_ids] : cg_field_ids) {
+    for (const auto& cg_field_id : cg_field_ids) {
+        const auto cg_index = cg_field_id.first;
+        const auto& field_ids_ref = cg_field_id.second;
         auto [state_it, inserted] = size_estimate_states.try_emplace(
             cg_index, std::make_shared<ColumnSizeEstimateState>());
         (void)inserted;
@@ -8948,7 +8950,7 @@ ChunkedSegmentSealedImpl::LoadColumnGroups(
                                    properties,
                                    lazy_manifest_reader_enabled,
                                    cg_index,
-                                   field_ids,
+                                   field_ids = field_ids_ref,
                                    size_estimate_state = state_it->second,
                                    &segment_load_info,
                                    schema_snapshot,
