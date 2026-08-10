@@ -49,6 +49,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
+	pkgutil "github.com/milvus-io/milvus/pkg/v3/util"
 	"github.com/milvus-io/milvus/pkg/v3/util/etcd"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
@@ -1200,6 +1201,22 @@ func TestCatalog_CreateSegmentIndex(t *testing.T) {
 }
 
 func TestCatalog_ListSegmentIndexes(t *testing.T) {
+	t.Run("all segment indexes", func(t *testing.T) {
+		metakv := mocks.NewMetaKv(t)
+		metakv.EXPECT().WalkWithPrefix(
+			mock.Anything,
+			pkgutil.SegmentIndexPrefix+"/",
+			mock.Anything,
+			mock.Anything,
+		).Return(nil).Once()
+		catalog := &Catalog{MetaKv: metakv}
+
+		segmentIndexes, err := catalog.ListAllSegmentIndexes(context.Background())
+
+		assert.NoError(t, err)
+		assert.Empty(t, segmentIndexes)
+	})
+
 	t.Run("success", func(t *testing.T) {
 		segIdx := &indexpb.SegmentIndex{
 			CollectionID:  0,
@@ -2429,4 +2446,62 @@ func TestListDataViewsForRecovery(t *testing.T) {
 	assert.True(t, proto.Equal(dataView100, viewsByCollection[100][0]))
 	assert.True(t, proto.Equal(dataView200, viewsByCollection[200][0]))
 	assert.NotContains(t, viewsByCollection, int64(300))
+}
+
+func TestSaveDataViewsForRecovery(t *testing.T) {
+	ctx := context.Background()
+	txn := mocks.NewMetaKv(t)
+	catalog := NewCatalog(txn, rootPath, "")
+	maxTxnNum := paramtable.Get().MetaStoreCfg.MaxEtcdTxnNum.GetAsInt()
+	dataViews := make([]*viewpb.DataViewOfCollection, 0, maxTxnNum+1)
+	for i := 0; i < maxTxnNum+1; i++ {
+		dataViews = append(dataViews, &viewpb.DataViewOfCollection{
+			CollectionId: int64(i + 1),
+			DataVersion: &viewpb.DataVersion{
+				StreamingVersion: int64(i + 2),
+				CompactVersion:   int64(i + 3),
+			},
+		})
+	}
+
+	saved := make(map[string]string, len(dataViews))
+	txn.EXPECT().MultiSave(ctx, mock.Anything).
+		Run(func(_ context.Context, kvs map[string]string) {
+			for key, value := range kvs {
+				saved[key] = value
+			}
+		}).
+		Return(nil).
+		Times(2)
+
+	assert.NoError(t, catalog.SaveDataViewsForRecovery(ctx, dataViews))
+	assert.Len(t, saved, len(dataViews))
+	for _, expected := range dataViews {
+		key := buildDataViewVersionKey(
+			expected.GetCollectionId(),
+			expected.GetDataVersion().GetStreamingVersion(),
+			expected.GetDataVersion().GetCompactVersion(),
+		)
+		value, ok := saved[key]
+		assert.True(t, ok)
+		actual := &viewpb.DataViewOfCollection{}
+		assert.NoError(t, proto.Unmarshal([]byte(value), actual))
+		assert.True(t, proto.Equal(expected, actual))
+	}
+}
+
+func TestSaveDataViewsForRecoveryFailure(t *testing.T) {
+	ctx := context.Background()
+	txn := mocks.NewMetaKv(t)
+	catalog := NewCatalog(txn, rootPath, "")
+
+	assert.NoError(t, catalog.SaveDataViewsForRecovery(ctx, nil))
+	txn.EXPECT().MultiSave(ctx, mock.Anything).Return(errors.New("batch save failed")).Once()
+	err := catalog.SaveDataViewsForRecovery(ctx, []*viewpb.DataViewOfCollection{
+		{
+			CollectionId: 1,
+			DataVersion:  &viewpb.DataVersion{StreamingVersion: 2, CompactVersion: 3},
+		},
+	})
+	assert.Error(t, err)
 }

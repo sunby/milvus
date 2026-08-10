@@ -538,6 +538,35 @@ func (kc *Catalog) SaveDataView(ctx context.Context, dataView *viewpb.DataViewOf
 	return kc.MetaKv.Save(ctx, key, string(value))
 }
 
+// SaveDataViewsForRecovery persists recovery-generated DataViews in bounded
+// metadata transactions. It is intentionally not part of
+// metastore.DataCoordCatalog; DataView recovery discovers it through a private
+// optional writer interface.
+func (kc *Catalog) SaveDataViewsForRecovery(ctx context.Context, dataViews []*viewpb.DataViewOfCollection) error {
+	if len(dataViews) == 0 {
+		return nil
+	}
+
+	kvs := make(map[string]string, len(dataViews))
+	for _, dataView := range dataViews {
+		key := buildDataViewVersionKey(
+			dataView.GetCollectionId(),
+			dataView.GetDataVersion().GetStreamingVersion(),
+			dataView.GetDataVersion().GetCompactVersion(),
+		)
+		value, err := proto.Marshal(dataView)
+		if err != nil {
+			return merr.WrapErrSerializationFailed(
+				err,
+				"marshal DataView metadata during recovery for collection %d",
+				dataView.GetCollectionId(),
+			)
+		}
+		kvs[key] = string(value)
+	}
+	return kc.SaveByBatch(ctx, kvs)
+}
+
 func (kc *Catalog) ListDataViews(ctx context.Context, collectionID int64) ([]*viewpb.DataViewOfCollection, error) {
 	return kc.listDataViewsWithPrefix(ctx, buildDataViewVersionPrefix(collectionID))
 }
@@ -890,6 +919,11 @@ func (kc *Catalog) listSegmentIndexesWithPrefix(ctx context.Context, prefix stri
 
 func (kc *Catalog) ListSegmentIndexes(ctx context.Context, collectionID int64) ([]*model.SegmentIndex, error) {
 	return kc.listSegmentIndexesWithPrefix(ctx, buildSegmentIndexCollectionPrefix(collectionID))
+}
+
+// ListAllSegmentIndexes scans the global segment-index prefix for metadata recovery.
+func (kc *Catalog) ListAllSegmentIndexes(ctx context.Context) ([]*model.SegmentIndex, error) {
+	return kc.listSegmentIndexesWithPrefix(ctx, util.SegmentIndexPrefix+"/")
 }
 
 func (kc *Catalog) ListPartitionSegmentIndexes(ctx context.Context, collectionID, partitionID int64) ([]*model.SegmentIndex, error) {
