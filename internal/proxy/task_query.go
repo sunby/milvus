@@ -36,7 +36,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/retry"
 	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
-	"github.com/milvus-io/milvus/pkg/v3/util/timestamptz"
 	"github.com/milvus-io/milvus/pkg/v3/util/tsoutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
@@ -106,7 +105,6 @@ type queryParams struct {
 	collectionID        int64
 	groupByFields       []string
 	orderByFields       []string // NEW: ORDER BY field specifications (e.g., "price:desc")
-	timezone            string
 	extractTimeFields   []string
 	queryIteratorCursor *planpb.QueryIteratorCursor
 }
@@ -336,7 +334,6 @@ func parseQueryParams(queryParamsPair []*commonpb.KeyValuePair, largeTopKEnabled
 		isIterator        bool
 		err               error
 		collectionID      int64
-		timezone          string
 		extractTimeFields []string
 	)
 	reduceStopForBestStr, err := funcutil.GetAttrByKeyFromRepeatedKV(ReduceStopForBestKey, queryParamsPair)
@@ -403,11 +400,6 @@ func parseQueryParams(queryParamsPair []*commonpb.KeyValuePair, largeTopKEnabled
 		}
 	}
 
-	timezone, _ = funcutil.TryGetAttrByKeyFromRepeatedKV(common.TimezoneKey, queryParamsPair)
-	if (timezone != "") && !timestamptz.IsTimezoneValid(timezone) {
-		return nil, merr.WrapErrParameterInvalidMsg("unknown or invalid IANA Time Zone ID: %s", timezone)
-	}
-
 	extractTimeFieldsStr, err := funcutil.GetAttrByKeyFromRepeatedKV(TimefieldsKey, queryParamsPair)
 	if err == nil {
 		extractTimeFields = strings.FieldsFunc(extractTimeFieldsStr, func(r rune) bool {
@@ -455,7 +447,6 @@ func parseQueryParams(queryParamsPair []*commonpb.KeyValuePair, largeTopKEnabled
 		groupByFields:       groupByFields,
 		orderByFields:       orderByFields,
 		queryIteratorCursor: queryIteratorCursor,
-		timezone:            timezone,
 		extractTimeFields:   extractTimeFields,
 	}, nil
 }
@@ -777,14 +768,11 @@ func (t *queryTask) PreExecute(ctx context.Context) error {
 		t.request.Expr = IDs2Expr(pkField, t.ids)
 	}
 
-	if t.queryParams.timezone != "" {
-		// validated in queryParams, no need to validate again
-		t.resolvedTimezoneStr = t.queryParams.timezone
-		log.Debug(ctx, "determine timezone from request", mlog.String("user defined timezone", t.resolvedTimezoneStr))
-	} else {
-		t.resolvedTimezoneStr = getColTimezone(colInfo)
-		log.Debug(ctx, "determine timezone from collection", mlog.Any("collection timezone", t.resolvedTimezoneStr))
+	timezone, err := resolveTimezone(ctx, t.request.GetQueryParams(), colInfo)
+	if err != nil {
+		return err
 	}
+	t.resolvedTimezoneStr = timezone
 
 	if err := t.createPlanArgs(ctx, &planparserv2.ParserVisitorArgs{Timezone: t.resolvedTimezoneStr}); err != nil {
 		return err
@@ -1101,7 +1089,7 @@ func (t *queryTask) PostExecute(ctx context.Context) error {
 				return err
 			}
 		} else {
-			log.Debug(ctx, "translate timestamp to ISO string", mlog.String("user define timezone", t.queryParams.timezone))
+			log.Debug(ctx, "translate timestamp to ISO string", mlog.String("timezone", t.resolvedTimezoneStr))
 			err = timestamptzUTC2IsoStr(t.result.GetFieldsData(), t.resolvedTimezoneStr)
 			if err != nil {
 				log.Warn(ctx, "fail to translate timestamp", mlog.Err(err))
