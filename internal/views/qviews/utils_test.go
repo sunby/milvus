@@ -1,5 +1,3 @@
-//go:build test && dynamic
-
 package qviews
 
 import (
@@ -85,6 +83,7 @@ func TestShardID(t *testing.T) {
 	})
 	assert.Equal(t, ShardID{ReplicaID: 1, VChannel: "v1"}, sid)
 	assert.NotEmpty(t, sid.String())
+	assert.Equal(t, sid, FromProtoShardID(sid.IntoProto()))
 }
 
 func TestStateTransition(t *testing.T) {

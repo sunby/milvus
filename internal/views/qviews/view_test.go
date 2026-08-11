@@ -1,5 +1,3 @@
-//go:build test && dynamic
-
 package qviews
 
 import (
@@ -55,7 +53,19 @@ func TestNewQueryViewAtWorkNodeFromProto(t *testing.T) {
 	assert.Equal(t, ShardID{ReplicaID: 1, VChannel: "v1"}, qv.ShardID())
 	assert.Equal(t, QueryViewStatePreparing, qv.State())
 
-	qv = NewQueryViewAtQueryNode(pb.Meta, &viewpb.QueryViewOfQueryNode{NodeId: 1})
+	qv = NewFullQueryViewAtStreamingNode(
+		pb.Meta,
+		&viewpb.QueryViewOfStreamingNode{},
+		[]*viewpb.QueryViewOfQueryNode{{NodeId: 1}},
+	)
+	assert.Len(t, qv.IntoProto().GetQueryNode(), 1)
+
+	qv = NewQueryViewAtQueryNode(pb.Meta, &viewpb.QueryViewOfQueryNode{
+		NodeId: 1,
+		Partitions: []*viewpb.QueryViewOfPartition{
+			{PartitionId: 10, SegmentIds: []int64{100, 101}},
+		},
+	})
 	qv.(*QueryViewAtQueryNode).ViewOfQueryNode()
 	assert.Equal(t, NewQueryNode(1), qv.WorkNode())
 	assert.Equal(t, ShardID{ReplicaID: 1, VChannel: "v1"}, qv.ShardID())
@@ -67,6 +77,7 @@ func TestNewQueryViewAtWorkNodeFromProto(t *testing.T) {
 			QueryVersion: 1,
 		},
 	}, qv.QueryViewKey())
+	assert.ElementsMatch(t, []int64{100, 101}, qv.(*QueryViewAtQueryNode).SegmentIDs())
 }
 
 func TestNewQueryViewAtWorkNodeFromProto_InvalidInputPanics(t *testing.T) {

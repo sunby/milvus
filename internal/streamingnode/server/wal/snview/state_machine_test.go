@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus/internal/views/qviews"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
@@ -109,6 +110,49 @@ func newDroppedSM() *snQueryViewStateMachine {
 // newRecoveringSM returns a SM in UpRecovering state with all pending drained.
 func newRecoveringSM() *snQueryViewStateMachine {
 	return recoverSNQueryViewStateMachine(buildTestMeta(), buildTestSNView(), buildTestQueryNodes())
+}
+
+func TestUpdateView(t *testing.T) {
+	sm := newTestSM()
+	originalMeta := sm.Meta()
+	originalSNView := sm.SNView()
+
+	sm.UpdateView(nil)
+	assert.True(t, proto.Equal(originalMeta, sm.Meta()))
+	assert.True(t, proto.Equal(originalSNView, sm.SNView()))
+
+	sm.UpdateView(&viewpb.QueryViewOfShard{})
+	assert.True(t, proto.Equal(originalMeta, sm.Meta()))
+	assert.True(t, proto.Equal(originalSNView, sm.SNView()))
+	assert.Empty(t, sm.QueryNodes())
+
+	updated := &viewpb.QueryViewOfShard{
+		Meta: &viewpb.QueryViewMeta{
+			CollectionId: 200,
+			ReplicaId:    20,
+			Vchannel:     "updated_1v0",
+			Version: &viewpb.QueryViewVersion{
+				DataVersion:  &viewpb.DataVersion{StreamingVersion: 2, CompactVersion: 1},
+				QueryVersion: 3,
+			},
+			State: viewpb.QueryViewState_QueryViewStateUp,
+		},
+		StreamingNode: &viewpb.QueryViewOfStreamingNode{},
+		QueryNode: []*viewpb.QueryViewOfQueryNode{
+			{NodeId: 10},
+		},
+	}
+	sm.UpdateView(updated)
+
+	assert.Equal(t, int64(200), sm.Meta().GetCollectionId())
+	assert.NotNil(t, sm.SNView())
+	require.Len(t, sm.QueryNodes(), 1)
+	assert.Equal(t, int64(10), sm.QueryNodes()[0].GetNodeId())
+
+	updated.Meta.CollectionId = 300
+	updated.QueryNode[0].NodeId = 11
+	assert.Equal(t, int64(200), sm.Meta().GetCollectionId())
+	assert.Equal(t, int64(10), sm.QueryNodes()[0].GetNodeId())
 }
 
 func assertReportState(t *testing.T, sm *snQueryViewStateMachine, expected qviews.QueryViewState) {
