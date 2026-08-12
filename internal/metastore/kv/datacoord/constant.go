@@ -43,6 +43,7 @@ const (
 	SnapshotPrefix                      = MetaPrefix + "/snapshot"
 	DataViewPrefix                      = "coord/dv"
 	DataViewDropMarkerPrefix            = DataViewPrefix + "/drop"
+	ExportSnapshotJobPrefix             = MetaPrefix + "/export-snapshot-job"
 
 	NonRemoveFlagTomestone = "non-removed"
 	RemoveFlagTomestone    = "removed"

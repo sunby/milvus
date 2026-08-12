@@ -423,3 +423,7 @@ func buildDataViewVersionKey(collectionID, streamingVersion, compactVersion int6
 func buildDataViewDropMarkerKey(collectionID int64) string {
 	return fmt.Sprintf("%s/%d", DataViewDropMarkerPrefix, collectionID)
 }
+
+func buildExportSnapshotJobKey(jobID int64) string {
+	return fmt.Sprintf("%s/%d", ExportSnapshotJobPrefix, jobID)
+}
