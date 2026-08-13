@@ -28,8 +28,8 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
-// latestCollectionSchemaVersion asks GetCollectionSchema to use the latest
-// schema snapshot. Zero is a valid schema version and must stay explicit.
+// latestCollectionSchemaVersion asks schema accessors to use the latest
+// snapshot. Zero is a valid schema version and must stay explicit.
 const latestCollectionSchemaVersion int32 = -1
 
 var (
@@ -113,7 +113,7 @@ func RecoverShardManager(param *ShardManagerRecoverParam) ShardManager {
 		}
 	}
 	m := &shardManagerImpl{
-		mu:          sync.Mutex{},
+		mu:          sync.RWMutex{},
 		ctx:         ctx,
 		cancel:      cancel,
 		wal:         param.WAL,
@@ -239,11 +239,12 @@ func newCollectionInfos(recoverInfos *moduleapi.WritePathRecoveryModuleSnapshot)
 		if state.Schema != nil {
 			latestSchema = &streamingpb.CollectionSchemaOfVChannel{Schema: state.Schema}
 		}
-		collectionInfoMap[state.CollectionID] = &CollectionInfo{
+		collectionInfo := &CollectionInfo{
 			VChannel:   state.VChannel,
 			Partitions: partitions,
-			Schema:     latestSchema,
 		}
+		collectionInfo.setSchema(latestSchema)
+		collectionInfoMap[state.CollectionID] = collectionInfo
 	}
 	return collectionInfoMap
 }
@@ -254,7 +255,7 @@ func newCollectionInfos(recoverInfos *moduleapi.WritePathRecoveryModuleSnapshot)
 type shardManagerImpl struct {
 	mlog.Binder
 
-	mu          sync.Mutex
+	mu          sync.RWMutex
 	ctx         context.Context
 	cancel      context.CancelFunc
 	wal         *syncutil.Future[wal.WAL]
@@ -270,6 +271,37 @@ type CollectionInfo struct {
 	Partitions           map[int64]*partitionManager
 	Schema               *streamingpb.CollectionSchemaOfVChannel
 	FencedAssignTimeTick uint64
+	primaryKey           *PrimaryKeyDescriptor
+}
+
+// PrimaryKeyDescriptor is the immutable PK information needed by WAL write
+// tracking without exposing or cloning a collection schema.
+type PrimaryKeyDescriptor struct {
+	FieldID  int64
+	DataType schemapb.DataType
+}
+
+func (c *CollectionInfo) setSchema(schema *streamingpb.CollectionSchemaOfVChannel) {
+	c.Schema = schema
+	c.primaryKey = nil
+	if schema == nil || schema.GetSchema() == nil {
+		return
+	}
+	descriptor, err := primaryKeyDescriptorFromSchema(schema.GetSchema())
+	if err == nil {
+		c.primaryKey = &descriptor
+	}
+}
+
+func primaryKeyDescriptorFromSchema(schema *schemapb.CollectionSchema) (PrimaryKeyDescriptor, error) {
+	primaryField, err := typeutil.GetPrimaryFieldSchema(schema)
+	if err != nil {
+		return PrimaryKeyDescriptor{}, err
+	}
+	return PrimaryKeyDescriptor{
+		FieldID:  primaryField.GetFieldID(),
+		DataType: primaryField.GetDataType(),
+	}, nil
 }
 
 func (m *shardManagerImpl) partitionManager(key PartitionUniqueKey) *partitionManager {

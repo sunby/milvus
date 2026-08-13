@@ -8099,6 +8099,9 @@ type streamingConfig struct {
 	// logging
 	LoggingAppendSlowThreshold ParamItem `refreshable:"true"`
 
+	// partial update
+	PartialUpdateVersionIndexMaxBytes ParamItem `refreshable:"false"`
+
 	// memory usage control
 	FlushMemoryThreshold                 ParamItem `refreshable:"true"`
 	FlushGrowingSegmentBytesHwmThreshold ParamItem `refreshable:"true"`
@@ -8435,6 +8438,15 @@ If the wal implementation is woodpecker, the minimum threshold is 3s`,
 		Export:       true,
 	}
 	p.LoggingAppendSlowThreshold.Init(base.mgr)
+
+	p.PartialUpdateVersionIndexMaxBytes = ParamItem{
+		Key:          "streaming.partialUpdate.versionIndexMaxBytes",
+		Version:      "3.0.0",
+		Doc:          "The node-wide memory budget for the partial update primary-key version index, 640000000 bytes by default",
+		DefaultValue: "640000000",
+		Export:       false,
+	}
+	p.PartialUpdateVersionIndexMaxBytes.Init(base.mgr)
 
 	p.FlushMemoryThreshold = ParamItem{
 		Key:     "streaming.flush.memoryThreshold",
