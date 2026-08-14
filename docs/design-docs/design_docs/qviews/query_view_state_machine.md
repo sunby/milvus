@@ -187,7 +187,13 @@ complete `QueryViewOfShard` received from Coord, including both
 `QueryViewOfStreamingNode` and `QueryViewOfQueryNode`; the latter is required to
 rebuild Phase 1 query plans after StreamingNode restart.
 
-Persisted states: **Up** recovery info only (the latest Up view).
+Persisted states: **Up** recovery info only. Every version that has reached Up
+is persisted independently until that view receives Down or Dropped, so
+multiple Up recovery records may coexist.
+
+StreamingNode resource-preparation and WAL-recovery failures are wired to
+`snQueryViewStateMachine.OnUnrecoverable` through the resource manager's
+`OnUnrecoverable` callback.
 
 ### 2.1 Preparing
 
@@ -196,15 +202,24 @@ Persisted states: **Up** recovery info only (the latest Up view).
 
 **Automatic Behavior:**
 1. Check replica information.
-2. Transition growing segments to queryable state.
-3. Check whether the local Flusher's data_version > the view's data_version.
+2. Wait for the owning RecoveryStorage to finish bounded WAL recovery before
+   capturing the VChannel WAL view.
+3. For every retained segment in `FLUSHED` state without
+   `SealedAtDataVersion`, trigger or reuse its idempotent final-commit task and
+   wait for the exact first DataView version containing that segment.
+4. Build the growing snapshot by comparing each segment's complete
+   `SealedAtDataVersion` with the target QueryView DataVersion.
+
+There is no check that a VChannel-local maximum DataVersion reaches the target
+QueryView DataVersion. DataVersion is collection-level and may be advanced by
+Flushes on other VChannels, so it cannot serve as a VChannel recovery fence.
 
 **Transitions:**
 
 | Target State | Trigger | Transition Behavior |
 |---|---|---|
 | Ready | Resource preparation succeeded | Report Ready to Coord |
-| Unrecoverable | data_version expired (growing segments already flushed and released) | Report Unrecoverable to Coord |
+| Unrecoverable | Required retained segment state or another local query resource cannot be prepared | Report Unrecoverable to Coord |
 | Dropped | Received Dropped push from Coord (Coord aborted this view) | Release any prepared resources |
 
 **Possible Coord States (and this node's reaction):**
@@ -237,7 +252,8 @@ Persisted states: **Up** recovery info only (the latest Up view).
 - Received Up push from Coord.
 
 **Automatic Behavior:**
-1. Persist recovery info (retain only the latest Up view, overwriting previous).
+1. Persist this view's recovery info under its full QueryView version. Recovery
+   records for other Up versions are retained independently.
 2. Activate the view for query plan generation.
 3. Report Up to Coord.
 
@@ -259,25 +275,36 @@ Coord and QueryNode never enter this state. For Coord-visible reporting, UpRecov
 (Coord is unaware of UpRecovering and considers the view to be in Up state).
 
 **Entry Conditions:**
-- SN crash recovery: the highest-version Up view is rebuilt from persisted recovery info.
+- SN crash recovery: every persisted Up view is rebuilt into its own
+  UpRecovering state-machine instance.
 - WAL consumption has not yet caught up; growing segment data ([A2] portion) is incomplete.
 
 **Automatic Behavior:**
-1. Replay WAL from the checkpoint position to recover growing segments.
-2. Do NOT serve queries (data is incomplete).
+1. Complete bounded RecoveryStorage WAL replay and rebuild retained SegmentView
+   state.
+2. Resolve every `FLUSHED` segment without `SealedAtDataVersion` through its
+   idempotent final-commit task.
+3. Build the QueryRuntime by classifying every segment against the persisted
+   QueryView DataVersion.
+4. Do NOT serve queries until the QueryRuntime is ready.
+5. Multiple UpRecovering versions may coexist. After recovery, query planning
+   selects the highest available Up version.
 
 **Transitions:**
 
 | Target State | Trigger | Transition Behavior |
 |---|---|---|
-| Up | WAL consumption catches up to current position | Begin serving queries |
+| Up | Bounded recovery, pending final commits, and QueryRuntime initialization complete | Begin serving queries |
 | Down | Received Down push from Coord | Delete recovery info; abandon WAL catch-up |
-| Unrecoverable | Local resource failure during WAL recovery (e.g., OOM) | Report Unrecoverable to Coord |
+| Unrecoverable | Local resource failure during WAL recovery (e.g., OOM) | Mark the view locally unavailable without reporting to Coord; retain persisted Up recovery info and let the query path trigger replacement |
 
 **Possible Coord States (and this node's reaction):**
 - Coord considers this view to be in Up state (Coord is unaware of UpRecovering).
 - Coord pushes Down → SN transitions to Down directly.
 - Coord pushes Preparing (recovery scenario) → SN waits until WAL catches up and transitions to Up, then reports Up to allow Coord to fast-forward.
+- Local recovery failure → SN remains locally Unrecoverable without reporting;
+  Coord continues to consider the view Up until the query path triggers a
+  replacement.
 
 ### 2.5 Down
 
@@ -302,11 +329,14 @@ Coord and QueryNode never enter this state. For Coord-visible reporting, UpRecov
 ### 2.6 Unrecoverable
 
 **Entry Conditions:**
-- data_version check failed during Preparing (growing segments already flushed to sealed and released).
+- Required retained segment state is unavailable during Preparing.
 - Local resource failure during UpRecovering (e.g., OOM while replaying WAL to recover growing segments).
 
 **Automatic Behavior:**
-1. Report Unrecoverable to Coord.
+1. When entered from Preparing, report Unrecoverable to Coord.
+2. When entered from UpRecovering, do not report directly. Retain the persisted
+   Up recovery information for a later restart retry and let the query path
+   trigger replacement.
 
 **Transitions:**
 

@@ -8118,6 +8118,7 @@ type streamingConfig struct {
 	WALRecoveryMaxDirtyMessage                       ParamItem `refreshable:"true"`
 	WALRecoveryGracefulCloseTimeout                  ParamItem `refreshable:"true"`
 	WALRecoverySchemaExpirationTolerance             ParamItem `refreshable:"true"`
+	WALRecoveryTaskConcurrency                       ParamItem `refreshable:"true"`
 	TransformLogCatchupConcurrencyPerStream          ParamItem `refreshable:"false"`
 	QueryViewLiveEventDispatchConcurrencyPerPChannel ParamItem `refreshable:"false"`
 
@@ -8552,6 +8553,15 @@ If that persist operation exceeds this timeout, the wal recovery module will clo
 		Export:       true,
 	}
 	p.WALRecoveryGracefulCloseTimeout.Init(base.mgr)
+
+	p.WALRecoveryTaskConcurrency = ParamItem{
+		Key:          "streaming.walRecovery.taskConcurrency",
+		Version:      "2.6.10",
+		Doc:          `The max number of recovery storage async tasks running concurrently per pchannel, 16 by default. Non-positive value means unlimited.`,
+		DefaultValue: "16",
+		Export:       true,
+	}
+	p.WALRecoveryTaskConcurrency.Init(base.mgr)
 
 	p.WALRecoverySchemaExpirationTolerance = ParamItem{
 		Key:     "streaming.walRecovery.schemaExpirationTolerance",
