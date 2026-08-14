@@ -216,12 +216,9 @@ Persisted states: **Up** recovery info only. Every version that has reached Up
 is persisted independently until that view receives Down or Dropped, so
 multiple Up recovery records may coexist.
 
-> **TODO:** Wire StreamingNode resource-preparation and WAL-recovery failures
-> to `snQueryViewStateMachine.OnUnrecoverable`. The current production resource
-> manager reports successful readiness but does not provide an unrecoverable
-> failure callback. Until that callback is introduced, the StreamingNode
-> transitions to Unrecoverable described below are design intent rather than a
-> production-reachable chain.
+StreamingNode resource-preparation and WAL-recovery failures are wired to
+`snQueryViewStateMachine.OnUnrecoverable` through the resource manager's
+`OnUnrecoverable` callback.
 
 ### 2.1 Preparing
 
@@ -230,15 +227,24 @@ multiple Up recovery records may coexist.
 
 **Automatic Behavior:**
 1. Check replica information.
-2. Transition growing segments to queryable state.
-3. Check whether the local Flusher's data_version > the view's data_version.
+2. Wait for the owning RecoveryStorage to finish bounded WAL recovery before
+   capturing the VChannel WAL view.
+3. For every retained segment in `FLUSHED` state without
+   `SealedAtDataVersion`, trigger or reuse its idempotent final-commit task and
+   wait for the exact first DataView version containing that segment.
+4. Build the growing snapshot by comparing each segment's complete
+   `SealedAtDataVersion` with the target QueryView DataVersion.
+
+There is no check that a VChannel-local maximum DataVersion reaches the target
+QueryView DataVersion. DataVersion is collection-level and may be advanced by
+Flushes on other VChannels, so it cannot serve as a VChannel recovery fence.
 
 **Transitions:**
 
 | Target State | Trigger | Transition Behavior |
 |---|---|---|
 | Ready | Resource preparation succeeded | Report Ready to Coord |
-| Unrecoverable | **TODO:** data_version expired (growing segments already flushed and released) | Report Unrecoverable to Coord after the failure callback is wired |
+| Unrecoverable | Required retained segment state or another local query resource cannot be prepared | Report Unrecoverable to Coord |
 | Dropped | Received Dropped push from Coord (Coord aborted this view) | Release any prepared resources |
 
 **Possible Coord States (and this node's reaction):**
@@ -299,16 +305,21 @@ Coord and QueryNode never enter this state. For Coord-visible reporting, UpRecov
 - WAL consumption has not yet caught up; growing segment data ([A2] portion) is incomplete.
 
 **Automatic Behavior:**
-1. Replay WAL from the checkpoint position to recover growing segments.
-2. Do NOT serve queries (data is incomplete).
-3. Multiple UpRecovering versions may coexist. After recovery, query planning
+1. Complete bounded RecoveryStorage WAL replay and rebuild retained SegmentView
+   state.
+2. Resolve every `FLUSHED` segment without `SealedAtDataVersion` through its
+   idempotent final-commit task.
+3. Build the QueryRuntime by classifying every segment against the persisted
+   QueryView DataVersion.
+4. Do NOT serve queries until the QueryRuntime is ready.
+5. Multiple UpRecovering versions may coexist. After recovery, query planning
    selects the highest available Up version.
 
 **Transitions:**
 
 | Target State | Trigger | Transition Behavior |
 |---|---|---|
-| Up | WAL consumption catches up to current position | Begin serving queries |
+| Up | Bounded recovery, pending final commits, and QueryRuntime initialization complete | Begin serving queries |
 | Down | Received Down push from Coord | Delete recovery info; abandon WAL catch-up |
 | Unrecoverable | **TODO:** local resource failure during WAL recovery (e.g., OOM) | Mark the view locally unavailable without reporting to Coord after the failure callback is wired; retain persisted Up recovery info, and let the query path trigger replacement |
 
@@ -340,13 +351,11 @@ Coord and QueryNode never enter this state. For Coord-visible reporting, UpRecov
 - Coord in Down / Dropping → SN does nothing; normal.
 - Coord pushes Dropped → SN transitions to Dropped.
 
-### 2.6 Unrecoverable (TODO: Production Failure Wiring)
+### 2.6 Unrecoverable
 
 **Entry Conditions:**
-- **TODO:** data_version check failed during Preparing (growing segments already
-  flushed to sealed and released).
-- **TODO:** local resource failure during UpRecovering (e.g., OOM while
-  replaying WAL to recover growing segments).
+- Required retained segment state is unavailable during Preparing.
+- Local resource failure during UpRecovering (e.g., OOM while replaying WAL to recover growing segments).
 
 **Automatic Behavior:**
 1. When entered from Preparing, report Unrecoverable to Coord.
