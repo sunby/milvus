@@ -135,5 +135,14 @@ func (node *Proxy) ensureCollectionReadyForSearch(ctx context.Context, dbName, c
 		return merr.WrapErrServiceInternalMsg("unexpected collection load state %s", loadState.GetState().String())
 	}
 
-	return readiness.WaitForCollectionReady(ctx, collectionID, collectionInfo.VChannels)
+	waitStartedAt := time.Now()
+	if err := readiness.WaitForCollectionReady(ctx, collectionID, collectionInfo.VChannels); err != nil {
+		return err
+	}
+	mlog.Info(ctx, "[load on search] wait collection ready done",
+		mlog.FieldDbName(dbName),
+		mlog.FieldCollectionName(collectionName),
+		mlog.FieldCollectionID(collectionID),
+		mlog.Duration("wait", time.Since(waitStartedAt)))
+	return nil
 }

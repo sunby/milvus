@@ -21,6 +21,7 @@ package tasks
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/apache/arrow/go/v17/arrow"
 	"github.com/apache/arrow/go/v17/arrow/array"
@@ -50,6 +51,15 @@ type reduceLayout struct {
 	GroupSize        int64
 	PerRequestReduce bool
 	Ranges           []reduceRange
+}
+
+type reducePhaseTiming struct {
+	heapReduce         time.Duration
+	marshalReduce      time.Duration
+	sourceMapping      time.Duration
+	fillOutputFields   time.Duration
+	decodeOutputFields time.Duration
+	encodeResult       time.Duration
 }
 
 func hasMixedTopK(topks []int64) bool {
@@ -217,7 +227,22 @@ func (t *SearchTask) executeGoReduce(
 	nqOffset int,
 	nq int,
 ) (*mergeResult, error) {
+	return t.executeGoReduceWithTiming(segDFs, topK, groupByOpts, nqOffset, nq, nil)
+}
+
+func (t *SearchTask) executeGoReduceWithTiming(
+	segDFs []*chain.DataFrame,
+	topK int64,
+	groupByOpts *groupByOptions,
+	nqOffset int,
+	nq int,
+	timing *reducePhaseTiming,
+) (*mergeResult, error) {
+	reduceStart := time.Now()
 	result, err := heapMergeReduceRange(defaultAllocator, segDFs, topK, groupByOpts, nqOffset, nq)
+	if timing != nil {
+		timing.heapReduce += time.Since(reduceStart)
+	}
 	if err != nil {
 		mlog.Warn(t.ctx, "failed to heapMergeReduce", mlog.Err(err))
 		return nil, err
@@ -255,6 +280,7 @@ func (t *SearchTask) processReducedSlice(
 	tr *timerecord.TimeRecorder,
 	relatedDataSize int64,
 	allSearchCount int64,
+	timing *reducePhaseTiming,
 ) error {
 	if reduced == nil {
 		return merr.WrapErrServiceInternalMsg("process reduced slice %d: result is nil", i)
@@ -270,7 +296,7 @@ func (t *SearchTask) processReducedSlice(
 	if err != nil {
 		return err
 	}
-	return t.materializeAndAssignResult(
+	return t.materializeAndAssignResultWithTiming(
 		i,
 		reduced,
 		results,
@@ -279,6 +305,7 @@ func (t *SearchTask) processReducedSlice(
 		tr,
 		relatedDataSize,
 		allSearchCount,
+		timing,
 	)
 }
 
@@ -333,7 +360,20 @@ func (t *SearchTask) marshalReducedResult(
 	reduced *mergeResult,
 	allSearchCount int64,
 ) (*schemapb.SearchResultData, error) {
+	return t.marshalReducedResultWithTiming(i, reduced, allSearchCount, nil)
+}
+
+func (t *SearchTask) marshalReducedResultWithTiming(
+	i int,
+	reduced *mergeResult,
+	allSearchCount int64,
+	timing *reducePhaseTiming,
+) (*schemapb.SearchResultData, error) {
+	marshalStart := time.Now()
 	searchResultData, err := marshalReduceResult(reduced)
+	if timing != nil {
+		timing.marshalReduce += time.Since(marshalStart)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -358,14 +398,30 @@ func (t *SearchTask) materializeAndAssignResult(
 	relatedDataSize int64,
 	allSearchCount int64,
 ) error {
-	searchResultData, err := t.marshalReducedResult(i, reduced, allSearchCount)
+	return t.materializeAndAssignResultWithTiming(
+		i, reduced, results, plan, metricType, tr, relatedDataSize, allSearchCount, nil,
+	)
+}
+
+func (t *SearchTask) materializeAndAssignResultWithTiming(
+	i int,
+	reduced *mergeResult,
+	results []*segments.SearchResult,
+	plan *segcore.SearchPlan,
+	metricType string,
+	tr *timerecord.TimeRecorder,
+	relatedDataSize int64,
+	allSearchCount int64,
+	timing *reducePhaseTiming,
+) error {
+	searchResultData, err := t.marshalReducedResultWithTiming(i, reduced, allSearchCount, timing)
 	if err != nil {
 		return err
 	}
-	if err := lateMaterializeOutputFields(t.ctx, results, plan, reduced.Sources, searchResultData); err != nil {
+	if err := lateMaterializeOutputFieldsWithTiming(t.ctx, results, plan, reduced.Sources, searchResultData, timing); err != nil {
 		return err
 	}
-	return t.encodeAndAssignReducedResult(i, searchResultData, metricType, tr, relatedDataSize)
+	return t.encodeAndAssignReducedResultWithTiming(i, searchResultData, metricType, tr, relatedDataSize, timing)
 }
 
 func (t *SearchTask) encodeAndAssignReducedResult(
@@ -375,6 +431,18 @@ func (t *SearchTask) encodeAndAssignReducedResult(
 	tr *timerecord.TimeRecorder,
 	relatedDataSize int64,
 ) error {
+	return t.encodeAndAssignReducedResultWithTiming(i, searchResultData, metricType, tr, relatedDataSize, nil)
+}
+
+func (t *SearchTask) encodeAndAssignReducedResultWithTiming(
+	i int,
+	searchResultData *schemapb.SearchResultData,
+	metricType string,
+	tr *timerecord.TimeRecorder,
+	relatedDataSize int64,
+	timing *reducePhaseTiming,
+) error {
+	encodeStart := time.Now()
 	searchResults, err := segments.EncodeSearchResultData(
 		t.ctx,
 		searchResultData,
@@ -382,6 +450,9 @@ func (t *SearchTask) encodeAndAssignReducedResult(
 		t.originTopks[i],
 		metricType,
 	)
+	if timing != nil {
+		timing.encodeResult += time.Since(encodeStart)
+	}
 	if err != nil {
 		return err
 	}
@@ -410,6 +481,17 @@ func lateMaterializeOutputFields(
 	sources [][]segmentSource,
 	searchResultData *schemapb.SearchResultData,
 ) error {
+	return lateMaterializeOutputFieldsWithTiming(ctx, results, plan, sources, searchResultData, nil)
+}
+
+func lateMaterializeOutputFieldsWithTiming(
+	ctx context.Context,
+	results []*segments.SearchResult,
+	plan *segcore.SearchPlan,
+	sources [][]segmentSource,
+	searchResultData *schemapb.SearchResultData,
+	timing *reducePhaseTiming,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -417,6 +499,7 @@ func lateMaterializeOutputFields(
 		return nil
 	}
 
+	mappingStart := time.Now()
 	totalRows := 0
 	for _, chunk := range sources {
 		totalRows += len(chunk)
@@ -432,8 +515,15 @@ func lateMaterializeOutputFields(
 			pos++
 		}
 	}
+	if timing != nil {
+		timing.sourceMapping += time.Since(mappingStart)
+	}
 
+	fillStart := time.Now()
 	protoBytes, err := segcore.FillOutputFieldsOrdered(ctx, results, plan, segIndices, segOffsets)
+	if timing != nil {
+		timing.fillOutputFields += time.Since(fillStart)
+	}
 	if err != nil {
 		return err
 	}
@@ -444,8 +534,12 @@ func lateMaterializeOutputFields(
 	var fieldResult schemapb.SearchResultData
 	// fastpb: wire-equivalent fast decoder for the late-materialize output-fields
 	// hot path (~2x varchar / ~6x vector vs proto.Unmarshal).
+	decodeStart := time.Now()
 	if err := fastpb.UnmarshalSearchResultData(protoBytes, &fieldResult); err != nil {
 		return err
+	}
+	if timing != nil {
+		timing.decodeOutputFields += time.Since(decodeStart)
 	}
 	searchResultData.FieldsData = fieldResult.FieldsData
 	return nil
