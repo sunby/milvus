@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"io"
+	"slices"
 	"strconv"
 	"time"
 
@@ -111,15 +112,17 @@ func (dt *deleteTask) OnEnqueue() error {
 }
 
 func (dt *deleteTask) setChannels() error {
-	collID, err := dt.getMetaCache().GetCollectionID(dt.ctx, dt.req.GetDbName(), dt.req.GetCollectionName())
-	if err != nil {
-		return err
+	if dt.pChannels == nil {
+		collID, err := dt.getMetaCache().GetCollectionID(dt.ctx, dt.req.GetDbName(), dt.req.GetCollectionName())
+		if err != nil {
+			return err
+		}
+		channels, err := dt.chMgr.GetChannels(collID)
+		if err != nil {
+			return err
+		}
+		dt.pChannels = channels
 	}
-	channels, err := dt.chMgr.GetChannels(collID)
-	if err != nil {
-		return err
-	}
-	dt.pChannels = channels
 	return nil
 }
 
@@ -262,6 +265,7 @@ type deleteRunner struct {
 	// channel
 	chMgr     channelmgr.ChannelsMgr
 	vChannels []vChan
+	pChannels []pChan
 
 	idAllocator     allocator.Interface
 	tsoAllocatorIns tsoAllocator
@@ -403,12 +407,15 @@ func (dr *deleteRunner) Init(ctx context.Context) error {
 		dr.partitionIDs = []UniqueID{partID} // only one partID
 	}
 
-	// set vchannels
-	channelNames, err := dr.chMgr.GetVChannels(dr.collectionID)
+	// VChannels and PChannels are allocated together and returned by the same
+	// DescribeCollection response. Keep that pair on the runner so each delete
+	// task can enqueue without refetching collection metadata via channelsMgr.
+	channels, err := newChannels(colInfo.vChannels, colInfo.pChannels)
 	if err != nil {
-		return ErrWithLog(log, "Failed to get vchannels from collection", err)
+		return ErrWithLog(log, "Failed to get channels from collection metadata", err)
 	}
-	dr.vChannels = channelNames
+	dr.vChannels = slices.Clone(channels.vchans)
+	dr.pChannels = slices.Clone(channels.pchans)
 
 	dr.result = &milvuspb.MutationResult{
 		Status: merr.Success(),
@@ -449,7 +456,8 @@ func (dr *deleteRunner) produce(ctx context.Context, primaryKeys *schemapb.IDs, 
 		chMgr:        dr.chMgr,
 		collectionID: dr.collectionID,
 		partitionID:  partitionID,
-		vChannels:    dr.vChannels,
+		vChannels:    slices.Clone(dr.vChannels),
+		pChannels:    slices.Clone(dr.pChannels),
 		primaryKeys:  primaryKeys,
 		dbID:         dr.dbID,
 	}

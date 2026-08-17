@@ -179,12 +179,19 @@ func (v *ForceMergeSegmentView) calculateTargetSizeCount() (targetSize int64, ta
 }
 
 func (v *ForceMergeSegmentView) ForceTriggerAll() ([]CompactionView, string) {
-	if len(v.segments) == 0 {
+	return v.forceTriggerAllWithLimit(unlimitedCompactionTaskLimit)
+}
+
+func (v *ForceMergeSegmentView) forceTriggerAllWithLimit(limit int) ([]CompactionView, string) {
+	if limit == 0 || len(v.segments) == 0 {
 		return nil, "force merge trigger"
 	}
 
 	targetSize, targetCount := v.calculateTargetSizeCount()
 	groups := groupForceMergeSegments(v.segments, targetSize)
+	if limit >= 0 && len(groups) > limit {
+		groups = groups[:limit]
+	}
 
 	mlog.Info(context.TODO(), "planned force merge groups",
 		mlog.Int64("triggerID", v.triggerID),

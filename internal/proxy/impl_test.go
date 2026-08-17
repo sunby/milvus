@@ -1567,11 +1567,15 @@ func TestProxy_Delete(t *testing.T) {
 	}
 	schema := mustNewSchemaInfo(collSchema)
 	basicInfo := &collectionInfo{
-		CollID: collectionID,
+		CollID:    collectionID,
+		VChannels: channels,
+		PChannels: []string{"test_pchannel"},
 	}
 	paramtable.Init()
 
 	t.Run("delete run failed", func(t *testing.T) {
+		streaming.SetupNoopWALForTest()
+
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
@@ -1602,8 +1606,7 @@ func TestProxy_Delete(t *testing.T) {
 			mock.AnythingOfType("string"),
 		).Return(partitionID, nil)
 		cache.On("GetCollectionInfo", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(basicInfo, nil)
-		chMgr.On("GetVChannels", mock.Anything).Return(channels, nil)
-		chMgr.On("GetChannels", mock.Anything).Return(nil, errors.New("mock error"))
+		streaming.ExpectErrorOnce(errors.New("mock error"))
 		rc := mocks.NewMockRootCoordClient(t)
 		tsoAllocator := &mockTsoAllocator{}
 		idAllocator, err := allocator.NewIDAllocator(ctx, rc, 0)
@@ -1611,6 +1614,8 @@ func TestProxy_Delete(t *testing.T) {
 
 		queue, err := newTaskScheduler(ctx, tsoAllocator)
 		assert.NoError(t, err)
+		queue.Start()
+		defer queue.Close()
 
 		node := &Proxy{metaCache: cache, chMgr: chMgr, rowIDAllocator: idAllocator, sched: queue}
 		node.UpdateStateCode(commonpb.StateCode_Healthy)

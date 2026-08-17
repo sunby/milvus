@@ -796,6 +796,13 @@ func (m *meta) GetClonedCollectionInfo(collectionID UniqueID) *collectionInfo {
 // GetSegmentsChanPart returns segments organized in Channel-Partition dimension with selector applied
 // TODO: Move this function to the compaction module after reorganizing the DataCoord modules.
 func GetSegmentsChanPart(m *meta, collectionID int64, filters ...SegmentFilter) []*chanPartSegments {
+	return GetSegmentsChanPartWithLimit(m, collectionID, unlimitedCompactionTaskLimit, filters...)
+}
+
+// GetSegmentsChanPartWithLimit groups at most limit channel-partition entries.
+// Limiting happens while scanning candidates so a trigger does not first build
+// an unbounded group map only to truncate it afterwards.
+func GetSegmentsChanPartWithLimit(m *meta, collectionID int64, limit int, filters ...SegmentFilter) []*chanPartSegments {
 	type dim struct {
 		partitionID int64
 		channelName string
@@ -804,11 +811,14 @@ func GetSegmentsChanPart(m *meta, collectionID int64, filters ...SegmentFilter) 
 	mDimEntry := make(map[dim]*chanPartSegments)
 
 	filters = append(filters, WithCollection(collectionID))
-	candidates := m.SelectSegments(context.Background(), filters...)
+	candidates := m.SelectSegmentsWithLimit(context.Background(), limit, filters...)
 	for _, si := range candidates {
 		d := dim{si.PartitionID, si.InsertChannel}
 		entry, ok := mDimEntry[d]
 		if !ok {
+			if compactionTaskLimitReached(limit, len(mDimEntry)) {
+				continue
+			}
 			entry = &chanPartSegments{
 				collectionID: si.CollectionID,
 				partitionID:  si.PartitionID,
@@ -1207,7 +1217,7 @@ func AddBinlogsOperator(segmentID int64, binlogs, statslogs, deltalogs, bm25logs
 		segment.Stats = storage.BuildStatsFromFieldBinlogs(
 			segment.GetBinlogs(), segment.GetStatslogs(), segment.GetBm25Statslogs(), segment.GetDeltalogs())
 		return true
-	}
+	})
 }
 
 // addDeltalogsToSegment merges only previously unseen deltalogs and advances
@@ -1855,6 +1865,13 @@ func (m *meta) GetFlushingSegments() []*SegmentInfo {
 func (m *meta) SelectSegments(ctx context.Context, filters ...SegmentFilter) []*SegmentInfo {
 
 	return m.segments.GetSegmentsBySelector(filters...)
+}
+
+// SelectSegmentsWithLimit selects at most limit matching segments without
+// materializing the complete candidate slice first. A negative limit means
+// unlimited.
+func (m *meta) SelectSegmentsWithLimit(ctx context.Context, limit int, filters ...SegmentFilter) []*SegmentInfo {
+	return m.segments.GetSegmentsBySelectorWithLimit(limit, filters...)
 }
 
 func (m *meta) GetCollectionIDsByPartition(ctx context.Context, partitionIDs []int64) []int64 {
@@ -2683,7 +2700,11 @@ func (m *meta) GcConfirm(ctx context.Context, collectionID, partitionID UniqueID
 }
 
 func (m *meta) GetCompactableSegmentGroupByCollection() map[int64][]*SegmentInfo {
-	allSegs := m.SelectSegments(m.ctx, SegmentFilterFunc(func(segment *SegmentInfo) bool {
+	return m.GetCompactableSegmentGroupByCollectionWithLimit(unlimitedCompactionTaskLimit)
+}
+
+func (m *meta) GetCompactableSegmentGroupByCollectionWithLimit(limit int) map[int64][]*SegmentInfo {
+	allSegs := m.SelectSegmentsWithLimit(m.ctx, limit, SegmentFilterFunc(func(segment *SegmentInfo) bool {
 		return isSegmentHealthy(segment) &&
 			isFlushed(segment) && // sealed segment
 			!segment.isCompacting && // not compacting now
