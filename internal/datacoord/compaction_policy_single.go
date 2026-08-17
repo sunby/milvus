@@ -57,11 +57,18 @@ func (policy *singleCompactionPolicy) Name() string {
 
 func (policy *singleCompactionPolicy) Trigger(ctx context.Context) (map[CompactionTriggerType][]CompactionView, error) {
 	collections := policy.meta.GetCollections()
+	limit := getCompactionTaskLimit(ctx)
+	if limit == 0 {
+		return map[CompactionTriggerType][]CompactionView{}, nil
+	}
 
 	events := make(map[CompactionTriggerType][]CompactionView, 0)
 	views := make([]CompactionView, 0)
 	sortViews := make([]CompactionView, 0)
 	for _, collection := range collections {
+		if compactionTaskLimitReached(limit, len(views)+len(sortViews)) {
+			break
+		}
 		if collection == nil {
 			continue
 		}
@@ -74,13 +81,33 @@ func (policy *singleCompactionPolicy) Trigger(ctx context.Context) (map[Compacti
 				mlog.FieldCollectionID(collection.ID))
 			continue
 		}
-		collectionViews, collectionSortViews, _, err := policy.triggerOneCollection(ctx, collection.ID, false)
+		remaining := limit
+		if remaining >= 0 {
+			remaining -= len(views) + len(sortViews)
+		}
+		collectionViews, collectionSortViews, _, err := policy.triggerOneCollection(withCompactionTaskLimit(ctx, remaining), collection.ID, false)
 		if err != nil {
 			// not throw this error because no need to fail because of one collection
 			mlog.Warn(ctx, "fail to trigger single compaction", mlog.FieldCollectionID(collection.ID), mlog.Err(err))
 		}
-		views = append(views, collectionViews...)
-		sortViews = append(sortViews, collectionSortViews...)
+		if remaining >= 0 {
+			available := remaining
+			if available < len(collectionViews) {
+				collectionViews = collectionViews[:available]
+			}
+			views = append(views, collectionViews...)
+			available -= len(collectionViews)
+			if available < 0 {
+				available = 0
+			}
+			if available < len(collectionSortViews) {
+				collectionSortViews = collectionSortViews[:available]
+			}
+			sortViews = append(sortViews, collectionSortViews...)
+		} else {
+			views = append(views, collectionViews...)
+			sortViews = append(sortViews, collectionSortViews...)
+		}
 	}
 	events[TriggerTypeSingle] = views
 	events[TriggerTypeSort] = sortViews
@@ -170,6 +197,10 @@ func (policy *singleCompactionPolicy) triggerSortCompaction(
 		return nil, nil
 	}
 	views := make([]CompactionView, 0)
+	limit := getCompactionTaskLimit(ctx)
+	if limit == 0 {
+		return views, nil
+	}
 
 	collection, err := policy.handler.GetCollection(ctx, collectionID)
 	if err != nil {
@@ -185,7 +216,7 @@ func (policy *singleCompactionPolicy) triggerSortCompaction(
 		log.Info(ctx, "skip triggerSegmentSortCompaction for external collection", mlog.FieldCollectionID(collection.ID))
 		return nil, nil
 	}
-	triggerableSegments := policy.meta.SelectSegments(ctx, WithCollection(collectionID),
+	triggerableSegments := policy.meta.SelectSegmentsWithLimit(ctx, getCompactionCandidateLimit(ctx), WithCollection(collectionID),
 		SegmentFilterFunc(func(seg *SegmentInfo) bool {
 			return canTriggerSortCompaction(seg) &&
 				!policy.meta.isSegmentCompactionProtected(seg.GetID())
@@ -201,6 +232,9 @@ func (policy *singleCompactionPolicy) triggerSortCompaction(
 	invisibleSegments, ok := gbSegments[true]
 	if ok {
 		for _, segment := range invisibleSegments {
+			if compactionTaskLimitReached(limit, len(views)) {
+				break
+			}
 			segmentViews := GetViewsByInfo(segment)
 			view := &MixSegmentView{
 				label:         segmentViews[0].label,
@@ -215,7 +249,7 @@ func (policy *singleCompactionPolicy) triggerSortCompaction(
 	visibleSegments, ok := gbSegments[false]
 	if ok {
 		for i, segment := range visibleSegments {
-			if i > Params.DataCoordCfg.SortCompactionTriggerCount.GetAsInt() {
+			if i > Params.DataCoordCfg.SortCompactionTriggerCount.GetAsInt() || compactionTaskLimitReached(limit, len(views)) {
 				break
 			}
 			segmentViews := GetViewsByInfo(segment)
@@ -258,13 +292,29 @@ func (policy *singleCompactionPolicy) triggerOneCollection(ctx context.Context, 
 		return nil, nil, 0, err
 	}
 
-	newTriggerID, err := policy.allocator.AllocID(ctx)
+	limit := getCompactionTaskLimit(ctx)
+	if limit == 0 {
+		return nil, nil, 0, nil
+	}
+	newTriggerID := int64(0)
+	allocTriggerID := func() (int64, error) {
+		if newTriggerID != 0 {
+			return newTriggerID, nil
+		}
+		id, err := policy.allocator.AllocID(ctx)
+		if err != nil {
+			return 0, err
+		}
+		newTriggerID = id
+		return id, nil
+	}
+
+	sortTriggerID, err := allocTriggerID()
 	if err != nil {
 		log.Warn(ctx, "fail to apply singleCompactionPolicy, unable to allocate triggerID", mlog.Err(err))
 		return nil, nil, 0, err
 	}
-
-	sortViews, err := policy.triggerSortCompaction(ctx, newTriggerID, collectionID, collectionTTL)
+	sortViews, err := policy.triggerSortCompaction(ctx, sortTriggerID, collectionID, collectionTTL)
 	if err != nil {
 		log.Warn(ctx, "failed to apply singleCompactionPolicy, trigger sort compaction failed", mlog.Err(err))
 		return nil, nil, 0, err
@@ -275,7 +325,7 @@ func (policy *singleCompactionPolicy) triggerOneCollection(ctx context.Context, 
 	}
 
 	views := make([]CompactionView, 0)
-	partSegments := GetSegmentsChanPart(policy.meta, collectionID, SegmentFilterFunc(func(segment *SegmentInfo) bool {
+	partSegments := GetSegmentsChanPartWithLimit(policy.meta, collectionID, getCompactionCandidateLimit(ctx), SegmentFilterFunc(func(segment *SegmentInfo) bool {
 		return isSegmentHealthy(segment) &&
 			isFlushed(segment) &&
 			!segment.isCompacting && // not compacting now
@@ -286,11 +336,17 @@ func (policy *singleCompactionPolicy) triggerOneCollection(ctx context.Context, 
 	}))
 
 	for _, group := range partSegments {
+		if compactionTaskLimitReached(limit, len(views)+len(sortViews)) {
+			break
+		}
 		if Params.DataCoordCfg.IndexBasedCompaction.GetAsBool() {
 			group.segments = FilterInIndexedSegments(ctx, policy.handler, policy.meta, false, group.segments...)
 		}
 
 		for _, segment := range group.segments {
+			if compactionTaskLimitReached(limit, len(views)+len(sortViews)) {
+				break
+			}
 			if hasTooManyDeletions(segment) {
 				segmentViews := GetViewsByInfo(segment)
 				view := &MixSegmentView{

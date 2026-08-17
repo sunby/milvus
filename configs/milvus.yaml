@@ -19,7 +19,7 @@ etcd:
   # Endpoints used to access etcd service. You can change this parameter as the endpoints of your own etcd cluster.
   # Environment variable: ETCD_ENDPOINTS
   # etcd preferentially acquires valid address from environment variable ETCD_ENDPOINTS when Milvus is started.
-  endpoints:  10.15.78.23:2379
+  endpoints: localhost:22379
   # Root prefix of the key to where Milvus stores data in etcd.
   # It is recommended to change this parameter before starting Milvus for the first time.
   # To share an etcd instance among multiple Milvus instances, consider changing this to a different value for each Milvus instance before you start them.
@@ -108,13 +108,13 @@ minio:
   # minio.accessKeyID and minio.secretAccessKey together are used for identity authentication to access the MinIO or S3 service.
   # This configuration must be set identical to the environment variable MINIO_ACCESS_KEY_ID, which is necessary for starting MinIO or S3.
   # The default value applies to MinIO or S3 service that started with the default docker-compose.yml file.
-  accessKeyID: "REDACTED_ACCESS_KEY"
+  accessKeyID: ""
   # Secret key used to encrypt the signature string and verify the signature string on server. It must be kept strictly confidential and accessible only to the MinIO or S3 server and users.
   # Environment variable: MINIO_SECRET_ACCESS_KEY or minio.secretAccessKey
   # minio.accessKeyID and minio.secretAccessKey together are used for identity authentication to access the MinIO or S3 service.
   # This configuration must be set identical to the environment variable MINIO_SECRET_ACCESS_KEY, which is necessary for starting MinIO or S3.
   # The default value applies to MinIO or S3 service that started with the default docker-compose.yml file.
-  secretAccessKey: "REDACTED_SECRET_KEY"
+  secretAccessKey: ""
   useSSL: true # Switch value to control if to access the MinIO or S3 service through SSL.
   ssl:
     tlsCACert:  # path to your CACert file
@@ -143,7 +143,7 @@ minio:
   # gcp: https://cloud.google.com/storage/docs/access-control/iam
   # aliyun (ack): https://www.alibabacloud.com/help/en/container-service-for-kubernetes/latest/use-rrsa-to-enforce-access-control
   # aliyun (ecs): https://www.alibabacloud.com/help/en/elastic-compute-service/latest/attach-an-instance-ram-role
-  useIAM: false
+  useIAM: true
   # Cloud Provider of S3. Supports: "aws", "gcp", "aliyun".
   # Cloud Provider of Google Cloud Storage. Supports: "gcpnative".
   # You can use "aws" for other cloud provider supports S3 API with signature v4, e.g.: minio
@@ -347,7 +347,7 @@ rootCoord:
   minSegmentSizeToEnableIndex: 1024
   enableActiveStandby: false
   maxDatabaseNum: 64 # Maximum number of database
-  maxGeneralCapacity: 200002 # upper limit for the sum of of product of partitionNumber and shardNumber
+  maxGeneralCapacity: 2000002 # upper limit for the sum of of product of partitionNumber and shardNumber
   gracefulStopTimeout: 5 # seconds. force stop node without graceful stop
   ip:  # TCP/IP address of rootCoord. If not specified, use the first unicastable address
   port: 22125 # TCP port of rootCoord
@@ -382,7 +382,7 @@ proxy:
   roleNameValidation:
     allowedChars: $ # Additional characters allowed in role names beyond underscores, letters and numbers. Add '-' to allow hyphens in role names.
   maxTaskNum: 1024 # The maximum number of tasks in the task queue of the proxy.
-  ddlConcurrency: 16 # The concurrent execution number of DDL at proxy.
+  ddlConcurrency: 32 # The concurrent execution number of DDL at proxy.
   dclConcurrency: 16 # The concurrent execution number of DCL at proxy.
   mustUsePartitionKey: false # switch for whether proxy must use partition key for the collection
   resolveAliasForPrivilege: true # switch for whether proxy shall resolve alias to actual collection name during RBAC privilege checks
@@ -775,6 +775,8 @@ dataCoord:
     # mix is prioritized by level: mix compactions first, then L0 compactions, then clustering compactions.
     taskPrioritizer: level
     taskQueueCapacity: 100000 # compaction task queue size
+    maxTaskNum: 1000 # maximum number of compaction tasks in pending or running state
+    maxTaskNumPerTrigger: 500 # maximum number of compaction plans generated in one trigger invocation
     rpcTimeout: 10
     maxParallelTaskNum: -1 # Deprecated, see datanode.slot.slotCap
     dropTolerance: 3600 # Compaction task will be cleaned after finish longer than this time(in seconds)
@@ -1185,7 +1187,7 @@ common:
 #   4. DQL result rate protection;
 # If necessary, you can also manually force to deny RW requests.
 quotaAndLimits:
-  enabled: true # `true` to enable quota and limits, `false` to disable.
+  enabled: false # `true` to enable quota and limits, `false` to disable.
   # quotaCenterCollectInterval is the time interval that quotaCenter
   # collects metrics from Proxies, Query cluster and Data cluster.
   # seconds, (0 ~ 65536)
@@ -1199,8 +1201,8 @@ quotaAndLimits:
     allocRetryTimes: 15 # retry times when delete alloc forward data from rate limit failed
     allocWaitInterval: 1000 # retry wait duration when delete alloc forward data rate failed, in millisecond
     complexDeleteLimitEnable: false # whether complex delete check forward data by limiter
-    maxCollectionNum: 65536
-    maxCollectionNumPerDB: 65536 # Maximum number of collections per database.
+    maxCollectionNum: 10000000
+    maxCollectionNumPerDB: 10000000 # Maximum number of collections per database.
     maxInsertSize: -1 # maximum size of a single insert request, in bytes, -1 means no limit
     maxResourceGroupNumOfQueryNode: 1024 # maximum number of resource groups of query nodes
     maxGroupSize: 10 # maximum size for one single group when doing search group by

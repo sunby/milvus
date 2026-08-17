@@ -245,7 +245,13 @@ func (m *CompactionTriggerManager) loop(ctx context.Context) {
 			m.handleTicker(ctx, BumpSchemaVersionTicker)
 		case segID := <-getStatsTaskChSingleton():
 			log.Info(ctx, "receive new segment to trigger sort compaction", mlog.Int64("segmentID", segID))
-			view := m.singlePolicy.triggerSegmentSortCompaction(ctx, segID)
+			limit := getCompactionTaskBudget(m.inspector)
+			if limit == 0 {
+				log.RatedInfo(ctx, rate.Limit(10), "skip sort compaction since compaction task limit is reached")
+				continue
+			}
+			limitedCtx := withCompactionTaskLimit(ctx, limit)
+			view := m.singlePolicy.triggerSegmentSortCompaction(limitedCtx, segID)
 			if view == nil {
 				log.Warn(ctx, "segment no need to do sort compaction", mlog.Int64("segmentID", segID))
 				continue
@@ -254,7 +260,7 @@ func (m *CompactionTriggerManager) loop(ctx context.Context) {
 				log.Warn(ctx, "segment not found", mlog.Int64("segmentID", segID))
 				continue
 			}
-			m.notify(ctx, TriggerTypeSort, []CompactionView{view})
+			m.notify(limitedCtx, TriggerTypeSort, []CompactionView{view})
 		}
 	}
 }
@@ -270,13 +276,24 @@ func (m *CompactionTriggerManager) handleTicker(ctx context.Context, tickerType 
 		return
 	}
 
+	// Keep the queue-capacity gate as a separate check.  Besides preserving the
+	// existing behavior, this also prevents policies backed by lightweight test
+	// inspectors from being dispatched when their queue reports full.
 	if m.inspector.isFull() {
 		mlog.RatedInfo(ctx, rate.Limit(10), "Skip dispatching compaction events since inspector is full",
 			mlog.String("policy", policy.Name()))
 		return
 	}
 
-	events, err := policy.Trigger(ctx)
+	limit := getCompactionTaskBudget(m.inspector)
+	if limit == 0 {
+		mlog.RatedInfo(ctx, rate.Limit(10), "Skip dispatching compaction events since inspector is full",
+			mlog.String("policy", policy.Name()))
+		return
+	}
+
+	limitedCtx := withCompactionTaskLimit(ctx, limit)
+	events, err := policy.Trigger(limitedCtx)
 	if err != nil {
 		mlog.Warn(ctx, "Fail to trigger policy", mlog.String("policy", policy.Name()), mlog.Err(err))
 		return
@@ -285,7 +302,7 @@ func (m *CompactionTriggerManager) handleTicker(ctx context.Context, tickerType 
 		if len(views) == 0 {
 			continue
 		}
-		m.notify(ctx, triggerType, views)
+		m.notify(limitedCtx, triggerType, views)
 	}
 }
 
@@ -307,6 +324,12 @@ func (m *CompactionTriggerManager) ManualTrigger(ctx context.Context, collection
 		return 0, merr.WrapErrParameterInvalidMsg(
 			"compaction is not supported for external collection")
 	}
+
+	limit := getCompactionTaskBudget(m.inspector)
+	if limit == 0 {
+		return 0, merr.WrapErrServiceQuotaExceeded("compaction task limit reached")
+	}
+	ctx = withCompactionTaskLimit(ctx, limit)
 
 	var triggerID UniqueID
 	var views []CompactionView
@@ -342,6 +365,13 @@ func (m *CompactionTriggerManager) triggerViewForCompaction(ctx context.Context,
 		return []CompactionView{view}, reason
 
 	case TriggerTypeLevelZeroViewManual, TriggerTypeForceMerge:
+		limit := getCompactionTaskLimit(ctx)
+		switch typedView := view.(type) {
+		case *LevelZeroCompactionView:
+			return typedView.forceTriggerAllWithLimit(limit)
+		case *ForceMergeSegmentView:
+			return typedView.forceTriggerAllWithLimit(limit)
+		}
 		return view.ForceTriggerAll()
 
 	default:
@@ -353,9 +383,18 @@ func (m *CompactionTriggerManager) triggerViewForCompaction(ctx context.Context,
 func (m *CompactionTriggerManager) notify(ctx context.Context, eventType CompactionTriggerType, views []CompactionView) {
 	log := mlog.With()
 	log.Debug(ctx, "Start to trigger compactions", mlog.String("eventType", eventType.String()))
+	limit := getCompactionTaskLimit(ctx)
+	submitted := 0
 	for _, view := range views {
-		outViews, reason := m.triggerViewForCompaction(ctx, eventType, view)
+		remaining := compactionTaskSubmissionLimit(limit, submitted, m.inspector)
+		if remaining == 0 {
+			break
+		}
+		outViews, reason := m.triggerViewForCompaction(withCompactionTaskLimit(ctx, remaining), eventType, view)
 		for _, outView := range outViews {
+			if compactionTaskSubmissionLimit(limit, submitted, m.inspector) == 0 {
+				break
+			}
 			if outView != nil {
 				log.Info(ctx, "Success to trigger a compaction, try to submit",
 					mlog.String("eventType", eventType.String()),
@@ -363,17 +402,26 @@ func (m *CompactionTriggerManager) notify(ctx context.Context, eventType Compact
 					mlog.String("output view", outView.String()),
 					mlog.Int64("triggerID", outView.GetTriggerID()))
 
+				attempted := false
 				switch eventType {
 				case TriggerTypeLevelZeroViewChange, TriggerTypeLevelZeroViewIDLE, TriggerTypeLevelZeroViewManual:
 					m.SubmitL0ViewToScheduler(ctx, outView)
+					attempted = true
 				case TriggerTypeClustering:
 					m.SubmitClusteringViewToScheduler(ctx, outView)
+					attempted = true
 				case TriggerTypeSingle, TriggerTypeSort, TriggerTypeStorageVersionUpgrade:
 					m.SubmitSingleViewToScheduler(ctx, outView, eventType)
+					attempted = true
 				case TriggerTypeForceMerge:
 					m.SubmitForceMergeViewToScheduler(ctx, outView)
+					attempted = true
 				case TriggerTypeBumpSchemaVersion:
 					m.SubmitBumpSchemaVersionViewToScheduler(ctx, outView)
+					attempted = true
+				}
+				if attempted {
+					submitted++
 				}
 			}
 		}

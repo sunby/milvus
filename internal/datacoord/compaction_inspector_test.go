@@ -18,6 +18,7 @@ package datacoord
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -565,6 +566,170 @@ func (s *CompactionPlanHandlerSuite) TestCompactionQueueFull() {
 	}, nil, s.mockMeta, newMockVersionManager())
 
 	s.Error(s.handler.submitTask(t2))
+}
+
+func (s *CompactionPlanHandlerSuite) TestCompactionTaskLimitCountsPendingAndRunning() {
+	s.SetupTest()
+	pt := paramtable.Get()
+	pt.Save(pt.DataCoordCfg.CompactionMaxTaskNum.Key, "2")
+	defer pt.Reset(pt.DataCoordCfg.CompactionMaxTaskNum.Key)
+	pt.Save(pt.DataCoordCfg.CompactionTaskQueueCapacity.Key, "100")
+	defer pt.Reset(pt.DataCoordCfg.CompactionTaskQueueCapacity.Key)
+
+	mockScheduler := task.NewMockGlobalScheduler(s.T())
+	mockScheduler.EXPECT().Enqueue(mock.Anything).Return().Maybe()
+	s.handler = newCompactionInspector(s.mockMeta, s.mockAlloc, nil, mockScheduler, mockScheduler, newMockVersionManager())
+
+	pending := newMixCompactionTask(&datapb.CompactionTask{
+		PlanID:  1,
+		Type:    datapb.CompactionType_MixCompaction,
+		State:   datapb.CompactionTaskState_pipelining,
+		Channel: "pending",
+	}, nil, s.mockMeta, newMockVersionManager())
+	running := newMixCompactionTask(&datapb.CompactionTask{
+		PlanID:  2,
+		Type:    datapb.CompactionType_MixCompaction,
+		State:   datapb.CompactionTaskState_executing,
+		Channel: "running",
+	}, nil, s.mockMeta, newMockVersionManager())
+
+	s.Require().NoError(s.handler.submitTask(pending))
+	s.handler.restoreTask(running)
+	s.True(s.handler.isFull())
+	s.Equal(0, s.handler.getCompactionTaskRemaining())
+}
+
+func (s *CompactionPlanHandlerSuite) TestConcurrentEnqueueRespectsCompactionTaskLimit() {
+	s.SetupTest()
+	pt := paramtable.Get()
+	pt.Save(pt.DataCoordCfg.CompactionMaxTaskNum.Key, "1")
+	defer pt.Reset(pt.DataCoordCfg.CompactionMaxTaskNum.Key)
+	pt.Save(pt.DataCoordCfg.CompactionTaskQueueCapacity.Key, "100")
+	defer pt.Reset(pt.DataCoordCfg.CompactionTaskQueueCapacity.Key)
+
+	s.mockMeta.EXPECT().CheckAndSetSegmentsCompacting(mock.Anything, mock.Anything).Return(true, true).Maybe()
+	s.handler = newCompactionInspector(s.mockMeta, s.mockAlloc, nil,
+		task.NewMockGlobalScheduler(s.T()), task.NewMockGlobalScheduler(s.T()), newMockVersionManager())
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := int64(1); i <= 2; i++ {
+		wg.Add(1)
+		go func(planID int64) {
+			defer wg.Done()
+			<-start
+			errs <- s.handler.enqueueCompaction(&datapb.CompactionTask{
+				PlanID:        planID,
+				TriggerID:     planID,
+				Type:          datapb.CompactionType_MixCompaction,
+				State:         datapb.CompactionTaskState_pipelining,
+				Channel:       "ch",
+				InputSegments: []int64{planID},
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	successes := 0
+	failures := 0
+	for err := range errs {
+		if err == nil {
+			successes++
+		} else {
+			failures++
+			s.ErrorIs(err, merr.ErrServiceQuotaExceeded)
+		}
+	}
+	s.Equal(1, successes)
+	s.Equal(1, failures)
+	s.Equal(1, s.handler.getCompactionTasksNum())
+}
+
+func (s *CompactionPlanHandlerSuite) TestRejectedEnqueueDoesNotWriteTaskMeta() {
+	s.SetupTest()
+	pt := paramtable.Get()
+	pt.Save(pt.DataCoordCfg.CompactionMaxTaskNum.Key, "1")
+	defer pt.Reset(pt.DataCoordCfg.CompactionMaxTaskNum.Key)
+
+	pending := newMixCompactionTask(&datapb.CompactionTask{
+		PlanID: 1, Type: datapb.CompactionType_MixCompaction,
+		State: datapb.CompactionTaskState_pipelining, Channel: "pending",
+	}, nil, s.mockMeta, newMockVersionManager())
+	s.Require().NoError(s.handler.submitTask(pending))
+
+	err := s.handler.enqueueCompaction(&datapb.CompactionTask{
+		PlanID: 2, Type: datapb.CompactionType_MixCompaction,
+		State: datapb.CompactionTaskState_pipelining, Channel: "other",
+		InputSegments: []int64{2},
+	})
+	s.ErrorIs(err, merr.ErrServiceQuotaExceeded)
+}
+
+func (s *CompactionPlanHandlerSuite) TestScheduleKeepsAdmissionAtomic() {
+	s.SetupTest()
+	pt := paramtable.Get()
+	pt.Save(pt.DataCoordCfg.CompactionMaxTaskNum.Key, "1")
+	defer pt.Reset(pt.DataCoordCfg.CompactionMaxTaskNum.Key)
+	pt.Save(pt.DataCoordCfg.CompactionTaskQueueCapacity.Key, "100")
+	defer pt.Reset(pt.DataCoordCfg.CompactionTaskQueueCapacity.Key)
+
+	task1 := newMixCompactionTask(&datapb.CompactionTask{
+		PlanID: 1, Type: datapb.CompactionType_MixCompaction,
+		State: datapb.CompactionTaskState_pipelining, Channel: "ch",
+	}, nil, s.mockMeta, newMockVersionManager())
+	s.Require().NoError(s.handler.submitTask(task1))
+
+	started := make(chan struct{})
+	continueSchedule := make(chan struct{})
+	s.handler.scheduler.(*task.MockGlobalScheduler).EXPECT().Enqueue(mock.Anything).Run(func(task.Task) {
+		close(started)
+		<-continueSchedule
+	}).Once()
+
+	done := make(chan struct{})
+	go func() {
+		s.handler.schedule()
+		close(done)
+	}()
+	<-started
+
+	enqueueDone := make(chan error, 1)
+	go func() {
+		enqueueDone <- s.handler.enqueueCompaction(&datapb.CompactionTask{
+			PlanID: 2, Type: datapb.CompactionType_MixCompaction,
+			State: datapb.CompactionTaskState_pipelining, Channel: "other",
+			InputSegments: []int64{2},
+		})
+	}()
+	select {
+	case err := <-enqueueDone:
+		s.Failf("enqueue raced with schedule", "got result before transition completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(continueSchedule)
+	<-done
+	s.ErrorIs(<-enqueueDone, merr.ErrServiceQuotaExceeded)
+}
+
+func (s *CompactionPlanHandlerSuite) TestFinishingTaskReleasesAdmissionAtomically() {
+	s.SetupTest()
+	pt := paramtable.Get()
+	pt.Save(pt.DataCoordCfg.CompactionMaxTaskNum.Key, "1")
+	defer pt.Reset(pt.DataCoordCfg.CompactionMaxTaskNum.Key)
+	s.mockMeta.EXPECT().SetSegmentsCompacting(mock.Anything, mock.Anything, false).Return().Maybe()
+
+	task1 := newMixCompactionTask(&datapb.CompactionTask{
+		PlanID: 1, Type: datapb.CompactionType_MixCompaction,
+		State: datapb.CompactionTaskState_completed, Channel: "ch",
+	}, nil, s.mockMeta, newMockVersionManager())
+	s.handler.executingTasks[1] = task1
+
+	s.Require().NoError(s.handler.checkCompaction())
+	s.Equal(0, s.handler.getCompactionTasksNum())
+	s.Equal(1, s.handler.getCompactionTaskRemaining())
 }
 
 func (s *CompactionPlanHandlerSuite) TestExecCompactionPlan() {

@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"context"
+	"time"
 
 	"go.uber.org/atomic"
 
@@ -45,26 +46,29 @@ const (
 )
 
 type broadcastAckModule struct {
-	channelName  string
-	frontierView moduleapi.DataFrontierProvider
-	runtime      moduleapi.Runtime
-	acked        *atomic.Uint64
-	mode         moduleMode
-	lastAckTask  *broadcastAckTask
-	ack          func(context.Context, message.ImmutableMessage) error
+	channelName                string
+	frontierView               moduleapi.DataFrontierProvider
+	runtime                    moduleapi.Runtime
+	acked                      *atomic.Uint64
+	mode                       moduleMode
+	lastAckTask                *broadcastAckTask
+	ack                        func(context.Context, message.ImmutableMessage) error
+	observeDropCollectionStage func(string, time.Duration)
 }
 
 func newBroadcastAckModule(
 	channelName string,
 	frontierView moduleapi.DataFrontierProvider,
 	runtime moduleapi.Runtime,
+	observeDropCollectionStage func(string, time.Duration),
 ) *broadcastAckModule {
 	return &broadcastAckModule{
-		channelName:  channelName,
-		frontierView: frontierView,
-		runtime:      runtime,
-		acked:        atomic.NewUint64(0),
-		mode:         moduleModeMetaOnly,
+		channelName:                channelName,
+		frontierView:               frontierView,
+		runtime:                    runtime,
+		acked:                      atomic.NewUint64(0),
+		mode:                       moduleModeMetaOnly,
+		observeDropCollectionStage: observeDropCollectionStage,
 		ack: func(ctx context.Context, msg message.ImmutableMessage) error {
 			return streaming.WAL().Broadcast().Ack(ctx, msg)
 		},
@@ -104,10 +108,11 @@ func (m *broadcastAckModule) ConsumeDirtySnapshots() []moduleapi.DirtySnapshot {
 
 func (m *broadcastAckModule) newTask(msg message.ImmutableMessage) *broadcastAckTask {
 	return &broadcastAckTask{
-		module:   m,
-		msg:      msg,
-		previous: m.lastAckTask,
-		frontier: m.buildFrontier(msg),
+		module:    m,
+		msg:       msg,
+		previous:  m.lastAckTask,
+		frontier:  m.buildFrontier(msg),
+		createdAt: time.Now(),
 	}
 }
 
@@ -199,12 +204,19 @@ func (b *broadcastAckBarrier) TimeTick() uint64 {
 }
 
 type broadcastAckTask struct {
-	module   *broadcastAckModule
-	msg      message.ImmutableMessage
-	previous *broadcastAckTask
-	frontier walcheckpoint.Barrier
-	done     atomic.Bool
+	module    *broadcastAckModule
+	msg       message.ImmutableMessage
+	previous  *broadcastAckTask
+	frontier  walcheckpoint.Barrier
+	createdAt time.Time
+	done      atomic.Bool
 }
+
+const (
+	dropCollectionStageAckReadyWait = "ack_ready_wait"
+	dropCollectionStageAckRPC       = "ack_rpc"
+	dropCollectionStageAckTotal     = "ack_total"
+)
 
 func (t *broadcastAckTask) Done() bool {
 	return t.done.Load()
@@ -217,8 +229,15 @@ func (t *broadcastAckTask) Execute(ctx context.Context) error {
 	if t.frontier != nil && t.frontier.TimeTick() < t.msg.TimeTick() {
 		return nodescheduler.ErrDelay
 	}
+	t.observeDropCollectionStage(dropCollectionStageAckReadyWait, time.Since(t.createdAt))
+	defer func() {
+		t.observeDropCollectionStage(dropCollectionStageAckTotal, time.Since(t.createdAt))
+	}()
 	defer t.done.Store(true)
-	if err := t.module.ack(ctx, t.msg); err != nil {
+	ackStart := time.Now()
+	err := t.module.ack(ctx, t.msg)
+	t.observeDropCollectionStage(dropCollectionStageAckRPC, time.Since(ackStart))
+	if err != nil {
 		return err
 	}
 	t.module.markAcked(t.msg.TimeTick())
@@ -226,6 +245,13 @@ func (t *broadcastAckTask) Execute(ctx context.Context) error {
 		t.module.runtime.Notifier.NotifyBarrierUpdated()
 	}
 	return nil
+}
+
+func (t *broadcastAckTask) observeDropCollectionStage(stage string, duration time.Duration) {
+	if t.msg.MessageType() != message.MessageTypeDropCollection || t.module.observeDropCollectionStage == nil {
+		return
+	}
+	t.module.observeDropCollectionStage(stage, duration)
 }
 
 var (

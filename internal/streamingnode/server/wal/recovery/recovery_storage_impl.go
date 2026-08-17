@@ -235,7 +235,7 @@ func (r *recoveryStorageImpl) initRecoveryModules(
 	r.vchannelManager = manager
 	r.modules = []moduleapi.Module{
 		r.vchannelManager,
-		newBroadcastAckModule(r.channel.Name, r.vchannelManager, moduleRuntime),
+		newBroadcastAckModule(r.channel.Name, r.vchannelManager, moduleRuntime, r.metrics.ObserveDropCollectionStage),
 	}
 	return nil
 }

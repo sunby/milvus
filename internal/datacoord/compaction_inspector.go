@@ -82,6 +82,11 @@ type compactionInspector struct {
 	cleaningGuard lock.RWMutex
 	cleaningTasks map[int64]CompactionTask // planID -> task
 
+	// Trigger managers may enqueue concurrently. Serialize admission with the
+	// existing SaveTaskMeta -> submitTask sequence so a snapshot-based check
+	// cannot overshoot the active-task limit.
+	enqueueGuard sync.Mutex
+
 	meta             CompactionMeta
 	allocator        allocator.Allocator
 	analyzeScheduler task.GlobalScheduler
@@ -206,6 +211,13 @@ func (c *compactionInspector) checkSchedule() {
 }
 
 func (c *compactionInspector) schedule() []CompactionTask {
+	// Keep the queue -> executing transition and excluded-task restoration
+	// atomic with task admission. A dequeued task is otherwise briefly absent
+	// from both collections, allowing a concurrent trigger to overshoot the
+	// pending+running limit.
+	c.enqueueGuard.Lock()
+	defer c.enqueueGuard.Unlock()
+
 	selected := make([]CompactionTask, 0)
 	if c.queueTasks.Len() == 0 {
 		return selected
@@ -288,6 +300,8 @@ func (c *compactionInspector) schedule() []CompactionTask {
 
 		c.executingGuard.Lock()
 		c.executingTasks[t.GetTaskProto().GetPlanID()] = t
+		c.executingGuard.Unlock()
+
 		c.scheduler.Enqueue(t)
 		mlog.Info(context.TODO(), "compaction task enqueued",
 			mlog.Int64("planID", t.GetTaskProto().GetPlanID()),
@@ -296,7 +310,6 @@ func (c *compactionInspector) schedule() []CompactionTask {
 			mlog.String("label", t.GetLabel()),
 			mlog.Int64s("inputSegments", t.GetTaskProto().GetInputSegments()),
 		)
-		c.executingGuard.Unlock()
 		metrics.DataCoordCompactionTaskNum.WithLabelValues(fmt.Sprintf("%d", NullNodeID), t.GetTaskProto().GetType().String(), metrics.Pending).Dec()
 		metrics.DataCoordCompactionTaskNum.WithLabelValues(fmt.Sprintf("%d", t.GetTaskProto().GetNodeID()), t.GetTaskProto().GetType().String(), metrics.Executing).Inc()
 	}
@@ -484,6 +497,9 @@ func (c *compactionInspector) stop() {
 }
 
 func (c *compactionInspector) removeTasksByChannel(channel string) {
+	c.enqueueGuard.Lock()
+	defer c.enqueueGuard.Unlock()
+
 	mlog.Info(context.TODO(), "removing tasks by channel", mlog.String("channel", channel))
 	c.queueTasks.RemoveAll(func(task CompactionTask) bool {
 		if task.GetTaskProto().GetChannel() == channel {
@@ -516,6 +532,10 @@ func (c *compactionInspector) removeTasksByChannel(channel string) {
 }
 
 func (c *compactionInspector) submitTask(t CompactionTask) error {
+	return c.submitTaskLocked(t)
+}
+
+func (c *compactionInspector) submitTaskLocked(t CompactionTask) error {
 	if err := c.queueTasks.Enqueue(t); err != nil {
 		return err
 	}
@@ -525,6 +545,12 @@ func (c *compactionInspector) submitTask(t CompactionTask) error {
 
 // restoreTask used to restore Task from etcd
 func (c *compactionInspector) restoreTask(t CompactionTask) {
+	c.enqueueGuard.Lock()
+	defer c.enqueueGuard.Unlock()
+	c.restoreTaskLocked(t)
+}
+
+func (c *compactionInspector) restoreTaskLocked(t CompactionTask) {
 	c.executingGuard.Lock()
 	c.executingTasks[t.GetTaskProto().GetPlanID()] = t
 	c.scheduler.Enqueue(t)
@@ -551,6 +577,13 @@ func (c *compactionInspector) getCompactionTask(planID int64) CompactionTask {
 }
 
 func (c *compactionInspector) enqueueCompaction(task *datapb.CompactionTask) error {
+	c.enqueueGuard.Lock()
+	defer c.enqueueGuard.Unlock()
+
+	if c.isFullLocked() {
+		return merr.WrapErrServiceQuotaExceeded("compaction task limit reached")
+	}
+
 	log := mlog.With(mlog.Int64("planID", task.GetPlanID()), mlog.Int64("triggerID", task.GetTriggerID()), mlog.FieldCollectionID(task.GetCollectionID()), mlog.String("type", task.GetType().String()))
 	t, err := c.createCompactTask(task)
 	if err != nil {
@@ -624,7 +657,10 @@ func (c *compactionInspector) checkCompaction() error {
 	}
 	c.executingGuard.RUnlock()
 
-	// delete all finished
+	// Delete finished tasks atomically with admission. Keep Process() outside of
+	// enqueueGuard because it may perform RPC/etcd work; finished tasks remain in
+	// executingTasks until this point and are therefore conservatively counted.
+	c.enqueueGuard.Lock()
 	c.executingGuard.Lock()
 	for _, t := range finishedTasks {
 		delete(c.executingTasks, t.GetTaskProto().GetPlanID())
@@ -642,6 +678,7 @@ func (c *compactionInspector) checkCompaction() error {
 		metrics.DataCoordCompactionTaskNum.WithLabelValues(fmt.Sprintf("%d", t.GetTaskProto().GetNodeID()), t.GetTaskProto().GetType().String(), metrics.Done).Inc()
 	}
 	c.executingGuard.Unlock()
+	c.enqueueGuard.Unlock()
 
 	// insert task need to clean
 	c.cleaningGuard.Lock()
@@ -682,7 +719,51 @@ func (c *compactionInspector) cleanFailedTasks() {
 
 // isFull return true if the task pool is full
 func (c *compactionInspector) isFull() bool {
-	return c.queueTasks.Len() >= c.queueTasks.capacity
+	c.enqueueGuard.Lock()
+	defer c.enqueueGuard.Unlock()
+	return c.isFullLocked()
+}
+
+func (c *compactionInspector) isFullLocked() bool {
+	if c.queueTasks.capacity > 0 && c.queueTasks.Len() >= c.queueTasks.capacity {
+		return true
+	}
+	maxTaskNum := Params.DataCoordCfg.CompactionMaxTaskNum.GetAsInt()
+	return maxTaskNum > 0 && c.getActiveCompactionTaskCountLocked() >= maxTaskNum
+}
+
+func (c *compactionInspector) getCompactionTaskRemaining() int {
+	c.enqueueGuard.Lock()
+	defer c.enqueueGuard.Unlock()
+
+	maxTaskNum := Params.DataCoordCfg.CompactionMaxTaskNum.GetAsInt()
+	remaining := unlimitedCompactionTaskLimit
+	if maxTaskNum <= 0 {
+		remaining = unlimitedCompactionTaskLimit
+	} else {
+		remaining = maxTaskNum - c.getActiveCompactionTaskCountLocked()
+		if remaining < 0 {
+			remaining = 0
+		}
+	}
+	// Keep the existing queue capacity as a second admission bound. A
+	// non-positive queue capacity means the queue itself is unlimited.
+	if c.queueTasks.capacity > 0 {
+		queueRemaining := c.queueTasks.capacity - c.queueTasks.Len()
+		if queueRemaining < 0 {
+			queueRemaining = 0
+		}
+		if remaining < 0 || queueRemaining < remaining {
+			remaining = queueRemaining
+		}
+	}
+	return remaining
+}
+
+func (c *compactionInspector) getActiveCompactionTaskCountLocked() int {
+	c.executingGuard.RLock()
+	defer c.executingGuard.RUnlock()
+	return c.queueTasks.Len() + len(c.executingTasks)
 }
 
 func (c *compactionInspector) checkDelay(t CompactionTask) {

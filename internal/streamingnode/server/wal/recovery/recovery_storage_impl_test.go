@@ -541,7 +541,7 @@ func TestBroadcastAckModulePreconditionsFollowMessageFlow(t *testing.T) {
 		partition: blockingBarrier,
 		vchannel:  blockingBarrier,
 		all:       blockingBarrier,
-	}, moduleapi.Runtime{})
+	}, moduleapi.Runtime{}, nil)
 	module.ack = func(context.Context, message.ImmutableMessage) error {
 		return nil
 	}
@@ -606,7 +606,7 @@ func TestBroadcastAckModulePreconditionsFollowMessageFlow(t *testing.T) {
 func TestBroadcastAckModuleUsesMaterializedFrontierForSynchronousFlushAndDrop(t *testing.T) {
 	blockingBarrier := walcheckpoint.BarrierFunc(func() uint64 { return 9 })
 	view := &recordingFrontierView{barrier: blockingBarrier}
-	module := newBroadcastAckModule("test-pchannel", view, moduleapi.Runtime{})
+	module := newBroadcastAckModule("test-pchannel", view, moduleapi.Runtime{}, nil)
 	module.ack = func(context.Context, message.ImmutableMessage) error {
 		return nil
 	}
@@ -660,8 +660,40 @@ func TestBroadcastAckModuleUsesMaterializedFrontierForSynchronousFlushAndDrop(t 
 	}
 }
 
+func TestBroadcastAckModuleObservesDropCollectionAckStages(t *testing.T) {
+	type observation struct {
+		stage    string
+		duration time.Duration
+	}
+	observations := make([]observation, 0, 3)
+	module := newBroadcastAckModule(
+		"test-pchannel",
+		nil,
+		moduleapi.Runtime{},
+		func(stage string, duration time.Duration) {
+			observations = append(observations, observation{stage: stage, duration: duration})
+		},
+	)
+	module.ack = func(context.Context, message.ImmutableMessage) error {
+		return nil
+	}
+	msg := newAckPreconditionMessage(t, message.NewDropCollectionMessageBuilderV1().
+		WithVChannel("v1").
+		WithHeader(&message.DropCollectionMessageHeader{CollectionId: 1}).
+		WithBody(&msgpb.DropCollectionRequest{}))
+
+	require.NoError(t, module.newTask(msg).Execute(context.Background()))
+	require.Len(t, observations, 3)
+	assert.Equal(t, dropCollectionStageAckReadyWait, observations[0].stage)
+	assert.Equal(t, dropCollectionStageAckRPC, observations[1].stage)
+	assert.Equal(t, dropCollectionStageAckTotal, observations[2].stage)
+	for _, observation := range observations {
+		assert.GreaterOrEqual(t, observation.duration, time.Duration(0))
+	}
+}
+
 func TestBroadcastAckModuleReturnsBarrierForEveryBroadcastHeader(t *testing.T) {
-	module := newBroadcastAckModule("test-pchannel", nil, moduleapi.Runtime{})
+	module := newBroadcastAckModule("test-pchannel", nil, moduleapi.Runtime{}, nil)
 	module.SwitchIntoMetaAndData()
 
 	msg := newBroadcastAckMessage(t, message.NewCreateCollectionMessageBuilderV1().

@@ -169,8 +169,23 @@ func (v *ForceMergeSegmentView) calculateTargetSizeCount() (maxSafeSize float64,
 }
 
 func (v *ForceMergeSegmentView) ForceTriggerAll() ([]CompactionView, string) {
+	return v.forceTriggerAllWithLimit(unlimitedCompactionTaskLimit)
+}
+
+func (v *ForceMergeSegmentView) forceTriggerAllWithLimit(limit int) ([]CompactionView, string) {
+	if limit == 0 {
+		return nil, "force merge trigger"
+	}
 	targetSizePerSegment, targetCount := v.calculateTargetSizeCount()
-	groups := adaptiveGroupSegments(v.segments, targetSizePerSegment)
+	var groups [][]*SegmentView
+	if limit >= 0 {
+		// A bounded trigger must not run the max-full dynamic program over all
+		// segments only to discard the tail. The remaining segments are left for
+		// a later trigger, so a linear prefix grouping is sufficient here.
+		groups = largerGroupingSegmentsLimited(v.segments, targetSizePerSegment, limit)
+	} else {
+		groups = adaptiveGroupSegments(v.segments, targetSizePerSegment)
+	}
 
 	results := make([]CompactionView, 0, len(groups))
 	for _, group := range groups {
@@ -194,6 +209,36 @@ func (v *ForceMergeSegmentView) ForceTriggerAll() ([]CompactionView, string) {
 		})
 	}
 	return results, "force merge trigger"
+}
+
+func largerGroupingSegmentsLimited(segments []*SegmentView, targetSize float64, limit int) [][]*SegmentView {
+	if len(segments) == 0 || limit <= 0 {
+		return nil
+	}
+	if targetSize <= 0 {
+		return [][]*SegmentView{segments[:minInt(limit, len(segments))]}
+	}
+
+	groups := make([][]*SegmentView, 0, minInt(limit, len(segments)))
+	i := 0
+	for i < len(segments) && len(groups) < limit {
+		start := i
+		groupSize := 0.0
+		for i < len(segments) {
+			groupSize += segments[i].Size
+			i++
+			if i < len(segments) {
+				nextSize := groupSize + segments[i].Size
+				currentFull := int(groupSize / targetSize)
+				nextFull := int(nextSize / targetSize)
+				if currentFull > 0 && nextFull == currentFull && math.Mod(groupSize, targetSize) < targetSize*defaultToleranceMB {
+					break
+				}
+			}
+		}
+		groups = append(groups, segments[start:i])
+	}
+	return groups
 }
 
 // adaptiveGroupSegments automatically selects the best grouping algorithm based on segment count
