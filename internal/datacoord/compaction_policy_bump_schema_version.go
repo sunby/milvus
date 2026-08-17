@@ -62,8 +62,12 @@ func isSchemaBumpDataSegment(segment *SegmentInfo) bool {
 
 // staleFlushedSegments returns schema-bump-eligible flushed segments for collectionID
 // whose SchemaVersion lags behind collectionSchemaVersion.
-func (policy *bumpSchemaVersionPolicy) staleFlushedSegments(collectionID int64, collectionSchemaVersion int32) []*chanPartSegments {
-	return GetSegmentsChanPart(policy.meta, collectionID, SegmentFilterFunc(func(segment *SegmentInfo) bool {
+func (policy *bumpSchemaVersionPolicy) staleFlushedSegments(collectionID int64, collectionSchemaVersion int32, limits ...int) []*chanPartSegments {
+	limit := unlimitedCompactionTaskLimit
+	if len(limits) > 0 {
+		limit = limits[0]
+	}
+	return GetSegmentsChanPartWithLimit(policy.meta, collectionID, limit, SegmentFilterFunc(func(segment *SegmentInfo) bool {
 		if !isSchemaBumpDataSegment(segment) ||
 			segment.isCompacting ||
 			policy.meta.isSegmentCompactionProtected(segment.GetID()) ||
@@ -85,10 +89,18 @@ func (policy *bumpSchemaVersionPolicy) staleFlushedSegments(collectionID int64, 
 }
 
 func (policy *bumpSchemaVersionPolicy) Trigger(ctx context.Context) (map[CompactionTriggerType][]CompactionView, error) {
+	limit := getCompactionTaskLimit(ctx)
+	if limit == 0 {
+		return map[CompactionTriggerType][]CompactionView{}, nil
+	}
 	collections := policy.meta.GetCollections()
 	events := make(map[CompactionTriggerType][]CompactionView)
+	viewCount := 0
 
 	for _, collection := range collections {
+		if compactionTaskLimitReached(limit, viewCount) {
+			break
+		}
 		if collection.Schema == nil {
 			continue
 		}
@@ -104,13 +116,20 @@ func (policy *bumpSchemaVersionPolicy) Trigger(ctx context.Context) (map[Compact
 		collectionID := collection.ID
 		capturedSchema := proto.Clone(collection.Schema).(*schemapb.CollectionSchema)
 		collectionSchemaVersion := capturedSchema.GetVersion()
-		partSegments := policy.staleFlushedSegments(collectionID, collectionSchemaVersion)
+		remaining := limit
+		if remaining >= 0 {
+			remaining -= viewCount
+		}
+		partSegments := policy.staleFlushedSegments(collectionID, collectionSchemaVersion, getCompactionCandidateLimit(ctx))
 
 		var views []CompactionView
 		var collectionTriggerID int64
 	partSegmentsLoop:
 		for _, group := range partSegments {
 			for _, segment := range group.segments {
+				if compactionTaskLimitReached(limit, viewCount+len(views)) {
+					break partSegmentsLoop
+				}
 				segmentID := segment.GetID()
 				segmentViews := GetViewsByInfo(segment)
 				if len(segmentViews) == 0 {
@@ -150,6 +169,7 @@ func (policy *bumpSchemaVersionPolicy) Trigger(ctx context.Context) (map[Compact
 		}
 		if len(views) > 0 {
 			events[TriggerTypeBumpSchemaVersion] = append(events[TriggerTypeBumpSchemaVersion], views...)
+			viewCount += len(views)
 		}
 	}
 	return events, nil

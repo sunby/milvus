@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
@@ -2418,6 +2419,39 @@ func (s *CompactionTriggerSuite) SetupTest() {
 		s.versionManager,
 	)
 	s.tr.testingOnly = true
+}
+
+func (s *CompactionTriggerSuite) TestGetCandidatesExplicitSegmentsIgnoreCandidateLimit() {
+	pt := paramtable.Get()
+	pt.Save(pt.DataCoordCfg.CompactionMaxTaskNumPerTrigger.Key, "1")
+	defer pt.Reset(pt.DataCoordCfg.CompactionMaxTaskNumPerTrigger.Key)
+
+	segmentIDs := []int64{1, 2, 3}
+	groups, err := s.tr.getCandidates(NewCompactionSignal().
+		WithIsForce(true).
+		WithCollectionID(s.collectionID).
+		WithSegmentIDs(segmentIDs...), 1)
+	s.Require().NoError(err)
+	s.Require().Len(groups, 1)
+	s.ElementsMatch(segmentIDs, lo.Map(groups[0].segments, func(segment *SegmentInfo, _ int) int64 {
+		return segment.GetID()
+	}))
+}
+
+func (s *CompactionTriggerSuite) TestGetCandidatesAutomaticRespectsCandidateLimit() {
+	pt := paramtable.Get()
+	pt.Save(pt.DataCoordCfg.CompactionMaxTaskNumPerTrigger.Key, "2")
+	defer pt.Reset(pt.DataCoordCfg.CompactionMaxTaskNumPerTrigger.Key)
+
+	groups, err := s.tr.getCandidates(NewCompactionSignal().
+		WithCollectionID(s.collectionID), 2)
+	s.Require().NoError(err)
+	candidateCount := 0
+	for _, group := range groups {
+		candidateCount += len(group.segments)
+	}
+	expectedLimit := max(2, Params.DataCoordCfg.MinSegmentToMerge.GetAsInt())
+	s.LessOrEqual(candidateCount, expectedLimit)
 }
 
 func (s *CompactionTriggerSuite) TestHandleSignal() {

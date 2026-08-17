@@ -97,3 +97,16 @@ func TestCachedSegmentsInfo_SetSegmentRejectsStaleVersion(t *testing.T) {
 	assert.Len(t, cache.GetSegmentsBySelector(WithCollection(10), WithChannel("ch-1")), 1)
 	assert.Empty(t, cache.GetSegmentsBySelector(WithCollection(11), WithChannel("ch-2")))
 }
+
+func TestCachedSegmentsInfo_GetSegmentsBySelectorWithLimit(t *testing.T) {
+	cache := NewCachedSegmentsInfo()
+	for id := int64(1); id <= 3; id++ {
+		cache.SetSegment(id, &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
+			ID: id, CollectionID: 10, InsertChannel: "ch",
+		}}, 0)
+	}
+
+	assert.Len(t, cache.GetSegmentsBySelectorWithLimit(2, WithCollection(10)), 2)
+	assert.Len(t, cache.GetSegmentsBySelectorWithLimit(-1, WithCollection(10)), 3)
+	assert.Empty(t, cache.GetSegmentsBySelectorWithLimit(0, WithCollection(10)))
+}

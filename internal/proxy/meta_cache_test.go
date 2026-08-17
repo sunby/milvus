@@ -2468,15 +2468,16 @@ func TestMetaCache_GetPartitionInfo_CacheHit(t *testing.T) {
 		Status: merr.Success(),
 	}, nil).Maybe()
 
-	// the cold fill costs two describes -- one for the collection resolution and
-	// one inside the partition-list filler; the second lookup hits both caches
+	// The cold fill describes once to resolve and cache the collection. The
+	// partition-list filler reuses that cached schema; the second lookup hits
+	// both caches.
 	rootCoord.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
 		Status:       merr.Success(),
 		CollectionID: 1,
 		DbName:       "db",
 		Schema:       &schemapb.CollectionSchema{Name: "collection", Fields: []*schemapb.FieldSchema{}},
 		RequestTime:  1000,
-	}, nil).Times(2)
+	}, nil).Once()
 
 	rootCoord.EXPECT().ShowPartitions(mock.Anything, mock.Anything).Return(&milvuspb.ShowPartitionsResponse{
 		Status:               merr.Success(),
@@ -2500,6 +2501,45 @@ func TestMetaCache_GetPartitionInfo_CacheHit(t *testing.T) {
 	assert.Equal(t, info1, info2)
 }
 
+func TestMetaCache_GetCollectionIDThenPartitionIDDescribesOnce(t *testing.T) {
+	ctx := context.Background()
+	rootCoord := mocks.NewMockMixCoordClient(t)
+
+	rootCoord.EXPECT().ListPolicy(mock.Anything, mock.Anything).Return(&internalpb.ListPolicyResponse{
+		Status: merr.Success(),
+	}, nil).Maybe()
+
+	rootCoord.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
+		Status:       merr.Success(),
+		CollectionID: 1,
+		DbName:       "db",
+		Schema:       &schemapb.CollectionSchema{Name: "collection", Fields: []*schemapb.FieldSchema{}},
+		RequestTime:  1000,
+	}, nil).Once()
+
+	rootCoord.EXPECT().ShowPartitions(mock.Anything, mock.MatchedBy(func(req *milvuspb.ShowPartitionsRequest) bool {
+		return req.GetCollectionName() == "" && req.GetCollectionID() == 1
+	})).Return(&milvuspb.ShowPartitionsResponse{
+		Status:               merr.Success(),
+		PartitionIDs:         []int64{100},
+		PartitionNames:       []string{"par1"},
+		CreatedTimestamps:    []uint64{1000},
+		CreatedUtcTimestamps: []uint64{1000},
+	}, nil).Once()
+
+	cache, err := NewMetaCache(rootCoord)
+	assert.NoError(t, err)
+	defer cache.Close()
+
+	collectionID, err := cache.GetCollectionID(ctx, "db", "collection")
+	assert.NoError(t, err)
+	assert.Equal(t, int64(1), collectionID)
+
+	partitionID, err := cache.GetPartitionID(ctx, "db", "collection", "par1")
+	assert.NoError(t, err)
+	assert.Equal(t, int64(100), partitionID)
+}
+
 func TestMetaCache_GetPartitionInfo_DefaultPartition(t *testing.T) {
 	ctx := context.Background()
 	rootCoord := mocks.NewMockMixCoordClient(t)
@@ -2508,14 +2548,14 @@ func TestMetaCache_GetPartitionInfo_DefaultPartition(t *testing.T) {
 		Status: merr.Success(),
 	}, nil).Maybe()
 
-	// two describes on the cold fill: collection resolution + partition-list filler
+	// One describe resolves the collection; the partition fill reuses its schema.
 	rootCoord.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
 		Status:       merr.Success(),
 		CollectionID: 1,
 		DbName:       "db",
 		Schema:       &schemapb.CollectionSchema{Name: "collection", Fields: []*schemapb.FieldSchema{}},
 		RequestTime:  1000,
-	}, nil).Times(2)
+	}, nil).Once()
 
 	defaultPartitionName := Params.CommonCfg.DefaultPartitionName.GetValue()
 	rootCoord.EXPECT().ShowPartitions(mock.Anything, mock.MatchedBy(func(req *milvuspb.ShowPartitionsRequest) bool {
@@ -2546,15 +2586,15 @@ func TestMetaCache_GetPartitionInfo_Error(t *testing.T) {
 		Status: merr.Success(),
 	}, nil).Maybe()
 
-	// two describes: collection resolution + the filler's describe, which
-	// precedes the failing ShowPartitions inside the fill
+	// The collection is described once; the failing ShowPartitions follows while
+	// the partition fill reuses the cached schema.
 	rootCoord.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
 		Status:       merr.Success(),
 		CollectionID: 1,
 		DbName:       "db",
 		Schema:       &schemapb.CollectionSchema{Name: "collection", Fields: []*schemapb.FieldSchema{}},
 		RequestTime:  1000,
-	}, nil).Times(2)
+	}, nil).Once()
 
 	rootCoord.EXPECT().ShowPartitions(mock.Anything, mock.Anything).Return(nil, errors.New("connection failed")).Once()
 
@@ -2574,8 +2614,8 @@ func TestMetaCache_GetPartitionInfos_CacheHit(t *testing.T) {
 		Status: merr.Success(),
 	}, nil).Maybe()
 
-	// one describe for the name resolution (fills the collection cache) and one inside the
-	// collection-level partition fill; the second GetPartitionInfos hits both caches
+	// One describe resolves and fills the collection cache. The partition fill
+	// reuses its schema, and the second GetPartitionInfos hits both caches.
 	rootCoord.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
 		Status:       merr.Success(),
 		CollectionID: 1,
@@ -2585,7 +2625,7 @@ func TestMetaCache_GetPartitionInfos_CacheHit(t *testing.T) {
 			Fields: []*schemapb.FieldSchema{},
 		},
 		RequestTime: 1000,
-	}, nil).Times(2)
+	}, nil).Once()
 
 	rootCoord.EXPECT().ShowPartitions(mock.Anything, mock.Anything).Return(&milvuspb.ShowPartitionsResponse{
 		Status:               merr.Success(),
@@ -2616,9 +2656,9 @@ func TestMetaCache_RemovePartition(t *testing.T) {
 		Status: merr.Success(),
 	}, nil).Maybe()
 
-	// Four describes: the initial resolution + the partition-list filler's
-	// describe on the cold fill, then both again after the partition DDL staled
-	// the collection entry and the partition list.
+	// Two describes: one initial collection resolution, then one refetch after
+	// the partition DDL stales both the collection entry and partition list. Each
+	// partition fill reuses the corresponding cached schema.
 	describeCalls := 0
 	rootCoord.EXPECT().DescribeCollection(mock.Anything, mock.Anything).RunAndReturn(
 		func(ctx context.Context, req *milvuspb.DescribeCollectionRequest, opts ...grpc.CallOption) (*milvuspb.DescribeCollectionResponse, error) {
@@ -2642,7 +2682,7 @@ func TestMetaCache_RemovePartition(t *testing.T) {
 				Aliases:     []string{"alias"},
 				RequestTime: requestTime,
 			}, nil
-		}).Times(4)
+		}).Times(2)
 
 	// Two fills: the initial one, and the refetch after the partition DDL staled
 	// the exact real-name key. The alias lookups resolve to the real name and hit
@@ -2918,7 +2958,7 @@ func TestMetaCache_GetPartitionInfos_SingleflightKeyIncludesDatabase(t *testing.
 				},
 				RequestTime: 1000,
 			}, nil
-		}).Times(4) // per db: one name resolution + one inside the partition fill
+		}).Twice() // one name resolution per database; partition fills reuse the schemas
 
 	rootCoord.EXPECT().ShowPartitions(mock.Anything, mock.Anything).RunAndReturn(
 		func(ctx context.Context, req *milvuspb.ShowPartitionsRequest, opts ...grpc.CallOption) (*milvuspb.ShowPartitionsResponse, error) {
@@ -2985,9 +3025,9 @@ func TestMetaCache_GetPartitionInfosNormalizesEmptyDB(t *testing.T) {
 		Status: merr.Success(),
 	}, nil).Maybe()
 
-	// two describes on the first call (name resolution + partition fill); the
-	// explicit-default call hits the caches, proving both requests share the
-	// canonical bucket
+	// One describe on the first call resolves the collection; the partition fill
+	// reuses its schema. The explicit-default call hits the caches, proving both
+	// requests share the canonical bucket.
 	rootCoord.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
 		Status:       merr.Success(),
 		CollectionID: 1,
@@ -2997,7 +3037,7 @@ func TestMetaCache_GetPartitionInfosNormalizesEmptyDB(t *testing.T) {
 			Fields: []*schemapb.FieldSchema{},
 		},
 		RequestTime: 1000,
-	}, nil).Times(2)
+	}, nil).Once()
 
 	rootCoord.EXPECT().ShowPartitions(mock.Anything, mock.Anything).Return(&milvuspb.ShowPartitionsResponse{
 		Status:               merr.Success(),
@@ -3034,15 +3074,16 @@ func TestMetaCache_GetPartitionInfoNormalizesEmptyDB(t *testing.T) {
 		Status: merr.Success(),
 	}, nil).Maybe()
 
-	// two describes on the cold fill (name resolution + partition-list filler);
-	// the explicit-default lookup hits the same cached entries
+	// One describe resolves the collection on the cold fill; the partition-list
+	// filler reuses its schema and the explicit-default lookup hits the same
+	// cached entries.
 	rootCoord.EXPECT().DescribeCollection(mock.Anything, mock.Anything).Return(&milvuspb.DescribeCollectionResponse{
 		Status:       merr.Success(),
 		CollectionID: 1,
 		DbName:       "default",
 		Schema:       &schemapb.CollectionSchema{Name: "collection", Fields: []*schemapb.FieldSchema{}},
 		RequestTime:  1000,
-	}, nil).Times(2)
+	}, nil).Once()
 
 	// ShowPartitions must fire exactly once across both lookups when the cache
 	// key is normalized.
@@ -4980,13 +5021,11 @@ func TestMetaCache_ConsistencyCheckerCatchesGhostAlias(t *testing.T) {
 	assert.Empty(t, v, "with only B declaring \"a\", the cache is consistent")
 }
 
-// TestMetaCache_PartitionFillDoesNotAttachNewCollectionToOldID: the partition
-// fill resolves the collection id first, then must describe/show BY THAT ID.
-// If a same-name drop+recreate happens between resolve and fill, a by-name
-// describe would return the NEW collection's partitions and cache them under
-// the OLD id (wrong partition context, uncleanable with no GC). By id, the
-// stale old id returns not-found and the fill fails (caller re-resolves)
-// instead of caching a mismatch.
+// TestMetaCache_PartitionFillDoesNotAttachNewCollectionToOldID: even if the
+// collection cache still contains a stale same-name entry, the partition fill
+// must show partitions BY THAT RESOLVED ID. A by-name ShowPartitions could
+// return the recreated collection's list and cache it under the old id; the
+// id-addressed RPC instead fails for the dropped id, so no mismatch is cached.
 func TestMetaCache_PartitionFillDoesNotAttachNewCollectionToOldID(t *testing.T) {
 	ctx := context.Background()
 	rootCoord := mocks.NewMockMixCoordClient(t)
@@ -4994,33 +5033,17 @@ func TestMetaCache_PartitionFillDoesNotAttachNewCollectionToOldID(t *testing.T) 
 		Status: merr.Success(),
 	}, nil).Maybe()
 
-	// id 1 was dropped and "foo" recreated as id 2; the proxy's collection cache
-	// still holds the stale foo->1 mapping, so the partition fill resolves id 1.
-	rootCoord.EXPECT().DescribeCollection(mock.Anything, mock.Anything).RunAndReturn(
-		func(ctx context.Context, req *milvuspb.DescribeCollectionRequest, opts ...grpc.CallOption) (*milvuspb.DescribeCollectionResponse, error) {
-			id := req.GetCollectionID()
-			if id == 0 { // by-name resolve -> the CURRENT collection (id 2)
-				id = 2
-			}
-			if id == 1 { // by-id describe of the dropped old id -> not found
-				return &milvuspb.DescribeCollectionResponse{Status: merr.Status(merr.WrapErrCollectionNotFound("foo"))}, nil
-			}
-			return &milvuspb.DescribeCollectionResponse{
-				Status:       merr.Success(),
-				CollectionID: id,
-				DbName:       "db",
-				Schema:       &schemapb.CollectionSchema{Name: "foo", Fields: []*schemapb.FieldSchema{}},
-				RequestTime:  100,
-			}, nil
-		})
+	// The stale collection entry below already resolves foo -> id 1, so an
+	// additional DescribeCollection would be the redundant RPC this regression
+	// test is meant to prevent.
 	rootCoord.EXPECT().ShowPartitions(mock.Anything, mock.Anything).RunAndReturn(
 		func(ctx context.Context, req *milvuspb.ShowPartitionsRequest, opts ...grpc.CallOption) (*milvuspb.ShowPartitionsResponse, error) {
-			// id 2's partitions -- must NOT be cached under id 1
+			assert.Empty(t, req.GetCollectionName(), "partition fill must not resolve by the reused name")
+			assert.Equal(t, int64(1), req.GetCollectionID())
 			return &milvuspb.ShowPartitionsResponse{
-				Status: merr.Success(), PartitionIDs: []int64{201}, PartitionNames: []string{"p_new"},
-				CreatedTimestamps: []uint64{100}, CreatedUtcTimestamps: []uint64{100},
+				Status: merr.Status(merr.WrapErrCollectionNotFound("foo")),
 			}, nil
-		}).Maybe()
+		}).Once()
 
 	cache, err := NewMetaCache(rootCoord)
 	assert.NoError(t, err)
@@ -5029,7 +5052,7 @@ func TestMetaCache_PartitionFillDoesNotAttachNewCollectionToOldID(t *testing.T) 
 	// seed the stale collection-cache entry foo->id 1 (as if cached before the drop)
 	seedCollection(cache, "db", "foo", 1)
 
-	// partition fill resolves id 1, describes BY id 1 -> not-found -> error;
+	// Partition fill resolves id 1 and shows BY id 1 -> not-found -> error;
 	// NOTHING is cached under id 1.
 	_, err = cache.GetPartitionInfos(ctx, "db", "foo")
 	assert.Error(t, err, "the fill must fail rather than attach id 2's partitions to id 1")
@@ -5038,13 +5061,12 @@ func TestMetaCache_PartitionFillDoesNotAttachNewCollectionToOldID(t *testing.T) 
 	assert.False(t, ok, "no partition entry may be cached under the stale old id")
 }
 
-// TestMetaCache_PartitionFillSkipsWriteWhenPrimaryEvictedMidFill: the partition
-// fill resolves the collection id BEFORE taking fillMu.RLock; an invalidation in
-// that window evicts the primary (and its partition list). The fill still
-// describes/shows the collection successfully, but must NOT cache the list under
-// the now-owner-less id -- otherwise a later Create/DropPartition invalidation
-// (which routes through evictCollectionEntryLocked, a no-op when the primary is
-// absent) cannot clean it, and it would be re-adopted when the primary re-fills.
+// TestMetaCache_PartitionFillSkipsWriteWhenPrimaryEvictedMidFill: the exceptional
+// RemoveDatabase post-drain walk can evict the primary while a partition fill
+// holds fillMu.RLock. The fill may still successfully show partitions by id, but
+// must NOT cache the list under the now-owner-less id -- otherwise a later
+// Create/DropPartition invalidation (whose unified eviction no-ops when the
+// primary is absent) cannot clean it, and a refill could re-adopt stale data.
 func TestMetaCache_PartitionFillSkipsWriteWhenPrimaryEvictedMidFill(t *testing.T) {
 	ctx := context.Background()
 	rootCoord := mocks.NewMockMixCoordClient(t)
@@ -5053,29 +5075,24 @@ func TestMetaCache_PartitionFillSkipsWriteWhenPrimaryEvictedMidFill(t *testing.T
 	}, nil).Maybe()
 
 	var cache *MetaCache
-	rootCoord.EXPECT().DescribeCollection(mock.Anything, mock.Anything).RunAndReturn(
-		func(ctx context.Context, req *milvuspb.DescribeCollectionRequest, opts ...grpc.CallOption) (*milvuspb.DescribeCollectionResponse, error) {
-			// The partition fill describes BY ID (empty name). At that exact
-			// moment simulate a concurrent invalidation evicting the primary.
-			if req.GetCollectionName() == "" && req.GetCollectionID() == 1 {
-				cache.DeleteCollectionForTest(1)
-			}
-			return &milvuspb.DescribeCollectionResponse{
-				Status:       merr.Success(),
-				CollectionID: 1,
-				DbName:       "db",
-				Schema:       &schemapb.CollectionSchema{Name: "collection", Fields: []*schemapb.FieldSchema{}},
-				RequestTime:  1000,
+	rootCoord.EXPECT().ShowPartitions(mock.Anything, mock.Anything).RunAndReturn(
+		func(ctx context.Context, req *milvuspb.ShowPartitionsRequest, opts ...grpc.CallOption) (*milvuspb.ShowPartitionsResponse, error) {
+			assert.Empty(t, req.GetCollectionName())
+			assert.Equal(t, int64(1), req.GetCollectionID())
+			// Simulate the exceptional RemoveDatabase post-drain walk, which can
+			// evict an entry while fills run because it intentionally releases
+			// fillMu before its O(N) primary-store cleanup.
+			cache.DeleteCollectionForTest(1)
+			return &milvuspb.ShowPartitionsResponse{
+				Status: merr.Success(), PartitionIDs: []int64{100}, PartitionNames: []string{"par1"},
+				CreatedTimestamps: []uint64{1000}, CreatedUtcTimestamps: []uint64{1000},
 			}, nil
-		})
-	rootCoord.EXPECT().ShowPartitions(mock.Anything, mock.Anything).Return(&milvuspb.ShowPartitionsResponse{
-		Status: merr.Success(), PartitionIDs: []int64{100}, PartitionNames: []string{"par1"},
-		CreatedTimestamps: []uint64{1000}, CreatedUtcTimestamps: []uint64{1000},
-	}, nil).Maybe()
+		}).Once()
 
 	cache, err := NewMetaCache(rootCoord)
 	assert.NoError(t, err)
 	defer cache.Close()
+	seedCollection(cache, "db", "collection", 1)
 
 	// the caller still gets the correct list...
 	info, err := cache.GetPartitionInfos(ctx, "db", "collection")

@@ -51,18 +51,58 @@ func (s *CachedSegmentsInfo) GetSegments() []*SegmentInfo {
 }
 
 func (s *CachedSegmentsInfo) GetSegmentsBySelector(filters ...SegmentFilter) []*SegmentInfo {
+	return s.GetSegmentsBySelectorWithLimit(-1, filters...)
+}
+
+// GetSegmentsBySelectorWithLimit selects at most limit matching segments.
+// A negative limit keeps the existing unlimited behavior.
+func (s *CachedSegmentsInfo) GetSegmentsBySelectorWithLimit(limit int, filters ...SegmentFilter) []*SegmentInfo {
+	if limit == 0 {
+		return nil
+	}
 	criterion := &segmentCriterion{}
 	for _, filter := range filters {
 		filter.AddFilter(criterion)
 	}
 
-	candidates := s.getCandidates(criterion)
-	result := make([]*SegmentInfo, 0, len(candidates))
-	for _, seg := range candidates {
-		if criterion.Match(seg) {
+	result := make([]*SegmentInfo, 0)
+	appendIfMatch := func(seg *SegmentInfo) bool {
+		if seg != nil && criterion.Match(seg) {
 			result = append(result, seg)
+			return limit <= 0 || len(result) < limit
 		}
+		return true
 	}
+
+	if criterion.collectionID > 0 {
+		idSet, ok := s.coll2Segments.Get(criterion.collectionID)
+		if !ok {
+			return result
+		}
+		idSet.Range(func(id UniqueID, _ struct{}) bool {
+			seg := s.GetSegment(id)
+			if seg == nil || (criterion.channel != "" && seg.InsertChannel != criterion.channel) {
+				return true
+			}
+			return appendIfMatch(seg)
+		})
+		return result
+	}
+
+	if criterion.channel != "" {
+		idSet, ok := s.channel2Segments.Get(criterion.channel)
+		if !ok {
+			return result
+		}
+		idSet.Range(func(id UniqueID, _ struct{}) bool {
+			return appendIfMatch(s.GetSegment(id))
+		})
+		return result
+	}
+
+	s.segments.Range(func(_ UniqueID, seg *SegmentInfo) bool {
+		return appendIfMatch(seg)
+	})
 	return result
 }
 
