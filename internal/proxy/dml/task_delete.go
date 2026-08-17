@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -117,15 +118,17 @@ func (dt *DeleteTask) OnEnqueue() error {
 }
 
 func (dt *DeleteTask) SetChannels() error {
-	collID, err := dt.GetMetaCache().GetCollectionID(dt.ctx, dt.req.GetDbName(), dt.req.GetCollectionName())
-	if err != nil {
-		return err
+	if dt.pChannels == nil {
+		collID, err := dt.GetMetaCache().GetCollectionID(dt.ctx, dt.req.GetDbName(), dt.req.GetCollectionName())
+		if err != nil {
+			return err
+		}
+		channels, err := dt.chMgr.GetChannels(collID)
+		if err != nil {
+			return err
+		}
+		dt.pChannels = channels
 	}
-	channels, err := dt.chMgr.GetChannels(collID)
-	if err != nil {
-		return err
-	}
-	dt.pChannels = channels
 	return nil
 }
 
@@ -295,6 +298,7 @@ type DeleteRunner struct {
 	// channel
 	chMgr     channelmgr.ChannelsMgr
 	vChannels []vChan
+	pChannels []pChan
 
 	idAllocator     allocator.Interface
 	tsoAllocatorIns tsoAllocator
@@ -519,12 +523,18 @@ func (dr *DeleteRunner) Init(ctx context.Context) error {
 		dr.partitionIDs = []UniqueID{partID} // only one partID
 	}
 
-	// set vchannels
-	channelNames, err := dr.chMgr.GetVChannels(dr.collectionID)
-	if err != nil {
-		return ErrWithLog(log, "Failed to get vchannels from collection", err)
+	// VChannels and PChannels are allocated together and returned by the same
+	// DescribeCollection response. Keep that pair on the runner so each delete
+	// task can enqueue without refetching collection metadata via channelsMgr.
+	if len(colInfo.VChannels) != len(colInfo.PChannels) {
+		// Channel lists come from DescribeCollection (coordinator-allocated
+		// metadata), never from the caller: a mismatch is a server-side bug.
+		return ErrWithLog(log, "Failed to get channels from collection metadata",
+			merr.WrapErrServiceInternalMsg("physical channels mismatch virtual channels, len(VirtualChannelNames): %v, len(PhysicalChannelNames): %v",
+				len(colInfo.VChannels), len(colInfo.PChannels)))
 	}
-	dr.vChannels = channelNames
+	dr.vChannels = slices.Clone(colInfo.VChannels)
+	dr.pChannels = slices.Clone(colInfo.PChannels)
 
 	dr.result = &milvuspb.MutationResult{
 		Status: merr.Success(),
@@ -576,7 +586,8 @@ func (dr *DeleteRunner) produce(ctx context.Context, primaryKeys *schemapb.IDs, 
 		schema:       dr.schema,
 		collectionID: dr.collectionID,
 		partitionID:  partitionID,
-		vChannels:    dr.vChannels,
+		vChannels:    slices.Clone(dr.vChannels),
+		pChannels:    slices.Clone(dr.pChannels),
 		primaryKeys:  primaryKeys,
 		dbID:         dr.dbID,
 	}

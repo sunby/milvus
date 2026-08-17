@@ -221,6 +221,8 @@ func TestRLSOperationsUseSchemaFromPinnedCollectionInfo(t *testing.T) {
 			CollID:     collectionID,
 			Schema:     pinnedSchema,
 			RlsEnabled: true,
+			VChannels:  []string{"vchan1"},
+			PChannels:  []string{"pchan1"},
 		}, nil).Maybe()
 		cache.EXPECT().GetCollectionSchema(mock.Anything, "default", aliasName).
 			Run(func(context.Context, string, string) { nameSchemaLoads++ }).
@@ -323,8 +325,8 @@ func TestRLSOperationsUseSchemaFromPinnedCollectionInfo(t *testing.T) {
 			Actions:    []rlsutil.PolicyAction{rlsutil.PolicyActionDelete},
 			UsingExpr:  "value == 10",
 		}})
+		// The runner takes its channels from the pinned collection info.
 		chMgr := channelmgr.NewMockChannelsMgr(t)
-		chMgr.EXPECT().GetVChannels(collectionID).Return([]string{"vchan1"}, nil)
 		runner := &DeleteRunner{
 			node:      &mockTaskNode{metaCache: cache},
 			metaCache: cache,
@@ -338,6 +340,8 @@ func TestRLSOperationsUseSchemaFromPinnedCollectionInfo(t *testing.T) {
 		}
 		require.NoError(t, runner.Init(ctx))
 		require.Same(t, pinnedSchema, runner.schema)
+		require.Equal(t, []vChan{"vchan1"}, runner.vChannels)
+		require.Equal(t, []pChan{"pchan1"}, runner.pChannels)
 		require.Zero(t, *nameSchemaLoads)
 	})
 }
