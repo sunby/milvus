@@ -49,7 +49,11 @@ func (policy *l0CompactionPolicy) OnCollectionUpdate(collectionID int64) {
 }
 
 func (policy *l0CompactionPolicy) Trigger(ctx context.Context) (events map[CompactionTriggerType][]CompactionView, err error) {
-	latestCollSegs := policy.meta.GetCompactableSegmentGroupByCollection()
+	limit := getCompactionTaskLimit(ctx)
+	if limit == 0 {
+		return map[CompactionTriggerType][]CompactionView{}, nil
+	}
+	latestCollSegs := policy.meta.GetCompactableSegmentGroupByCollectionWithLimit(getCompactionCandidateLimit(ctx))
 
 	// 1. Get active collections
 	activeColls := policy.activeCollections.GetActiveCollections()
@@ -67,6 +71,9 @@ func (policy *l0CompactionPolicy) Trigger(ctx context.Context) (events map[Compa
 	}
 	events = make(map[CompactionTriggerType][]CompactionView)
 	for collID, segments := range latestCollSegs {
+		if compactionTaskLimitReached(limit, len(activeL0Views)+len(idleL0Views)) {
+			break
+		}
 		collection := policy.meta.GetCollection(collID)
 		if collection == nil {
 			continue
@@ -83,7 +90,11 @@ func (policy *l0CompactionPolicy) Trigger(ctx context.Context) (events map[Compa
 		if len(levelZeroSegments) == 0 {
 			continue
 		}
-		labelViews := policy.groupL0ViewsByPartChan(collID, GetViewsByInfo(levelZeroSegments...), newTriggerID)
+		remaining := limit
+		if remaining >= 0 {
+			remaining -= len(activeL0Views) + len(idleL0Views)
+		}
+		labelViews := policy.groupL0ViewsByPartChan(collID, GetViewsByInfo(levelZeroSegments...), newTriggerID, remaining)
 		if idleCollsSet.Contain(collID) {
 			idleL0Views = append(idleL0Views, labelViews...)
 		} else {
@@ -113,7 +124,7 @@ func (policy *l0CompactionPolicy) triggerOneCollection(ctx context.Context, coll
 		log.Info(ctx, "skip trigger l0 compaction for external collection")
 		return nil, 0, nil
 	}
-	allL0Segments := policy.meta.SelectSegments(ctx, WithCollection(collectionID), SegmentFilterFunc(func(segment *SegmentInfo) bool {
+	allL0Segments := policy.meta.SelectSegmentsWithLimit(ctx, getCompactionCandidateLimit(ctx), WithCollection(collectionID), SegmentFilterFunc(func(segment *SegmentInfo) bool {
 		return isSegmentHealthy(segment) &&
 			isFlushed(segment) &&
 			!segment.isCompacting && // not compacting now
@@ -130,15 +141,22 @@ func (policy *l0CompactionPolicy) triggerOneCollection(ctx context.Context, coll
 		log.Warn(ctx, "fail to allocate triggerID for l0 compaction", mlog.Err(err))
 		return nil, 0, err
 	}
-	views := policy.groupL0ViewsByPartChan(collectionID, GetViewsByInfo(allL0Segments...), newTriggerID)
+	views := policy.groupL0ViewsByPartChan(collectionID, GetViewsByInfo(allL0Segments...), newTriggerID, getCompactionTaskLimit(ctx))
 	return views, newTriggerID, nil
 }
 
-func (policy *l0CompactionPolicy) groupL0ViewsByPartChan(collectionID UniqueID, levelZeroSegments []*SegmentView, triggerID UniqueID) []CompactionView {
+func (policy *l0CompactionPolicy) groupL0ViewsByPartChan(collectionID UniqueID, levelZeroSegments []*SegmentView, triggerID UniqueID, limits ...int) []CompactionView {
+	limit := unlimitedCompactionTaskLimit
+	if len(limits) > 0 {
+		limit = limits[0]
+	}
 	partChanView := make(map[string]*LevelZeroCompactionView) // "part-chan" as key
 	for _, segView := range levelZeroSegments {
 		key := segView.label.Key()
 		if _, ok := partChanView[key]; !ok {
+			if compactionTaskLimitReached(limit, len(partChanView)) {
+				continue
+			}
 			earliestGrowingStartPos := policy.meta.GetEarliestStartPositionOfGrowingSegments(segView.label)
 			partChanView[key] = &LevelZeroCompactionView{
 				label:           segView.label,

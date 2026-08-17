@@ -362,6 +362,27 @@ func TestLoadAdmissionAsyncMemoryDefault(t *testing.T) {
 	assert.EqualValues(t, 2*1024*1024*1024, pt.CommonCfg.LoadTransientBudgetBytes.GetAsInt64())
 }
 
+func TestComponentParam_DataCoordCompactionTaskLimits(t *testing.T) {
+	Init()
+	params := Get()
+	maxTaskNum := &params.DataCoordCfg.CompactionMaxTaskNum
+	maxTaskNumPerTrigger := &params.DataCoordCfg.CompactionMaxTaskNumPerTrigger
+	t.Cleanup(func() {
+		params.Reset(maxTaskNum.Key)
+		params.Reset(maxTaskNumPerTrigger.Key)
+	})
+
+	assert.Equal(t, "dataCoord.compaction.maxTaskNum", maxTaskNum.Key)
+	assert.Equal(t, 1000, maxTaskNum.GetAsInt())
+	assert.Equal(t, "dataCoord.compaction.maxTaskNumPerTrigger", maxTaskNumPerTrigger.Key)
+	assert.Equal(t, 500, maxTaskNumPerTrigger.GetAsInt())
+
+	assert.NoError(t, params.Save(maxTaskNum.Key, "64"))
+	assert.Equal(t, 64, maxTaskNum.GetAsInt())
+	assert.NoError(t, params.Save(maxTaskNumPerTrigger.Key, "32"))
+	assert.Equal(t, 32, maxTaskNumPerTrigger.GetAsInt())
+}
+
 func TestResolveLoadAdmissionLimits(t *testing.T) {
 	pt := &ComponentParam{}
 	pt.Init(NewBaseTable(SkipRemote(true), SkipEnv(true), Files(nil)))
