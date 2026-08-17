@@ -21,6 +21,7 @@ package tasks
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/apache/arrow/go/v17/arrow"
 	"github.com/apache/arrow/go/v17/arrow/array"
@@ -37,6 +38,15 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
 )
+
+type reducePhaseTiming struct {
+	heapReduce         time.Duration
+	marshalReduce      time.Duration
+	sourceMapping      time.Duration
+	fillOutputFields   time.Duration
+	decodeOutputFields time.Duration
+	encodeResult       time.Duration
+}
 
 // exportSearchResultsAsArrow exports per-segment SearchResults as Arrow DataFrames
 // via the Arrow C Stream Interface (one RecordBatch per NQ).
@@ -113,6 +123,7 @@ func (t *SearchTask) executeGoReduce(
 	tr *timerecord.TimeRecorder,
 	relatedDataSize int64,
 	allSearchCount int64,
+	timing *reducePhaseTiming,
 ) error {
 	plan := searchReq.Plan()
 
@@ -130,19 +141,21 @@ func (t *SearchTask) executeGoReduce(
 	}
 
 	if !requiresPerSliceReduce(groupByOpts, t.originTopks) {
-		return t.executeGoReduceFastPath(segDFs, results, plan, metricType, tr, relatedDataSize, allSearchCount, groupByOpts)
+		return t.executeGoReduceFastPath(segDFs, results, plan, metricType, tr, relatedDataSize, allSearchCount, groupByOpts, timing)
 	}
 
 	nqOffset := 0
 	for i := range t.originNqs {
 		nq := int(t.originNqs[i])
+		reduceStart := time.Now()
 		reduceResult, err := heapMergeReduceRange(defaultAllocator, segDFs, t.originTopks[i], groupByOpts, nqOffset, nq)
+		timing.heapReduce += time.Since(reduceStart)
 		if err != nil {
 			mlog.Warn(t.ctx, "failed to heapMergeReduce", mlog.Err(err))
 			return err
 		}
 
-		err = t.buildReducedResult(i, reduceResult, results, plan, metricType, tr, relatedDataSize, allSearchCount)
+		err = t.buildReducedResult(i, reduceResult, results, plan, metricType, tr, relatedDataSize, allSearchCount, timing)
 		if reduceResult.DF != nil {
 			reduceResult.DF.Release()
 		}
@@ -165,11 +178,14 @@ func (t *SearchTask) executeGoReduceFastPath(
 	relatedDataSize int64,
 	allSearchCount int64,
 	groupByOpts *groupByOptions,
+	timing *reducePhaseTiming,
 ) error {
 	// plan.GetTopK() may be reduced by the delegator optimizer. t.topk is the
 	// task's unity topK across merged slices, preserving the worker reduce
 	// contract based on the original request topK.
+	reduceStart := time.Now()
 	reduceResult, err := heapMergeReduce(defaultAllocator, segDFs, t.topk, groupByOpts)
+	timing.heapReduce += time.Since(reduceStart)
 	if err != nil {
 		mlog.Warn(t.ctx, "failed to heapMergeReduce", mlog.Err(err))
 		return err
@@ -184,7 +200,7 @@ func (t *SearchTask) executeGoReduceFastPath(
 	nqOffset := 0
 	for i := range t.originNqs {
 		nq := int(t.originNqs[i])
-		if err := t.buildSlicedResult(i, nqOffset, nq, groupSize, reduceResult, results, plan, metricType, tr, relatedDataSize, allSearchCount); err != nil {
+		if err := t.buildSlicedResult(i, nqOffset, nq, groupSize, reduceResult, results, plan, metricType, tr, relatedDataSize, allSearchCount, timing); err != nil {
 			return err
 		}
 		nqOffset += nq
@@ -262,8 +278,11 @@ func (t *SearchTask) buildReducedResult(
 	tr *timerecord.TimeRecorder,
 	relatedDataSize int64,
 	allSearchCount int64,
+	timing *reducePhaseTiming,
 ) error {
+	marshalStart := time.Now()
 	searchResultData, err := marshalReduceResult(reduceResult)
+	timing.marshalReduce += time.Since(marshalStart)
 	if err != nil {
 		return err
 	}
@@ -276,11 +295,13 @@ func (t *SearchTask) buildReducedResult(
 	searchResultData.TopK = t.originTopks[i]
 	searchResultData.AllSearchCount = allSearchCount
 
-	if err := lateMaterializeOutputFields(t.ctx, results, plan, reduceResult.Sources, searchResultData); err != nil {
+	if err := lateMaterializeOutputFieldsWithTiming(t.ctx, results, plan, reduceResult.Sources, searchResultData, timing); err != nil {
 		return err
 	}
 
+	encodeStart := time.Now()
 	searchResults, err := segments.EncodeSearchResultData(t.ctx, searchResultData, t.originNqs[i], t.originTopks[i], metricType)
+	timing.encodeResult += time.Since(encodeStart)
 	if err != nil {
 		return err
 	}
@@ -314,6 +335,7 @@ func (t *SearchTask) buildSlicedResult(
 	tr *timerecord.TimeRecorder,
 	relatedDataSize int64,
 	allSearchCount int64,
+	timing *reducePhaseTiming,
 ) error {
 	rowLimit := t.originTopks[i] * groupSize
 	sliceResult, err := extractSlice(reduceResult, nqOffset, nq, rowLimit)
@@ -323,7 +345,7 @@ func (t *SearchTask) buildSlicedResult(
 	if sliceResult != reduceResult && sliceResult.DF != nil {
 		defer sliceResult.DF.Release()
 	}
-	return t.buildReducedResult(i, sliceResult, results, plan, metricType, tr, relatedDataSize, allSearchCount)
+	return t.buildReducedResult(i, sliceResult, results, plan, metricType, tr, relatedDataSize, allSearchCount, timing)
 }
 
 // lateMaterializeOutputFields reads output fields from C++ segments in a single
@@ -336,6 +358,17 @@ func lateMaterializeOutputFields(
 	sources [][]segmentSource,
 	searchResultData *schemapb.SearchResultData,
 ) error {
+	return lateMaterializeOutputFieldsWithTiming(ctx, results, plan, sources, searchResultData, nil)
+}
+
+func lateMaterializeOutputFieldsWithTiming(
+	ctx context.Context,
+	results []*segments.SearchResult,
+	plan *segcore.SearchPlan,
+	sources [][]segmentSource,
+	searchResultData *schemapb.SearchResultData,
+	timing *reducePhaseTiming,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -343,6 +376,7 @@ func lateMaterializeOutputFields(
 		return nil
 	}
 
+	mappingStart := time.Now()
 	totalRows := 0
 	for _, chunk := range sources {
 		totalRows += len(chunk)
@@ -358,8 +392,15 @@ func lateMaterializeOutputFields(
 			pos++
 		}
 	}
+	if timing != nil {
+		timing.sourceMapping += time.Since(mappingStart)
+	}
 
+	fillStart := time.Now()
 	protoBytes, err := segcore.FillOutputFieldsOrdered(ctx, results, plan, segIndices, segOffsets)
+	if timing != nil {
+		timing.fillOutputFields += time.Since(fillStart)
+	}
 	if err != nil {
 		return err
 	}
@@ -370,8 +411,12 @@ func lateMaterializeOutputFields(
 	var fieldResult schemapb.SearchResultData
 	// fastpb: wire-equivalent fast decoder for the late-materialize output-fields
 	// hot path (~2x varchar / ~6x vector vs proto.Unmarshal).
+	decodeStart := time.Now()
 	if err := fastpb.UnmarshalSearchResultData(protoBytes, &fieldResult); err != nil {
 		return err
+	}
+	if timing != nil {
+		timing.decodeOutputFields += time.Since(decodeStart)
 	}
 	searchResultData.FieldsData = fieldResult.FieldsData
 	return nil

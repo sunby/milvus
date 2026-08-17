@@ -1119,7 +1119,7 @@ func TestExecuteMergedSubTasks_MixedTopK(t *testing.T) {
 	}()
 
 	tr := timerecord.NewTimeRecorder("mixed-topk-test")
-	require.NoError(t, receiver.executeGoReduce(segDFs, ts.searchResults, ts.searchReq, "IP", tr, 0, allSearchCount))
+	require.NoError(t, receiver.executeGoReduce(segDFs, ts.searchResults, ts.searchReq, "IP", tr, 0, allSearchCount, &reducePhaseTiming{}))
 
 	for i, wantTopK := range subTaskTopks {
 		sub := receiver.subTaskAt(i)
@@ -1282,7 +1282,7 @@ func TestExecuteGoReduceHonorsEnableResultZeroCopy(t *testing.T) {
 	}()
 
 	tr := timerecord.NewTimeRecorder("zero-copy-test")
-	require.NoError(t, task.executeGoReduce(segDFs, ts.searchResults, ts.searchReq, "IP", tr, 0, allSearchCount))
+	require.NoError(t, task.executeGoReduce(segDFs, ts.searchResults, ts.searchReq, "IP", tr, 0, allSearchCount, &reducePhaseTiming{}))
 
 	res := task.SearchResult()
 	require.NotNil(t, res)

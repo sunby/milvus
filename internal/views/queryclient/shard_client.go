@@ -2,6 +2,7 @@ package queryclient
 
 import (
 	"context"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/proto"
@@ -11,6 +12,7 @@ import (
 	"github.com/milvus-io/milvus/internal/views/queryclient/resolver"
 	"github.com/milvus-io/milvus/internal/views/qviews"
 	"github.com/milvus-io/milvus/internal/views/viewerror"
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
@@ -162,16 +164,19 @@ func (s *shardViewQueryClient) executeShard(
 	var lastErr error
 
 	for attempt := 0; attempt < s.maxRetries; attempt++ {
+		attemptStart := time.Now()
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 
 		// Resolve shard replicas (every attempt, including first).
 		// ShardResolver uses a local cache, so this is a zero-overhead lookup.
+		resolveStart := time.Now()
 		shardReplicas, err := s.shardResolver.ResolveShard(ctx, collectionID, vchannel)
 		if err != nil {
 			return nil, err
 		}
+		resolveDuration := time.Since(resolveStart)
 
 		// Select target replica via picker.
 		pickResult, err := s.replicaPicker.Pick(ctx, ReplicaPickInfo{ShardReplicas: shardReplicas})
@@ -182,6 +187,7 @@ func (s *shardViewQueryClient) executeShard(
 
 		// Phase 1: GetQueryPlan with consistency routing.
 		planReq := params.buildPlanReq(targetShardID)
+		planStart := time.Now()
 		plan, err := s.executeGetQueryPlan(ctx, targetShardID, shardReplicas, planReq, params)
 		if err != nil {
 			if pickResult.Done != nil {
@@ -193,12 +199,15 @@ func (s *shardViewQueryClient) executeShard(
 			}
 			return nil, err
 		}
+		planDuration := time.Since(planStart)
 
 		shardID := qviews.FromProtoShardID(plan.ShardId)
 		workNodes := workNodesFromPlan(plan)
 
 		// Phase 2: Fan out to all work nodes concurrently.
+		fanoutStart := time.Now()
 		err = s.fanOutToWorkNodes(ctx, workNodes, plan, shardID, params.dispatchNode)
+		fanoutDuration := time.Since(fanoutStart)
 		if pickResult.Done != nil {
 			pickResult.Done(ReplicaDoneInfo{Err: err})
 		}
@@ -210,6 +219,16 @@ func (s *shardViewQueryClient) executeShard(
 			}
 			return nil, err
 		}
+
+		mlog.Info(ctx, "[load on search] shard query timing",
+			mlog.FieldCollectionID(collectionID),
+			mlog.FieldVChannel(vchannel),
+			mlog.Int("attempt", attempt+1),
+			mlog.Int("workNodeCount", len(workNodes)),
+			mlog.Duration("resolveShard", resolveDuration),
+			mlog.Duration("getQueryPlan", planDuration),
+			mlog.Duration("workNodeFanout", fanoutDuration),
+			mlog.Duration("total", time.Since(attemptStart)))
 
 		return &ShardPlan{
 			ShardID:   shardID,
