@@ -82,9 +82,11 @@ func RecoverShardManager(param *ShardManagerRecoverParam) ShardManager {
 	ctx, cancel := context.WithCancel(context.Background())
 	logger := resource.Resource().Logger().With(mlog.FieldComponent("shard-manager")).With(mlog.Stringer("pchannel", param.ChannelInfo))
 	segmentTotal := 0
+	partitionTotal := 0
 	metrics := metricsutil.NewSegmentAssignMetrics(param.ChannelInfo.Name)
 	for collectionID, collectionInfo := range collections {
 		collectionInfo.FencedAssignTimeTick = checkpointTimeTick
+		partitionTotal += len(collectionInfo.Partitions) - 1
 		for partitionID := range collectionInfo.Partitions {
 			var segmentManagers map[int64]*segmentAllocManager
 			// recovery meta is recovered , use it.
@@ -113,15 +115,16 @@ func RecoverShardManager(param *ShardManagerRecoverParam) ShardManager {
 		}
 	}
 	m := &shardManagerImpl{
-		mu:          sync.RWMutex{},
-		ctx:         ctx,
-		cancel:      cancel,
-		wal:         param.WAL,
-		scheduler:   param.Scheduler,
-		pchannel:    param.ChannelInfo,
-		collections: collections,
-		txnManager:  param.TxnManager,
-		metrics:     metrics,
+		mu:             sync.RWMutex{},
+		ctx:            ctx,
+		cancel:         cancel,
+		wal:            param.WAL,
+		scheduler:      param.Scheduler,
+		pchannel:       param.ChannelInfo,
+		collections:    collections,
+		txnManager:     param.TxnManager,
+		metrics:        metrics,
+		partitionCount: partitionTotal,
 	}
 	m.SetLogger(logger)
 	m.updateMetrics()
@@ -264,6 +267,12 @@ type shardManagerImpl struct {
 	collections map[int64]*CollectionInfo // map collectionID to collectionInfo
 	metrics     *metricsutil.SegmentAssignMetrics
 	txnManager  TxnManager
+
+	// partitionCount is the total number of real partitions across all collections,
+	// excluding the always-present AllPartitionsID sentinel entry. It is maintained
+	// incrementally at every create/drop site so updateMetrics can report it in O(1)
+	// instead of scanning every collection on the hot DDL path.
+	partitionCount int
 }
 
 type CollectionInfo struct {
@@ -489,11 +498,7 @@ func (m *shardManagerImpl) Close() {
 }
 
 func (m *shardManagerImpl) updateMetrics() {
-	partitionCount := 0
-	for _, collection := range m.collections {
-		partitionCount += len(collection.Partitions) - 1
-	}
-	m.metrics.UpdatePartitionCount(partitionCount)
+	m.metrics.UpdatePartitionCount(m.partitionCount)
 	m.metrics.UpdateCollectionCount(len(m.collections))
 }
 
