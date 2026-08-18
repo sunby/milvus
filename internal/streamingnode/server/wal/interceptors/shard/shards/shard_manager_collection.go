@@ -111,6 +111,7 @@ func (m *shardManagerImpl) CreateCollection(msg message.ImmutableCreateCollectio
 		)
 	}
 	logger.Info(context.TODO(), "collection created in segment assignment service", mlog.Int64s("partitionIDs", partitionIDs))
+	m.partitionCount += len(collectionInfo.Partitions) - 1
 	m.updateMetrics()
 }
 
@@ -130,6 +131,7 @@ func (m *shardManagerImpl) DropCollection(msg message.ImmutableDropCollectionMes
 	}
 
 	collectionInfo := m.collections[collectionID]
+	m.partitionCount -= len(collectionInfo.Partitions) - 1
 	delete(m.collections, collectionID)
 	// remove all partition and segment
 	partitionIDs := make([]int64, 0, len(collectionInfo.Partitions))

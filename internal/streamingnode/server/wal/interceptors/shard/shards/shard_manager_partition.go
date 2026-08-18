@@ -82,6 +82,7 @@ func (m *shardManagerImpl) CreatePartition(msg message.ImmutableCreatePartitionM
 		m.metrics,
 	)
 	m.Logger().Info(m.ctx, "partition created")
+	m.partitionCount++
 	m.updateMetrics()
 }
 
@@ -103,6 +104,7 @@ func (m *shardManagerImpl) DropPartition(msg message.ImmutableDropPartitionMessa
 	collection := m.collections[collectionID]
 	pm := collection.Partitions[partitionID]
 	delete(collection.Partitions, partitionID)
+	m.partitionCount--
 
 	if pm == nil {
 		logger.Warn(m.ctx, "partition not exists", mlog.FieldCollectionID(collectionID), mlog.FieldPartitionID(partitionID))
