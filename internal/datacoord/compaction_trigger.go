@@ -332,19 +332,16 @@ func (t *compactionTrigger) handleSignal(signal *compactionSignal) error {
 		mlog.Int64("signal.collectionID", signal.collectionID),
 		mlog.Int64("signal.partitionID", signal.partitionID),
 		mlog.Int64s("signal.segmentIDs", signal.segmentIDs))
+	limit := Params.DataCoordCfg.CompactionMaxTaskNumPerTrigger.GetAsInt()
+	generated := 0
 
 	if !signal.isForce && t.inspector.isFull() {
 		log.Warn(context.TODO(), "skip to generate compaction plan due to handler full")
 		return merr.WrapErrServiceQuotaExceeded("compaction handler full")
 	}
-	limit := getCompactionTaskBudget(t.inspector)
-	if limit == 0 {
-		log.Warn(context.TODO(), "skip to generate compaction plan due to compaction task limit")
-		return merr.WrapErrServiceQuotaExceeded("compaction task limit reached")
-	}
 
 	log.Info(context.TODO(), "handleSignal receive")
-	groups, err := t.getCandidates(signal, limit)
+	groups, err := t.getCandidates(signal)
 	if err != nil {
 		log.Warn(context.TODO(), "handle signal failed, get candidates return error", mlog.Err(err))
 		return err
@@ -355,8 +352,10 @@ func (t *compactionTrigger) handleSignal(signal *compactionSignal) error {
 		return nil
 	}
 
-	submitted := 0
 	for _, group := range groups {
+		if limit > 0 && generated >= limit {
+			break
+		}
 		log := mlog.With(
 			mlog.Int64("group.partitionID", group.partitionID),
 			mlog.String("group.channel", group.channelName),
@@ -365,10 +364,6 @@ func (t *compactionTrigger) handleSignal(signal *compactionSignal) error {
 		if !signal.isForce && t.inspector.isFull() {
 			log.Warn(context.TODO(), "skip to generate compaction plan due to handler full")
 			return merr.WrapErrServiceQuotaExceeded("compaction handler full")
-		}
-		remaining := compactionTaskSubmissionLimit(limit, submitted, t.inspector)
-		if remaining == 0 {
-			break
 		}
 
 		if Params.DataCoordCfg.IndexBasedCompaction.GetAsBool() {
@@ -404,15 +399,16 @@ func (t *compactionTrigger) handleSignal(signal *compactionSignal) error {
 		}
 
 		expectedSize := getExpectedSegmentSize(t.meta, coll.ID, coll.Schema)
-		plans := t.generatePlans(group.segments, signal, ct, expectedSize, remaining)
+		plans := t.generatePlans(group.segments, signal, ct, expectedSize)
+		if limit > 0 && len(plans) > limit-generated {
+			plans = plans[:limit-generated]
+		}
 		for _, bucket := range plans {
-			if compactionTaskSubmissionLimit(limit, submitted, t.inspector) == 0 {
-				break
-			}
 			if !signal.isForce && t.inspector.isFull() {
 				log.Warn(context.TODO(), "skip to generate compaction plan due to handler full")
 				return merr.WrapErrServiceQuotaExceeded("compaction handler full")
 			}
+			generated++
 			inputSegmentIDs := lo.Map(bucket.segments, func(s *SegmentInfo, _ int) int64 { return s.GetID() })
 
 			inputs := typeutil.NewSet[int64](inputSegmentIDs...)
@@ -454,7 +450,6 @@ func (t *compactionTrigger) handleSignal(signal *compactionSignal) error {
 					mlog.Err(err))
 				continue
 			}
-			submitted++
 
 			log.Info(context.TODO(), "time cost of generating compaction",
 				mlog.Int64("planID", task.GetPlanID()),
@@ -475,28 +470,11 @@ type compactionBucket struct {
 	maxSize   int64
 }
 
-func (t *compactionTrigger) generatePlans(segments []*SegmentInfo, signal *compactionSignal, compactTime *compactTime, expectedSize int64, limits ...int) []*compactionBucket {
-	limit := unlimitedCompactionTaskLimit
-	if len(limits) > 0 {
-		limit = limits[0]
-	}
-	if limit == 0 {
-		return nil
-	}
+func (t *compactionTrigger) generatePlans(segments []*SegmentInfo, signal *compactionSignal, compactTime *compactTime, expectedSize int64) []*compactionBucket {
 	if Params.DataCoordCfg.TwoTierCompaction.GetAsBool() {
-		if len(signal.segmentIDs) == 0 {
-			candidateLimit := getCompactionCandidateLimit(withCompactionTaskLimit(context.Background(), limit))
-			if candidateLimit >= 0 && len(segments) > candidateLimit {
-				segments = segments[:candidateLimit]
-			}
-		}
-		plans := t.generatePlansTwoTier(segments, signal, compactTime, expectedSize)
-		if limit >= 0 && len(plans) > limit {
-			plans = plans[:limit]
-		}
-		return plans
+		return t.generatePlansTwoTier(segments, signal, compactTime, expectedSize)
 	}
-	return t.generatePlansLegacy(segments, signal, compactTime, expectedSize, limit)
+	return t.generatePlansLegacy(segments, signal, compactTime, expectedSize)
 }
 
 func (t *compactionTrigger) generatePlansTwoTier(segments []*SegmentInfo, signal *compactionSignal, compactTime *compactTime, expectedSize int64) []*compactionBucket {
@@ -622,15 +600,7 @@ func (t *compactionTrigger) generatePlansTwoTier(segments []*SegmentInfo, signal
 	return buckets
 }
 
-func (t *compactionTrigger) generatePlansLegacy(segments []*SegmentInfo, signal *compactionSignal, compactTime *compactTime, expectedSize int64, limits ...int) []*compactionBucket {
-	limit := unlimitedCompactionTaskLimit
-	if len(limits) > 0 {
-		limit = limits[0]
-	}
-	candidateLimit := unlimitedCompactionTaskLimit
-	if len(signal.segmentIDs) == 0 {
-		candidateLimit = getCompactionCandidateLimit(withCompactionTaskLimit(context.Background(), limit))
-	}
+func (t *compactionTrigger) generatePlansLegacy(segments []*SegmentInfo, signal *compactionSignal, compactTime *compactTime, expectedSize int64) []*compactionBucket {
 	if len(segments) == 0 {
 		mlog.Warn(context.TODO(), "the number of candidate segments is 0, skip to generate compaction plan")
 		return nil
@@ -640,12 +610,7 @@ func (t *compactionTrigger) generatePlansLegacy(segments []*SegmentInfo, signal 
 	var smallCandidates []*SegmentInfo
 	var nonPlannedSegments []*SegmentInfo
 
-	// TODO, currently we lack of the measurement of data distribution, there should be another compaction help on redistributing segment based on scalar/vector field distribution
-	classified := 0
 	for _, segment := range segments {
-		if compactionTaskLimitReached(candidateLimit, classified) {
-			break
-		}
 		segment := segment.ShadowClone()
 		if signal.isForce || t.ShouldDoSingleCompaction(segment, compactTime) {
 			prioritizedCandidates = append(prioritizedCandidates, segment)
@@ -654,20 +619,9 @@ func (t *compactionTrigger) generatePlansLegacy(segments []*SegmentInfo, signal 
 		} else {
 			nonPlannedSegments = append(nonPlannedSegments, segment)
 		}
-		classified++
 	}
 
-	buckets := make([][]*SegmentInfo, 0)
-	appendBucket := func(pack []*SegmentInfo) bool {
-		if len(pack) == 0 {
-			return true
-		}
-		if compactionTaskLimitReached(limit, len(buckets)) {
-			return false
-		}
-		buckets = append(buckets, pack)
-		return true
-	}
+	buckets := [][]*SegmentInfo{}
 	toUpdate := newSegmentPacker("update", prioritizedCandidates, compactTime)
 	toMerge := newSegmentPacker("merge", smallCandidates, compactTime)
 
@@ -684,9 +638,7 @@ func (t *compactionTrigger) generatePlansLegacy(segments []*SegmentInfo, signal 
 			break
 		}
 		reasons = append(reasons, fmt.Sprintf("merging %d small segments with left size %d", len(pack), left))
-		if !appendBucket(pack) {
-			break
-		}
+		buckets = append(buckets, pack)
 	}
 
 	for {
@@ -695,14 +647,10 @@ func (t *compactionTrigger) generatePlansLegacy(segments []*SegmentInfo, signal 
 			break
 		}
 		reasons = append(reasons, fmt.Sprintf("packing %d prioritized segments", len(pack)))
-		if !appendBucket(pack) {
-			break
-		}
+		buckets = append(buckets, pack)
 	}
 	for _, s := range toUpdate.candidates {
-		if !appendBucket([]*SegmentInfo{s}) {
-			break
-		}
+		buckets = append(buckets, []*SegmentInfo{s})
 		reasons = append(reasons, fmt.Sprintf("force packing prioritized segment %d", s.GetID()))
 	}
 
@@ -712,14 +660,9 @@ func (t *compactionTrigger) generatePlansLegacy(segments []*SegmentInfo, signal 
 			break
 		}
 		reasons = append(reasons, fmt.Sprintf("packing all %d small segments", len(pack)))
-		if !appendBucket(pack) {
-			break
-		}
+		buckets = append(buckets, pack)
 	}
-	smallRemaining := toMerge.candidates
-	if !compactionTaskLimitReached(limit, len(buckets)) {
-		smallRemaining = t.squeezeSmallSegmentsToBuckets(toMerge.candidates, buckets, expectedSize)
-	}
+	smallRemaining := t.squeezeSmallSegmentsToBuckets(toMerge.candidates, buckets, expectedSize)
 
 	result := make([]*compactionBucket, 0, len(buckets))
 	for _, b := range buckets {
@@ -782,11 +725,7 @@ func (t *compactionTrigger) squeezeSmallSegmentsToBuckets(small []*SegmentInfo, 
 // getCandidates converts signal criterion into corresponding compaction candidate groups
 // since non-major compaction happens under channel+partition level
 // the selected segments are grouped into these categories.
-func (t *compactionTrigger) getCandidates(signal *compactionSignal, limits ...int) ([]chanPartSegments, error) {
-	limit := unlimitedCompactionTaskLimit
-	if len(limits) > 0 {
-		limit = limits[0]
-	}
+func (t *compactionTrigger) getCandidates(signal *compactionSignal) ([]chanPartSegments, error) {
 	// Fail-closed: if any protected snapshot's RefIndex hasn't loaded yet,
 	// block compaction for the entire collection.
 	if signal.collectionID > 0 && t.meta.isCollectionCompactionBlocked(signal.collectionID) {
@@ -823,14 +762,7 @@ func (t *compactionTrigger) getCandidates(signal *compactionSignal, limits ...in
 		}))
 	}
 
-	candidateLimit := unlimitedCompactionTaskLimit
-	if len(signal.segmentIDs) == 0 {
-		// Automatic/global triggers can bound the selected segment slice by the
-		// per-trigger candidate limit. Explicit manual segment selection remains
-		// exact so a caller still receives the existing mismatch validation.
-		candidateLimit = getCompactionCandidateLimit(withCompactionTaskLimit(context.Background(), limit))
-	}
-	segments := t.meta.SelectSegmentsWithLimit(context.TODO(), candidateLimit, filters...)
+	segments := t.meta.SelectSegments(context.TODO(), filters...)
 	// some criterion not met or conflicted
 	if len(signal.segmentIDs) > 0 && len(segments) != len(signal.segmentIDs) {
 		// SelectSegments also filters segments that are transiently mid-flush /
@@ -844,32 +776,22 @@ func (t *compactionTrigger) getCandidates(signal *compactionSignal, limits ...in
 		partitionID  int64
 		channelName  string
 	}
-	groups := make(map[category][]*SegmentInfo)
-	for _, segment := range segments {
-		c := category{
+	groups := lo.GroupBy(segments, func(segment *SegmentInfo) category {
+		return category{
 			collectionID: segment.CollectionID,
 			partitionID:  segment.PartitionID,
 			channelName:  segment.InsertChannel,
 		}
-		if _, ok := groups[c]; !ok {
-			if len(signal.segmentIDs) == 0 && compactionTaskLimitReached(limit, len(groups)) {
-				continue
-			}
-			groups[c] = make([]*SegmentInfo, 0)
-		}
-		groups[c] = append(groups[c], segment)
-	}
+	})
 
-	result := make([]chanPartSegments, 0, len(groups))
-	for c, groupSegments := range groups {
-		result = append(result, chanPartSegments{
+	return lo.MapToSlice(groups, func(c category, segments []*SegmentInfo) chanPartSegments {
+		return chanPartSegments{
 			collectionID: c.collectionID,
 			partitionID:  c.partitionID,
 			channelName:  c.channelName,
-			segments:     groupSegments,
-		})
-	}
-	return result, nil
+			segments:     segments,
+		}
+	}), nil
 }
 
 func hasTooManyDeletions(segment *SegmentInfo) bool {

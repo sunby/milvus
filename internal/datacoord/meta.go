@@ -2555,15 +2555,6 @@ func (m *meta) SelectSegments(ctx context.Context, filters ...SegmentFilter) []*
 	return m.segments.GetSegmentsBySelector(filters...)
 }
 
-// SelectSegmentsWithLimit selects at most limit matching segments without
-// materializing the complete candidate slice first. A negative limit means
-// unlimited.
-func (m *meta) SelectSegmentsWithLimit(ctx context.Context, limit int, filters ...SegmentFilter) []*SegmentInfo {
-	m.segMu.RLock()
-	defer m.segMu.RUnlock()
-	return m.segments.GetSegmentsBySelectorWithLimit(limit, filters...)
-}
-
 func (m *meta) GetCollectionIDsByPartition(ctx context.Context, partitionIDs []int64) []int64 {
 	partitions := make(map[int64]struct{}, len(partitionIDs))
 	for _, partitionID := range partitionIDs {
@@ -3587,11 +3578,7 @@ func (m *meta) isCollectionCompactionBlocked(collectionID int64) bool {
 // delta log accumulation, query latency spikes, and write stalls on collections with
 // active snapshots.
 func (m *meta) GetCompactableSegmentGroupByCollection() map[int64][]*SegmentInfo {
-	return m.GetCompactableSegmentGroupByCollectionWithLimit(unlimitedCompactionTaskLimit)
-}
-
-func (m *meta) GetCompactableSegmentGroupByCollectionWithLimit(limit int) map[int64][]*SegmentInfo {
-	allSegs := m.SelectSegmentsWithLimit(m.ctx, limit, SegmentFilterFunc(func(segment *SegmentInfo) bool {
+	allSegs := m.SelectSegments(m.ctx, SegmentFilterFunc(func(segment *SegmentInfo) bool {
 		return isSegmentHealthy(segment) &&
 			isFlushed(segment) && // sealed segment
 			!segment.isCompacting && // not compacting now

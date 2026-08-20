@@ -66,10 +66,6 @@ func (policy *forceMergeCompactionPolicy) triggerOneCollection(
 	collectionID int64,
 	targetSize int64,
 ) ([]CompactionView, int64, error) {
-	limit := getCompactionTaskLimit(ctx)
-	if limit == 0 {
-		return nil, 0, nil
-	}
 	log := mlog.With(
 		mlog.FieldCollectionID(collectionID),
 		mlog.Int64("targetSize", targetSize))
@@ -107,7 +103,7 @@ func (policy *forceMergeCompactionPolicy) triggerOneCollection(
 		return nil, 0, merr.WrapErrParameterInvalidMsg("targetSize %d MB should be greater than or equal to configMaxSize %d MB", targetSize, configMaxSize/(1024*1024))
 	}
 
-	segments := policy.meta.SelectSegmentsWithLimit(ctx, getCompactionCandidateLimit(ctx), WithCollection(collectionID), SegmentFilterFunc(func(segment *SegmentInfo) bool {
+	segments := policy.meta.SelectSegments(ctx, WithCollection(collectionID), SegmentFilterFunc(func(segment *SegmentInfo) bool {
 		return isNormalManualCompactionCandidate(policy.meta, segment)
 	}))
 
@@ -122,11 +118,8 @@ func (policy *forceMergeCompactionPolicy) triggerOneCollection(
 	}
 	topology.NumShards = len(collection.VChannelNames)
 
-	views := make([]CompactionView, 0, minInt(limit, len(segments)))
+	views := []CompactionView{}
 	for label, groups := range groupByPartitionChannel(segments) {
-		if compactionTaskLimitReached(limit, len(views)) {
-			break
-		}
 		view := &ForceMergeSegmentView{
 			label:         label,
 			segments:      groups,
@@ -142,13 +135,6 @@ func (policy *forceMergeCompactionPolicy) triggerOneCollection(
 
 	log.Info(ctx, "force merge triggered", mlog.Int("viewCount", len(views)))
 	return views, triggerID, nil
-}
-
-func minInt(a, b int) int {
-	if a < 0 || a > b {
-		return b
-	}
-	return a
 }
 
 func groupByPartitionChannel(segments []*SegmentInfo) map[*CompactionGroupLabel][]*SegmentInfo {

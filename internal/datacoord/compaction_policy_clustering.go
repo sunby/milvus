@@ -59,18 +59,11 @@ func (policy *clusteringCompactionPolicy) Name() string {
 
 func (policy *clusteringCompactionPolicy) Trigger(ctx context.Context) (map[CompactionTriggerType][]CompactionView, error) {
 	mlog.Info(ctx, "start trigger clusteringCompactionPolicy...")
-	limit := getCompactionTaskLimit(ctx)
-	if limit == 0 {
-		return map[CompactionTriggerType][]CompactionView{}, nil
-	}
 	collections := policy.meta.GetCollections()
 
 	events := make(map[CompactionTriggerType][]CompactionView, 0)
 	views := make([]CompactionView, 0)
 	for _, collection := range collections {
-		if compactionTaskLimitReached(limit, len(views)) {
-			break
-		}
 		if collection == nil {
 			continue
 		}
@@ -83,11 +76,7 @@ func (policy *clusteringCompactionPolicy) Trigger(ctx context.Context) (map[Comp
 				mlog.FieldCollectionID(collection.ID))
 			continue
 		}
-		remaining := limit
-		if remaining >= 0 {
-			remaining -= len(views)
-		}
-		collectionViews, _, err := policy.triggerOneCollection(withCompactionTaskLimit(ctx, remaining), collection.ID, false)
+		collectionViews, _, err := policy.triggerOneCollection(ctx, collection.ID, false)
 		if err != nil {
 			// not throw this error because no need to fail because of one collection
 			mlog.Warn(ctx, "fail to trigger collection clustering compaction", mlog.FieldCollectionID(collection.ID), mlog.Err(err))
@@ -155,7 +144,7 @@ func (policy *clusteringCompactionPolicy) triggerOneCollection(ctx context.Conte
 	}
 
 	namespaceEnabled := collection.Schema.GetEnableNamespace()
-	partSegments := GetSegmentsChanPartWithLimit(policy.meta, collectionID, getCompactionCandidateLimit(ctx), SegmentFilterFunc(func(segment *SegmentInfo) bool {
+	partSegments := GetSegmentsChanPart(policy.meta, collectionID, SegmentFilterFunc(func(segment *SegmentInfo) bool {
 		return isSegmentHealthy(segment) &&
 			isFlushed(segment) &&
 			!segment.isCompacting && // not compacting now
@@ -169,9 +158,6 @@ func (policy *clusteringCompactionPolicy) triggerOneCollection(ctx context.Conte
 	views := make([]CompactionView, 0)
 	// partSegments is list of chanPartSegments, which is channel-partition organized segments
 	for _, group := range partSegments {
-		if compactionTaskLimitReached(getCompactionTaskLimit(ctx), len(views)) {
-			break
-		}
 		log := mlog.With(mlog.FieldPartitionID(group.partitionID), mlog.String("channel", group.channelName))
 
 		if !policy.checkAllL2SegmentsContains(ctx, group.collectionID, group.partitionID, group.channelName) {

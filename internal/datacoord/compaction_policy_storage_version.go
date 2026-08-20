@@ -91,10 +91,6 @@ func segmentColumnGroupFormatsAllEqual(segment *SegmentInfo, targetFormat string
 }
 
 func (policy *storageVersionUpgradePolicy) Trigger(ctx context.Context) (map[CompactionTriggerType][]CompactionView, error) {
-	limit := getCompactionTaskLimit(ctx)
-	if limit == 0 {
-		return map[CompactionTriggerType][]CompactionView{}, nil
-	}
 	versionReqStr := paramtable.Get().DataCoordCfg.StorageVersionCompactionSessionVersionRequirement.GetValue()
 	versionRequirement, err := semver.Parse(versionReqStr)
 	if err != nil {
@@ -119,7 +115,7 @@ func (policy *storageVersionUpgradePolicy) Trigger(ctx context.Context) (map[Com
 
 	views := make([]CompactionView, 0)
 	for _, collection := range collections {
-		if policy.currentCount >= maxCount || compactionTaskLimitReached(limit, len(views)) {
+		if policy.currentCount >= maxCount {
 			break
 		}
 		if policy.meta.isCollectionCompactionBlocked(collection.ID) {
@@ -127,18 +123,11 @@ func (policy *storageVersionUpgradePolicy) Trigger(ctx context.Context) (map[Com
 				mlog.FieldCollectionID(collection.ID))
 			continue
 		}
-		remaining := limit
-		if remaining >= 0 {
-			remaining -= len(views)
-		}
-		collectionViews, err := policy.triggerOneCollection(withCompactionTaskLimit(ctx, remaining), collection.ID, maxCount)
+		collectionViews, err := policy.triggerOneCollection(ctx, collection.ID, maxCount)
 		if err != nil {
 			// not throw this error because no need to fail because of one collection
 			mlog.Warn(ctx, "fail to trigger storage version compaction", mlog.FieldCollectionID(collection.ID), mlog.Err(err))
 			continue
-		}
-		if remaining >= 0 && len(collectionViews) > remaining {
-			collectionViews = collectionViews[:remaining]
 		}
 		views = append(views, collectionViews...)
 	}
@@ -193,7 +182,7 @@ func (policy *storageVersionUpgradePolicy) triggerOneCollection(ctx context.Cont
 	formatEnabled := paramtable.Get().DataCoordCfg.StorageFormatCompactionEnabled.GetAsBool()
 	targetFormat := paramtable.Get().DataNodeCfg.StorageFormat.GetValue()
 
-	segments := policy.meta.SelectSegmentsWithLimit(ctx, getCompactionCandidateLimit(ctx), WithCollection(collectionID), SegmentFilterFunc(func(segment *SegmentInfo) bool {
+	segments := policy.meta.SelectSegments(ctx, WithCollection(collectionID), SegmentFilterFunc(func(segment *SegmentInfo) bool {
 		return isSegmentHealthy(segment) &&
 			isFlushed(segment) &&
 			!segment.isCompacting &&
@@ -209,7 +198,7 @@ func (policy *storageVersionUpgradePolicy) triggerOneCollection(ctx context.Cont
 
 	views := make([]CompactionView, 0, len(segments))
 	for _, segment := range segments {
-		if policy.currentCount >= maxCount || compactionTaskLimitReached(getCompactionTaskLimit(ctx), len(views)) {
+		if policy.currentCount >= maxCount {
 			break
 		}
 		segmentViews := GetViewsByInfo(segment)

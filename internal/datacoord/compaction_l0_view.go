@@ -122,13 +122,6 @@ func (v *LevelZeroCompactionView) ForceTrigger() (CompactionView, string) {
 }
 
 func (v *LevelZeroCompactionView) ForceTriggerAll() ([]CompactionView, string) {
-	return v.forceTriggerAllWithLimit(unlimitedCompactionTaskLimit)
-}
-
-func (v *LevelZeroCompactionView) forceTriggerAllWithLimit(limit int) ([]CompactionView, string) {
-	if limit == 0 {
-		return nil, "force trigger all"
-	}
 	sort.Slice(v.l0Segments, func(i, j int) bool {
 		return v.l0Segments[i].dmlPos.GetTimestamp() < v.l0Segments[j].dmlPos.GetTimestamp()
 	})
@@ -137,7 +130,7 @@ func (v *LevelZeroCompactionView) forceTriggerAllWithLimit(limit int) ([]Compact
 	remainingSegments := v.l0Segments
 
 	// Multi-round force trigger loop
-	for len(remainingSegments) > 0 && (limit < 0 || len(resultViews) < limit) {
+	for len(remainingSegments) > 0 {
 		targetViews, _ := v.forceTrigger(remainingSegments)
 		if len(targetViews) == 0 {
 			// No more segments can be force triggered, break the loop

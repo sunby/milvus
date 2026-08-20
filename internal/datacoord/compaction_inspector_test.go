@@ -600,7 +600,6 @@ func (s *CompactionPlanHandlerSuite) TestCompactionTaskLimitCountsPendingAndRunn
 	s.Require().NoError(s.handler.submitTask(pending))
 	s.handler.restoreTask(running)
 	s.True(s.handler.isFull())
-	s.Equal(0, s.handler.getCompactionTaskRemaining())
 }
 
 func (s *CompactionPlanHandlerSuite) TestConcurrentEnqueueRespectsCompactionTaskLimit() {
@@ -733,7 +732,6 @@ func (s *CompactionPlanHandlerSuite) TestFinishingTaskReleasesAdmissionAtomicall
 
 	s.Require().NoError(s.handler.checkCompaction())
 	s.Equal(0, s.handler.getCompactionTasksNum())
-	s.Equal(1, s.handler.getCompactionTaskRemaining())
 }
 
 func (s *CompactionPlanHandlerSuite) TestExecCompactionPlan() {
