@@ -200,7 +200,7 @@ func (m *Manager) startBuildLocked(meta *viewpb.QueryViewMeta, build ViewBuilder
 	if build == nil {
 		panic("query resource view builder is nil")
 	}
-	view, ok := build(meta)
+	_, ok := build(meta)
 	if !ok {
 		return false
 	}

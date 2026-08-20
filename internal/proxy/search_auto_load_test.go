@@ -555,8 +555,8 @@ func mockSearchCollectionMeta(t *testing.T, collectionID int64, vchannels []stri
 	globalMetaCache = &MetaCache{}
 	getCollectionIDMock := mockey.Mock((*MetaCache).GetCollectionID).Return(collectionID, nil).Build()
 	getCollectionInfoMock := mockey.Mock((*MetaCache).GetCollectionInfo).Return(&collectionInfo{
-		collID:    collectionID,
-		vChannels: vchannels,
+		CollID:    collectionID,
+		VChannels: vchannels,
 	}, nil).Build()
 	t.Cleanup(func() {
 		getCollectionInfoMock.UnPatch()

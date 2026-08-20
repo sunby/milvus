@@ -320,8 +320,8 @@ func (s *DeleteRunnerSuite) SetupSuite() {
 
 func deleteCollectionInfo() *collectionInfo {
 	return &collectionInfo{
-		vChannels: []string{"vchan1"},
-		pChannels: []string{"pchan1"},
+		VChannels: []string{"vchan1"},
+		PChannels: []string{"pchan1"},
 	}
 }
 
@@ -800,8 +800,8 @@ func (s *DeleteRunnerSuite) TestInitFailure() {
 		s.mockCache.EXPECT().GetCollectionID(mock.Anything, mock.Anything, mock.Anything).Return(s.collectionID, nil)
 		s.mockCache.EXPECT().GetCollectionSchema(mock.Anything, mock.Anything, mock.Anything).Return(s.schema, nil).Twice()
 		s.mockCache.EXPECT().GetCollectionInfo(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(&collectionInfo{
-			vChannels: []string{"vchan1", "vchan2"},
-			pChannels: []string{"pchan1"},
+			VChannels: []string{"vchan1", "vchan2"},
+			PChannels: []string{"pchan1"},
 		}, nil)
 		s.mockCache.EXPECT().GetPartitionsIndex(mock.Anything, mock.Anything, mock.Anything).Return([]string{"part1", "part2"}, nil)
 		s.mockCache.EXPECT().GetPartitions(mock.Anything, mock.Anything, mock.Anything).Return(map[string]int64{"part1": 100, "part2": 101}, nil)

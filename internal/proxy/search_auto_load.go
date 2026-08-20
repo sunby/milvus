@@ -56,7 +56,7 @@ func (node *Proxy) ensureCollectionReadyForSearch(ctx context.Context, dbName, c
 		return err
 	}
 
-	err = readiness.CheckCollectionReady(ctx, collectionID, collectionInfo.vChannels)
+	err = readiness.CheckCollectionReady(ctx, collectionID, collectionInfo.VChannels)
 	if err == nil {
 		return nil
 	}
@@ -134,5 +134,5 @@ func (node *Proxy) ensureCollectionReadyForSearch(ctx context.Context, dbName, c
 		return merr.WrapErrServiceInternalMsg("unexpected collection load state %s", loadState.GetState().String())
 	}
 
-	return readiness.WaitForCollectionReady(ctx, collectionID, collectionInfo.vChannels)
+	return readiness.WaitForCollectionReady(ctx, collectionID, collectionInfo.VChannels)
 }
