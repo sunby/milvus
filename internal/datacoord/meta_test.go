@@ -6178,7 +6178,7 @@ func TestCompactionCompletionRecordsSegmentCreateTsFromTaskCreateTs(t *testing.T
 	expectedCreateTS := tsoutil.ComposeTSByTimeWithLogical(time.Unix(startTime, 0), 7)
 
 	t.Run("mix", func(t *testing.T) {
-		meta := newCompactionCreateTsTestMeta(
+		meta := newCompactionCreateTsTestMeta(t,
 			newCompactionCreateTsTestSegment(1, datapb.SegmentLevel_L1),
 			newCompactionCreateTsTestSegment(2, datapb.SegmentLevel_L1),
 		)
@@ -6207,7 +6207,7 @@ func TestCompactionCompletionRecordsSegmentCreateTsFromTaskCreateTs(t *testing.T
 	})
 
 	t.Run("sort", func(t *testing.T) {
-		meta := newCompactionCreateTsTestMeta(newCompactionCreateTsTestSegment(1, datapb.SegmentLevel_L2))
+		meta := newCompactionCreateTsTestMeta(t, newCompactionCreateTsTestSegment(1, datapb.SegmentLevel_L2))
 		task := &datapb.CompactionTask{
 			InputSegments: []int64{1},
 			Type:          datapb.CompactionType_SortCompaction,
@@ -6233,7 +6233,7 @@ func TestCompactionCompletionRecordsSegmentCreateTsFromTaskCreateTs(t *testing.T
 	})
 
 	t.Run("clustering", func(t *testing.T) {
-		meta := newCompactionCreateTsTestMeta(
+		meta := newCompactionCreateTsTestMeta(t,
 			newCompactionCreateTsTestSegment(1, datapb.SegmentLevel_L1),
 			newCompactionCreateTsTestSegment(2, datapb.SegmentLevel_L1),
 		)
@@ -6262,7 +6262,7 @@ func TestCompactionCompletionRecordsSegmentCreateTsFromTaskCreateTs(t *testing.T
 	})
 
 	t.Run("bump schema replacement", func(t *testing.T) {
-		meta := newCompactionCreateTsTestMeta(newCompactionCreateTsTestSegment(1, datapb.SegmentLevel_L1))
+		meta := newCompactionCreateTsTestMeta(t, newCompactionCreateTsTestSegment(1, datapb.SegmentLevel_L1))
 		task := &datapb.CompactionTask{
 			InputSegments:          []int64{1},
 			Type:                   datapb.CompactionType_BumpSchemaVersionCompaction,
@@ -6295,7 +6295,7 @@ func TestCompactionCompletionRecordsSegmentCreateTsFromTaskCreateTs(t *testing.T
 		segment.CreateTs = 777
 		segment.StorageVersion = storage.StorageV3
 		segment.ManifestPath = "manifest"
-		meta := newCompactionCreateTsTestMeta(segment)
+		meta := newCompactionCreateTsTestMeta(t, segment)
 		task := &datapb.CompactionTask{
 			InputSegments: []int64{1},
 			Type:          datapb.CompactionType_BumpSchemaVersionCompaction,
@@ -6322,16 +6322,20 @@ func TestCompactionCompletionRecordsSegmentCreateTsFromTaskCreateTs(t *testing.T
 	})
 }
 
-func newCompactionCreateTsTestMeta(segments ...*SegmentInfo) *meta {
+func newCompactionCreateTsTestMeta(t testing.TB, segments ...*SegmentInfo) *meta {
+	t.Helper()
 	segmentStore := NewCachedSegmentsInfo()
 	for _, segment := range segments {
 		segmentStore.SetSegment(segment.GetID(), segment, 0)
 	}
-	return &meta{
-		ctx:      context.Background(),
-		catalog:  &datacoord.Catalog{MetaKv: NewMetaMemoryKV()},
-		segments: segmentStore,
+	meta := &meta{
+		ctx:            context.Background(),
+		catalog:        &datacoord.Catalog{MetaKv: NewMetaMemoryKV()},
+		segments:       segmentStore,
+		segmentPersist: newTestSegmentPersist(),
 	}
+	seedTestSegmentPersist(t, meta)
+	return meta
 }
 
 func newCompactionCreateTsTestSegment(id int64, level datapb.SegmentLevel) *SegmentInfo {

@@ -2038,6 +2038,10 @@ func normalizePositionTimestamp(pos *msgpb.MsgPosition, commitTs uint64) *msgpb.
 	}
 }
 
+func compactionTaskCreateTS(t *datapb.CompactionTask) uint64 {
+	return t.GetCreateTs()
+}
+
 func maxCommitTimestamp(compactFromSegInfos []*SegmentInfo) uint64 {
 	var maxCommitTs uint64
 	for _, info := range compactFromSegInfos {
@@ -2109,6 +2113,7 @@ func (m *meta) completeClusterCompactionMutation(t *datapb.CompactionTask, resul
 			Statslogs:           seg.GetField2StatslogPaths(),
 			CreatedByCompaction: true,
 			CompactionFrom:      compactFromSegIDs,
+			CreateTs:            compactionTaskCreateTS(t),
 			LastExpireTime:      tsoutil.ComposeTSByTime(time.Unix(t.GetStartTime(), 0)),
 			Level:               datapb.SegmentLevel_L2,
 			StartPosition:       startPos,
@@ -2973,6 +2978,7 @@ func (m *meta) completeSortCompactionMutation(
 		Bm25Statslogs:                 resultSegment.GetBm25Logs(),
 		Deltalogs:                     resultSegment.GetDeltalogs(),
 		CompactionFrom:                []int64{compactFromSegID},
+		CreateTs:                      compactionTaskCreateTS(t),
 		IsSorted:                      resultSegment.GetIsSorted(),
 		ManifestPath:                  resultSegment.GetManifest(),
 		ExpirQuantiles:                resultSegment.GetExpirQuantiles(),
@@ -3179,6 +3185,7 @@ func (m *meta) completeBumpSchemaVersionReplacementMutation(
 		Bm25Statslogs:                 resultSegment.GetBm25Logs(),
 		Deltalogs:                     resultSegment.GetDeltalogs(),
 		CompactionFrom:                []int64{oldSegment.GetID()},
+		CreateTs:                      compactionTaskCreateTS(t),
 		IsSorted:                      oldSegment.GetIsSorted(),
 		ManifestPath:                  resultSegment.GetManifest(),
 		ExpirQuantiles:                resultSegment.GetExpirQuantiles(),
