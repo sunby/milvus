@@ -69,11 +69,12 @@ func TestComponentParam_DataCoordCompactionTaskLimits(t *testing.T) {
 
 	assert.Equal(t, "dataCoord.compaction.maxTaskNum", maxTaskNum.Key)
 	assert.Equal(t, 1000, maxTaskNum.GetAsInt())
-	assert.Equal(t, "dataCoord.compaction.maxTaskNumPerTrigger", maxTaskNumPerTrigger.Key)
-	assert.Equal(t, 500, maxTaskNumPerTrigger.GetAsInt())
 
 	assert.NoError(t, params.Save(maxTaskNum.Key, "64"))
 	assert.Equal(t, 64, maxTaskNum.GetAsInt())
+
+	assert.Equal(t, "dataCoord.compaction.maxTaskNumPerTrigger", maxTaskNumPerTrigger.Key)
+	assert.Equal(t, 500, maxTaskNumPerTrigger.GetAsInt())
 	assert.NoError(t, params.Save(maxTaskNumPerTrigger.Key, "32"))
 	assert.Equal(t, 32, maxTaskNumPerTrigger.GetAsInt())
 }

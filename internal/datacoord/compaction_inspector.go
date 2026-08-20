@@ -747,34 +747,6 @@ func (c *compactionInspector) isFullLocked() bool {
 	return maxTaskNum > 0 && c.getActiveCompactionTaskCountLocked() >= maxTaskNum
 }
 
-func (c *compactionInspector) getCompactionTaskRemaining() int {
-	c.enqueueGuard.Lock()
-	defer c.enqueueGuard.Unlock()
-
-	maxTaskNum := Params.DataCoordCfg.CompactionMaxTaskNum.GetAsInt()
-	remaining := unlimitedCompactionTaskLimit
-	if maxTaskNum <= 0 {
-		remaining = unlimitedCompactionTaskLimit
-	} else {
-		remaining = maxTaskNum - c.getActiveCompactionTaskCountLocked()
-		if remaining < 0 {
-			remaining = 0
-		}
-	}
-	// Keep the existing queue capacity as a second admission bound. A
-	// non-positive queue capacity means the queue itself is unlimited.
-	if c.queueTasks.capacity > 0 {
-		queueRemaining := c.queueTasks.capacity - c.queueTasks.Len()
-		if queueRemaining < 0 {
-			queueRemaining = 0
-		}
-		if remaining < 0 || queueRemaining < remaining {
-			remaining = queueRemaining
-		}
-	}
-	return remaining
-}
-
 func (c *compactionInspector) getActiveCompactionTaskCountLocked() int {
 	c.executingGuard.RLock()
 	defer c.executingGuard.RUnlock()
