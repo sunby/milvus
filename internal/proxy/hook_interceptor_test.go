@@ -218,7 +218,7 @@ func TestUpdateProxyFunctionCallMetric(t *testing.T) {
 
 	metrics.ProxyFunctionCall.Reset()
 	updateProxyFunctionCallMetric(milvuspb.MilvusService_DropCollection_FullMethodName, errors.New("mock hook error"))
-	assert.Equal(t, 0, testutil.CollectAndCount(metrics.ProxyFunctionCall))
+	assert.Equal(t, 2, testutil.CollectAndCount(metrics.ProxyFunctionCall))
 }
 
 // A refusal returned from Before reaches the client as InvalidArgument, not
