@@ -410,7 +410,7 @@ func (dr *deleteRunner) Init(ctx context.Context) error {
 	// VChannels and PChannels are allocated together and returned by the same
 	// DescribeCollection response. Keep that pair on the runner so each delete
 	// task can enqueue without refetching collection metadata via channelsMgr.
-	channels, err := newChannels(colInfo.vChannels, colInfo.pChannels)
+	channels, err := newChannels(colInfo.VChannels, colInfo.PChannels)
 	if err != nil {
 		return ErrWithLog(log, "Failed to get channels from collection metadata", err)
 	}

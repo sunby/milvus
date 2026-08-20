@@ -47,12 +47,12 @@ func TestManagerRetriesViewBuildUntilSnapshotReady(t *testing.T) {
 	ready := make(chan struct{})
 	meta, key := testManagerQueryViewMetaAndKey(1)
 	manager.Acquire(snview.AcquireResource{Key: key, Meta: meta, OnReady: func() { close(ready) }}, func(*viewpb.QueryViewMeta) (walview.VChannelWALView, bool) {
-		attempts.Add(1)
-		return walview.VChannelWALView{}, snapshotReady.Load()
+		attempt := attempts.Add(1)
+		return walview.VChannelWALView{}, attempt == 1 || snapshotReady.Load()
 	})
 
 	require.Eventually(t, func() bool {
-		return attempts.Load() > 0
+		return attempts.Load() > 1
 	}, time.Second, time.Millisecond)
 	snapshotReady.Store(true)
 	require.Eventually(t, func() bool {
