@@ -28,6 +28,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v3/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/pkg/v3/mq/msgstream"
+	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
@@ -87,7 +88,7 @@ func TestGenInsertMsgsByPartitionContiguousFastPath(t *testing.T) {
 	}
 
 	msgs, err := genInsertMsgsByPartition(
-		context.Background(), 0, 1, "test_partition", []int{1, 2, 3}, "test_channel", insertMsg,
+		context.Background(), 0, 1, "test_partition", []int{1, 2, 3}, "test_channel", insertMsg, message.WALNamePulsar,
 	)
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
@@ -106,7 +107,9 @@ func TestGenInsertMsgsByPartitionContiguousFastPath(t *testing.T) {
 	assert.True(t, &longData[1] == &got.FieldsData[0].GetScalars().GetLongData().Data[0])
 	assert.True(t, &jsonData[1] == &got.FieldsData[1].GetScalars().GetJsonData().Data[0])
 	assert.True(t, &floatData[2] == &got.FieldsData[2].GetVectors().GetFloatVector().Data[0])
-	assert.True(t, &validData[1] == &got.FieldsData[2].ValidData[0])
+	gotValidData := typeutil.GetFieldDataValidData(got.FieldsData[2])
+	require.Len(t, gotValidData, 3)
+	assert.True(t, &validData[1] == &gotValidData[0])
 	assert.True(t, &hashValues[1] == &got.HashValues[0])
 	assert.True(t, &timestamps[1] == &got.Timestamps[0])
 	assert.True(t, &rowIDs[1] == &got.RowIDs[0])
@@ -140,7 +143,7 @@ func TestGenInsertMsgsByPartitionNonContiguousFallback(t *testing.T) {
 	}
 
 	msgs, err := genInsertMsgsByPartition(
-		context.Background(), 0, 1, "test_partition", []int{0, 2}, "test_channel", insertMsg,
+		context.Background(), 0, 1, "test_partition", []int{0, 2}, "test_channel", insertMsg, message.WALNamePulsar,
 	)
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
@@ -175,7 +178,7 @@ func TestGenInsertMsgsByPartitionContiguousFastPathAfterSplit(t *testing.T) {
 	}
 
 	msgs, err := genInsertMsgsByPartition(
-		context.Background(), 0, 1, "test_partition", []int{0, 1, 2, 3}, "test_channel", insertMsg,
+		context.Background(), 0, 1, "test_partition", []int{0, 1, 2, 3}, "test_channel", insertMsg, message.WALNamePulsar,
 	)
 	require.NoError(t, err)
 	require.Len(t, msgs, 2)
