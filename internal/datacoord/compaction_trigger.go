@@ -332,6 +332,8 @@ func (t *compactionTrigger) handleSignal(signal *compactionSignal) error {
 		mlog.Int64("signal.collectionID", signal.collectionID),
 		mlog.Int64("signal.partitionID", signal.partitionID),
 		mlog.Int64s("signal.segmentIDs", signal.segmentIDs))
+	limit := Params.DataCoordCfg.CompactionMaxTaskNumPerTrigger.GetAsInt()
+	generated := 0
 
 	if !signal.isForce && t.inspector.isFull() {
 		log.Warn(context.TODO(), "skip to generate compaction plan due to handler full")
@@ -351,6 +353,9 @@ func (t *compactionTrigger) handleSignal(signal *compactionSignal) error {
 	}
 
 	for _, group := range groups {
+		if limit > 0 && generated >= limit {
+			break
+		}
 		log := mlog.With(
 			mlog.Int64("group.partitionID", group.partitionID),
 			mlog.String("group.channel", group.channelName),
@@ -395,11 +400,15 @@ func (t *compactionTrigger) handleSignal(signal *compactionSignal) error {
 
 		expectedSize := getExpectedSegmentSize(t.meta, coll.ID, coll.Schema)
 		plans := t.generatePlans(group.segments, signal, ct, expectedSize)
+		if limit > 0 && len(plans) > limit-generated {
+			plans = plans[:limit-generated]
+		}
 		for _, bucket := range plans {
 			if !signal.isForce && t.inspector.isFull() {
 				log.Warn(context.TODO(), "skip to generate compaction plan due to handler full")
 				return merr.WrapErrServiceQuotaExceeded("compaction handler full")
 			}
+			generated++
 			inputSegmentIDs := lo.Map(bucket.segments, func(s *SegmentInfo, _ int) int64 { return s.GetID() })
 
 			inputs := typeutil.NewSet[int64](inputSegmentIDs...)

@@ -2493,6 +2493,47 @@ func (s *CompactionTriggerSuite) TestHandleSignal() {
 			WithIsForce(true))
 		s.NoError(err)
 	})
+
+	s.Run("force compaction respects per-trigger task limit", func() {
+		defer s.SetupTest()
+		pt := paramtable.Get()
+		pt.Save(pt.DataCoordCfg.IndexBasedCompaction.Key, "false")
+		defer pt.Reset(pt.DataCoordCfg.IndexBasedCompaction.Key)
+		pt.Save(pt.DataCoordCfg.CompactionPreAllocateIDExpansionFactor.Key, "1")
+		defer pt.Reset(pt.DataCoordCfg.CompactionPreAllocateIDExpansionFactor.Key)
+		pt.Save(pt.DataCoordCfg.SegmentMaxSize.Key, "100")
+		defer pt.Reset(pt.DataCoordCfg.SegmentMaxSize.Key)
+		pt.Save(pt.DataCoordCfg.CompactionMaxTaskNumPerTrigger.Key, "1")
+		defer pt.Reset(pt.DataCoordCfg.CompactionMaxTaskNumPerTrigger.Key)
+
+		const mb = 1024 * 1024
+		for _, segmentID := range []int64{1, 2, 3} {
+			s.meta.segments.GetSegment(segmentID).Binlogs[0].Binlogs[0].MemorySize = 250 * mb
+		}
+
+		handler := NewNMockHandler(s.T())
+		handler.EXPECT().GetCollection(mock.Anything, s.collectionID).
+			Return(&collectionInfo{
+				ID: s.collectionID,
+				Schema: &schemapb.CollectionSchema{Fields: []*schemapb.FieldSchema{
+					{FieldID: s.vecFieldID, DataType: schemapb.DataType_FloatVector},
+				}},
+			}, nil).Once()
+		s.tr.handler = handler
+
+		s.allocator.EXPECT().AllocN(mock.Anything).RunAndReturn(func(count int64) (int64, int64, error) {
+			return 1000, 1000 + count, nil
+		}).Once()
+		s.inspector.EXPECT().enqueueCompaction(mock.Anything).Return(nil).Once()
+
+		err := s.tr.handleSignal(NewCompactionSignal().
+			WithCollectionID(s.collectionID).
+			WithPartitionID(s.partitionID).
+			WithChannel(s.channel).
+			WithSegmentIDs(1, 2, 3).
+			WithIsForce(true))
+		s.NoError(err)
+	})
 }
 
 func TestIsCollectionAutoCompactionEnabledExternal(t *testing.T) {

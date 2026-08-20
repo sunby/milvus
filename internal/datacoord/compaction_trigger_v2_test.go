@@ -281,7 +281,8 @@ func (s *CompactionTriggerManagerSuite) TestNotifyByViewIDLE() {
 			return nil
 		}).Return(nil).Once()
 	s.mockAlloc.EXPECT().AllocID(mock.Anything).Return(19530, nil).Maybe()
-	s.triggerManager.notify(context.Background(), TriggerTypeLevelZeroViewIDLE, levelZeroViews)
+	_, err := s.triggerManager.notify(context.Background(), TriggerTypeLevelZeroViewIDLE, levelZeroViews, 0)
+	s.NoError(err)
 }
 
 func (s *CompactionTriggerManagerSuite) TestNotifyByViewChange() {
@@ -321,7 +322,78 @@ func (s *CompactionTriggerManagerSuite) TestNotifyByViewChange() {
 			return nil
 		}).Return(nil).Once()
 	s.mockAlloc.EXPECT().AllocID(mock.Anything).Return(19530, nil).Maybe()
-	s.triggerManager.notify(context.Background(), TriggerTypeLevelZeroViewChange, levelZeroViews)
+	_, err := s.triggerManager.notify(context.Background(), TriggerTypeLevelZeroViewChange, levelZeroViews, 0)
+	s.NoError(err)
+}
+
+func (s *CompactionTriggerManagerSuite) TestNotifyEventsRespectsPerTriggerLimit() {
+	pt := paramtable.Get()
+	pt.Save(pt.DataCoordCfg.CompactionMaxTaskNumPerTrigger.Key, "2")
+	defer pt.Reset(pt.DataCoordCfg.CompactionMaxTaskNumPerTrigger.Key)
+	pt.Save(pt.DataCoordCfg.CompactionPreAllocateIDExpansionFactor.Key, "1")
+	defer pt.Reset(pt.DataCoordCfg.CompactionPreAllocateIDExpansionFactor.Key)
+
+	s.meta.indexMeta = &indexMeta{indexes: make(map[UniqueID]map[UniqueID]*model.Index)}
+	collection := &collectionInfo{
+		ID: s.testLabel.CollectionID,
+		Schema: &schemapb.CollectionSchema{Fields: []*schemapb.FieldSchema{
+			{FieldID: 1, DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+			{FieldID: 2, DataType: schemapb.DataType_FloatVector},
+		}},
+	}
+	handler := NewNMockHandler(s.T())
+	handler.EXPECT().GetCollection(mock.Anything, s.testLabel.CollectionID).Return(collection, nil).Twice()
+	s.triggerManager.handler = handler
+
+	s.mockAlloc.EXPECT().AllocN(mock.Anything).Return(int64(100), int64(102), nil).Twice()
+	s.inspector.EXPECT().enqueueCompaction(mock.Anything).Return(nil).Twice()
+
+	makeView := func(id int64) CompactionView {
+		return &MixSegmentView{
+			label:     s.testLabel,
+			segments:  []*SegmentView{{ID: id, label: s.testLabel, Size: 1}},
+			triggerID: 1000,
+		}
+	}
+	s.triggerManager.notifyEvents(context.Background(), map[CompactionTriggerType][]CompactionView{
+		TriggerTypeSingle: {makeView(200), makeView(201)},
+		TriggerTypeSort:   {makeView(202)},
+	})
+}
+
+func (s *CompactionTriggerManagerSuite) TestNotifyEventsStopsOnQuotaError() {
+	pt := paramtable.Get()
+	pt.Save(pt.DataCoordCfg.CompactionMaxTaskNumPerTrigger.Key, "5")
+	defer pt.Reset(pt.DataCoordCfg.CompactionMaxTaskNumPerTrigger.Key)
+	pt.Save(pt.DataCoordCfg.CompactionPreAllocateIDExpansionFactor.Key, "1")
+	defer pt.Reset(pt.DataCoordCfg.CompactionPreAllocateIDExpansionFactor.Key)
+
+	s.meta.indexMeta = &indexMeta{indexes: make(map[UniqueID]map[UniqueID]*model.Index)}
+	collection := &collectionInfo{
+		ID: s.testLabel.CollectionID,
+		Schema: &schemapb.CollectionSchema{Fields: []*schemapb.FieldSchema{
+			{FieldID: 1, DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+			{FieldID: 2, DataType: schemapb.DataType_FloatVector},
+		}},
+	}
+	handler := NewNMockHandler(s.T())
+	handler.EXPECT().GetCollection(mock.Anything, s.testLabel.CollectionID).Return(collection, nil).Once()
+	s.triggerManager.handler = handler
+
+	s.mockAlloc.EXPECT().AllocN(mock.Anything).Return(int64(100), int64(102), nil).Once()
+	s.inspector.EXPECT().enqueueCompaction(mock.Anything).
+		Return(merr.WrapErrServiceQuotaExceeded("compaction task limit reached")).Once()
+
+	makeView := func(id int64) CompactionView {
+		return &MixSegmentView{
+			label:     s.testLabel,
+			segments:  []*SegmentView{{ID: id, label: s.testLabel, Size: 1}},
+			triggerID: 1000,
+		}
+	}
+	s.triggerManager.notifyEvents(context.Background(), map[CompactionTriggerType][]CompactionView{
+		TriggerTypeSingle: {makeView(200), makeView(201), makeView(202)},
+	})
 }
 
 func (s *CompactionTriggerManagerSuite) TestManualTriggerSkipExternal() {
