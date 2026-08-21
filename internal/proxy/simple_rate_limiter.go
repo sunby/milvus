@@ -41,8 +41,9 @@ import (
 
 // SimpleLimiter is implemented based on Limiter interface
 type SimpleLimiter struct {
-	quotaStatesMu sync.RWMutex
-	rateLimiter   *rlinternal.RateLimiterTree
+	// setRatesMu serializes controller updates without blocking request checks.
+	setRatesMu  sync.Mutex
+	rateLimiter *rlinternal.RateLimiterTree
 
 	// for alloc
 	allocWaitInterval time.Duration
@@ -71,9 +72,6 @@ func (m *SimpleLimiter) Check(dbID int64, collectionIDToPartIDs map[int64][]int6
 	if n <= 0 {
 		return nil
 	}
-
-	m.quotaStatesMu.RLock()
-	defer m.quotaStatesMu.RUnlock()
 
 	// 1. check global(cluster) level rate limits
 	clusterRateLimiters := m.rateLimiter.GetRootLimiters()
@@ -159,8 +157,6 @@ func isNotCollectionLevelLimitRequest(rt internalpb.RateType) bool {
 
 // GetQuotaStates returns quota states.
 func (m *SimpleLimiter) GetQuotaStates() ([]milvuspb.QuotaState, []string) {
-	m.quotaStatesMu.RLock()
-	defer m.quotaStatesMu.RUnlock()
 	type stateReasonKey struct {
 		ErrorCode commonpb.ErrorCode
 		Reason    string
@@ -190,8 +186,8 @@ func (m *SimpleLimiter) GetQuotaStates() ([]milvuspb.QuotaState, []string) {
 
 // SetRates sets quota states for SimpleLimiter.
 func (m *SimpleLimiter) SetRates(rootLimiter *proxypb.LimiterNode) error {
-	m.quotaStatesMu.Lock()
-	defer m.quotaStatesMu.Unlock()
+	m.setRatesMu.Lock()
+	defer m.setRatesMu.Unlock()
 
 	// Reset the limiter rates due to potential changes in configurations.
 	var (
