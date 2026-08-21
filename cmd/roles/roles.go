@@ -19,6 +19,7 @@ package roles
 import (
 	"context"
 	"fmt"
+	nethttp "net/http"
 	"os"
 	"os/signal"
 	"reflect"
@@ -38,6 +39,7 @@ import (
 	"github.com/milvus-io/milvus/internal/distributed/streaming"
 	"github.com/milvus-io/milvus/internal/http"
 	"github.com/milvus-io/milvus/internal/http/healthz"
+	"github.com/milvus-io/milvus/internal/storagev2"
 	"github.com/milvus-io/milvus/internal/util/dependency"
 	kvfactory "github.com/milvus-io/milvus/internal/util/dependency/kv"
 	"github.com/milvus-io/milvus/internal/util/fileresource"
@@ -344,14 +346,46 @@ func (mr *MilvusRoles) setupLogger() {
 // Register serves prometheus http service
 func setupPrometheusHTTPServer(r *internalmetrics.MilvusRegistry) {
 	mlog.Info(context.TODO(), "setupPrometheusHTTPServer")
+	metricsHandler := withMetricsRefresh(
+		promhttp.HandlerFor(r, promhttp.HandlerOpts{}),
+		refreshFilesystemMetrics,
+	)
 	http.Register(&http.Handler{
 		Path:    http.MetricsPath,
-		Handler: promhttp.HandlerFor(r, promhttp.HandlerOpts{}),
+		Handler: metricsHandler,
 	})
 	http.Register(&http.Handler{
 		Path:    http.MetricsDefaultPath,
 		Handler: promhttp.Handler(),
 	})
+}
+
+func withMetricsRefresh(next nethttp.Handler, refresh func()) nethttp.Handler {
+	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, req *nethttp.Request) {
+		refresh()
+		next.ServeHTTP(w, req)
+	})
+}
+
+func refreshFilesystemMetrics() {
+	if !roleUsesFilesystemMetrics(paramtable.GetRole()) {
+		return
+	}
+	_, _ = storagev2.PublishDefaultFilesystemMetrics()
+}
+
+func roleUsesFilesystemMetrics(role string) bool {
+	switch role {
+	case typeutil.StreamingNodeRole,
+		typeutil.QueryNodeRole,
+		typeutil.DataNodeRole,
+		typeutil.DataCoordRole,
+		typeutil.MixCoordRole,
+		typeutil.StandaloneRole:
+		return true
+	default:
+		return false
+	}
 }
 
 func (mr *MilvusRoles) handleSignals() func() {

@@ -17,6 +17,8 @@
 package roles
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -168,4 +170,34 @@ func TestEnableEmbeddedQueryNodeIfNeeded(t *testing.T) {
 		assert.True(t, roles.EnableQueryNode)
 		assert.Empty(t, os.Getenv(labelKey))
 	})
+}
+
+func TestWithMetricsRefresh(t *testing.T) {
+	refreshed := false
+	handler := withMetricsRefresh(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		assert.True(t, refreshed)
+		w.WriteHeader(http.StatusNoContent)
+	}), func() {
+		refreshed = true
+	})
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	assert.Equal(t, http.StatusNoContent, recorder.Code)
+}
+
+func TestRoleUsesFilesystemMetrics(t *testing.T) {
+	for _, role := range []string{
+		typeutil.StreamingNodeRole,
+		typeutil.QueryNodeRole,
+		typeutil.DataNodeRole,
+		typeutil.DataCoordRole,
+		typeutil.MixCoordRole,
+		typeutil.StandaloneRole,
+	} {
+		assert.True(t, roleUsesFilesystemMetrics(role), role)
+	}
+	assert.False(t, roleUsesFilesystemMetrics(typeutil.ProxyRole))
+	assert.False(t, roleUsesFilesystemMetrics(typeutil.QueryCoordRole))
 }
