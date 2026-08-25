@@ -550,7 +550,7 @@ func NewSegment(ctx context.Context,
 	if !workerStart.IsZero() {
 		createSegmentDoneFields = append(createSegmentDoneFields, mlog.Duration("queueWait", workerStart.Sub(submitTime)))
 	}
-	logger.Debug(ctx, "[xxx] create segment done", createSegmentDoneFields...)
+	logger.Debug(ctx, "create segment done", createSegmentDoneFields...)
 
 	segment := &LocalSegment{
 		baseSegment:        base,
