@@ -116,6 +116,8 @@ type InputNode struct {
 	dataType           string
 	consumeMsgCount    prometheus.Counter
 	consumeTimeTickLag prometheus.Gauge
+	metricsKey         inputNodeMetricsKey
+	metricsReleaseOnce sync.Once
 
 	closeGracefully *atomic.Bool
 
@@ -278,8 +280,14 @@ func NewInputNode(input <-chan *msgstream.MsgPack, nodeName string, maxQueueLeng
 		lastNotTimetickTime: time.Now(),
 	}
 	if role == typeutil.DataNodeRole {
-		node.consumeMsgCount = metrics.DataNodeConsumeMsgCount.WithLabelValues(nodeIDStr, dataType, collectionIDStr)
-		node.consumeTimeTickLag = metrics.DataNodeConsumeTimeTickLag.WithLabelValues(nodeIDStr, dataType, collectionIDStr)
+		node.metricsKey = inputNodeMetricsKey{
+			nodeID:       nodeIDStr,
+			dataType:     dataType,
+			collectionID: collectionIDStr,
+		}
+		handle := acquireInputNodeMetrics(node.metricsKey)
+		node.consumeMsgCount = handle.consumeMsgCount
+		node.consumeTimeTickLag = handle.consumeTimeTickLag
 	}
 	return node
 }
