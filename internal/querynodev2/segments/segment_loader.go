@@ -902,7 +902,7 @@ func (loader *segmentLoader) LoadBloomFilterSet(ctx context.Context, collectionI
 				fmt.Sprintf("failed to reserve loading resource for bloom filters, totalMemorySize = %v MB",
 					logutil.ToMB(float64(totalMemorySize))))
 		}
-		mlog.Info(context.TODO(), "reserved loading resource for bloom filters", mlog.Float64("totalMemorySizeMB", logutil.ToMB(float64(totalMemorySize))))
+		mlog.Debug(context.TODO(), "reserved loading resource for bloom filters", mlog.Float64("totalMemorySizeMB", logutil.ToMB(float64(totalMemorySize))))
 	}
 
 	defer func() {
@@ -911,17 +911,17 @@ func (loader *segmentLoader) LoadBloomFilterSet(ctx context.Context, collectionI
 				memory_bytes: C.int64_t(totalMemorySize * 2),
 				disk_bytes:   C.int64_t(0),
 			})
-			mlog.Info(context.TODO(), "released loading resource for bloom filters", mlog.Float64("totalMemorySizeMB", logutil.ToMB(float64(totalMemorySize))))
+			mlog.Debug(context.TODO(), "released loading resource for bloom filters", mlog.Float64("totalMemorySizeMB", logutil.ToMB(float64(totalMemorySize))))
 		}
 	}()
 
-	mlog.Info(context.TODO(), "start loading remote...", mlog.Int("segmentNum", segmentNum))
+	mlog.Debug(context.TODO(), "start loading remote...", mlog.Int("segmentNum", segmentNum))
 
 	loadRemoteFunc := func(idx int) error {
 		loadInfo := infos[idx]
 		bfs := bfSets[idx]
 
-		mlog.Info(context.TODO(), "loading bloom filter for remote...")
+		mlog.Debug(context.TODO(), "loading bloom filter for remote...")
 		pkStatsBinlogs, err := packed.NewStatsResolverFromLoadInfo(loadInfo).BloomFilterPaths(pkFieldID)
 		if err != nil {
 			return err
@@ -1206,14 +1206,16 @@ func (loader *segmentLoader) loadSealedSegment(ctx context.Context, loadInfo *qu
 	indexedFieldInfos, _, textIndexes, unindexedTextFields, jsonKeyStats, _, _ := separateLoadInfoV2(loadInfo, collection.Schema())
 
 	tr := timerecord.NewTimeRecorder("segmentLoader.loadSealedSegment")
-	mlog.Info(context.TODO(), "Start loading fields...",
-		mlog.Int("indexedFields count", len(indexedFieldInfos)),
-		mlog.Int64s("indexed text fields", lo.Keys(textIndexes)),
-		mlog.Int64s("unindexed text fields", lo.Keys(unindexedTextFields)),
-		mlog.Int64s("indexed json key fields", lo.Keys(jsonKeyStats)),
-		mlog.Int("running pool size", GetLoadPool().Running()),
-		mlog.Int("pool size", GetLoadPool().Cap()),
-	)
+	if mlog.LevelEnabled(mlog.DebugLevel) {
+		mlog.Debug(context.TODO(), "Start loading fields...",
+			mlog.Int("indexedFields count", len(indexedFieldInfos)),
+			mlog.Int64s("indexed text fields", lo.Keys(textIndexes)),
+			mlog.Int64s("unindexed text fields", lo.Keys(unindexedTextFields)),
+			mlog.Int64s("indexed json key fields", lo.Keys(jsonKeyStats)),
+			mlog.Int("running pool size", GetLoadPool().Running()),
+			mlog.Int("pool size", GetLoadPool().Cap()),
+		)
+	}
 	physicalLoadTiming := PhysicalLoadTimingFromContext(ctx)
 	loadSubmittedAt := time.Now()
 	_, err = GetLoadPool().Submit(func() (any, error) {
@@ -1255,7 +1257,7 @@ func (loader *segmentLoader) loadSealedSegment(ctx context.Context, loadInfo *qu
 		physicalLoadTiming.SealedPostLoad = time.Since(postLoadStartedAt)
 	}
 	patchEntryNumberSpan := tr.RecordSpan()
-	mlog.Info(context.TODO(), "Finish loading segment",
+	mlog.Debug(context.TODO(), "Finish loading segment",
 		mlog.Duration("patchEntryNumberSpan", patchEntryNumberSpan),
 	)
 	return nil
@@ -1269,7 +1271,7 @@ func (loader *segmentLoader) LoadSegment(ctx context.Context,
 	if !ok {
 		return merr.WrapErrParameterInvalid("LocalSegment", fmt.Sprintf("%T", seg))
 	}
-	mlog.Info(context.TODO(), "start loading segment files",
+	mlog.Debug(context.TODO(), "start loading segment files",
 		mlog.FieldCollectionID(segment.Collection()),
 		mlog.Int64("partitionID", segment.Partition()),
 		mlog.String("shard", segment.Shard().VirtualName()),
@@ -1473,7 +1475,7 @@ func (loader *segmentLoader) loadBloomFilterWithDownloader(
 		size += stat.BF.Cap()
 		bfs.AddHistoricalStats(pkStat)
 	}
-	mlog.Info(context.TODO(), "Successfully load pk stats", mlog.Duration("time", time.Since(startTs)), mlog.Uint("size", size))
+	mlog.Debug(context.TODO(), "Successfully load pk stats", mlog.Duration("time", time.Since(startTs)), mlog.Uint("size", size))
 	return nil
 }
 
@@ -1484,7 +1486,7 @@ func (loader *segmentLoader) loadDeltalogs(ctx context.Context, segment Segment,
 	deltaLogs := loadInfo.GetDeltalogs()
 	ctx, sp := otel.Tracer(typeutil.QueryNodeRole).Start(ctx, fmt.Sprintf("LoadDeltalogs-%d", segment.ID()))
 	defer sp.End()
-	mlog.Info(context.TODO(), "loading delta...")
+	mlog.Debug(context.TODO(), "loading delta...")
 
 	rowNumsStart := time.Now()
 	var rowNums int64
@@ -1683,7 +1685,7 @@ func (loader *segmentLoader) loadDeltalogs(ctx context.Context, segment Segment,
 	}
 	loadDeltaDataDuration := time.Since(loadDeltaDataStart)
 
-	mlog.Info(context.TODO(), "load delta logs done",
+	mlog.Debug(context.TODO(), "load delta logs done",
 		mlog.Int64("deleteCount", deltaData.DeleteRowCount()),
 		mlog.Int64("rowNums", rowNums),
 		mlog.Int("pathNum", pathNum),
@@ -2041,7 +2043,7 @@ func (loader *segmentLoader) checkLoadingResource(
 	predictMemUsage := memUsage + loadingUsage.MemorySize
 	predictDiskUsage := diskUsage + loadingUsage.DiskSize
 
-	logger.Info(ctx, "predict memory and disk usage while loading (in MiB)",
+	logger.Debug(ctx, "predict memory and disk usage while loading (in MiB)",
 		mlog.Float64("maxSegmentSize(MB)", logutil.ToMB(float64(maxSegmentSize))),
 		mlog.Float64("committedMemSize(MB)", logutil.ToMB(float64(loader.committedResource.MemorySize))),
 		mlog.Float64("memLimit(MB)", logutil.ToMB(float64(totalMem))),

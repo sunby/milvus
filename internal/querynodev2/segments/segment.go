@@ -551,7 +551,7 @@ func NewSegment(ctx context.Context,
 	if !workerStart.IsZero() {
 		createSegmentDoneFields = append(createSegmentDoneFields, mlog.Duration("queueWait", workerStart.Sub(submitTime)))
 	}
-	logger.Info(ctx, "[xxx] create segment done", createSegmentDoneFields...)
+	logger.Debug(ctx, "create segment done", createSegmentDoneFields...)
 
 	segment := &LocalSegment{
 		baseSegment:        base,
@@ -1255,13 +1255,13 @@ func GetCLoadInfoWithFunc(ctx context.Context,
 			mlog.FieldSegmentID(loadInfo.GetSegmentID()),
 			mlog.FieldFieldID(indexInfo.GetFieldID()))
 	} else if existingWarmup, exists := indexParams[common.WarmupKey]; exists {
-		mlog.Info(ctx, "warmup policy already in index params (from QueryCoord)",
+		mlog.Debug(ctx, "warmup policy already in index params (from QueryCoord)",
 			mlog.FieldSegmentID(loadInfo.GetSegmentID()),
 			mlog.FieldFieldID(indexInfo.GetFieldID()),
 			mlog.String("warmup", existingWarmup))
 	} else {
 		warmupPolicy := getLoadIndexWarmupPolicy(loadInfo, fieldSchema, indexInfo)
-		mlog.Info(ctx, "warmup policy from getIndexWarmupPolicy",
+		mlog.Debug(ctx, "warmup policy from getIndexWarmupPolicy",
 			mlog.FieldSegmentID(loadInfo.GetSegmentID()),
 			mlog.FieldFieldID(indexInfo.GetFieldID()),
 			mlog.String("warmup", warmupPolicy))
