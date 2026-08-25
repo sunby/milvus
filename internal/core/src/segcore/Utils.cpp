@@ -1335,7 +1335,7 @@ LoadIndexData(milvus::tracer::TraceContext& ctx,
     auto priority_for_load = milvus::PriorityForLoad(load_priority_str);
     config[milvus::LOAD_PRIORITY] = priority_for_load;
 
-    LOG_INFO(
+    LOG_DEBUG(
         "[collection={}][segment={}][field={}][enable_mmap={}][load_"
         "priority={}] load index {}, "
         "mmap_dir_path={}",
