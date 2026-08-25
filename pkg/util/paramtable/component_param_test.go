@@ -1917,3 +1917,20 @@ func TestSegmentIndexManifestLoadConcurrency(t *testing.T) {
 	params.Save(params.DataCoordCfg.SegmentIndexManifestLoadConcurrency.Key, "2147483648")
 	assert.Equal(t, 256, params.DataCoordCfg.SegmentIndexManifestLoadConcurrency.GetAsInt())
 }
+
+func TestComponentParam_QueryViewFullReconsileInterval(t *testing.T) {
+	Init()
+	params := Get()
+	item := &params.QueryCoordCfg.QueryViewFullReconsileInterval
+	params.Reset(item.Key)
+	t.Cleanup(func() { params.Reset(item.Key) })
+
+	assert.Equal(t, "queryCoord.queryView.fullReconsileInterval", item.Key)
+	assert.Equal(t, "60", item.DefaultValue)
+	assert.True(t, item.Export)
+	assert.Equal(t, time.Minute, item.GetAsDuration(time.Second))
+	params.Save(item.Key, "300")
+	assert.Equal(t, 5*time.Minute, item.GetAsDuration(time.Second))
+	params.Save(item.Key, "0")
+	assert.Zero(t, item.GetAsDuration(time.Second))
+}

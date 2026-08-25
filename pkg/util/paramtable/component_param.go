@@ -4520,8 +4520,8 @@ Set to 0 to disable the penalty period.`,
 	p.QueryViewFullReconsileInterval = ParamItem{
 		Key:          "queryCoord.queryView.fullReconsileInterval",
 		Version:      "3.0.0",
-		DefaultValue: "10",
-		Doc:          "Interval in seconds for periodic QueryView full reconciliation.",
+		DefaultValue: "60",
+		Doc:          "Interval in seconds for periodic QueryView full reconciliation. Set to 0 to disable it.",
 		Export:       true,
 		Formatter: func(v string) string {
 			if getAsInt(v) < 1 {

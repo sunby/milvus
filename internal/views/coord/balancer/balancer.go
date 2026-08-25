@@ -13,8 +13,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
 
-const defaultTickerInterval = 10 * time.Second
-
 // Balancer is the scheduling controller that reconciles dirty shards into
 // QueryView prepare/release operations.
 type Balancer interface {
@@ -51,8 +49,8 @@ func NewDefaultBalancer(
 	if policy == nil {
 		policy = NewDefaultBalancePolicy()
 	}
-	interval := defaultTickerInterval
-	if builder != nil && builder.config != nil && builder.config.TickerInterval > 0 {
+	var interval time.Duration
+	if builder != nil && builder.config != nil {
 		interval = builder.config.TickerInterval
 	}
 	var source snapshotSource
@@ -118,20 +116,38 @@ func (b *DefaultBalancer) Trigger(scopes ...TriggerScope) {
 func (b *DefaultBalancer) loop(ctx context.Context) {
 	defer b.wg.Done()
 
-	ticker := time.NewTicker(b.tickerInterval)
-	defer ticker.Stop()
+	var ticker *time.Ticker
+	var tickerCh <-chan time.Time
+	if b.tickerInterval > 0 {
+		ticker = time.NewTicker(b.tickerInterval)
+		tickerCh = ticker.C
+	}
+
+	defer func() {
+		if ticker != nil {
+			ticker.Stop()
+		}
+	}()
 
 	for {
 		interval := paramtable.Get().QueryCoordCfg.QueryViewFullReconsileInterval.GetAsDuration(time.Second)
 		if interval != b.tickerInterval {
 			b.tickerInterval = interval
-			ticker.Reset(interval)
+			if ticker != nil {
+				ticker.Stop()
+				ticker = nil
+				tickerCh = nil
+			}
+			if interval > 0 {
+				ticker = time.NewTicker(interval)
+				tickerCh = ticker.C
+			}
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-b.queue.signalCh():
-		case <-ticker.C:
+		case <-tickerCh:
 			b.queue.add()
 			continue
 		}

@@ -229,7 +229,7 @@ func TestBalancer_ReconcileFullScanDoesNotRestackPreparing(t *testing.T) {
 func TestBalancer_StartStop(t *testing.T) {
 	reg := emptyRegistry(t)
 	b := NewDefaultBalancer(nil, reg, nil)
-	assert.Equal(t, 10*time.Second, b.tickerInterval)
+	assert.Zero(t, b.tickerInterval)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
