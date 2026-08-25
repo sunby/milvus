@@ -108,18 +108,7 @@ func TestCleanupQueryNodeCollectionMetrics(t *testing.T) {
 	QueryNodeNumEntities.WithLabelValues("default", "other_collection", nodeIDStr, otherCollectionIDStr, "growing").Set(200)
 
 	// Helper function to count metrics
-	countCounterMetrics := func(vec *prometheus.CounterVec) int {
-		ch := make(chan prometheus.Metric, 100)
-		vec.Collect(ch)
-		close(ch)
-		count := 0
-		for range ch {
-			count++
-		}
-		return count
-	}
-
-	countGaugeMetrics := func(vec *prometheus.GaugeVec) int {
+	countMetrics := func(vec prometheus.Collector) int {
 		ch := make(chan prometheus.Metric, 100)
 		vec.Collect(ch)
 		close(ch)
@@ -131,16 +120,16 @@ func TestCleanupQueryNodeCollectionMetrics(t *testing.T) {
 	}
 
 	// Record counts before cleanup
-	consumerCountBefore := countCounterMetrics(QueryNodeConsumerMsgCount)
-	numEntitiesBefore := countGaugeMetrics(QueryNodeNumEntities)
+	consumerCountBefore := countMetrics(QueryNodeConsumerMsgCount)
+	numEntitiesBefore := countMetrics(QueryNodeNumEntities)
 
 	// Clean up metrics for the target collection
 	CleanupQueryNodeCollectionMetrics(nodeID, collectionID)
 
 	// Verify that the target collection's metrics are cleaned up
 	// and other collection's metrics still exist
-	consumerCountAfter := countCounterMetrics(QueryNodeConsumerMsgCount)
-	numEntitiesAfter := countGaugeMetrics(QueryNodeNumEntities)
+	consumerCountAfter := countMetrics(QueryNodeConsumerMsgCount)
+	numEntitiesAfter := countMetrics(QueryNodeNumEntities)
 
 	// At least one metric should be removed from each
 	assert.Less(t, consumerCountAfter, consumerCountBefore)
