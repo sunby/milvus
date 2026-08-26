@@ -932,11 +932,11 @@ dataCoord:
   manifestCommitConcurrency: 16 # Maximum concurrent DataCoord manifest commits across L0 compaction, index and stats publication, schema materialization, and GC. Values are clamped to [1, 256]. Workers start on demand. Read once during metadata initialization; changes require restart.
   # Switch value to control if to enable segment compaction.
   # Compaction merges small-size segments into a large segment, and clears the entities deleted beyond the rentention duration of Time Travel.
-  enableCompaction: false
+  enableCompaction: true
   compaction:
     # Switch value to control if to enable automatic segment compaction during which data coord locates and merges compactable segments in the background.
     # This configuration takes effect only when dataCoord.enableCompaction is set as true.
-    enableAutoCompaction: false
+    enableAutoCompaction: true
     enableTargetBasedCompaction: false # Whether target-based compaction is enabled.
     target:
       maxEventsPerReconcile: 100 # Maximum number of compaction events emitted by one target reconciliation.
