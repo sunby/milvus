@@ -189,11 +189,11 @@ func (s *ImportCheckerSuite) TestCheckJob() {
 	catalog.EXPECT().SavePreImportTask(mock.Anything, mock.Anything).Return(nil)
 
 	s.checker.checkPendingJob(job)
-	preimportTasks := s.importMeta.GetTaskBy(context.TODO(), WithJob(job.GetJobID()), WithType(PreImportTaskType))
+	preimportTasks := s.importMeta.GetTaskByJob(context.TODO(), job.GetJobID(), WithType(PreImportTaskType))
 	s.Equal(2, len(preimportTasks))
 	s.Equal(internalpb.ImportJobState_PreImporting, s.importMeta.GetJob(context.TODO(), job.GetJobID()).GetState())
 	s.checker.checkPendingJob(job) // no lack
-	preimportTasks = s.importMeta.GetTaskBy(context.TODO(), WithJob(job.GetJobID()), WithType(PreImportTaskType))
+	preimportTasks = s.importMeta.GetTaskByJob(context.TODO(), job.GetJobID(), WithType(PreImportTaskType))
 	s.Equal(2, len(preimportTasks))
 	s.Equal(internalpb.ImportJobState_PreImporting, s.importMeta.GetJob(context.TODO(), job.GetJobID()).GetState())
 
@@ -211,11 +211,11 @@ func (s *ImportCheckerSuite) TestCheckJob() {
 	}
 
 	s.checker.checkPreImportingJob(job)
-	importTasks := s.importMeta.GetTaskBy(context.TODO(), WithJob(job.GetJobID()), WithType(ImportTaskType))
+	importTasks := s.importMeta.GetTaskByJob(context.TODO(), job.GetJobID(), WithType(ImportTaskType))
 	s.Equal(1, len(importTasks))
 	s.Equal(internalpb.ImportJobState_Importing, s.importMeta.GetJob(context.TODO(), job.GetJobID()).GetState())
 	s.checker.checkPreImportingJob(job) // no lack
-	importTasks = s.importMeta.GetTaskBy(context.TODO(), WithJob(job.GetJobID()), WithType(ImportTaskType))
+	importTasks = s.importMeta.GetTaskByJob(context.TODO(), job.GetJobID(), WithType(ImportTaskType))
 	s.Equal(1, len(importTasks))
 	s.Equal(internalpb.ImportJobState_Importing, s.importMeta.GetJob(context.TODO(), job.GetJobID()).GetState())
 
@@ -327,14 +327,14 @@ func (s *ImportCheckerSuite) TestCheckJob_Failed() {
 	catalog.EXPECT().SavePreImportTask(mock.Anything, mock.Anything).Return(mockErr)
 
 	s.checker.checkPendingJob(job)
-	preimportTasks := s.importMeta.GetTaskBy(context.TODO(), WithJob(job.GetJobID()), WithType(PreImportTaskType))
+	preimportTasks := s.importMeta.GetTaskByJob(context.TODO(), job.GetJobID(), WithType(PreImportTaskType))
 	s.Equal(0, len(preimportTasks))
 	s.Equal(internalpb.ImportJobState_Pending, s.importMeta.GetJob(context.TODO(), job.GetJobID()).GetState())
 
 	alloc.ExpectedCalls = nil
 	alloc.EXPECT().AllocN(mock.Anything).Return(0, 0, mockErr)
 	s.checker.checkPendingJob(job)
-	preimportTasks = s.importMeta.GetTaskBy(context.TODO(), WithJob(job.GetJobID()), WithType(PreImportTaskType))
+	preimportTasks = s.importMeta.GetTaskByJob(context.TODO(), job.GetJobID(), WithType(PreImportTaskType))
 	s.Equal(0, len(preimportTasks))
 	s.Equal(internalpb.ImportJobState_Pending, s.importMeta.GetJob(context.TODO(), job.GetJobID()).GetState())
 
@@ -344,7 +344,7 @@ func (s *ImportCheckerSuite) TestCheckJob_Failed() {
 	catalog.EXPECT().SaveImportJob(mock.Anything, mock.Anything).Return(nil)
 	catalog.EXPECT().SavePreImportTask(mock.Anything, mock.Anything).Return(nil)
 	s.checker.checkPendingJob(job)
-	preimportTasks = s.importMeta.GetTaskBy(context.TODO(), WithJob(job.GetJobID()), WithType(PreImportTaskType))
+	preimportTasks = s.importMeta.GetTaskByJob(context.TODO(), job.GetJobID(), WithType(PreImportTaskType))
 	s.Equal(2, len(preimportTasks))
 	s.Equal(internalpb.ImportJobState_PreImporting, s.importMeta.GetJob(context.TODO(), job.GetJobID()).GetState())
 
@@ -364,7 +364,7 @@ func (s *ImportCheckerSuite) TestCheckJob_Failed() {
 	catalog.EXPECT().SaveImportTask(mock.Anything, mock.Anything).Return(mockErr)
 	catalog.EXPECT().SaveImportJob(mock.Anything, mock.Anything).Return(nil)
 	s.checker.checkPreImportingJob(job)
-	importTasks := s.importMeta.GetTaskBy(context.TODO(), WithJob(job.GetJobID()), WithType(ImportTaskType))
+	importTasks := s.importMeta.GetTaskByJob(context.TODO(), job.GetJobID(), WithType(ImportTaskType))
 	s.Equal(0, len(importTasks))
 	s.Equal(internalpb.ImportJobState_Failed, s.importMeta.GetJob(context.TODO(), job.GetJobID()).GetState())
 
@@ -372,7 +372,7 @@ func (s *ImportCheckerSuite) TestCheckJob_Failed() {
 	alloc.EXPECT().AllocN(mock.Anything).Return(0, 0, mockErr)
 	s.manuallyUpdateJob(job.GetJobID(), UpdateJobState(internalpb.ImportJobState_PreImporting))
 	s.checker.checkPreImportingJob(job)
-	importTasks = s.importMeta.GetTaskBy(context.TODO(), WithJob(job.GetJobID()), WithType(ImportTaskType))
+	importTasks = s.importMeta.GetTaskByJob(context.TODO(), job.GetJobID(), WithType(ImportTaskType))
 	s.Equal(0, len(importTasks))
 	s.Equal(internalpb.ImportJobState_PreImporting, s.importMeta.GetJob(context.TODO(), job.GetJobID()).GetState())
 
@@ -382,7 +382,7 @@ func (s *ImportCheckerSuite) TestCheckJob_Failed() {
 	alloc.ExpectedCalls = nil
 	alloc.EXPECT().AllocN(mock.Anything).Return(0, 0, nil)
 	s.checker.checkPreImportingJob(job)
-	importTasks = s.importMeta.GetTaskBy(context.TODO(), WithJob(job.GetJobID()), WithType(ImportTaskType))
+	importTasks = s.importMeta.GetTaskByJob(context.TODO(), job.GetJobID(), WithType(ImportTaskType))
 	s.Equal(1, len(importTasks))
 	s.Equal(internalpb.ImportJobState_Importing, s.importMeta.GetJob(context.TODO(), job.GetJobID()).GetState())
 }
@@ -427,19 +427,19 @@ func (s *ImportCheckerSuite) TestCheckFailure() {
 	s.NoError(err)
 
 	s.checker.checkFailedJob(s.importMeta.GetJob(context.TODO(), s.jobID))
-	tasks := s.importMeta.GetTaskBy(context.TODO(), WithJob(s.jobID), WithStates(datapb.ImportTaskStateV2_Failed))
+	tasks := s.importMeta.GetTaskByJob(context.TODO(), s.jobID, WithStates(datapb.ImportTaskStateV2_Failed))
 	s.Equal(1, len(tasks))
 
 	catalog.ExpectedCalls = nil
 	catalog.EXPECT().SaveImportTask(mock.Anything, mock.Anything).Return(errors.New("mock error"))
 	s.checker.checkFailedJob(s.importMeta.GetJob(context.TODO(), s.jobID))
-	tasks = s.importMeta.GetTaskBy(context.TODO(), WithJob(s.jobID), WithStates(datapb.ImportTaskStateV2_Failed))
+	tasks = s.importMeta.GetTaskByJob(context.TODO(), s.jobID, WithStates(datapb.ImportTaskStateV2_Failed))
 	s.Equal(1, len(tasks))
 
 	catalog.ExpectedCalls = nil
 	catalog.EXPECT().SaveImportTask(mock.Anything, mock.Anything).Return(nil)
 	s.checker.checkFailedJob(s.importMeta.GetJob(context.TODO(), s.jobID))
-	tasks = s.importMeta.GetTaskBy(context.TODO(), WithJob(s.jobID), WithStates(datapb.ImportTaskStateV2_Failed))
+	tasks = s.importMeta.GetTaskByJob(context.TODO(), s.jobID, WithStates(datapb.ImportTaskStateV2_Failed))
 	s.Equal(1, len(tasks))
 }
 
@@ -466,7 +466,7 @@ func (s *ImportCheckerSuite) TestCheckGC() {
 
 	// not failed or completed
 	s.checker.checkGC(s.importMeta.GetJob(context.TODO(), s.jobID))
-	s.Equal(1, len(s.importMeta.GetTaskBy(context.TODO(), WithJob(s.jobID))))
+	s.Equal(1, len(s.importMeta.GetTaskByJob(context.TODO(), s.jobID)))
 	s.Equal(1, len(s.importMeta.GetJobBy(context.TODO())))
 	catalog.EXPECT().SaveImportJob(mock.Anything, mock.Anything).Return(nil)
 	err = s.importMeta.UpdateJob(context.TODO(), s.jobID, UpdateJobState(internalpb.ImportJobState_Failed))
@@ -474,7 +474,7 @@ func (s *ImportCheckerSuite) TestCheckGC() {
 
 	// not reach cleanup ts
 	s.checker.checkGC(s.importMeta.GetJob(context.TODO(), s.jobID))
-	s.Equal(1, len(s.importMeta.GetTaskBy(context.TODO(), WithJob(s.jobID))))
+	s.Equal(1, len(s.importMeta.GetTaskByJob(context.TODO(), s.jobID)))
 	s.Equal(1, len(s.importMeta.GetJobBy(context.TODO())))
 	GCRetention := Params.DataCoordCfg.ImportTaskRetention.GetAsDuration(time.Second)
 	job := s.importMeta.GetJob(context.TODO(), s.jobID)
@@ -484,21 +484,21 @@ func (s *ImportCheckerSuite) TestCheckGC() {
 
 	// origin segment not dropped
 	s.checker.checkGC(s.importMeta.GetJob(context.TODO(), s.jobID))
-	s.Equal(1, len(s.importMeta.GetTaskBy(context.TODO(), WithJob(s.jobID))))
+	s.Equal(1, len(s.importMeta.GetTaskByJob(context.TODO(), s.jobID)))
 	s.Equal(1, len(s.importMeta.GetJobBy(context.TODO())))
 	err = s.importMeta.UpdateTask(context.TODO(), task.GetTaskID(), UpdateSegmentIDs([]int64{}))
 	s.NoError(err)
 
 	// stats segment not dropped
 	s.checker.checkGC(s.importMeta.GetJob(context.TODO(), s.jobID))
-	s.Equal(1, len(s.importMeta.GetTaskBy(context.TODO(), WithJob(s.jobID))))
+	s.Equal(1, len(s.importMeta.GetTaskByJob(context.TODO(), s.jobID)))
 	s.Equal(1, len(s.importMeta.GetJobBy(context.TODO())))
 	err = s.importMeta.UpdateTask(context.TODO(), task.GetTaskID(), UpdateStatsSegmentIDs([]int64{}))
 	s.NoError(err)
 
 	// task is not dropped
 	s.checker.checkGC(s.importMeta.GetJob(context.TODO(), s.jobID))
-	s.Equal(1, len(s.importMeta.GetTaskBy(context.TODO(), WithJob(s.jobID))))
+	s.Equal(1, len(s.importMeta.GetTaskByJob(context.TODO(), s.jobID)))
 	s.Equal(1, len(s.importMeta.GetJobBy(context.TODO())))
 	err = s.importMeta.UpdateTask(context.TODO(), task.GetTaskID(), UpdateNodeID(NullNodeID))
 	s.NoError(err)
@@ -506,7 +506,7 @@ func (s *ImportCheckerSuite) TestCheckGC() {
 	// remove task failed
 	catalog.EXPECT().DropImportTask(mock.Anything, mock.Anything).Return(mockErr)
 	s.checker.checkGC(s.importMeta.GetJob(context.TODO(), s.jobID))
-	s.Equal(1, len(s.importMeta.GetTaskBy(context.TODO(), WithJob(s.jobID))))
+	s.Equal(1, len(s.importMeta.GetTaskByJob(context.TODO(), s.jobID)))
 	s.Equal(1, len(s.importMeta.GetJobBy(context.TODO())))
 
 	// remove job failed
@@ -514,14 +514,14 @@ func (s *ImportCheckerSuite) TestCheckGC() {
 	catalog.EXPECT().DropImportTask(mock.Anything, mock.Anything).Return(nil)
 	catalog.EXPECT().DropImportJob(mock.Anything, mock.Anything).Return(mockErr)
 	s.checker.checkGC(s.importMeta.GetJob(context.TODO(), s.jobID))
-	s.Equal(0, len(s.importMeta.GetTaskBy(context.TODO(), WithJob(s.jobID))))
+	s.Equal(0, len(s.importMeta.GetTaskByJob(context.TODO(), s.jobID)))
 	s.Equal(1, len(s.importMeta.GetJobBy(context.TODO())))
 
 	// normal case
 	catalog.ExpectedCalls = nil
 	catalog.EXPECT().DropImportJob(mock.Anything, mock.Anything).Return(nil)
 	s.checker.checkGC(s.importMeta.GetJob(context.TODO(), s.jobID))
-	s.Equal(0, len(s.importMeta.GetTaskBy(context.TODO(), WithJob(s.jobID))))
+	s.Equal(0, len(s.importMeta.GetTaskByJob(context.TODO(), s.jobID)))
 	s.Equal(0, len(s.importMeta.GetJobBy(context.TODO())))
 }
 
@@ -791,7 +791,7 @@ func (s *ImportCheckerSuite) TestStateMachineProgressesWhileGCRollbackParked() {
 	s.NoError(s.importMeta.AddTask(context.TODO(), task))
 
 	s.Eventually(func() bool {
-		tasks := s.importMeta.GetTaskBy(context.TODO(), WithJob(jobB.GetJobID()))
+		tasks := s.importMeta.GetTaskByJob(context.TODO(), jobB.GetJobID())
 		return len(tasks) == 1 && tasks[0].GetState() == datapb.ImportTaskStateV2_Failed
 	}, 10*time.Second, 20*time.Millisecond)
 }
@@ -997,7 +997,7 @@ func TestImportCheckerCompaction(t *testing.T) {
 	catalog.EXPECT().SaveImportJob(mock.Anything, mock.Anything).Return(nil).Once()
 	assert.Eventually(t, func() bool {
 		job := importMeta.GetJob(context.TODO(), jobID)
-		preimportTasks := importMeta.GetTaskBy(context.TODO(), WithJob(job.GetJobID()), WithType(PreImportTaskType))
+		preimportTasks := importMeta.GetTaskByJob(context.TODO(), job.GetJobID(), WithType(PreImportTaskType))
 		taskLen := len(preimportTasks)
 		mlog.Info(context.TODO(), "job pre-importing", mlog.Any("taskLen", taskLen), mlog.Any("jobState", job.GetState()))
 		return taskLen == 2 && job.GetState() == internalpb.ImportJobState_PreImporting
@@ -1008,7 +1008,7 @@ func TestImportCheckerCompaction(t *testing.T) {
 	catalog.EXPECT().SaveImportTask(mock.Anything, mock.Anything).Return(nil).Once()
 	catalog.EXPECT().SavePreImportTask(mock.Anything, mock.Anything).Return(nil).Twice()
 	catalog.EXPECT().SaveImportJob(mock.Anything, mock.Anything).Return(nil).Once()
-	preimportTasks := importMeta.GetTaskBy(context.TODO(), WithJob(job.GetJobID()), WithType(PreImportTaskType))
+	preimportTasks := importMeta.GetTaskByJob(context.TODO(), job.GetJobID(), WithType(PreImportTaskType))
 	fileStats := []*datapb.ImportFileStats{
 		{
 			TotalRows: 100,
@@ -1021,7 +1021,7 @@ func TestImportCheckerCompaction(t *testing.T) {
 	}
 	assert.Eventually(t, func() bool {
 		job := importMeta.GetJob(context.TODO(), jobID)
-		importTasks := importMeta.GetTaskBy(context.TODO(), WithJob(job.GetJobID()), WithType(ImportTaskType))
+		importTasks := importMeta.GetTaskByJob(context.TODO(), job.GetJobID(), WithType(ImportTaskType))
 		return len(importTasks) == 1 && job.GetState() == internalpb.ImportJobState_Importing
 	}, 2*time.Second, 100*time.Millisecond)
 	mlog.Info(context.TODO(), "job importing")
@@ -1030,7 +1030,7 @@ func TestImportCheckerCompaction(t *testing.T) {
 	catalog.EXPECT().SaveChannelCheckpoint(mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
 	catalog.EXPECT().SaveImportJob(mock.Anything, mock.Anything).Return(nil).Once()
 	catalog.EXPECT().SaveImportTask(mock.Anything, mock.Anything).Return(nil).Once()
-	importTasks := importMeta.GetTaskBy(context.TODO(), WithJob(job.GetJobID()), WithType(ImportTaskType))
+	importTasks := importMeta.GetTaskByJob(context.TODO(), job.GetJobID(), WithType(ImportTaskType))
 	targetSegmentIDs := make([]int64, 0)
 	for _, it := range importTasks {
 		segment := &SegmentInfo{
@@ -1220,7 +1220,7 @@ func (s *ImportCheckerSuite) TestCheckPreImporting_EmptyImport_AutoCommitFalse()
 	s.Equal(internalpb.ImportJobState_PreImporting, s.importMeta.GetJob(context.TODO(), s.jobID).GetState())
 
 	// Mark all pre-import tasks completed with totalRows == 0 (empty import).
-	preimportTasks := s.importMeta.GetTaskBy(context.TODO(), WithJob(s.jobID), WithType(PreImportTaskType))
+	preimportTasks := s.importMeta.GetTaskByJob(context.TODO(), s.jobID, WithType(PreImportTaskType))
 	for _, t := range preimportTasks {
 		err := s.importMeta.UpdateTask(context.TODO(), t.GetTaskID(),
 			UpdateState(datapb.ImportTaskStateV2_Completed),
@@ -1254,7 +1254,7 @@ func (s *ImportCheckerSuite) TestCheckPreImporting_EmptyImport_AutoCommitTrue() 
 	s.Equal(internalpb.ImportJobState_PreImporting, s.importMeta.GetJob(context.TODO(), s.jobID).GetState())
 
 	// Mark all pre-import tasks completed with totalRows == 0 (empty import).
-	preimportTasks := s.importMeta.GetTaskBy(context.TODO(), WithJob(s.jobID), WithType(PreImportTaskType))
+	preimportTasks := s.importMeta.GetTaskByJob(context.TODO(), s.jobID, WithType(PreImportTaskType))
 	for _, t := range preimportTasks {
 		err := s.importMeta.UpdateTask(context.TODO(), t.GetTaskID(),
 			UpdateState(datapb.ImportTaskStateV2_Completed),
