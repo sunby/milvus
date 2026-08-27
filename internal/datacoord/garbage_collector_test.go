@@ -56,6 +56,7 @@ import (
 	"github.com/milvus-io/milvus/internal/storagev2/packed"
 	balancerapi "github.com/milvus-io/milvus/internal/views/coord/balancer/api"
 	"github.com/milvus-io/milvus/pkg/v3/common"
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/objectstorage"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
@@ -69,17 +70,38 @@ import (
 )
 
 type fakeDataViewGarbageCollector struct {
-	calls []struct {
+	scanCalls []struct {
+		collectionIDs []int64
+		retainLatest  int
+	}
+	candidates map[int64][]*viewpb.DataVersion
+	calls      []struct {
 		collectionID int64
-		retainLatest int
+		candidates   []*viewpb.DataVersion
 	}
 }
 
-func (c *fakeDataViewGarbageCollector) GarbageCollect(_ context.Context, collectionID int64, retainLatest int) error {
+func (c *fakeDataViewGarbageCollector) ListGarbageCollectionCandidates(
+	_ context.Context,
+	collectionIDs []int64,
+	retainLatest int,
+) (map[int64][]*viewpb.DataVersion, error) {
+	c.scanCalls = append(c.scanCalls, struct {
+		collectionIDs []int64
+		retainLatest  int
+	}{collectionIDs: append([]int64(nil), collectionIDs...), retainLatest: retainLatest})
+	return c.candidates, nil
+}
+
+func (c *fakeDataViewGarbageCollector) GarbageCollectCandidates(
+	_ context.Context,
+	collectionID int64,
+	candidates []*viewpb.DataVersion,
+) error {
 	c.calls = append(c.calls, struct {
 		collectionID int64
-		retainLatest int
-	}{collectionID: collectionID, retainLatest: retainLatest})
+		candidates   []*viewpb.DataVersion
+	}{collectionID: collectionID, candidates: candidates})
 	return nil
 }
 
@@ -188,6 +210,27 @@ func (m *fakeGCDataViewManager) GarbageCollect(ctx context.Context, collectionID
 	return nil
 }
 
+func (m *fakeGCDataViewManager) ListGarbageCollectionCandidates(
+	ctx context.Context,
+	collectionIDs []int64,
+	retainLatest int,
+) (map[int64][]*viewpb.DataVersion, error) {
+	return nil, nil
+}
+
+func (m *fakeGCDataViewManager) GarbageCollectCandidates(
+	ctx context.Context,
+	collectionID int64,
+	candidates []*viewpb.DataVersion,
+	protected []*viewpb.DataVersion,
+) error {
+	m.calls = append(m.calls, fakeGCDataViewCall{
+		collectionID: collectionID,
+		protected:    protected,
+	})
+	return nil
+}
+
 func TestGarbageCollector_recycleDataViews(t *testing.T) {
 	manager := &fakeGCDataViewManager{}
 	m := &meta{
@@ -196,18 +239,42 @@ func TestGarbageCollector_recycleDataViews(t *testing.T) {
 	}
 	m.collections.Insert(1, &collectionInfo{ID: 1})
 	m.collections.Insert(2, &collectionInfo{ID: 2})
-	guardedGC := &fakeDataViewGarbageCollector{}
+	version := &viewpb.DataVersion{StreamingVersion: 1}
+	guardedGC := &fakeDataViewGarbageCollector{candidates: map[int64][]*viewpb.DataVersion{
+		1: {version},
+		2: {version},
+	}}
 	gc := newGarbageCollector(m, newMockHandler(), GcOption{dataViewGC: guardedGC})
 
 	gc.recycleDataViews(context.Background(), nil)
 
 	require.Empty(t, manager.calls, "normal GC must not bypass the collection reference guard")
+	require.Len(t, guardedGC.scanCalls, 1)
+	require.ElementsMatch(t, []int64{1, 2}, guardedGC.scanCalls[0].collectionIDs)
+	require.Equal(t, 1, guardedGC.scanCalls[0].retainLatest)
 	require.Len(t, guardedGC.calls, 2)
-	byCollection := make(map[int64]int, len(guardedGC.calls))
+	byCollection := make(map[int64][]*viewpb.DataVersion, len(guardedGC.calls))
 	for _, call := range guardedGC.calls {
-		byCollection[call.collectionID] = call.retainLatest
+		byCollection[call.collectionID] = call.candidates
 	}
-	require.Equal(t, map[int64]int{1: 1, 2: 1}, byCollection)
+	require.Equal(t, map[int64][]*viewpb.DataVersion{1: {version}, 2: {version}}, byCollection)
+}
+
+func TestGarbageCollector_recycleDataViewsSkipsPausedCandidates(t *testing.T) {
+	m := &meta{collections: typeutil.NewConcurrentMap[UniqueID, *collectionInfo]()}
+	m.collections.Insert(1, &collectionInfo{ID: 1})
+	version := &viewpb.DataVersion{StreamingVersion: 1}
+	guardedGC := &fakeDataViewGarbageCollector{candidates: map[int64][]*viewpb.DataVersion{1: {version}}}
+	gc := newGarbageCollector(m, newMockHandler(), GcOption{dataViewGC: guardedGC})
+	pauseRecords := NewGCPauseRecords()
+	_, err := pauseRecords.Insert("test", time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	gc.pausedCollection.Insert(1, pauseRecords)
+
+	gc.recycleDataViews(context.Background(), nil)
+
+	require.Len(t, guardedGC.scanCalls, 1)
+	require.Empty(t, guardedGC.calls)
 }
 
 func Test_garbageCollector_basic(t *testing.T) {
@@ -5002,4 +5069,35 @@ func TestGarbageCollector_removeDroppedSegmentFiles_JSONStatsV2(t *testing.T) {
 	defer mu.Unlock()
 	assert.Contains(t, removed, expectedJSON)
 	assert.Contains(t, removed, indexFile)
+}
+
+func TestRunGCStageLogsDuration(t *testing.T) {
+	var logs syncBuffer
+	oldLogger := mlog.L()
+	oldLevel := mlog.GetAtomicLevel()
+	logger, props, err := mlog.InitLoggerWithWriteSyncer(&mlog.Config{
+		Level:             "info",
+		Format:            "text",
+		DisableCaller:     true,
+		DisableTimestamp:  true,
+		DisableStacktrace: true,
+	}, &logs)
+	require.NoError(t, err)
+	mlog.ReplaceGlobals(logger, props)
+	defer mlog.ReplaceGlobals(oldLogger, &mlog.ZapProperties{Level: oldLevel})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	called := false
+	runGCStage(ctx, "meta", "testStage", func() {
+		called = true
+		cancel()
+	})
+
+	require.True(t, called)
+	output := logs.String()
+	assert.Contains(t, output, "garbage collector stage done")
+	assert.Contains(t, output, "gcType=meta")
+	assert.Contains(t, output, "gcStage=testStage")
+	assert.Contains(t, output, "timeCost=")
+	assert.Contains(t, output, "canceled=true")
 }

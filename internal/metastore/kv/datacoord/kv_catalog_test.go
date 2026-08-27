@@ -2408,6 +2408,40 @@ func TestListDataViewsForRecovery(t *testing.T) {
 	assert.NotContains(t, viewsByCollection, int64(300))
 }
 
+func TestListDataViewGCCandidates(t *testing.T) {
+	ctx := context.Background()
+	txn := mocks.NewMetaKv(t)
+	catalog := NewCatalog(txn, rootPath, "")
+	prefix := DataViewPrefix + "/"
+	fullPrefix := rootPath + "/" + prefix
+
+	txn.EXPECT().GetPath(prefix).Return(fullPrefix).Once()
+	txn.EXPECT().WalkWithPrefix(ctx, prefix, catalog.paginationSize, mock.Anything).
+		RunAndReturn(func(_ context.Context, _ string, _ int, f func([]byte, []byte) error) error {
+			// WalkWithPrefix is key-ordered, which is intentionally different
+			// from numeric DataVersion ordering for 1, 10, and 2.
+			assert.NoError(t, f([]byte(fullPrefix+"100/current"), []byte("not-a-data-view")))
+			assert.NoError(t, f([]byte(fullPrefix+"100/versions/1/0"), nil))
+			assert.NoError(t, f([]byte(fullPrefix+"100/versions/10/0"), nil))
+			assert.NoError(t, f([]byte(fullPrefix+"100/versions/2/5"), nil))
+			assert.NoError(t, f([]byte(fullPrefix+"200/versions/5/0"), nil))
+			assert.NoError(t, f([]byte(fullPrefix+"300/versions/1/0"), nil))
+			assert.NoError(t, f([]byte(fullPrefix+"300/versions/2/0"), nil))
+			assert.NoError(t, f([]byte(fullPrefix+"drop/100"), nil))
+			return nil
+		}).Once()
+
+	candidates, err := catalog.ListDataViewGCCandidates(ctx, []int64{100, 200}, 1)
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+	require.Equal(t, []*viewpb.DataVersion{
+		{StreamingVersion: 2, CompactVersion: 5},
+		{StreamingVersion: 1, CompactVersion: 0},
+	}, candidates[100])
+	require.NotContains(t, candidates, int64(200))
+	require.NotContains(t, candidates, int64(300))
+}
+
 func TestSaveDataViewsForRecovery(t *testing.T) {
 	ctx := context.Background()
 	txn := mocks.NewMetaKv(t)

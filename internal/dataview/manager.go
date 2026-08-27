@@ -52,6 +52,14 @@ type RecoveryCatalog interface {
 	ListAllDataViews(ctx context.Context) ([]*viewpb.DataViewOfCollection, error)
 }
 
+type dataViewGarbageCollectionCatalog interface {
+	ListDataViewGCCandidates(
+		ctx context.Context,
+		collectionIDs []int64,
+		retainLatest int,
+	) (map[int64][]*viewpb.DataVersion, error)
+}
+
 type Manager interface {
 	OnCreateCollection(ctx context.Context, event CreateCollectionDataViewEvent) (*viewpb.DataVersion, error)
 	OnFlush(ctx context.Context, event FlushDataViewEvent) (*viewpb.DataVersion, error)
@@ -74,6 +82,8 @@ type Manager interface {
 	SegmentSnapshot(ctx context.Context, segmentIDs []int64) balancerapi.SegmentSnapshot
 	ShardTimeTicks(ctx context.Context, collectionIDs []int64) ([]*viewpb.DataViewShardTimeTick, error)
 	IsSegmentReferenced(ctx context.Context, collectionID int64, segmentID int64) (bool, error)
+	ListGarbageCollectionCandidates(ctx context.Context, collectionIDs []int64, retainLatest int) (map[int64][]*viewpb.DataVersion, error)
+	GarbageCollectCandidates(ctx context.Context, collectionID int64, candidates, protected []*viewpb.DataVersion) error
 	GarbageCollect(ctx context.Context, collectionID int64, protected []*viewpb.DataVersion, retainLatest int) error
 }
 
@@ -137,12 +147,17 @@ type collectionDataViewState struct {
 }
 
 type dataViewManager struct {
-	mu             sync.RWMutex
-	catalog        Catalog
-	segments       SegmentStore
-	states         map[int64]*collectionDataViewState
-	recoveredAll   bool
-	recoveredViews map[int64][]*viewpb.DataViewOfCollection
+	mu       sync.RWMutex
+	catalog  Catalog
+	segments SegmentStore
+	states   map[int64]*collectionDataViewState
+}
+
+// RecoverySnapshot contains the historical DataViews loaded for one startup
+// recovery attempt. It is passed explicitly between the catalog-loading and
+// collection-reconciliation phases and is not retained by dataViewManager.
+type RecoverySnapshot struct {
+	dataViewsByCollection map[int64][]*viewpb.DataViewOfCollection
 }
 
 type dataViewRecoveryReadCatalog interface {
@@ -326,14 +341,15 @@ func NewManager(catalog Catalog, segments SegmentStore) Manager {
 	}
 }
 
-func RecoverManager(ctx context.Context, catalog RecoveryCatalog, segments SegmentStore) (Manager, error) {
+func RecoverManager(ctx context.Context, catalog RecoveryCatalog, segments SegmentStore) (Manager, *RecoverySnapshot, error) {
 	manager := NewManager(catalog, segments).(*dataViewManager)
 	dataViews, err := catalog.ListAllDataViews(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	manager.recoverFromDataViews(dataViews)
-	return manager, nil
+	recoverySnapshot := newRecoverySnapshot(dataViews)
+	manager.recoverFromSnapshot(recoverySnapshot)
+	return manager, recoverySnapshot, nil
 }
 
 func (m *dataViewManager) OnCreateCollection(ctx context.Context, event CreateCollectionDataViewEvent) (*viewpb.DataVersion, error) {
@@ -503,14 +519,10 @@ func (m *dataViewManager) OnDropCollection(ctx context.Context, collectionID int
 func (m *dataViewManager) RepairCollection(ctx context.Context, collectionID int64) error {
 	state := m.getOrCreateState(collectionID)
 	state.mu.Lock()
-	persistedViews, ok := m.recoveredDataViews(collectionID)
-	if !ok {
-		var err error
-		persistedViews, err = m.catalog.ListDataViews(ctx, collectionID)
-		if err != nil {
-			state.mu.Unlock()
-			return err
-		}
+	persistedViews, err := m.catalog.ListDataViews(ctx, collectionID)
+	if err != nil {
+		state.mu.Unlock()
+		return err
 	}
 	plan := m.prepareCollectionRecoveryLocked(ctx, state, collectionID, persistedViews)
 	return m.persistCollectionRecovery(ctx, plan)
@@ -525,37 +537,36 @@ func (m *dataViewManager) RepairCollections(ctx context.Context, collectionIDs [
 	return nil
 }
 
-// RecoverCollections uses a global-prefix batch scan when the catalog supports
-// it. The method is deliberately kept off Manager: DataCoord discovers it
-// through a private optional interface, so existing manager implementations
-// keep the point-recovery fallback.
+// RecoverCollections reconciles collections from the temporary startup
+// snapshot when one is supplied. Callers without a snapshot retain the
+// catalog batch-scan or point-read fallback. The method is deliberately kept
+// off Manager: DataCoord discovers it through a private optional interface.
 func (m *dataViewManager) RecoverCollections(
 	ctx context.Context,
+	recoverySnapshot *RecoverySnapshot,
 	collectionIDs []int64,
 	observe func(index int, collectionID int64, duration time.Duration, err error),
 ) error {
-	m.mu.RLock()
-	recoveredAll := m.recoveredAll
-	m.mu.RUnlock()
 	recoveryWriteCatalog, batchWriteSupported := m.catalog.(dataViewRecoveryWriteCatalog)
-	if recoveredAll {
+	if recoverySnapshot != nil {
 		mlog.Info(ctx, "DataView recovery path selected",
-			mlog.String("selectedMode", "memory"),
+			mlog.String("selectedMode", "snapshot"),
 			mlog.Int("numCollections", len(collectionIDs)))
 		if batchWriteSupported {
 			return m.recoverCollectionBatches(
 				ctx,
 				recoveryWriteCatalog,
 				collectionIDs,
-				func(collectionID int64) []*viewpb.DataViewOfCollection {
-					dataViews, _ := m.recoveredDataViews(collectionID)
-					return dataViews
-				},
+				recoverySnapshot.dataViews,
 				observe,
 			)
 		}
 		return m.recoverCollectionList(ctx, collectionIDs, observe, func(collectionID int64) error {
-			return m.RepairCollection(ctx, collectionID)
+			return m.repairCollectionWithDataViews(
+				ctx,
+				collectionID,
+				recoverySnapshot.dataViews(collectionID),
+			)
 		})
 	}
 
@@ -686,7 +697,6 @@ func (m *dataViewManager) recoverCollectionBatches(
 			persistDurationShare = persistDuration / time.Duration(len(dataViewsToPersist))
 		}
 		for _, plan := range plans {
-			m.rememberRecoveredDataView(plan.toPersist)
 			plan.commit()
 		}
 		for offset, plan := range plans {
@@ -709,61 +719,41 @@ func abortDataViewRecoveryPlans(plans []*dataViewRecoveryPlan) {
 	}
 }
 
-func (m *dataViewManager) recoverFromDataViews(dataViews []*viewpb.DataViewOfCollection) {
-	viewsByCollection := make(map[int64][]*viewpb.DataViewOfCollection)
-	recoveredViews := make(map[int64][]*viewpb.DataViewOfCollection)
+func newRecoverySnapshot(dataViews []*viewpb.DataViewOfCollection) *RecoverySnapshot {
+	dataViewsByCollection := make(map[int64][]*viewpb.DataViewOfCollection)
 	for _, view := range dataViews {
 		if view == nil {
 			continue
 		}
 		collectionID := view.GetCollectionId()
-		viewsByCollection[collectionID] = append(viewsByCollection[collectionID], view)
-		recoveredViews[collectionID] = append(recoveredViews[collectionID], canonicalDataViewClone(view))
+		dataViewsByCollection[collectionID] = append(
+			dataViewsByCollection[collectionID],
+			canonicalDataViewClone(view),
+		)
 	}
-	m.mu.Lock()
-	m.recoveredAll = true
-	m.recoveredViews = recoveredViews
-	m.mu.Unlock()
+	return &RecoverySnapshot{dataViewsByCollection: dataViewsByCollection}
+}
 
-	collectionIDs := make([]int64, 0, len(viewsByCollection))
-	for collectionID := range viewsByCollection {
+func (s *RecoverySnapshot) dataViews(collectionID int64) []*viewpb.DataViewOfCollection {
+	if s == nil {
+		return nil
+	}
+	return cloneDataViews(s.dataViewsByCollection[collectionID])
+}
+
+func (m *dataViewManager) recoverFromSnapshot(recoverySnapshot *RecoverySnapshot) {
+	if recoverySnapshot == nil {
+		return
+	}
+
+	collectionIDs := make([]int64, 0, len(recoverySnapshot.dataViewsByCollection))
+	for collectionID := range recoverySnapshot.dataViewsByCollection {
 		collectionIDs = append(collectionIDs, collectionID)
 	}
 	sort.Slice(collectionIDs, func(i, j int) bool { return collectionIDs[i] < collectionIDs[j] })
 	for _, collectionID := range collectionIDs {
-		m.recoverCollectionFromDataViews(collectionID, viewsByCollection[collectionID])
+		m.recoverCollectionFromDataViews(collectionID, recoverySnapshot.dataViewsByCollection[collectionID])
 	}
-}
-
-func (m *dataViewManager) recoveredDataViews(collectionID int64) ([]*viewpb.DataViewOfCollection, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if !m.recoveredAll {
-		return nil, false
-	}
-	return cloneDataViews(m.recoveredViews[collectionID]), true
-}
-
-func (m *dataViewManager) rememberRecoveredDataView(view *viewpb.DataViewOfCollection) {
-	if view == nil {
-		return
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.recoveredAll {
-		return
-	}
-	collectionID := view.GetCollectionId()
-	version := view.GetDataVersion()
-	views := m.recoveredViews[collectionID]
-	for idx, recovered := range views {
-		if compareDataVersion(recovered.GetDataVersion(), version) == 0 {
-			views[idx] = canonicalDataViewClone(view)
-			m.recoveredViews[collectionID] = views
-			return
-		}
-	}
-	m.recoveredViews[collectionID] = append(views, canonicalDataViewClone(view))
 }
 
 func (m *dataViewManager) recoverCollectionFromDataViews(collectionID int64, persistedViews []*viewpb.DataViewOfCollection) {
@@ -777,18 +767,24 @@ func (m *dataViewManager) recoverCollectionFromDataViews(collectionID int64, per
 	state.segmentJoinVersion = segmentJoinVersionsFromDataViews(persistedViews)
 }
 
-func (m *dataViewManager) repairCollectionWithDataViews(ctx context.Context, collectionID int64, persistedViews []*viewpb.DataViewOfCollection) error {
+func (m *dataViewManager) repairCollectionWithDataViews(
+	ctx context.Context,
+	collectionID int64,
+	persistedViews []*viewpb.DataViewOfCollection,
+) error {
 	plan := m.prepareCollectionRecovery(ctx, collectionID, persistedViews)
 	return m.persistCollectionRecovery(ctx, plan)
 }
 
-func (m *dataViewManager) persistCollectionRecovery(ctx context.Context, plan *dataViewRecoveryPlan) error {
+func (m *dataViewManager) persistCollectionRecovery(
+	ctx context.Context,
+	plan *dataViewRecoveryPlan,
+) error {
 	if plan.toPersist != nil {
 		if err := m.catalog.SaveDataView(ctx, plan.toPersist); err != nil {
 			plan.abort()
 			return err
 		}
-		m.rememberRecoveredDataView(plan.toPersist)
 	}
 	plan.commit()
 	return nil
@@ -1072,25 +1068,93 @@ func (m *dataViewManager) GarbageCollect(ctx context.Context, collectionID int64
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
-	if retainLatest < 1 {
-		retainLatest = 1
-	}
 	views, err := m.catalog.ListDataViews(ctx, collectionID)
 	if err != nil {
 		return err
 	}
+	candidates := dataViewGarbageCollectionCandidates(views, retainLatest)
+	return m.garbageCollectCandidatesLocked(ctx, collectionID, candidates, protected)
+}
+
+func (m *dataViewManager) ListGarbageCollectionCandidates(
+	ctx context.Context,
+	collectionIDs []int64,
+	retainLatest int,
+) (map[int64][]*viewpb.DataVersion, error) {
+	if catalog, ok := m.catalog.(dataViewGarbageCollectionCatalog); ok {
+		mlog.Info(ctx, "DataView GC candidate path selected",
+			mlog.String("selectedMode", "catalog-batch"),
+			mlog.Int("numCollections", len(collectionIDs)))
+		return catalog.ListDataViewGCCandidates(ctx, collectionIDs, retainLatest)
+	}
+
+	mlog.Info(ctx, "DataView GC candidate path selected",
+		mlog.String("selectedMode", "catalog-point"),
+		mlog.Int("numCollections", len(collectionIDs)))
+	candidatesByCollection := make(map[int64][]*viewpb.DataVersion)
+	for _, collectionID := range collectionIDs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		views, err := m.catalog.ListDataViews(ctx, collectionID)
+		if err != nil {
+			return nil, err
+		}
+		candidates := dataViewGarbageCollectionCandidates(views, retainLatest)
+		if len(candidates) > 0 {
+			candidatesByCollection[collectionID] = candidates
+		}
+	}
+	return candidatesByCollection, nil
+}
+
+func (m *dataViewManager) GarbageCollectCandidates(
+	ctx context.Context,
+	collectionID int64,
+	candidates []*viewpb.DataVersion,
+	protected []*viewpb.DataVersion,
+) error {
+	state := m.getOrCreateState(collectionID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return m.garbageCollectCandidatesLocked(ctx, collectionID, candidates, protected)
+}
+
+func dataViewGarbageCollectionCandidates(
+	views []*viewpb.DataViewOfCollection,
+	retainLatest int,
+) []*viewpb.DataVersion {
+	if retainLatest < 1 {
+		retainLatest = 1
+	}
 	sort.Slice(views, func(i, j int) bool {
 		return compareDataVersion(views[i].GetDataVersion(), views[j].GetDataVersion()) > 0
 	})
+	if len(views) <= retainLatest {
+		return nil
+	}
+	candidates := make([]*viewpb.DataVersion, 0, len(views)-retainLatest)
+	for _, view := range views[retainLatest:] {
+		version := view.GetDataVersion()
+		candidates = append(candidates, &viewpb.DataVersion{
+			StreamingVersion: version.GetStreamingVersion(),
+			CompactVersion:   version.GetCompactVersion(),
+		})
+	}
+	return candidates
+}
+
+func (m *dataViewManager) garbageCollectCandidatesLocked(
+	ctx context.Context,
+	collectionID int64,
+	candidates []*viewpb.DataVersion,
+	protected []*viewpb.DataVersion,
+) error {
 	protectedSet := make(map[string]struct{}, len(protected))
 	for _, version := range protected {
 		protectedSet[dataVersionKey(version)] = struct{}{}
 	}
-	for idx, view := range views {
-		version := view.GetDataVersion()
-		if idx < retainLatest {
-			continue
-		}
+	for _, version := range candidates {
 		if _, ok := protectedSet[dataVersionKey(version)]; ok {
 			continue
 		}

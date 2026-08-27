@@ -45,6 +45,7 @@ type (
 type batchDataViewRecoveryManager interface {
 	RecoverCollections(
 		ctx context.Context,
+		recoverySnapshot *dataview.RecoverySnapshot,
 		collectionIDs []int64,
 		observe func(index int, collectionID int64, duration time.Duration, err error),
 	) error
@@ -61,11 +62,12 @@ func newDataViewManager(catalog metastore.DataCoordCatalog, meta *meta) DataView
 func recoverDataViewCollections(
 	ctx context.Context,
 	manager DataViewManager,
+	recoverySnapshot *dataview.RecoverySnapshot,
 	collectionIDs []int64,
 	observe func(index int, collectionID int64, duration time.Duration, err error),
 ) error {
 	if batchManager, ok := manager.(batchDataViewRecoveryManager); ok {
-		return batchManager.RecoverCollections(ctx, collectionIDs, observe)
+		return batchManager.RecoverCollections(ctx, recoverySnapshot, collectionIDs, observe)
 	}
 
 	for index, collectionID := range collectionIDs {

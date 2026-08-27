@@ -34,6 +34,8 @@ type dataViewDropMarkerCatalog interface {
 
 type dataViewReferenceDataViews interface {
 	DataView(ctx context.Context, collectionID int64, dataVersion *viewpb.DataVersion) (*viewpb.DataViewOfCollection, error)
+	ListGarbageCollectionCandidates(ctx context.Context, collectionIDs []int64, retainLatest int) (map[int64][]*viewpb.DataVersion, error)
+	GarbageCollectCandidates(ctx context.Context, collectionID int64, candidates, protected []*viewpb.DataVersion) error
 	GarbageCollect(ctx context.Context, collectionID int64, protected []*viewpb.DataVersion, retainLatest int) error
 	OnDropCollection(ctx context.Context, collectionID int64) (*viewpb.DataVersion, error)
 }
@@ -154,6 +156,33 @@ func (m *dataViewReferenceManager) GarbageCollect(ctx context.Context, collectio
 	if state.terminal {
 		return nil
 	}
+	return m.dataViews.GarbageCollect(ctx, collectionID, protectedDataViewVersions(state), retainLatest)
+}
+
+func (m *dataViewReferenceManager) ListGarbageCollectionCandidates(
+	ctx context.Context,
+	collectionIDs []int64,
+	retainLatest int,
+) (map[int64][]*viewpb.DataVersion, error) {
+	return m.dataViews.ListGarbageCollectionCandidates(ctx, collectionIDs, retainLatest)
+}
+
+func (m *dataViewReferenceManager) GarbageCollectCandidates(
+	ctx context.Context,
+	collectionID int64,
+	candidates []*viewpb.DataVersion,
+) error {
+	state := m.getOrCreateState(collectionID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	if state.terminal {
+		return nil
+	}
+	return m.dataViews.GarbageCollectCandidates(ctx, collectionID, candidates, protectedDataViewVersions(state))
+}
+
+func protectedDataViewVersions(state *dataViewReferenceState) []*viewpb.DataVersion {
 	protected := make([]qviews.DataVersion, 0, len(state.refs))
 	for version := range state.refs {
 		protected = append(protected, version)
@@ -168,7 +197,7 @@ func (m *dataViewReferenceManager) GarbageCollect(ctx context.Context, collectio
 	for _, version := range protected {
 		protectedProto = append(protectedProto, version.IntoProto())
 	}
-	return m.dataViews.GarbageCollect(ctx, collectionID, protectedProto, retainLatest)
+	return protectedProto
 }
 
 func (m *dataViewReferenceManager) DropCollection(ctx context.Context, collectionID int64) error {

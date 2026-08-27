@@ -639,6 +639,99 @@ func (kc *Catalog) ListDataViewsForRecovery(
 	return dataViewsByCollection, nil
 }
 
+type dataViewCatalogVersion struct {
+	streaming int64
+	compact   int64
+}
+
+// ListDataViewGCCandidates finds obsolete DataView versions for all requested
+// collections with one global metadata walk. It parses versions from keys and
+// retains only deletion candidates, so memory usage does not include the full
+// DataView payload or the latest-only collection population.
+func (kc *Catalog) ListDataViewGCCandidates(
+	ctx context.Context,
+	collectionIDs []int64,
+	retainLatest int,
+) (map[int64][]*viewpb.DataVersion, error) {
+	candidatesByCollection := make(map[int64][]*viewpb.DataVersion)
+	if len(collectionIDs) == 0 {
+		return candidatesByCollection, nil
+	}
+	if retainLatest < 1 {
+		retainLatest = 1
+	}
+
+	requestedCollections := make(map[int64]struct{}, len(collectionIDs))
+	for _, collectionID := range collectionIDs {
+		requestedCollections[collectionID] = struct{}{}
+	}
+
+	prefix := DataViewPrefix + "/"
+	fullPrefix := kc.MetaKv.GetPath(prefix)
+	// The etcd and TiKV WalkWithPrefix implementations traverse keys in
+	// ascending order, so every Collection's version keys are contiguous.
+	// Flush at the Collection boundary to avoid retaining one latest-version
+	// entry for each of the million latest-only Collections.
+	versions := make([]dataViewCatalogVersion, 0, retainLatest+1)
+	var currentCollectionID int64
+	hasCurrentCollection := false
+	flushCurrentCollection := func() {
+		if !hasCurrentCollection || len(versions) <= retainLatest {
+			return
+		}
+		slices.SortFunc(versions, func(left, right dataViewCatalogVersion) int {
+			if left.streaming > right.streaming {
+				return -1
+			}
+			if left.streaming < right.streaming {
+				return 1
+			}
+			if left.compact > right.compact {
+				return -1
+			}
+			if left.compact < right.compact {
+				return 1
+			}
+			return 0
+		})
+		candidates := make([]*viewpb.DataVersion, 0, len(versions)-retainLatest)
+		for _, version := range versions[retainLatest:] {
+			candidates = append(candidates, &viewpb.DataVersion{
+				StreamingVersion: version.streaming,
+				CompactVersion:   version.compact,
+			})
+		}
+		candidatesByCollection[currentCollectionID] = candidates
+	}
+
+	applyFn := func(key []byte, _ []byte) error {
+		collectionID, streamingVersion, compactVersion, ok := dataViewVersionFromKey(fullPrefix, key)
+		if !ok {
+			return nil
+		}
+		if !hasCurrentCollection || currentCollectionID != collectionID {
+			flushCurrentCollection()
+			versions = versions[:0]
+			currentCollectionID = collectionID
+			hasCurrentCollection = true
+		}
+		if _, ok := requestedCollections[collectionID]; !ok {
+			return nil
+		}
+		versions = append(versions, dataViewCatalogVersion{
+			streaming: streamingVersion,
+			compact:   compactVersion,
+		})
+		return nil
+	}
+
+	if err := kc.MetaKv.WalkWithPrefix(ctx, prefix, kc.paginationSize, applyFn); err != nil {
+		return nil, err
+	}
+	flushCurrentCollection()
+	return candidatesByCollection, nil
+}
+
 func dataViewCollectionIDFromKey(fullPrefix string, key []byte) (int64, bool) {
 	keyString := string(key)
 	if !strings.HasPrefix(keyString, fullPrefix) {
@@ -654,6 +747,31 @@ func dataViewCollectionIDFromKey(fullPrefix string, key []byte) (int64, bool) {
 		return 0, false
 	}
 	return collectionID, true
+}
+
+func dataViewVersionFromKey(fullPrefix string, key []byte) (int64, int64, int64, bool) {
+	keyString := string(key)
+	if !strings.HasPrefix(keyString, fullPrefix) {
+		return 0, 0, 0, false
+	}
+
+	parts := strings.Split(strings.TrimPrefix(keyString, fullPrefix), "/")
+	if len(parts) != 4 || parts[1] != "versions" {
+		return 0, 0, 0, false
+	}
+	collectionID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	streamingVersion, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	compactVersion, err := strconv.ParseInt(parts[3], 10, 64)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	return collectionID, streamingVersion, compactVersion, true
 }
 
 func (kc *Catalog) DropDataView(ctx context.Context, collectionID int64, dataVersion *viewpb.DataVersion) error {

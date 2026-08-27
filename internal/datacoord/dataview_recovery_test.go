@@ -22,18 +22,27 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/milvus-io/milvus/internal/dataview"
 )
 
 type fakeBatchRecoveryManager struct {
 	DataViewManager
-	collectionIDs []int64
+	collectionIDs    []int64
+	recoverySnapshot *dataview.RecoverySnapshot
+	recoveryErr      error
 }
 
 func (m *fakeBatchRecoveryManager) RecoverCollections(
 	ctx context.Context,
+	recoverySnapshot *dataview.RecoverySnapshot,
 	collectionIDs []int64,
 	observe func(index int, collectionID int64, duration time.Duration, err error),
 ) error {
+	m.recoverySnapshot = recoverySnapshot
+	if m.recoveryErr != nil {
+		return m.recoveryErr
+	}
 	m.collectionIDs = append([]int64(nil), collectionIDs...)
 	for index, collectionID := range collectionIDs {
 		observe(index, collectionID, 0, nil)
@@ -53,9 +62,10 @@ func (m *fakePointRecoveryManager) RepairCollection(ctx context.Context, collect
 
 func TestRecoverDataViewCollectionsUsesOptionalBatchManager(t *testing.T) {
 	manager := &fakeBatchRecoveryManager{}
+	recoverySnapshot := new(dataview.RecoverySnapshot)
 	observed := 0
 
-	err := recoverDataViewCollections(context.Background(), manager, []int64{1, 2}, func(index int, collectionID int64, duration time.Duration, err error) {
+	err := recoverDataViewCollections(context.Background(), manager, recoverySnapshot, []int64{1, 2}, func(index int, collectionID int64, duration time.Duration, err error) {
 		require.NoError(t, err)
 		observed++
 	})
@@ -63,12 +73,23 @@ func TestRecoverDataViewCollectionsUsesOptionalBatchManager(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []int64{1, 2}, manager.collectionIDs)
 	require.Equal(t, 2, observed)
+	require.Same(t, recoverySnapshot, manager.recoverySnapshot)
+}
+
+func TestRecoverDataViewCollectionsForwardsSnapshotOnFailure(t *testing.T) {
+	manager := &fakeBatchRecoveryManager{recoveryErr: context.Canceled}
+	recoverySnapshot := new(dataview.RecoverySnapshot)
+
+	err := recoverDataViewCollections(context.Background(), manager, recoverySnapshot, []int64{1}, nil)
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.Same(t, recoverySnapshot, manager.recoverySnapshot)
 }
 
 func TestRecoverDataViewCollectionsFallsBackToPointManager(t *testing.T) {
 	manager := &fakePointRecoveryManager{}
 
-	err := recoverDataViewCollections(context.Background(), manager, []int64{1, 2}, nil)
+	err := recoverDataViewCollections(context.Background(), manager, nil, []int64{1, 2}, nil)
 
 	require.NoError(t, err)
 	require.Equal(t, []int64{1, 2}, manager.collectionIDs)

@@ -64,9 +64,11 @@ func (c *testDataViewReferenceCatalog) UnmarkDataViewCollectionDropped(_ context
 }
 
 type testDataViewReferenceDataViews struct {
-	dataViewFn       func(context.Context, int64, *viewpb.DataVersion) (*viewpb.DataViewOfCollection, error)
-	garbageCollectFn func(context.Context, int64, []*viewpb.DataVersion, int) error
-	dropCollectionFn func(context.Context, int64) (*viewpb.DataVersion, error)
+	dataViewFn                 func(context.Context, int64, *viewpb.DataVersion) (*viewpb.DataViewOfCollection, error)
+	listGCCandidatesFn         func(context.Context, []int64, int) (map[int64][]*viewpb.DataVersion, error)
+	garbageCollectCandidatesFn func(context.Context, int64, []*viewpb.DataVersion, []*viewpb.DataVersion) error
+	garbageCollectFn           func(context.Context, int64, []*viewpb.DataVersion, int) error
+	dropCollectionFn           func(context.Context, int64) (*viewpb.DataVersion, error)
 }
 
 func (m *testDataViewReferenceDataViews) DataView(ctx context.Context, collectionID int64, version *viewpb.DataVersion) (*viewpb.DataViewOfCollection, error) {
@@ -75,6 +77,29 @@ func (m *testDataViewReferenceDataViews) DataView(ctx context.Context, collectio
 
 func (m *testDataViewReferenceDataViews) GarbageCollect(ctx context.Context, collectionID int64, protected []*viewpb.DataVersion, retainLatest int) error {
 	return m.garbageCollectFn(ctx, collectionID, protected, retainLatest)
+}
+
+func (m *testDataViewReferenceDataViews) ListGarbageCollectionCandidates(
+	ctx context.Context,
+	collectionIDs []int64,
+	retainLatest int,
+) (map[int64][]*viewpb.DataVersion, error) {
+	if m.listGCCandidatesFn == nil {
+		return nil, nil
+	}
+	return m.listGCCandidatesFn(ctx, collectionIDs, retainLatest)
+}
+
+func (m *testDataViewReferenceDataViews) GarbageCollectCandidates(
+	ctx context.Context,
+	collectionID int64,
+	candidates []*viewpb.DataVersion,
+	protected []*viewpb.DataVersion,
+) error {
+	if m.garbageCollectCandidatesFn == nil {
+		return nil
+	}
+	return m.garbageCollectCandidatesFn(ctx, collectionID, candidates, protected)
 }
 
 func (m *testDataViewReferenceDataViews) OnDropCollection(ctx context.Context, collectionID int64) (*viewpb.DataVersion, error) {
@@ -151,6 +176,93 @@ func TestDataViewReferenceManagerPinProtectsGC(t *testing.T) {
 	gcEntered = make(chan struct{})
 	require.NoError(t, manager.GarbageCollect(context.Background(), 100, 1))
 	require.Empty(t, protected)
+}
+
+func TestDataViewReferenceManagerBatchGCProtectsPinnedVersion(t *testing.T) {
+	version := qviews.DataVersion{StreamingVersion: 3, CompactVersion: 1}
+	candidate := &viewpb.DataVersion{StreamingVersion: 2}
+	catalog := &testDataViewReferenceCatalog{markerPresent: make(map[int64]struct{})}
+	var appliedCandidates []*viewpb.DataVersion
+	var protected []*viewpb.DataVersion
+	dataViews := &testDataViewReferenceDataViews{
+		dataViewFn: func(context.Context, int64, *viewpb.DataVersion) (*viewpb.DataViewOfCollection, error) {
+			return &viewpb.DataViewOfCollection{}, nil
+		},
+		listGCCandidatesFn: func(_ context.Context, collectionIDs []int64, retainLatest int) (map[int64][]*viewpb.DataVersion, error) {
+			require.Equal(t, []int64{100}, collectionIDs)
+			require.Equal(t, 1, retainLatest)
+			return map[int64][]*viewpb.DataVersion{100: {candidate}}, nil
+		},
+		garbageCollectCandidatesFn: func(
+			_ context.Context,
+			collectionID int64,
+			candidates []*viewpb.DataVersion,
+			versions []*viewpb.DataVersion,
+		) error {
+			require.Equal(t, int64(100), collectionID)
+			appliedCandidates = candidates
+			protected = versions
+			return nil
+		},
+		garbageCollectFn: func(context.Context, int64, []*viewpb.DataVersion, int) error { return nil },
+		dropCollectionFn: func(context.Context, int64) (*viewpb.DataVersion, error) { return nil, nil },
+	}
+	manager := newTestDataViewReferenceManager(t, catalog, dataViews, func(int64) bool { return true })
+	require.NoError(t, manager.PinDataView(context.Background(), 100, version))
+
+	candidates, err := manager.ListGarbageCollectionCandidates(context.Background(), []int64{100}, 1)
+	require.NoError(t, err)
+	require.NoError(t, manager.GarbageCollectCandidates(context.Background(), 100, candidates[100]))
+	require.Equal(t, []*viewpb.DataVersion{candidate}, appliedCandidates)
+	require.Equal(t, []*viewpb.DataVersion{version.IntoProto()}, protected)
+}
+
+func TestDataViewReferenceManagerBatchGCCanWinBeforePin(t *testing.T) {
+	version := qviews.DataVersion{StreamingVersion: 3, CompactVersion: 1}
+	candidate := &viewpb.DataVersion{StreamingVersion: 2}
+	catalog := &testDataViewReferenceCatalog{markerPresent: make(map[int64]struct{})}
+	gcEntered := make(chan struct{})
+	allowGC := make(chan struct{})
+	dataViewEntered := make(chan struct{})
+	available := true
+	dataViews := &testDataViewReferenceDataViews{
+		dataViewFn: func(context.Context, int64, *viewpb.DataVersion) (*viewpb.DataViewOfCollection, error) {
+			close(dataViewEntered)
+			if !available {
+				return nil, nil
+			}
+			return &viewpb.DataViewOfCollection{}, nil
+		},
+		garbageCollectCandidatesFn: func(context.Context, int64, []*viewpb.DataVersion, []*viewpb.DataVersion) error {
+			close(gcEntered)
+			<-allowGC
+			available = false
+			return nil
+		},
+		garbageCollectFn: func(context.Context, int64, []*viewpb.DataVersion, int) error { return nil },
+		dropCollectionFn: func(context.Context, int64) (*viewpb.DataVersion, error) { return nil, nil },
+	}
+	manager := newTestDataViewReferenceManager(t, catalog, dataViews, func(int64) bool { return true })
+
+	gcDone := make(chan error, 1)
+	go func() {
+		gcDone <- manager.GarbageCollectCandidates(context.Background(), 100, []*viewpb.DataVersion{candidate})
+	}()
+	<-gcEntered
+
+	pinDone := make(chan error, 1)
+	go func() { pinDone <- manager.PinDataView(context.Background(), 100, version) }()
+	select {
+	case <-dataViewEntered:
+		t.Fatal("pin validated the data view before the in-flight batch GC completed")
+	default:
+	}
+
+	close(allowGC)
+	require.NoError(t, <-gcDone)
+	err := <-pinDone
+	require.ErrorIs(t, err, merr.ErrServiceNotReady)
+	require.True(t, merr.IsRetryableErr(err))
 }
 
 func TestDataViewReferenceManagerGCCanWinBeforePin(t *testing.T) {

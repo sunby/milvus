@@ -649,19 +649,20 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 		catalog := datacoord.NewCatalog(s.kv, chunkManager.RootPath(), s.metaRootPath)
 		dataViewStore := &dataViewSegmentStore{}
 		type dataViewRecoveryResult struct {
-			manager DataViewManager
-			err     error
+			manager  DataViewManager
+			snapshot *dataview.RecoverySnapshot
+			err      error
 		}
 		dataViewRecoveryCh := make(chan dataViewRecoveryResult, 1)
 		go func() {
 			recoveryStart := time.Now()
 			mlog.Info(s.ctx, "datacoord DataView catalog recovery started")
-			manager, err := dataview.RecoverManager(s.ctx, catalog, dataViewStore)
+			manager, snapshot, err := dataview.RecoverManager(s.ctx, catalog, dataViewStore)
 			if err == nil {
 				mlog.Info(s.ctx, "datacoord DataView catalog recovery done",
 					mlog.Duration("duration", time.Since(recoveryStart)))
 			}
-			dataViewRecoveryCh <- dataViewRecoveryResult{manager: manager, err: err}
+			dataViewRecoveryCh <- dataViewRecoveryResult{manager: manager, snapshot: snapshot, err: err}
 		}()
 		marshaler := &SegmentInfoMarshaler{}
 		var segmentPersist OptimisticTxnPersist[string, *datapb.SegmentInfo]
@@ -714,6 +715,7 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 		err = recoverDataViewCollections(
 			s.ctx,
 			s.dataViewManager,
+			dataViewRecovery.snapshot,
 			repairCollectionIDs,
 			func(index int, collectionID int64, collectionDuration time.Duration, recoveryErr error) {
 				if recoveryErr != nil {

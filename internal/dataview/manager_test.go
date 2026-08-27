@@ -113,6 +113,50 @@ type fakeBatchReadOnlyDataViewCatalog struct {
 	batchCalls int
 }
 
+type fakeGCDataViewCatalog struct {
+	*fakeDataViewCatalog
+	gcScanCalls int
+	candidates  map[int64][]*viewpb.DataVersion
+}
+
+func (c *fakeGCDataViewCatalog) ListDataViewGCCandidates(
+	ctx context.Context,
+	collectionIDs []int64,
+	retainLatest int,
+) (map[int64][]*viewpb.DataVersion, error) {
+	c.gcScanCalls++
+	if c.candidates == nil {
+		requested := make(map[int64]struct{}, len(collectionIDs))
+		for _, collectionID := range collectionIDs {
+			requested[collectionID] = struct{}{}
+		}
+		viewsByCollection := make(map[int64][]*viewpb.DataViewOfCollection)
+		for _, view := range c.views {
+			if _, ok := requested[view.GetCollectionId()]; !ok {
+				continue
+			}
+			viewsByCollection[view.GetCollectionId()] = append(
+				viewsByCollection[view.GetCollectionId()],
+				proto.Clone(view).(*viewpb.DataViewOfCollection),
+			)
+		}
+		result := make(map[int64][]*viewpb.DataVersion)
+		for collectionID, views := range viewsByCollection {
+			if candidates := dataViewGarbageCollectionCandidates(views, retainLatest); len(candidates) > 0 {
+				result[collectionID] = candidates
+			}
+		}
+		return result, nil
+	}
+	result := make(map[int64][]*viewpb.DataVersion, len(c.candidates))
+	for collectionID, candidates := range c.candidates {
+		for _, candidate := range candidates {
+			result[collectionID] = append(result[collectionID], proto.Clone(candidate).(*viewpb.DataVersion))
+		}
+	}
+	return result, nil
+}
+
 func (c *fakeBatchReadOnlyDataViewCatalog) ListDataViewsForRecovery(
 	ctx context.Context,
 	collectionIDs []int64,
@@ -919,7 +963,7 @@ func TestRecoveredManagerDuplicateFlushReturnsOriginalVersion(t *testing.T) {
 		100: newDataViewTestSegment(1, 10, 100, "ch-1", 1000),
 		200: newDataViewTestSegment(1, 20, 200, "ch-2", 2000),
 	}}
-	manager, err := RecoverManager(ctx, catalog, store)
+	manager, _, err := RecoverManager(ctx, catalog, store)
 	require.NoError(t, err)
 
 	retried, err := manager.OnFlush(ctx, FlushDataViewEvent{CollectionID: 1, SegmentIDs: []int64{100}})
@@ -940,7 +984,7 @@ func TestRecoveredManagerDoesNotInventUnknownSegmentJoinVersion(t *testing.T) {
 		200: newDataViewTestSegment(1, 20, 200, "ch-2", 2000),
 	}}
 	store.segments[100].State = commonpb.SegmentState_Dropped
-	manager, err := RecoverManager(ctx, catalog, store)
+	manager, _, err := RecoverManager(ctx, catalog, store)
 	require.NoError(t, err)
 
 	version, err := manager.OnFlush(ctx, FlushDataViewEvent{CollectionID: 1, SegmentIDs: []int64{100}})
@@ -1044,7 +1088,7 @@ func TestDataViewManagerRecoverCollectionsFallsBackToPointCatalog(t *testing.T) 
 	manager := NewManager(catalog, store).(*dataViewManager)
 
 	observed := 0
-	err := manager.RecoverCollections(ctx, []int64{1, 2}, func(index int, collectionID int64, duration time.Duration, err error) {
+	err := manager.RecoverCollections(ctx, nil, []int64{1, 2}, func(index int, collectionID int64, duration time.Duration, err error) {
 		require.NoError(t, err)
 		observed++
 	})
@@ -1065,7 +1109,7 @@ func TestDataViewManagerRecoverCollectionsUsesBatchCatalog(t *testing.T) {
 
 	collectionIDs := []int64{1, 2}
 	observed := 0
-	err := manager.RecoverCollections(ctx, collectionIDs, func(index int, collectionID int64, duration time.Duration, err error) {
+	err := manager.RecoverCollections(ctx, nil, collectionIDs, func(index int, collectionID int64, duration time.Duration, err error) {
 		require.NoError(t, err)
 		observed++
 	})
@@ -1088,7 +1132,7 @@ func TestDataViewManagerRecoverCollectionsRetainsBatchReadWithPointWriter(t *tes
 	manager := NewManager(catalog, store).(*dataViewManager)
 	store.segments[100] = newDataViewTestSegment(1, 10, 100, "ch-1", 1000)
 
-	require.NoError(t, manager.RecoverCollections(ctx, []int64{1}, nil))
+	require.NoError(t, manager.RecoverCollections(ctx, nil, []int64{1}, nil))
 	require.Equal(t, 1, catalog.batchCalls)
 	require.Zero(t, baseCatalog.listCalls)
 	require.Equal(t, 1, baseCatalog.saveCalls)
@@ -1108,13 +1152,13 @@ func TestDataViewManagerRecoverCollectionsRetriesAfterPartialBatchSave(t *testin
 	store.segments[100] = newDataViewTestSegment(1, 10, 100, "ch-1", 1000)
 	store.segments[200] = newDataViewTestSegment(2, 20, 200, "ch-2", 2000)
 
-	err := manager.RecoverCollections(ctx, []int64{1, 2}, nil)
+	err := manager.RecoverCollections(ctx, nil, []int64{1, 2}, nil)
 	require.Error(t, err)
 	require.Len(t, baseCatalog.views, 1)
 	require.Nil(t, manager.states[1].latestResident)
 	require.Nil(t, manager.states[2].latestResident)
 
-	require.NoError(t, manager.RecoverCollections(ctx, []int64{1, 2}, nil))
+	require.NoError(t, manager.RecoverCollections(ctx, nil, []int64{1, 2}, nil))
 	require.Equal(t, 2, catalog.batchSaveCalls)
 	require.Equal(t, []int{2, 1}, catalog.batchSaveSizes)
 	require.Len(t, baseCatalog.views, 2)
@@ -1142,7 +1186,7 @@ func TestDataViewManagerRecoverCollectionsBoundsPlanningBatches(t *testing.T) {
 		)
 	}
 
-	require.NoError(t, manager.RecoverCollections(ctx, collectionIDs, nil))
+	require.NoError(t, manager.RecoverCollections(ctx, nil, collectionIDs, nil))
 	require.Equal(t, []int{dataViewRecoveryWriteBatchSize, 1}, catalog.batchSaveSizes)
 	require.Len(t, baseCatalog.views, len(collectionIDs))
 }
@@ -1254,9 +1298,11 @@ func TestRecoverManagerLoadsAllDataViewsWithoutSegmentMetaRepair(t *testing.T) {
 	}
 	store := &fakeDataViewSegmentStore{segments: make(map[int64]*Segment)}
 
-	manager, err := RecoverManager(ctx, catalog, store)
+	manager, recoverySnapshot, err := RecoverManager(ctx, catalog, store)
 
 	require.NoError(t, err)
+	require.NotNil(t, recoverySnapshot)
+	require.Len(t, recoverySnapshot.dataViewsByCollection, 2)
 	require.Equal(t, 1, catalog.listAllCalls)
 	require.Zero(t, catalog.listCalls)
 	snapshot, err := manager.Snapshot(ctx, nil)
@@ -1267,7 +1313,28 @@ func TestRecoverManagerLoadsAllDataViewsWithoutSegmentMetaRepair(t *testing.T) {
 	require.Len(t, catalog.views, 2)
 }
 
-func TestRecoverManagerRecoverCollectionsUsesMemoryBatchWriter(t *testing.T) {
+func TestRecoverySnapshotIsSeparateFromManager(t *testing.T) {
+	ctx := context.Background()
+	catalog := &fakeDataViewCatalog{views: []*viewpb.DataViewOfCollection{
+		{CollectionId: 1, DataVersion: &viewpb.DataVersion{StreamingVersion: 1}},
+	}}
+	recovered, recoverySnapshot, err := RecoverManager(
+		ctx,
+		catalog,
+		&fakeDataViewSegmentStore{segments: make(map[int64]*Segment)},
+	)
+	require.NoError(t, err)
+	manager := recovered.(*dataViewManager)
+
+	views := recoverySnapshot.dataViews(1)
+	require.Len(t, views, 1)
+
+	recoverySnapshot = nil
+	require.NoError(t, manager.RepairCollection(ctx, 1))
+	require.Equal(t, 1, catalog.listCalls, "runtime manager must not retain the recovery snapshot")
+}
+
+func TestRecoverManagerRecoverCollectionsUsesSnapshotBatchWriter(t *testing.T) {
 	ctx := context.Background()
 	baseCatalog := &fakeDataViewCatalog{}
 	catalog := &fakeBatchDataViewCatalog{fakeDataViewCatalog: baseCatalog}
@@ -1275,11 +1342,11 @@ func TestRecoverManagerRecoverCollectionsUsesMemoryBatchWriter(t *testing.T) {
 		100: newDataViewTestSegment(1, 10, 100, "ch-1", 1000),
 		200: newDataViewTestSegment(2, 20, 200, "ch-2", 2000),
 	}}
-	recoveredManager, err := RecoverManager(ctx, catalog, store)
+	recoveredManager, recoverySnapshot, err := RecoverManager(ctx, catalog, store)
 	require.NoError(t, err)
 	manager := recoveredManager.(*dataViewManager)
 
-	require.NoError(t, manager.RecoverCollections(ctx, []int64{1, 2}, nil))
+	require.NoError(t, manager.RecoverCollections(ctx, recoverySnapshot, []int64{1, 2}, nil))
 
 	require.Equal(t, 1, baseCatalog.listAllCalls)
 	require.Zero(t, baseCatalog.listCalls)
@@ -1288,12 +1355,8 @@ func TestRecoverManagerRecoverCollectionsUsesMemoryBatchWriter(t *testing.T) {
 	require.Equal(t, 1, catalog.batchSaveCalls)
 	require.Equal(t, []int{2}, catalog.batchSaveSizes)
 	require.Len(t, baseCatalog.views, 2)
-	views1, ok := manager.recoveredDataViews(1)
-	require.True(t, ok)
-	require.Len(t, views1, 1)
-	views2, ok := manager.recoveredDataViews(2)
-	require.True(t, ok)
-	require.Len(t, views2, 1)
+	require.Empty(t, recoverySnapshot.dataViews(1), "startup snapshot is read-only")
+	require.Empty(t, recoverySnapshot.dataViews(2), "startup snapshot is read-only")
 }
 
 func TestDataViewManagerRepairCollectionsAlignsSegmentMetaAfterRecover(t *testing.T) {
@@ -1307,10 +1370,11 @@ func TestDataViewManagerRepairCollectionsAlignsSegmentMetaAfterRecover(t *testin
 		100: newDataViewTestSegment(1, 10, 100, "ch-1", 1000),
 		101: newDataViewTestSegment(1, 10, 101, "ch-1", 1100),
 	}}
-	manager, err := RecoverManager(ctx, catalog, store)
+	recoveredManager, recoverySnapshot, err := RecoverManager(ctx, catalog, store)
 	require.NoError(t, err)
+	manager := recoveredManager.(*dataViewManager)
 
-	require.NoError(t, manager.RepairCollections(ctx, []int64{1}))
+	require.NoError(t, manager.RecoverCollections(ctx, recoverySnapshot, []int64{1}, nil))
 
 	require.Zero(t, catalog.listCalls)
 	require.Len(t, catalog.views, 2)
@@ -1689,6 +1753,83 @@ func TestDataViewManagerGarbageCollectRetainsLatestAndProtectedViews(t *testing.
 	views, err = catalog.ListDataViews(ctx, 2)
 	require.NoError(t, err)
 	require.Len(t, views, 1)
+}
+
+func TestDataViewManagerBatchGarbageCollectUsesCandidatesAndProtection(t *testing.T) {
+	ctx := context.Background()
+	baseCatalog := &fakeDataViewCatalog{views: []*viewpb.DataViewOfCollection{
+		{CollectionId: 1, DataVersion: &viewpb.DataVersion{StreamingVersion: 1}},
+		{CollectionId: 1, DataVersion: &viewpb.DataVersion{StreamingVersion: 2}},
+		{CollectionId: 1, DataVersion: &viewpb.DataVersion{StreamingVersion: 3}},
+	}}
+	catalog := &fakeGCDataViewCatalog{
+		fakeDataViewCatalog: baseCatalog,
+		candidates: map[int64][]*viewpb.DataVersion{
+			1: {
+				{StreamingVersion: 2},
+				{StreamingVersion: 1},
+			},
+		},
+	}
+	manager := NewManager(catalog, &fakeDataViewSegmentStore{segments: make(map[int64]*Segment)}).(*dataViewManager)
+
+	candidates, err := manager.ListGarbageCollectionCandidates(ctx, []int64{1}, 1)
+	require.NoError(t, err)
+	require.Equal(t, 1, catalog.gcScanCalls)
+	require.Zero(t, baseCatalog.listCalls)
+	require.NoError(t, manager.GarbageCollectCandidates(
+		ctx,
+		1,
+		candidates[1],
+		[]*viewpb.DataVersion{{StreamingVersion: 1}},
+	))
+
+	views, err := baseCatalog.ListDataViews(ctx, 1)
+	require.NoError(t, err)
+	require.Len(t, views, 2)
+	require.Equal(t, int64(1), views[0].GetDataVersion().GetStreamingVersion())
+	require.Equal(t, int64(3), views[1].GetDataVersion().GetStreamingVersion())
+}
+
+func TestDataViewManagerGarbageCollectUsesCatalogAfterRecover(t *testing.T) {
+	ctx := context.Background()
+	baseCatalog := &fakeDataViewCatalog{views: []*viewpb.DataViewOfCollection{
+		{CollectionId: 1, DataVersion: &viewpb.DataVersion{StreamingVersion: 1}},
+		{CollectionId: 1, DataVersion: &viewpb.DataVersion{StreamingVersion: 2}},
+		{CollectionId: 1, DataVersion: &viewpb.DataVersion{StreamingVersion: 3}},
+	}}
+	catalog := &fakeGCDataViewCatalog{fakeDataViewCatalog: baseCatalog}
+	recovered, _, err := RecoverManager(ctx, catalog, &fakeDataViewSegmentStore{segments: make(map[int64]*Segment)})
+	require.NoError(t, err)
+	manager := recovered.(*dataViewManager)
+
+	candidates, err := manager.ListGarbageCollectionCandidates(ctx, []int64{1}, 1)
+	require.NoError(t, err)
+	require.Equal(t, 1, catalog.gcScanCalls)
+	require.Zero(t, baseCatalog.listCalls)
+	require.Equal(t, []*viewpb.DataVersion{
+		{StreamingVersion: 2},
+		{StreamingVersion: 1},
+	}, candidates[1])
+
+	require.NoError(t, manager.GarbageCollectCandidates(
+		ctx,
+		1,
+		candidates[1],
+		[]*viewpb.DataVersion{{StreamingVersion: 1}},
+	))
+	candidates, err = manager.ListGarbageCollectionCandidates(ctx, []int64{1}, 1)
+	require.NoError(t, err)
+	require.Equal(t, 2, catalog.gcScanCalls)
+	require.Equal(t, []*viewpb.DataVersion{{StreamingVersion: 1}}, candidates[1])
+
+	require.NoError(t, manager.GarbageCollectCandidates(ctx, 1, candidates[1], nil))
+	candidates, err = manager.ListGarbageCollectionCandidates(ctx, []int64{1}, 1)
+	require.NoError(t, err)
+	require.Equal(t, 3, catalog.gcScanCalls)
+	require.Empty(t, candidates)
+	require.Len(t, baseCatalog.views, 1)
+	require.Equal(t, int64(3), baseCatalog.views[0].GetDataVersion().GetStreamingVersion())
 }
 
 func TestDataViewManagerDoesNotBlockOtherCollections(t *testing.T) {
