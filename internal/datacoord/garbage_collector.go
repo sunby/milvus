@@ -42,7 +42,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
-	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/conc"
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/hardware"
@@ -67,8 +66,7 @@ type GcOption struct {
 }
 
 type DataViewGarbageCollector interface {
-	ListGarbageCollectionCandidates(ctx context.Context, collectionIDs []int64, retainLatest int) (map[int64][]*viewpb.DataVersion, error)
-	GarbageCollectCandidates(ctx context.Context, collectionID int64, candidates []*viewpb.DataVersion) error
+	GarbageCollect(ctx context.Context, collectionID int64, retainLatest int) error
 }
 
 // garbageCollector handles garbage files in object storage
@@ -881,62 +879,9 @@ func (gc *garbageCollector) recycleDataViews(ctx context.Context, signal <-chan 
 	start := time.Now()
 	logger := mlog.With(mlog.String("gcName", "recycleDataViews"), mlog.Time("startAt", start))
 	logger.Info(ctx, "start recycleDataViews")
-	collections := gc.meta.GetCollections()
-	totalCollections := len(collections)
-	processedCollections := 0
-	skippedCollections := 0
-	failedCollections := 0
-	candidateCollections := 0
-	candidateVersions := 0
-	defer func() {
-		logger.Info(ctx, "recycleDataViews done",
-			mlog.Int("totalCollections", totalCollections),
-			mlog.Int("processedCollections", processedCollections),
-			mlog.Int("skippedCollections", skippedCollections),
-			mlog.Int("failedCollections", failedCollections),
-			mlog.Int("candidateCollections", candidateCollections),
-			mlog.Int("candidateVersions", candidateVersions),
-			mlog.Duration("timeCost", time.Since(start)))
-	}()
-	progressEvery := max(totalCollections/10, 1)
-	reportProgress := func() {
-		if processedCollections < totalCollections && processedCollections%progressEvery == 0 {
-			logger.Info(ctx, "recycleDataViews progress",
-				mlog.Int("totalCollections", totalCollections),
-				mlog.Int("processedCollections", processedCollections),
-				mlog.Int("skippedCollections", skippedCollections),
-				mlog.Int("failedCollections", failedCollections),
-				mlog.Duration("timeCost", time.Since(start)))
-		}
-	}
-	collectionIDs := make([]int64, 0, totalCollections)
-	for _, collection := range collections {
-		collectionIDs = append(collectionIDs, collection.ID)
-	}
-	candidateScanStart := time.Now()
-	candidatesByCollection, err := gc.option.dataViewGC.ListGarbageCollectionCandidates(ctx, collectionIDs, 1)
-	if err != nil {
-		if ctx.Err() != nil {
-			return
-		}
-		failedCollections = totalCollections
-		logger.Warn(ctx, "DataView GC candidate scan failed",
-			mlog.Int("totalCollections", totalCollections),
-			mlog.Duration("timeCost", time.Since(candidateScanStart)),
-			mlog.Err(err))
-		return
-	}
-	candidateCollections = len(candidatesByCollection)
-	for _, candidates := range candidatesByCollection {
-		candidateVersions += len(candidates)
-	}
-	logger.Info(ctx, "DataView GC candidate scan done",
-		mlog.Int("totalCollections", totalCollections),
-		mlog.Int("candidateCollections", candidateCollections),
-		mlog.Int("candidateVersions", candidateVersions),
-		mlog.Duration("timeCost", time.Since(candidateScanStart)))
+	defer func() { logger.Info(ctx, "recycleDataViews done", mlog.Duration("timeCost", time.Since(start))) }()
 
-	for _, collection := range collections {
+	for _, collection := range gc.meta.GetCollections() {
 		if ctx.Err() != nil {
 			return
 		}
@@ -944,25 +889,13 @@ func (gc *garbageCollector) recycleDataViews(ctx context.Context, signal <-chan 
 
 		collectionID := collection.ID
 		if gc.collectionGCPaused(collectionID) {
-			skippedCollections++
-			processedCollections++
-			reportProgress()
 			logger.Info(ctx, "skip DataView GC since collection is paused", mlog.FieldCollectionID(collectionID))
 			continue
 		}
 
-		candidates := candidatesByCollection[collectionID]
-		if len(candidates) == 0 {
-			processedCollections++
-			reportProgress()
-			continue
-		}
-		if err := gc.option.dataViewGC.GarbageCollectCandidates(ctx, collectionID, candidates); err != nil {
-			failedCollections++
+		if err := gc.option.dataViewGC.GarbageCollect(ctx, collectionID, 1); err != nil {
 			logger.Warn(ctx, "DataView GC failed", mlog.FieldCollectionID(collectionID), mlog.Err(err))
 		}
-		processedCollections++
-		reportProgress()
 	}
 }
 

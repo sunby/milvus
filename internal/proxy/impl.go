@@ -1753,6 +1753,7 @@ func (node *Proxy) Prewarm(ctx context.Context, request *milvuspb.PrewarmRequest
 	method := "Prewarm"
 	tr := timerecord.NewTimeRecorder(method)
 	pt := &prewarmTask{
+		baseTask:       baseTask{metaCache: node.getMetaCache()},
 		ctx:            ctx,
 		Condition:      NewTaskCondition(ctx),
 		PrewarmRequest: request,
@@ -2029,7 +2030,7 @@ func (node *Proxy) CreateNamespace(ctx context.Context, request *milvuspb.Create
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
 		return &milvuspb.CreateNamespaceResponse{Status: merr.Status(err)}, nil
 	}
-	if err := checkExternalCollectionBlockedForWrite(ctx, request.GetDbName(), request.GetCollectionName(), "create namespace"); err != nil {
+	if err := checkExternalCollectionBlockedForWrite(ctx, node.getMetaCache(), request.GetDbName(), request.GetCollectionName(), "create namespace"); err != nil {
 		return &milvuspb.CreateNamespaceResponse{Status: merr.Status(err)}, nil
 	}
 
@@ -2038,6 +2039,7 @@ func (node *Proxy) CreateNamespace(ctx context.Context, request *milvuspb.Create
 	method := "CreateNamespace"
 	tr := timerecord.NewTimeRecorder(method)
 	task := &createNamespaceTask{
+		baseTask:               baseTask{metaCache: node.getMetaCache()},
 		ctx:                    ctx,
 		Condition:              NewTaskCondition(ctx),
 		CreateNamespaceRequest: request,
@@ -2069,6 +2071,7 @@ func (node *Proxy) DescribeNamespace(ctx context.Context, request *milvuspb.Desc
 	method := "DescribeNamespace"
 	tr := timerecord.NewTimeRecorder(method)
 	task := &describeNamespaceTask{
+		baseTask:                 baseTask{metaCache: node.getMetaCache()},
 		ctx:                      ctx,
 		Condition:                NewTaskCondition(ctx),
 		DescribeNamespaceRequest: request,
@@ -2100,6 +2103,7 @@ func (node *Proxy) ListNamespaces(ctx context.Context, request *milvuspb.ListNam
 	method := "ListNamespaces"
 	tr := timerecord.NewTimeRecorder(method)
 	task := &listNamespacesTask{
+		baseTask:              baseTask{metaCache: node.getMetaCache()},
 		ctx:                   ctx,
 		Condition:             NewTaskCondition(ctx),
 		ListNamespacesRequest: request,
@@ -2125,7 +2129,7 @@ func (node *Proxy) DropNamespace(ctx context.Context, request *milvuspb.DropName
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
 		return &milvuspb.DropNamespaceResponse{Status: merr.Status(err)}, nil
 	}
-	if err := checkExternalCollectionBlockedForWrite(ctx, request.GetDbName(), request.GetCollectionName(), "drop namespace"); err != nil {
+	if err := checkExternalCollectionBlockedForWrite(ctx, node.getMetaCache(), request.GetDbName(), request.GetCollectionName(), "drop namespace"); err != nil {
 		return &milvuspb.DropNamespaceResponse{Status: merr.Status(err)}, nil
 	}
 
@@ -2134,6 +2138,7 @@ func (node *Proxy) DropNamespace(ctx context.Context, request *milvuspb.DropName
 	method := "DropNamespace"
 	tr := timerecord.NewTimeRecorder(method)
 	task := &dropNamespaceTask{
+		baseTask:             baseTask{metaCache: node.getMetaCache()},
 		ctx:                  ctx,
 		Condition:            NewTaskCondition(ctx),
 		DropNamespaceRequest: request,
@@ -2165,6 +2170,7 @@ func (node *Proxy) HasNamespace(ctx context.Context, request *milvuspb.HasNamesp
 	method := "HasNamespace"
 	tr := timerecord.NewTimeRecorder(method)
 	task := &hasNamespaceTask{
+		baseTask:            baseTask{metaCache: node.getMetaCache()},
 		ctx:                 ctx,
 		Condition:           NewTaskCondition(ctx),
 		HasNamespaceRequest: request,
@@ -2196,6 +2202,7 @@ func (node *Proxy) GetNamespaceStats(ctx context.Context, request *milvuspb.GetN
 	method := "GetNamespaceStats"
 	tr := timerecord.NewTimeRecorder(method)
 	task := &getNamespaceStatsTask{
+		baseTask:                 baseTask{metaCache: node.getMetaCache()},
 		ctx:                      ctx,
 		Condition:                NewTaskCondition(ctx),
 		GetNamespaceStatsRequest: request,
