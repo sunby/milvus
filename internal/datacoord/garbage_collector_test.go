@@ -5072,19 +5072,13 @@ func TestGarbageCollector_removeDroppedSegmentFiles_JSONStatsV2(t *testing.T) {
 }
 
 func TestRunGCStageLogsDuration(t *testing.T) {
-	var logs syncBuffer
-	oldLogger := mlog.L()
-	oldLevel := mlog.GetAtomicLevel()
-	logger, props, err := mlog.InitLoggerWithWriteSyncer(&mlog.Config{
+	logs := mlog.CaptureGlobalLogs(t, &mlog.Config{
 		Level:             "info",
 		Format:            "text",
 		DisableCaller:     true,
 		DisableTimestamp:  true,
 		DisableStacktrace: true,
-	}, &logs)
-	require.NoError(t, err)
-	mlog.ReplaceGlobals(logger, props)
-	defer mlog.ReplaceGlobals(oldLogger, &mlog.ZapProperties{Level: oldLevel})
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	called := false

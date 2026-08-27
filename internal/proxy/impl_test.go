@@ -1608,9 +1608,16 @@ func TestProxy_Delete(t *testing.T) {
 		cache.On("GetCollectionInfo", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(basicInfo, nil)
 		streaming.ExpectErrorOnce(errors.New("mock error"))
 		rc := mocks.NewMockRootCoordClient(t)
+		rc.EXPECT().AllocID(mock.Anything, mock.Anything).Return(&rootcoordpb.AllocIDResponse{
+			Status: merr.Success(),
+			ID:     1,
+			Count:  1,
+		}, nil)
 		tsoAllocator := &mockTsoAllocator{}
 		idAllocator, err := allocator.NewIDAllocator(ctx, rc, 0)
-		assert.NoError(t, err)
+		require.NoError(t, err)
+		require.NoError(t, idAllocator.Start())
+		defer idAllocator.Close()
 
 		queue, err := newTaskScheduler(ctx, tsoAllocator)
 		assert.NoError(t, err)

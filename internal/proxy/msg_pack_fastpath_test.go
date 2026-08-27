@@ -27,6 +27,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
+	"github.com/milvus-io/milvus/internal/proxy/channelmgr"
 	"github.com/milvus-io/milvus/pkg/v3/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
@@ -87,7 +88,7 @@ func TestGenInsertMsgsByPartitionContiguousFastPath(t *testing.T) {
 		},
 	}
 
-	msgs, err := genInsertMsgsByPartition(
+	msgs, err := channelmgr.GenInsertMsgsByPartition(
 		context.Background(), 0, 1, "test_partition", []int{1, 2, 3}, "test_channel", insertMsg, message.WALNamePulsar,
 	)
 	require.NoError(t, err)
@@ -142,7 +143,7 @@ func TestGenInsertMsgsByPartitionNonContiguousFallback(t *testing.T) {
 		},
 	}
 
-	msgs, err := genInsertMsgsByPartition(
+	msgs, err := channelmgr.GenInsertMsgsByPartition(
 		context.Background(), 0, 1, "test_partition", []int{0, 2}, "test_channel", insertMsg, message.WALNamePulsar,
 	)
 	require.NoError(t, err)
@@ -177,7 +178,7 @@ func TestGenInsertMsgsByPartitionContiguousFastPathAfterSplit(t *testing.T) {
 		},
 	}
 
-	msgs, err := genInsertMsgsByPartition(
+	msgs, err := channelmgr.GenInsertMsgsByPartition(
 		context.Background(), 0, 1, "test_partition", []int{0, 1, 2, 3}, "test_channel", insertMsg, message.WALNamePulsar,
 	)
 	require.NoError(t, err)

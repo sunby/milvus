@@ -33,7 +33,7 @@ import (
 
 func TestCreateNamespaceTaskPreExecuteModeValidation(t *testing.T) {
 	mockey.PatchConvey("create namespace mode validation", t, func() {
-		globalMetaCache = &MetaCache{}
+		cache := &MetaCache{}
 		ctx := context.Background()
 
 		tests := []struct {
@@ -78,6 +78,7 @@ func TestCreateNamespaceTaskPreExecuteModeValidation(t *testing.T) {
 				defer guard.UnPatch()
 
 				task := &createNamespaceTask{
+					baseTask: baseTask{metaCache: cache},
 					CreateNamespaceRequest: &milvuspb.CreateNamespaceRequest{
 						CollectionName: "coll",
 						NamespaceName:  "tenant_1",
@@ -96,7 +97,7 @@ func TestCreateNamespaceTaskPreExecuteModeValidation(t *testing.T) {
 
 func TestCreateNamespaceTaskPreExecuteRejectsInvalidName(t *testing.T) {
 	mockey.PatchConvey("create namespace invalid name", t, func() {
-		globalMetaCache = &MetaCache{}
+		cache := &MetaCache{}
 		mockey.Mock((*MetaCache).GetCollectionSchema).Return(mustNewSchemaInfo(&schemapb.CollectionSchema{
 			Name:            "coll",
 			EnableNamespace: true,
@@ -106,6 +107,7 @@ func TestCreateNamespaceTaskPreExecuteRejectsInvalidName(t *testing.T) {
 		}), nil).Build()
 
 		task := &createNamespaceTask{
+			baseTask: baseTask{metaCache: cache},
 			CreateNamespaceRequest: &milvuspb.CreateNamespaceRequest{
 				CollectionName: "coll",
 				NamespaceName:  "bad name",
@@ -117,7 +119,7 @@ func TestCreateNamespaceTaskPreExecuteRejectsInvalidName(t *testing.T) {
 
 func TestDropNamespaceTaskPreExecuteRejectsLoadedNamespace(t *testing.T) {
 	mockey.PatchConvey("drop namespace loaded rejection", t, func() {
-		globalMetaCache = &MetaCache{}
+		cache := &MetaCache{}
 		mockey.Mock((*MetaCache).GetCollectionSchema).Return(mustNewSchemaInfo(&schemapb.CollectionSchema{
 			Name:            "coll",
 			EnableNamespace: true,
@@ -131,6 +133,7 @@ func TestDropNamespaceTaskPreExecuteRejectsLoadedNamespace(t *testing.T) {
 		mockey.Mock(isPartitionLoaded).Return(true, nil).Build()
 
 		task := &dropNamespaceTask{
+			baseTask: baseTask{metaCache: cache},
 			DropNamespaceRequest: &milvuspb.DropNamespaceRequest{
 				CollectionName: "coll",
 				NamespaceName:  "tenant_1",
@@ -151,11 +154,12 @@ func TestGetNamespaceStatsTaskPreExecuteRejectsExact(t *testing.T) {
 
 func TestGetNamespaceStatsTaskExecuteRejectsDefaultPartition(t *testing.T) {
 	mockey.PatchConvey("get namespace stats rejects default partition", t, func() {
-		globalMetaCache = &MetaCache{}
+		cache := &MetaCache{}
 		mockey.Mock((*MetaCache).GetCollectionID).Return(int64(100), nil).Build()
 		mockey.Mock((*MetaCache).GetPartitionID).Return(int64(200), nil).Build()
 
 		task := &getNamespaceStatsTask{
+			baseTask: baseTask{metaCache: cache},
 			GetNamespaceStatsRequest: &milvuspb.GetNamespaceStatsRequest{
 				CollectionName: "coll",
 				NamespaceName:  Params.CommonCfg.DefaultPartitionName.GetValue(),
