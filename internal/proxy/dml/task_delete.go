@@ -526,15 +526,12 @@ func (dr *DeleteRunner) Init(ctx context.Context) error {
 	// VChannels and PChannels are allocated together and returned by the same
 	// DescribeCollection response. Keep that pair on the runner so each delete
 	// task can enqueue without refetching collection metadata via channelsMgr.
-	if len(colInfo.VChannels) != len(colInfo.PChannels) {
-		// Channel lists come from DescribeCollection (coordinator-allocated
-		// metadata), never from the caller: a mismatch is a server-side bug.
-		return ErrWithLog(log, "Failed to get channels from collection metadata",
-			merr.WrapErrServiceInternalMsg("physical channels mismatch virtual channels, len(VirtualChannelNames): %v, len(PhysicalChannelNames): %v",
-				len(colInfo.VChannels), len(colInfo.PChannels)))
+	channels, err := channelmgr.NewChannelInfo(colInfo.VChannels, colInfo.PChannels)
+	if err != nil {
+		return ErrWithLog(log, "Failed to get channels from collection metadata", err)
 	}
-	dr.vChannels = slices.Clone(colInfo.VChannels)
-	dr.pChannels = slices.Clone(colInfo.PChannels)
+	dr.vChannels = slices.Clone(channels.VChans)
+	dr.pChannels = slices.Clone(channels.PChans)
 
 	dr.result = &milvuspb.MutationResult{
 		Status: merr.Success(),

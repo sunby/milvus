@@ -42,6 +42,11 @@ type ChannelInfo struct {
 // must keep vchan/pchan aligned.
 type GetChannelsFunc func(collectionID typeutil.UniqueID) (ChannelInfo, error)
 
+// NewChannelInfo validates the alignment between virtual and physical channels.
+func NewChannelInfo(vchans []string, pchans []string) (ChannelInfo, error) {
+	return newChannels(vchans, pchans)
+}
+
 // newChannels validates the alignment between virtual and physical channels
 // and returns them as a ChannelInfo.
 func newChannels(vchans []string, pchans []string) (ChannelInfo, error) {
