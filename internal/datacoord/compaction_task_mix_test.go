@@ -309,11 +309,58 @@ func (s *MixCompactionTaskSuite) TestQueryTaskOnWorker() {
 		NodeID:    111,
 	}, nil, s.mockMeta, newMockVersionManager())
 
-	s.mockMeta.EXPECT().SaveCompactionTask(mock.Anything, mock.Anything).Return(nil)
+	s.mockMeta.EXPECT().SaveCompactionTask(mock.Anything, mock.Anything).Return(nil).Once()
 	cluster.EXPECT().QueryCompaction(mock.Anything, mock.Anything).Return(
 		&datapb.CompactionPlanResult{PlanID: 1, State: datapb.CompactionTaskState_timeout}, nil).Once()
 
 	t1.QueryTaskOnWorker(cluster)
 
 	s.Equal(taskcommon.Retry, t1.GetTaskState())
+
+	s.Run("retry task with unavailable result", func() {
+		cluster := session.NewMockCluster(s.T())
+		task := newMixCompactionTask(&datapb.CompactionTask{
+			PlanID:     2,
+			Type:       datapb.CompactionType_SortCompaction,
+			State:      datapb.CompactionTaskState_executing,
+			NodeID:     222,
+			RetryTimes: 3,
+		}, nil, s.mockMeta, newMockVersionManager())
+
+		cluster.EXPECT().QueryCompaction(int64(222), &datapb.CompactionStateRequest{PlanID: 2}).
+			Return(nil, merr.WrapErrDataIntegrityMsg("result payload is unavailable")).Once()
+		cluster.EXPECT().DropCompaction(int64(222), int64(2)).Return(nil).Once()
+		s.mockMeta.EXPECT().SaveCompactionTask(mock.Anything, mock.MatchedBy(func(task *datapb.CompactionTask) bool {
+			return task.GetPlanID() == 2 &&
+				task.GetState() == datapb.CompactionTaskState_pipelining &&
+				task.GetNodeID() == NullNodeID &&
+				task.GetRetryTimes() == 4
+		})).Return(nil).Once()
+
+		task.QueryTaskOnWorker(cluster)
+
+		s.Equal(taskcommon.Init, task.GetTaskState())
+		s.EqualValues(NullNodeID, task.GetTaskProto().GetNodeID())
+		s.EqualValues(4, task.GetTaskProto().GetRetryTimes())
+	})
+
+	s.Run("keep task running when drop fails", func() {
+		cluster := session.NewMockCluster(s.T())
+		task := newMixCompactionTask(&datapb.CompactionTask{
+			PlanID: 3,
+			Type:   datapb.CompactionType_MixCompaction,
+			State:  datapb.CompactionTaskState_executing,
+			NodeID: 333,
+		}, nil, s.mockMeta, newMockVersionManager())
+
+		cluster.EXPECT().QueryCompaction(int64(333), &datapb.CompactionStateRequest{PlanID: 3}).
+			Return(nil, merr.WrapErrDataIntegrityMsg("result payload is unavailable")).Once()
+		cluster.EXPECT().DropCompaction(int64(333), int64(3)).Return(merr.WrapErrServiceUnavailableMsg("drop failed")).Once()
+
+		task.QueryTaskOnWorker(cluster)
+
+		s.Equal(taskcommon.InProgress, task.GetTaskState())
+		s.EqualValues(333, task.GetTaskProto().GetNodeID())
+		s.Zero(task.GetTaskProto().GetRetryTimes())
+	})
 }

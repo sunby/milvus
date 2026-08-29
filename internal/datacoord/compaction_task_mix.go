@@ -118,10 +118,42 @@ func (t *mixCompactionTask) CreateTaskOnWorker(nodeID int64, cluster session.Clu
 }
 
 func (t *mixCompactionTask) QueryTaskOnWorker(cluster session.Cluster) {
-	result, err := cluster.QueryCompaction(t.GetTaskProto().GetNodeID(), &datapb.CompactionStateRequest{
-		PlanID: t.GetTaskProto().GetPlanID(),
+	task := t.GetTaskProto()
+	result, err := cluster.QueryCompaction(task.GetNodeID(), &datapb.CompactionStateRequest{
+		PlanID: task.GetPlanID(),
 	})
 	if err != nil || result == nil {
+		if errors.Is(err, merr.ErrDataIntegrity) {
+			if dropErr := cluster.DropCompaction(task.GetNodeID(), task.GetPlanID()); dropErr != nil {
+				mlog.Warn(context.TODO(), "mixCompactionTask failed to drop task with unavailable result",
+					mlog.Int64("planID", task.GetPlanID()),
+					mlog.Int64("nodeID", task.GetNodeID()),
+					mlog.Err(dropErr))
+				return
+			}
+
+			if retryErr := t.updateAndSaveTaskMeta(
+				setState(datapb.CompactionTaskState_pipelining),
+				setNodeID(NullNodeID),
+				setRetryTimes(task.GetRetryTimes()+1),
+				setFailReason(""),
+			); retryErr != nil {
+				mlog.Warn(context.TODO(), "mixCompactionTask failed to reset task with unavailable result",
+					mlog.Int64("planID", task.GetPlanID()),
+					mlog.Int64("nodeID", task.GetNodeID()),
+					mlog.Err(retryErr))
+				return
+			}
+
+			metrics.DataCoordCompactionTaskNum.WithLabelValues(fmt.Sprintf("%d", task.GetNodeID()), task.GetType().String(), metrics.Executing).Dec()
+			metrics.DataCoordCompactionTaskNum.WithLabelValues(fmt.Sprintf("%d", NullNodeID), task.GetType().String(), metrics.Pending).Inc()
+			mlog.Warn(context.TODO(), "mixCompactionTask will retry after unavailable result payload",
+				mlog.Int64("planID", task.GetPlanID()),
+				mlog.Int64("nodeID", task.GetNodeID()),
+				mlog.Err(err))
+			return
+		}
+
 		mlog.Warn(context.TODO(), "mixCompactionTask failed to get compaction result", mlog.Err(err))
 		if err := t.updateAndSaveTaskMeta(setState(datapb.CompactionTaskState_pipelining), setNodeID(NullNodeID)); err != nil {
 			mlog.Warn(context.TODO(), "mixCompactionTask failed to updateAndSaveTaskMeta", mlog.Err(err))
