@@ -403,7 +403,7 @@ func (m *dataViewManager) OnImport(ctx context.Context, event ImportDataViewEven
 	return m.applyMembershipMutation(ctx, dataViewMembershipMutation{
 		collectionID:  event.CollectionID,
 		addSegmentIDs: event.SegmentIDs,
-		advance:       dataViewAdvanceStreaming,
+		advance:       dataViewAdvanceCompact,
 	})
 }
 
@@ -1844,6 +1844,14 @@ func classifyRecoverAdvance(latest, expected *viewpb.DataViewOfCollection, segme
 
 func isRecoverStreamingAddition(segment *Segment, latestSegments map[int64]struct{}) bool {
 	if segment == nil {
+		return false
+	}
+	// Import/CDC segments carry a non-zero CommitTimestamp (the transaction
+	// timestamp of the import commit) and are published through OnImport, which
+	// advances the compact version. Recovery must classify them as compact
+	// advances — not streaming additions — so the recovered DataVersion matches
+	// the normal path.
+	if segment.GetCommitTimestamp() != 0 {
 		return false
 	}
 	if !segment.GetCreatedByCompaction() && len(segment.GetCompactionFrom()) == 0 {
