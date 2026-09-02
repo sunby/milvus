@@ -588,17 +588,16 @@ func (loader *segmentLoader) requestResource(ctx context.Context, infos ...*quer
 		return requestResourceResult{}, err
 	}
 
-	loader.mut.Lock()
-	defer loader.mut.Unlock()
-
 	physicalMemoryUsage := hardware.GetUsedMemoryCount()
 	totalMemory := hardware.GetMemoryCount()
-
 	physicalDiskUsage, err := loader.duf.GetDiskUsage()
 	if err != nil {
 		return requestResourceResult{}, merr.Wrap(err, "get local used size failed")
 	}
 	diskCap := paramtable.Get().QueryNodeCfg.DiskCapacityLimit.GetAsUint64()
+
+	loader.mut.Lock()
+	defer loader.mut.Unlock()
 
 	result := requestResourceResult{
 		CommittedResource: loader.committedResource,
