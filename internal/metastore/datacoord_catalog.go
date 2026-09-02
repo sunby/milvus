@@ -162,3 +162,12 @@ type DataCoordCatalog interface {
 	ListExportSnapshotJobs(ctx context.Context) ([]*datapb.ExportSnapshotJob, error)
 	DropExportSnapshotJob(ctx context.Context, jobID int64) error
 }
+
+// DataCoordIndexBatchCatalog is an optional capability for deleting exact
+// field-index and SegmentIndex keys in bounded metastore transactions. Keep it
+// separate from DataCoordCatalog so external implementations and generated
+// mocks retain the existing interface contract.
+type DataCoordIndexBatchCatalog interface {
+	DropIndexes(ctx context.Context, indexes []*model.Index) error
+	DropSegmentIndexes(ctx context.Context, indexes []*model.SegmentIndex) error
+}

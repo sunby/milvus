@@ -5808,24 +5808,27 @@ type dataCoordConfig struct {
 	LevelZeroCompactionForceSelectAll        ParamItem `refreshable:"true"`
 
 	// Garbage Collection
-	EnableGarbageCollection                ParamItem `refreshable:"false"`
-	GCInterval                             ParamItem `refreshable:"false"`
-	GCMissingTolerance                     ParamItem `refreshable:"false"`
-	GCDropTolerance                        ParamItem `refreshable:"false"`
-	GCRemoveConcurrent                     ParamItem `refreshable:"false"`
-	GCScanIntervalInHour                   ParamItem `refreshable:"false"`
-	GCSlowDownCPUUsageThreshold            ParamItem `refreshable:"false"`
-	SnapshotPendingTimeout                 ParamItem `refreshable:"true"`
-	SnapshotRefIndexLoadInterval           ParamItem `refreshable:"true"`
-	SnapshotRefIndexLoadTimeout            ParamItem `refreshable:"true"`
-	SnapshotMaxCompactionProtectionSeconds ParamItem `refreshable:"true"`
-	SnapshotRestorePinTTLSeconds           ParamItem `refreshable:"true"`
-	SnapshotCrossBucketEndpointAllowlist   ParamItem `refreshable:"true"`
-	SnapshotExportCopyConcurrency          ParamItem `refreshable:"true"`
-	SnapshotExportJobTimeout               ParamItem `refreshable:"true"`
-	SnapshotExportJobRetention             ParamItem `refreshable:"true"`
-	SnapshotExportMaxConcurrentJobs        ParamItem `refreshable:"true"`
-	EnableActiveStandby                    ParamItem `refreshable:"false"`
+	EnableGarbageCollection                   ParamItem `refreshable:"false"`
+	GCInterval                                ParamItem `refreshable:"false"`
+	GCMissingTolerance                        ParamItem `refreshable:"false"`
+	GCDropTolerance                           ParamItem `refreshable:"false"`
+	GCRemoveConcurrent                        ParamItem `refreshable:"false"`
+	GCDroppedSegmentChannelStateMaxConcurrent ParamItem `refreshable:"true"`
+	GCDroppedSegmentBatchSize                 ParamItem `refreshable:"true"`
+	GCIndexFileBatchSize                      ParamItem `refreshable:"true"`
+	GCScanIntervalInHour                      ParamItem `refreshable:"false"`
+	GCSlowDownCPUUsageThreshold               ParamItem `refreshable:"false"`
+	SnapshotPendingTimeout                    ParamItem `refreshable:"true"`
+	SnapshotRefIndexLoadInterval              ParamItem `refreshable:"true"`
+	SnapshotRefIndexLoadTimeout               ParamItem `refreshable:"true"`
+	SnapshotMaxCompactionProtectionSeconds    ParamItem `refreshable:"true"`
+	SnapshotRestorePinTTLSeconds              ParamItem `refreshable:"true"`
+	SnapshotCrossBucketEndpointAllowlist      ParamItem `refreshable:"true"`
+	SnapshotExportCopyConcurrency             ParamItem `refreshable:"true"`
+	SnapshotExportJobTimeout                  ParamItem `refreshable:"true"`
+	SnapshotExportJobRetention                ParamItem `refreshable:"true"`
+	SnapshotExportMaxConcurrentJobs           ParamItem `refreshable:"true"`
+	EnableActiveStandby                       ParamItem `refreshable:"false"`
 
 	// LOB Garbage Collection
 	GCLOBEnabled       ParamItem `refreshable:"false"`
@@ -6786,6 +6789,54 @@ Layout 1 is additionally gated on no QueryNode still reporting an older release 
 		Export: false,
 	}
 	p.GCRemoveConcurrent.Init(base.mgr)
+
+	p.GCDroppedSegmentChannelStateMaxConcurrent = ParamItem{
+		Key:          "dataCoord.gc.droppedSegment.channelStateMaxConcurrent",
+		Version:      "2.6.7",
+		DefaultValue: "1",
+		Formatter: func(value string) string {
+			num, err := strconv.Atoi(value)
+			if err != nil || num <= 0 || num > 128 {
+				return "1"
+			}
+			return value
+		},
+		Doc:    "maximum dropped-segment GC channel-state lookups processed concurrently",
+		Export: true,
+	}
+	p.GCDroppedSegmentChannelStateMaxConcurrent.Init(base.mgr)
+
+	p.GCDroppedSegmentBatchSize = ParamItem{
+		Key:          "dataCoord.gc.droppedSegment.batchDelete.batchSize",
+		Version:      "2.6.7",
+		DefaultValue: "1000",
+		Formatter: func(value string) string {
+			num, err := strconv.Atoi(value)
+			if err != nil || num <= 0 || num > 1000 {
+				return "1000"
+			}
+			return value
+		},
+		Doc:    "maximum dropped-segment candidates or explicit object paths admitted to one deletion batch",
+		Export: true,
+	}
+	p.GCDroppedSegmentBatchSize.Init(base.mgr)
+
+	p.GCIndexFileBatchSize = ParamItem{
+		Key:          "dataCoord.gc.indexFileBatchDelete.batchSize",
+		Version:      "2.6.7",
+		DefaultValue: "1000",
+		Formatter: func(value string) string {
+			num, err := strconv.Atoi(value)
+			if err != nil || num <= 0 || num > 1000 {
+				return "1000"
+			}
+			return value
+		},
+		Doc:    "maximum estimated index-file references in one object-storage delete batch; empty-file SegmentIndexes count as one candidate",
+		Export: true,
+	}
+	p.GCIndexFileBatchSize.Init(base.mgr)
 
 	p.SnapshotPendingTimeout = ParamItem{
 		Key:          "dataCoord.snapshot.pendingTimeout",

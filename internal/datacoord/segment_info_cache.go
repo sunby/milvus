@@ -41,6 +41,10 @@ func (s *CachedSegmentsInfo) GetSegment(segmentID UniqueID) *SegmentInfo {
 	return v
 }
 
+func (s *CachedSegmentsInfo) GetSegmentWithVersion(segmentID UniqueID) (*SegmentInfo, int64, bool) {
+	return s.segments.LookupWithVersion(segmentID)
+}
+
 func (s *CachedSegmentsInfo) GetSegments() []*SegmentInfo {
 	var result []*SegmentInfo
 	s.segments.Range(func(_ UniqueID, v *SegmentInfo) bool {

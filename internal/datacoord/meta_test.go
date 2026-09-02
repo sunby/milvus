@@ -3655,6 +3655,104 @@ func TestMeta_Basic(t *testing.T) {
 		require.NotNil(t, meta.GetSegment(context.TODO(), segment.GetID()))
 	})
 
+	t.Run("Test batch drop segments", func(t *testing.T) {
+		ctx := context.Background()
+		meta, err := newMemoryMeta(t)
+		require.NoError(t, err)
+		segments := []*SegmentInfo{
+			NewSegmentInfo(&datapb.SegmentInfo{ID: 1, CollectionID: 1, PartitionID: 1, State: commonpb.SegmentState_Dropped}),
+			NewSegmentInfo(&datapb.SegmentInfo{ID: 2, CollectionID: 1, PartitionID: 1, State: commonpb.SegmentState_Dropped}),
+			NewSegmentInfo(&datapb.SegmentInfo{ID: 3, CollectionID: 1, PartitionID: 1, State: commonpb.SegmentState_Flushed}),
+		}
+		for _, segment := range segments {
+			require.NoError(t, meta.AddSegment(ctx, segment))
+		}
+
+		removed, err := meta.DropSegments(ctx, segments)
+
+		require.NoError(t, err)
+		assert.Equal(t, 2, removed)
+		assert.Nil(t, meta.GetSegment(ctx, 1))
+		assert.Nil(t, meta.GetSegment(ctx, 2))
+		assert.NotNil(t, meta.GetSegment(ctx, 3), "non-dropped segment must not be admitted")
+	})
+
+	t.Run("Test batch drop falls back when one key is already absent", func(t *testing.T) {
+		ctx := context.Background()
+		meta, err := newMemoryMeta(t)
+		require.NoError(t, err)
+		segments := []*SegmentInfo{
+			NewSegmentInfo(&datapb.SegmentInfo{ID: 11, CollectionID: 1, PartitionID: 1, State: commonpb.SegmentState_Dropped}),
+			NewSegmentInfo(&datapb.SegmentInfo{ID: 12, CollectionID: 1, PartitionID: 1, State: commonpb.SegmentState_Dropped}),
+		}
+		for _, segment := range segments {
+			require.NoError(t, meta.AddSegment(ctx, segment))
+		}
+		txn := meta.segmentPersist.Txn(ctx)
+		txn.Delete(meta.segmentKey(1, 1, 11))
+		_, err = txn.Commit()
+		require.NoError(t, err)
+
+		removed, err := meta.DropSegments(ctx, segments)
+
+		require.NoError(t, err)
+		assert.Equal(t, 2, removed)
+		assert.Nil(t, meta.GetSegment(ctx, 11))
+		assert.Nil(t, meta.GetSegment(ctx, 12))
+	})
+
+	t.Run("Test batch drop keeps a concurrently changed segment", func(t *testing.T) {
+		ctx := context.Background()
+		meta, err := newMemoryMeta(t)
+		require.NoError(t, err)
+		segment := NewSegmentInfo(&datapb.SegmentInfo{
+			ID: 13, CollectionID: 1, PartitionID: 1, State: commonpb.SegmentState_Dropped,
+		})
+		require.NoError(t, meta.AddSegment(ctx, segment))
+
+		// Advance only the persisted revision to model the window after another
+		// writer commits but before it publishes the new cache entry. GC must not
+		// turn a revision conflict into an unconditional delete.
+		key := meta.segmentKey(1, 1, 13)
+		txn := meta.segmentPersist.Txn(ctx)
+		txn.Update(key, func(existing *datapb.SegmentInfo) (*datapb.SegmentInfo, bool) {
+			updated := proto.Clone(existing).(*datapb.SegmentInfo)
+			updated.NumOfRows++
+			return updated, true
+		})
+		_, err = txn.Commit()
+		require.NoError(t, err)
+
+		removed, err := meta.DropSegments(ctx, []*SegmentInfo{segment})
+
+		require.ErrorIs(t, err, errKeyVersionChanged)
+		assert.Zero(t, removed)
+		assert.NotNil(t, meta.GetSegment(ctx, segment.GetID()))
+		keys, persisted, _, err := meta.segmentPersist.Scan(ctx, key)
+		require.NoError(t, err)
+		require.Len(t, keys, 1)
+		require.Len(t, persisted, 1)
+		assert.Equal(t, int64(1), persisted[0].GetNumOfRows())
+	})
+
+	t.Run("Test batch drop persistence failure keeps cache", func(t *testing.T) {
+		ctx := context.Background()
+		meta, err := newMemoryMeta(t)
+		require.NoError(t, err)
+		segment := NewSegmentInfo(&datapb.SegmentInfo{
+			ID: 21, CollectionID: 1, PartitionID: 1, State: commonpb.SegmentState_Dropped,
+		})
+		require.NoError(t, meta.AddSegment(ctx, segment))
+		expectedErr := errors.New("batch drop failed")
+		meta.segmentPersist = &failingCommitSegmentPersist{base: meta.segmentPersist, err: expectedErr}
+
+		removed, err := meta.DropSegments(ctx, []*SegmentInfo{segment})
+
+		require.ErrorIs(t, err, expectedErr)
+		assert.Zero(t, removed)
+		assert.NotNil(t, meta.GetSegment(ctx, segment.GetID()))
+	})
+
 	t.Run("Test GetCount", func(t *testing.T) {
 		const rowCount0 = 100
 		const rowCount1 = 300

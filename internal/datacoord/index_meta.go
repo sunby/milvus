@@ -20,6 +20,7 @@ package datacoord
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -157,6 +158,15 @@ func (m *segmentBuildInfo) Remove(key UniqueID) {
 
 func (m *segmentBuildInfo) List() []*model.SegmentIndex {
 	return m.buildID2SegmentIndex.Values()
+}
+
+// Range visits resident SegmentIndex entries without first materializing a
+// full slice. The callback observes sync.Map traversal semantics and may miss
+// concurrent updates; GC revalidates every candidate by buildID before acting.
+func (m *segmentBuildInfo) Range(f func(*model.SegmentIndex) bool) {
+	m.buildID2SegmentIndex.Range(func(_ UniqueID, segmentIndex *model.SegmentIndex) bool {
+		return f(segmentIndex)
+	})
 }
 
 func (m *segmentBuildInfo) GetTaskStats() []*metricsinfo.IndexTaskStats {
@@ -1300,6 +1310,110 @@ func (m *indexMeta) GetAllSegIndexes() map[int64]*model.SegmentIndex {
 	return segIndexes
 }
 
+func (m *indexMeta) RangeSegmentIndexes(f func(*model.SegmentIndex) bool) {
+	m.segmentBuildInfo.Range(f)
+}
+
+func (m *indexMeta) supportsBatchIndexDeletion() bool {
+	_, ok := m.catalog.(metastore.DataCoordIndexBatchCatalog)
+	return ok
+}
+
+func sameSegmentIndexGCVersion(candidate, current *model.SegmentIndex) bool {
+	if candidate == nil || current == nil {
+		return false
+	}
+	return candidate.BuildID == current.BuildID &&
+		candidate.CollectionID == current.CollectionID &&
+		candidate.PartitionID == current.PartitionID &&
+		candidate.SegmentID == current.SegmentID &&
+		candidate.IndexID == current.IndexID &&
+		candidate.IndexVersion == current.IndexVersion &&
+		candidate.IndexStorePathVersion == current.IndexStorePathVersion &&
+		candidate.IndexState == current.IndexState &&
+		slices.Equal(candidate.IndexFileKeys, current.IndexFileKeys)
+}
+
+// RemoveSegmentIndexes persists an exact batch removal before publishing any
+// resident deletion. Candidates changed since file GC are skipped. If a
+// catalog transaction fails, all resident entries remain for an idempotent
+// retry. The input is capped at the metastore transaction limit so this method
+// never spans multiple persistence transactions.
+func (m *indexMeta) RemoveSegmentIndexes(ctx context.Context, candidates []*model.SegmentIndex) (int, error) {
+	batchCatalog, ok := m.catalog.(metastore.DataCoordIndexBatchCatalog)
+	if !ok {
+		return 0, merr.WrapErrServiceInternalMsg("DataCoord catalog does not support batch index deletion")
+	}
+	maxBatchSize := Params.MetaStoreCfg.MaxEtcdTxnNum.GetAsInt()
+	if maxBatchSize <= 0 {
+		maxBatchSize = 64
+	}
+	if len(candidates) > maxBatchSize {
+		return 0, merr.WrapErrServiceInternalMsg(
+			"segment index metadata batch size %d exceeds metastore transaction limit %d",
+			len(candidates), maxBatchSize)
+	}
+
+	candidateByBuildID := make(map[UniqueID]*model.SegmentIndex, len(candidates))
+	buildIDs := make([]UniqueID, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == nil {
+			continue
+		}
+		if _, exists := candidateByBuildID[candidate.BuildID]; !exists {
+			buildIDs = append(buildIDs, candidate.BuildID)
+		}
+		candidateByBuildID[candidate.BuildID] = candidate
+	}
+	sort.Slice(buildIDs, func(i, j int) bool { return buildIDs[i] < buildIDs[j] })
+	for _, buildID := range buildIDs {
+		m.keyLock.Lock(buildID)
+	}
+	defer func() {
+		for i := len(buildIDs) - 1; i >= 0; i-- {
+			m.keyLock.Unlock(buildIDs[i])
+		}
+	}()
+
+	currentIndexes := make([]*model.SegmentIndex, 0, len(buildIDs))
+	for _, buildID := range buildIDs {
+		current, exists := m.segmentBuildInfo.Get(buildID)
+		if !exists || !sameSegmentIndexGCVersion(candidateByBuildID[buildID], current) {
+			continue
+		}
+		currentIndexes = append(currentIndexes, current)
+	}
+	if len(currentIndexes) == 0 {
+		return 0, nil
+	}
+
+	if err := batchCatalog.DropSegmentIndexes(ctx, currentIndexes); err != nil {
+		return 0, err
+	}
+
+	for _, segIdx := range currentIndexes {
+		m.updateStoredIndexSizeMetric(ctx, segIdx.CollectionID, segIdx.IndexID,
+			segIdx.IndexSerializedSize, 0)
+	}
+
+	m.fieldIndexLock.Lock()
+	for _, segIdx := range currentIndexes {
+		if segmentIndexes, exists := m.segmentIndexes.Get(segIdx.SegmentID); exists {
+			resident, exists := segmentIndexes.Get(segIdx.IndexID)
+			if exists && resident.BuildID == segIdx.BuildID {
+				segmentIndexes.Remove(segIdx.IndexID)
+				if segmentIndexes.Len() == 0 {
+					m.segmentIndexes.Remove(segIdx.SegmentID)
+				}
+			}
+		}
+		m.segmentBuildInfo.Remove(segIdx.BuildID)
+	}
+	m.fieldIndexLock.Unlock()
+
+	return len(currentIndexes), nil
+}
+
 func (m *indexMeta) RemoveSegmentIndex(ctx context.Context, buildID UniqueID) error {
 	m.keyLock.Lock(buildID)
 	defer m.keyLock.Unlock(buildID)
@@ -1381,6 +1495,87 @@ func (m *indexMeta) RemoveIndex(ctx context.Context, collID, indexID UniqueID) e
 	}
 	mlog.Info(ctx, "IndexCoord meta table remove index success", mlog.Int64("collectionID", collID), mlog.Int64("indexID", indexID))
 	return nil
+}
+
+// RemoveIndexes persists a bounded exact-key batch before publishing resident
+// field-index removals. Collection locks keep the candidate revalidation and
+// publication ordered with concurrent index DDL.
+func (m *indexMeta) RemoveIndexes(ctx context.Context, candidates []*model.Index) (int, error) {
+	batchCatalog, ok := m.catalog.(metastore.DataCoordIndexBatchCatalog)
+	if !ok {
+		return 0, merr.WrapErrServiceInternalMsg("DataCoord catalog does not support batch index deletion")
+	}
+	maxBatchSize := Params.MetaStoreCfg.MaxEtcdTxnNum.GetAsInt()
+	if maxBatchSize <= 0 {
+		maxBatchSize = 64
+	}
+	if len(candidates) > maxBatchSize {
+		return 0, merr.WrapErrServiceInternalMsg(
+			"field index metadata batch size %d exceeds metastore transaction limit %d",
+			len(candidates), maxBatchSize)
+	}
+
+	collectionIDs := make([]UniqueID, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate != nil {
+			collectionIDs = append(collectionIDs, candidate.CollectionID)
+		}
+	}
+	unlockCollections := m.lockCollections(collectionIDs...)
+	defer unlockCollections()
+
+	currentIndexes := make([]*model.Index, 0, len(candidates))
+	seen := make(map[[2]UniqueID]struct{}, len(candidates))
+	m.fieldIndexLock.RLock()
+	for _, candidate := range candidates {
+		if candidate == nil {
+			continue
+		}
+		key := [2]UniqueID{candidate.CollectionID, candidate.IndexID}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		current, exists := m.indexes[candidate.CollectionID][candidate.IndexID]
+		if !exists || current != candidate || !current.IsDeleted {
+			continue
+		}
+		currentIndexes = append(currentIndexes, current)
+	}
+	m.fieldIndexLock.RUnlock()
+	if len(currentIndexes) == 0 {
+		return 0, nil
+	}
+
+	if err := batchCatalog.DropIndexes(ctx, currentIndexes); err != nil {
+		return 0, err
+	}
+
+	removedCollections := make(map[UniqueID]struct{})
+	m.fieldIndexLock.Lock()
+	for _, index := range currentIndexes {
+		delete(m.indexes[index.CollectionID], index.IndexID)
+		if len(m.indexes[index.CollectionID]) == 0 {
+			delete(m.indexes, index.CollectionID)
+			removedCollections[index.CollectionID] = struct{}{}
+		}
+	}
+	m.fieldIndexLock.Unlock()
+
+	for collectionID := range removedCollections {
+		collectionIDLabel := strconv.FormatInt(collectionID, 10)
+		labels := []string{
+			metrics.UnissuedIndexTaskLabel,
+			metrics.InProgressIndexTaskLabel,
+			metrics.FinishedIndexTaskLabel,
+			metrics.FailedIndexTaskLabel,
+		}
+		for _, label := range labels {
+			metrics.IndexTaskNum.DeleteLabelValues(collectionIDLabel, label)
+		}
+	}
+
+	return len(currentIndexes), nil
 }
 
 func (m *indexMeta) CheckCleanSegmentIndex(buildID UniqueID) (bool, *model.SegmentIndex) {
