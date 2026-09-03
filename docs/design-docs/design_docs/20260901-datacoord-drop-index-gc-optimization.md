@@ -50,7 +50,7 @@ SegmentIndex KV。不同 SegmentIndex 之间串行处理。
   buildID 加锁并重新校验状态和文件版本，已经变化的候选项留待下一轮处理。
 - SegmentIndex 元数据发布批次限制为 `metastore.maxEtcdTxnNum`，避免一次持有 1000
   个 `KeyLock`，并保证一次发布批次只对应一个 etcd transaction。
-- SegmentIndex batch 不维护额外汇总 stats；保留外层 stage 总耗时和失败 Warn。
+- field-index 和 SegmentIndex batch 不维护额外汇总 stats；保留外层 stage 总耗时和失败 Warn。
 - 所有 `ChunkManager` 都进入相同的有界 batch GC 流水线；实现
   `BatchRemoveChunkManager` 时使用逐 path 结果的后端批删，否则在流水线内部通过
   `dataCoord.gc.removeConcurrent` 有界调用 `Remove`。不会因 storage 能力不同切回另一套
@@ -666,7 +666,7 @@ per-build 删除证明，需要单独设计对象布局、保留周期和运维�
 ### Phase 0：基线与可观测性（已完成本地实现）
 
 - 保留可选的 100万/1000万性能测试。
-- 增加 stage 汇总计数，删除或限频逐条成功日志。
+- 保留 stage 总耗时和失败 Warn，不维护额外汇总 stats。
 - 记录 scan、文件删除、KV 删除、allocation、RSS、请求数和限流基线。
 
 ### Phase 1：对象存储批删能力（已完成本地实现）

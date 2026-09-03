@@ -2046,16 +2046,6 @@ func (gc *garbageCollector) recycleUnusedSegIndexesInBatches(
 	}
 }
 
-type fieldIndexGCBatchStats struct {
-	scanned       int
-	paused        int
-	deleteSuccess int
-	deleteFailed  int
-	deleteSkipped int
-	batchCount    int
-	deleteTime    time.Duration
-}
-
 func (gc *garbageCollector) recycleUnusedIndexesInBatches(
 	ctx context.Context,
 	signal <-chan gcCmd,
@@ -2066,7 +2056,6 @@ func (gc *garbageCollector) recycleUnusedIndexesInBatches(
 		batchSize = 64
 	}
 
-	stats := fieldIndexGCBatchStats{scanned: len(deletedIndexes)}
 	log := mlog.With(mlog.String("gcName", "recycleUnusedIndexes"))
 	for start := 0; start < len(deletedIndexes); start += batchSize {
 		if ctx.Err() != nil {
@@ -2084,7 +2073,6 @@ func (gc *garbageCollector) recycleUnusedIndexesInBatches(
 				continue
 			}
 			if gc.collectionGCPaused(index.CollectionID) {
-				stats.paused++
 				continue
 			}
 			candidates = append(candidates, index)
@@ -2093,30 +2081,14 @@ func (gc *garbageCollector) recycleUnusedIndexesInBatches(
 			continue
 		}
 
-		stats.batchCount++
-		deleteStart := time.Now()
-		removed, err := gc.meta.indexMeta.RemoveIndexes(ctx, candidates)
-		stats.deleteTime += time.Since(deleteStart)
+		_, err := gc.meta.indexMeta.RemoveIndexes(ctx, candidates)
 		if err != nil {
-			stats.deleteFailed += len(candidates)
 			log.RatedWarn(ctx, rate.Limit(1), "remove field-index metadata batch failed",
 				mlog.Int("indexes", len(candidates)),
 				mlog.Err(err))
-			continue
 		}
-		stats.deleteSuccess += removed
-		stats.deleteSkipped += len(candidates) - removed
 	}
 	gc.ackSignal(signal)
-
-	log.Info(ctx, "recycle unused field indexes batch summary",
-		mlog.Int("scanned", stats.scanned),
-		mlog.Int("paused", stats.paused),
-		mlog.Int("deleteSuccess", stats.deleteSuccess),
-		mlog.Int("deleteFailed", stats.deleteFailed),
-		mlog.Int("deleteSkipped", stats.deleteSkipped),
-		mlog.Int("batchCount", stats.batchCount),
-		mlog.Duration("deleteTime", stats.deleteTime))
 }
 
 // recycleUnusedIndexes is used to delete those indexes that is deleted by collection.
