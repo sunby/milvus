@@ -159,6 +159,8 @@ func TestChannelManager(t *testing.T) {
 		param, err := m.GetLatestChannelAssignment()
 		oldLocalVersion := param.Version.Local
 		assert.NoError(t, err)
+		assert.Contains(t, param.PChannelView.Channels, newChannelID("test-channel"))
+		assert.Nil(t, param.PChannelView.Stats, "an assignment must not copy the vchannel stats")
 		assert.Equal(t, m.ReplicateRole(), replicateutil.RolePrimary)
 
 		// Test update replicate configurations

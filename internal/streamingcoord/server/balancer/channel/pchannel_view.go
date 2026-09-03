@@ -12,9 +12,21 @@ type ChannelID = types.ChannelID
 
 // newPChannelView creates a new pchannel view.
 func newPChannelView(metas map[ChannelID]*PChannelMeta) *PChannelView {
+	view := newPChannelMetaView(metas)
+	view.Stats = make(map[ChannelID]PChannelStatsView, len(metas))
+	for id, meta := range view.Channels {
+		stat := StaticPChannelStatsManager.Get().GetPChannelStats(id).View()
+		stat.LastAssignTimestamp = meta.LastAssignTimestamp()
+		view.Stats[id] = stat
+	}
+	return view
+}
+
+// newPChannelMetaView creates a pchannel view without Stats, which copy every
+// vchannel of every pchannel.
+func newPChannelMetaView(metas map[ChannelID]*PChannelMeta) *PChannelView {
 	view := &PChannelView{
 		Channels: make(map[ChannelID]*PChannelMeta, len(metas)),
-		Stats:    make(map[ChannelID]PChannelStatsView, len(metas)),
 	}
 	for _, meta := range metas {
 		id := meta.ChannelInfo().ChannelID()
@@ -22,9 +34,6 @@ func newPChannelView(metas map[ChannelID]*PChannelMeta) *PChannelView {
 			panic(fmt.Sprintf("duplicate rw channel: %s", id.String()))
 		}
 		view.Channels[id] = meta
-		stat := StaticPChannelStatsManager.Get().GetPChannelStats(id).View()
-		stat.LastAssignTimestamp = meta.LastAssignTimestamp()
-		view.Stats[id] = stat
 	}
 	return view
 }
