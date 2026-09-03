@@ -969,42 +969,6 @@ type droppedSegmentGCChannelExistenceCatalog interface {
 	ChannelExistsWithError(ctx context.Context, channel string) (bool, error)
 }
 
-type droppedSegmentGCDeleteStats struct {
-	fileDeleteAttempts             int
-	fileDeleteFailures             int
-	fileDeleteBatches              int
-	prefixDeleteAttempts           int
-	fileDeleteTime                 time.Duration
-	segmentIndexMetaDeleteAttempts int
-	segmentIndexMetaDeleteEntries  int
-	segmentIndexMetaDeleteFailures int
-	segmentIndexMetaDeleteBatches  int
-	segmentIndexMetaDeleteTime     time.Duration
-	segmentMetaDeleteAttempts      int
-	segmentMetaDeleteFailures      int
-	segmentMetaDeleteBatches       int
-	segmentMetaDeleteTime          time.Duration
-	completedSegments              int
-}
-
-func (stats *droppedSegmentGCDeleteStats) add(other droppedSegmentGCDeleteStats) {
-	stats.fileDeleteAttempts += other.fileDeleteAttempts
-	stats.fileDeleteFailures += other.fileDeleteFailures
-	stats.fileDeleteBatches += other.fileDeleteBatches
-	stats.prefixDeleteAttempts += other.prefixDeleteAttempts
-	stats.fileDeleteTime += other.fileDeleteTime
-	stats.segmentIndexMetaDeleteAttempts += other.segmentIndexMetaDeleteAttempts
-	stats.segmentIndexMetaDeleteEntries += other.segmentIndexMetaDeleteEntries
-	stats.segmentIndexMetaDeleteFailures += other.segmentIndexMetaDeleteFailures
-	stats.segmentIndexMetaDeleteBatches += other.segmentIndexMetaDeleteBatches
-	stats.segmentIndexMetaDeleteTime += other.segmentIndexMetaDeleteTime
-	stats.segmentMetaDeleteAttempts += other.segmentMetaDeleteAttempts
-	stats.segmentMetaDeleteFailures += other.segmentMetaDeleteFailures
-	stats.segmentMetaDeleteBatches += other.segmentMetaDeleteBatches
-	stats.segmentMetaDeleteTime += other.segmentMetaDeleteTime
-	stats.completedSegments += other.completedSegments
-}
-
 // recycleDroppedSegments scans all segments and remove those dropped segments from meta and oss.
 func (gc *garbageCollector) recycleDroppedSegments(ctx context.Context, signal <-chan gcCmd) {
 	start := time.Now()
@@ -1078,7 +1042,6 @@ func (gc *garbageCollector) recycleDroppedSegments(ctx context.Context, signal <
 	log.Info(ctx, "start to GC segments", mlog.Int("drop_num", len(drops)))
 	candidateStart := time.Now()
 	processedDroppedSegments := 0
-	deleteStats := droppedSegmentGCDeleteStats{}
 	channelStateMaxConcurrent := Params.DataCoordCfg.GCDroppedSegmentChannelStateMaxConcurrent.GetAsInt()
 	defer func() {
 		log.Info(ctx, "recycleDroppedSegments candidates done",
@@ -1086,22 +1049,6 @@ func (gc *garbageCollector) recycleDroppedSegments(ctx context.Context, signal <
 			mlog.Int("processedDroppedSegments", processedDroppedSegments),
 			mlog.Int("channelStateMaxConcurrent", channelStateMaxConcurrent),
 			mlog.Duration("timeCost", time.Since(candidateStart)))
-		log.Info(ctx, "recycleDroppedSegments delete stages done; times are summed batch wall time",
-			mlog.Int("fileDeleteAttempts", deleteStats.fileDeleteAttempts),
-			mlog.Int("fileDeleteFailures", deleteStats.fileDeleteFailures),
-			mlog.Int("fileDeleteBatches", deleteStats.fileDeleteBatches),
-			mlog.Int("prefixDeleteAttempts", deleteStats.prefixDeleteAttempts),
-			mlog.Duration("fileDeleteTime", deleteStats.fileDeleteTime),
-			mlog.Int("segmentIndexMetaDeleteAttempts", deleteStats.segmentIndexMetaDeleteAttempts),
-			mlog.Int("segmentIndexMetaDeleteEntries", deleteStats.segmentIndexMetaDeleteEntries),
-			mlog.Int("segmentIndexMetaDeleteFailures", deleteStats.segmentIndexMetaDeleteFailures),
-			mlog.Int("segmentIndexMetaDeleteBatches", deleteStats.segmentIndexMetaDeleteBatches),
-			mlog.Duration("segmentIndexMetaDeleteTime", deleteStats.segmentIndexMetaDeleteTime),
-			mlog.Int("segmentMetaDeleteAttempts", deleteStats.segmentMetaDeleteAttempts),
-			mlog.Int("segmentMetaDeleteFailures", deleteStats.segmentMetaDeleteFailures),
-			mlog.Int("segmentMetaDeleteBatches", deleteStats.segmentMetaDeleteBatches),
-			mlog.Duration("segmentMetaDeleteTime", deleteStats.segmentMetaDeleteTime),
-			mlog.Int("completedSegments", deleteStats.completedSegments))
 	}()
 	processedDroppedSegments = gc.recycleDroppedSegmentsInBatches(
 		ctx,
@@ -1111,7 +1058,6 @@ func (gc *garbageCollector) recycleDroppedSegments(ctx context.Context, signal <
 		indexedSet,
 		channelStates,
 		loadedSegments,
-		&deleteStats,
 		channelStateMaxConcurrent,
 	)
 }
@@ -1244,13 +1190,12 @@ func (gc *garbageCollector) loadDroppedSegmentChannelStates(
 }
 
 type droppedSegmentGCBatchCandidate struct {
-	segmentID    int64
-	segment      *SegmentInfo
-	segIndexes   []*model.SegmentIndex
-	exactFiles   []string
-	prefix       string
-	fileDeleted  bool
-	indexDeleted bool
+	segmentID   int64
+	segment     *SegmentInfo
+	segIndexes  []*model.SegmentIndex
+	exactFiles  []string
+	prefix      string
+	fileDeleted bool
 }
 
 func (gc *garbageCollector) prepareDroppedSegmentGCBatchCandidate(
@@ -1417,14 +1362,11 @@ func collectBatchRemovePrefixOutcomes(
 func (gc *garbageCollector) recycleDroppedSegmentBatch(
 	ctx context.Context,
 	batch []*droppedSegmentGCBatchCandidate,
-) droppedSegmentGCDeleteStats {
-	stats := droppedSegmentGCDeleteStats{}
+) {
 	if len(batch) == 0 {
-		return stats
+		return
 	}
 
-	fileDeleteStart := time.Now()
-	stats.fileDeleteAttempts = len(batch)
 	fileStarts := make([]int, len(batch))
 	fileEnds := make([]int, len(batch))
 	filePaths := make([]string, 0)
@@ -1442,7 +1384,6 @@ func (gc *garbageCollector) recycleDroppedSegmentBatch(
 
 	fileErrors := make([]error, len(batch))
 	if len(filePaths) > 0 {
-		stats.fileDeleteBatches++
 		outcomes, batchErr := collectBatchRemoveOutcomes(filePaths, gc.removeObjectFilesWithResult(ctx, filePaths))
 		for i := range batch {
 			for _, filePath := range filePaths[fileStarts[i]:fileEnds[i]] {
@@ -1452,7 +1393,6 @@ func (gc *garbageCollector) recycleDroppedSegmentBatch(
 	}
 
 	if len(prefixes) > 0 {
-		stats.prefixDeleteAttempts += len(prefixes)
 		outcomes, batchErr := collectBatchRemovePrefixOutcomes(
 			prefixes,
 			gc.removeDroppedSegmentPrefixes(ctx, prefixes),
@@ -1468,7 +1408,6 @@ func (gc *garbageCollector) recycleDroppedSegmentBatch(
 
 	for i, candidate := range batch {
 		if fileErrors[i] != nil {
-			stats.fileDeleteFailures++
 			mlog.RatedWarn(ctx, rate.Limit(1), "failed to remove dropped segment files in batch",
 				mlog.FieldSegmentID(candidate.segmentID),
 				mlog.Int("exactFiles", len(candidate.exactFiles)),
@@ -1478,20 +1417,16 @@ func (gc *garbageCollector) recycleDroppedSegmentBatch(
 		}
 		candidate.fileDeleted = true
 	}
-	stats.fileDeleteTime = time.Since(fileDeleteStart)
 	if ctx.Err() != nil {
-		return stats
+		return
 	}
 
-	segmentIndexDeleteStart := time.Now()
 	segmentIndexes := make([]*model.SegmentIndex, 0)
 	fileComplete := make([]*droppedSegmentGCBatchCandidate, 0, len(batch))
 	for _, candidate := range batch {
 		if !candidate.fileDeleted {
 			continue
 		}
-		stats.segmentIndexMetaDeleteAttempts++
-		stats.segmentIndexMetaDeleteEntries += len(candidate.segIndexes)
 		fileComplete = append(fileComplete, candidate)
 		segmentIndexes = append(segmentIndexes, candidate.segIndexes...)
 	}
@@ -1506,7 +1441,6 @@ func (gc *garbageCollector) recycleDroppedSegmentBatch(
 				break
 			}
 			end := min(start+metadataBatchSize, len(segmentIndexes))
-			stats.segmentIndexMetaDeleteBatches++
 			if _, err := gc.meta.indexMeta.RemoveSegmentIndexes(ctx, segmentIndexes[start:end]); err != nil {
 				mlog.RatedWarn(ctx, rate.Limit(1), "failed to remove dropped segment index metadata batch",
 					mlog.Int("segmentIndexes", end-start),
@@ -1517,9 +1451,6 @@ func (gc *garbageCollector) recycleDroppedSegmentBatch(
 		for _, candidate := range fileComplete {
 			if ctx.Err() != nil {
 				break
-			}
-			if len(candidate.segIndexes) > 0 {
-				stats.segmentIndexMetaDeleteBatches++
 			}
 			if err := gc.removeDroppedSegmentIndexMeta(ctx, candidate.segIndexes); err != nil {
 				mlog.RatedWarn(ctx, rate.Limit(1), "failed to remove dropped segment index metadata",
@@ -1539,19 +1470,14 @@ func (gc *garbageCollector) recycleDroppedSegmentBatch(
 			}
 		}
 		if !allIndexesRemoved {
-			stats.segmentIndexMetaDeleteFailures++
 			continue
 		}
-		candidate.indexDeleted = true
 		segmentMetaCandidates = append(segmentMetaCandidates, candidate.segment)
 	}
-	stats.segmentIndexMetaDeleteTime = time.Since(segmentIndexDeleteStart)
 	if ctx.Err() != nil {
-		return stats
+		return
 	}
 
-	segmentMetaDeleteStart := time.Now()
-	stats.segmentMetaDeleteAttempts = len(segmentMetaCandidates)
 	metadataBatchSize := Params.MetaStoreCfg.MaxEtcdTxnNum.GetAsInt()
 	if metadataBatchSize <= 0 {
 		metadataBatchSize = 64
@@ -1561,25 +1487,12 @@ func (gc *garbageCollector) recycleDroppedSegmentBatch(
 			break
 		}
 		end := min(start+metadataBatchSize, len(segmentMetaCandidates))
-		stats.segmentMetaDeleteBatches++
 		if _, err := gc.meta.DropSegments(ctx, segmentMetaCandidates[start:end]); err != nil {
 			mlog.RatedWarn(ctx, rate.Limit(1), "failed to remove dropped segment metadata batch",
 				mlog.Int("segments", end-start),
 				mlog.Err(err))
 		}
 	}
-	for _, candidate := range fileComplete {
-		if !candidate.indexDeleted {
-			continue
-		}
-		if gc.meta.GetSegment(ctx, candidate.segmentID) != nil {
-			stats.segmentMetaDeleteFailures++
-			continue
-		}
-		stats.completedSegments++
-	}
-	stats.segmentMetaDeleteTime = time.Since(segmentMetaDeleteStart)
-	return stats
 }
 
 func (gc *garbageCollector) recycleDroppedSegmentsInBatches(
@@ -1590,7 +1503,6 @@ func (gc *garbageCollector) recycleDroppedSegmentsInBatches(
 	indexedSet typeutil.UniqueSet,
 	channelStates map[string]droppedSegmentGCChannelState,
 	loadedSegments typeutil.Set[int64],
-	deleteStats *droppedSegmentGCDeleteStats,
 	channelStateMaxConcurrent int,
 ) int {
 	if channelStateMaxConcurrent <= 0 {
@@ -1623,7 +1535,7 @@ func (gc *garbageCollector) recycleDroppedSegmentsInBatches(
 				active = append(active, candidate)
 			}
 		}
-		deleteStats.add(gc.recycleDroppedSegmentBatch(ctx, active))
+		gc.recycleDroppedSegmentBatch(ctx, active)
 		batch = batch[:0]
 		batchWeight = 0
 		gc.ackSignal(signal)
@@ -1653,8 +1565,6 @@ func (gc *garbageCollector) recycleDroppedSegmentsInBatches(
 
 		candidate, err := gc.prepareDroppedSegmentGCBatchCandidate(ctx, segmentID, segment)
 		if err != nil {
-			deleteStats.fileDeleteAttempts++
-			deleteStats.fileDeleteFailures++
 			mlog.RatedWarn(ctx, rate.Limit(1), "failed to prepare dropped segment deletion batch",
 				mlog.FieldSegmentID(segmentID),
 				mlog.Err(err))
