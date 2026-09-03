@@ -1303,25 +1303,6 @@ func batchRemovePathError(filePath string, outcomes map[string]removeOutcome, ba
 	return outcome.err
 }
 
-func (gc *garbageCollector) removeDroppedSegmentPrefixes(
-	ctx context.Context,
-	prefixes []string,
-) []storage.RemovePrefixResult {
-	if len(prefixes) == 0 {
-		return nil
-	}
-	if batchRemover, ok := gc.option.cli.(storage.BatchRemovePrefixChunkManager); ok {
-		return batchRemover.MultiRemoveWithPrefix(ctx, prefixes)
-	}
-
-	results := make([]storage.RemovePrefixResult, len(prefixes))
-	for i, prefix := range prefixes {
-		results[i].Prefix = prefix
-		results[i].Err = gc.option.cli.RemoveWithPrefix(ctx, prefix)
-	}
-	return results
-}
-
 func collectBatchRemovePrefixOutcomes(
 	expectedPrefixes []string,
 	results []storage.RemovePrefixResult,
@@ -1392,7 +1373,7 @@ func (gc *garbageCollector) recycleDroppedSegmentBatch(
 	if len(prefixes) > 0 {
 		outcomes, batchErr := collectBatchRemovePrefixOutcomes(
 			prefixes,
-			gc.removeDroppedSegmentPrefixes(ctx, prefixes),
+			gc.option.cli.MultiRemoveWithPrefix(ctx, prefixes),
 		)
 		for i, prefix := range prefixes {
 			candidateIndex := prefixCandidates[i]

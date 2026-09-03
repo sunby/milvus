@@ -84,7 +84,6 @@ type RemoteChunkManager struct {
 
 var _ ChunkManager = (*RemoteChunkManager)(nil)
 var _ BatchRemoveChunkManager = (*RemoteChunkManager)(nil)
-var _ BatchRemovePrefixChunkManager = (*RemoteChunkManager)(nil)
 
 const (
 	persistentObjectTypeTransformLog  = "transform_log"

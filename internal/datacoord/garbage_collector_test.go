@@ -5354,8 +5354,8 @@ func TestGarbageCollector_recycleDroppedSegments_V3(t *testing.T) {
 	})
 
 	// Track calls
-	removeWithPrefixCalled := false
-	var removeWithPrefixArg string
+	multiRemoveWithPrefixCalled := false
+	var multiRemoveWithPrefixArgs []string
 	removeObjectFilesCalled := false
 
 	// Snapshot layer transparent: no segment is blocked.
@@ -5363,14 +5363,18 @@ func TestGarbageCollector_recycleDroppedSegments_V3(t *testing.T) {
 	defer mockIsSegBlocked.UnPatch()
 	mockListLoaded := mockey.Mock((*ServerHandler).ListLoadedSegments).Return([]int64{}, nil).Build()
 	defer mockListLoaded.UnPatch()
-	// Mock RemoveWithPrefix for V3 segment
-	mockRemoveWithPrefix := mockey.Mock((*storage.LocalChunkManager).RemoveWithPrefix).To(
-		func(cm *storage.LocalChunkManager, ctx context.Context, prefix string) error {
-			removeWithPrefixCalled = true
-			removeWithPrefixArg = prefix
-			return nil
+	// Mock MultiRemoveWithPrefix for V3 segments.
+	mockMultiRemoveWithPrefix := mockey.Mock((*storage.LocalChunkManager).MultiRemoveWithPrefix).To(
+		func(cm *storage.LocalChunkManager, ctx context.Context, prefixes []string) []storage.RemovePrefixResult {
+			multiRemoveWithPrefixCalled = true
+			multiRemoveWithPrefixArgs = append(multiRemoveWithPrefixArgs, prefixes...)
+			results := make([]storage.RemovePrefixResult, len(prefixes))
+			for i, prefix := range prefixes {
+				results[i].Prefix = prefix
+			}
+			return results
 		}).Build()
-	defer mockRemoveWithPrefix.UnPatch()
+	defer mockMultiRemoveWithPrefix.UnPatch()
 
 	// Mock exact-key removal for the V1 segment.
 	mockRemove := mockey.Mock((*storage.LocalChunkManager).Remove).To(
@@ -5382,9 +5386,10 @@ func TestGarbageCollector_recycleDroppedSegments_V3(t *testing.T) {
 
 	gc.recycleDroppedSegments(ctx, nil)
 
-	// V3 segment should use RemoveWithPrefix with basePath
-	assert.True(t, removeWithPrefixCalled, "V3 segment should use RemoveWithPrefix")
-	assert.Equal(t, basePath, removeWithPrefixArg, "RemoveWithPrefix should be called with basePath")
+	// V3 segment should use MultiRemoveWithPrefix with basePath.
+	assert.True(t, multiRemoveWithPrefixCalled, "V3 segment should use MultiRemoveWithPrefix")
+	assert.Equal(t, []string{basePath}, multiRemoveWithPrefixArgs,
+		"MultiRemoveWithPrefix should be called with basePath")
 
 	// V1 segment should use exact-key removal.
 	assert.True(t, removeObjectFilesCalled, "V1 segment should remove its exact file keys")

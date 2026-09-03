@@ -73,14 +73,6 @@ type BatchRemoveChunkManager interface {
 	MultiRemoveWithResult(ctx context.Context, filePaths []string) []RemoveResult
 }
 
-// BatchRemovePrefixChunkManager is an optional capability for removing
-// multiple prefixes while retaining one completion result per input prefix.
-// Implementations may expand prefixes into object paths and combine those
-// paths into native object-storage delete batches.
-type BatchRemovePrefixChunkManager interface {
-	MultiRemoveWithPrefix(ctx context.Context, prefixes []string) []RemovePrefixResult
-}
-
 // ChunkManager is to manager chunks.
 // Include Read, Write, Remove chunks.
 type ChunkManager interface {
@@ -117,6 +109,8 @@ type ChunkManager interface {
 	MultiRemove(ctx context.Context, filePaths []string) error
 	// RemoveWithPrefix remove files with same @prefix.
 	RemoveWithPrefix(ctx context.Context, prefix string) error
+	// MultiRemoveWithPrefix removes files for multiple prefixes and reports one result per input prefix.
+	MultiRemoveWithPrefix(ctx context.Context, prefixes []string) []RemovePrefixResult
 	// Copy copies @srcFilePath to @dstFilePath.
 	Copy(ctx context.Context, srcFilePath string, dstFilePath string) error
 }
