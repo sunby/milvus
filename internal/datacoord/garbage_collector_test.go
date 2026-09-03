@@ -5789,11 +5789,7 @@ func TestGarbageCollector_recycleSnapshots_OrphanCleanup(t *testing.T) {
 
 func TestCheckDroppedSegmentGC_CommitTimestamp(t *testing.T) {
 	t.Run("import segment not GCed when commit_timestamp > cpTimestamp", func(t *testing.T) {
-		catalog := catalogmocks.NewDataCoordCatalog(t)
-		catalog.On("ChannelExists", mock.Anything, mock.Anything).Return(true)
-
 		m := &meta{
-			catalog:    catalog,
 			channelCPs: newChannelCps(),
 		}
 
@@ -5809,16 +5805,12 @@ func TestCheckDroppedSegmentGC_CommitTimestamp(t *testing.T) {
 		}}
 
 		// cpTimestamp=3000: effective dml ts is 5000 > 3000 → should NOT GC
-		result := gc.checkDroppedSegmentGC(segment, nil, typeutil.NewUniqueSet(), 3000)
+		result := gc.checkDroppedSegmentGC(segment, nil, typeutil.NewUniqueSet(), 3000, true)
 		assert.False(t, result, "import segment with commit_ts=5000 should NOT be GCed when cpTimestamp=3000")
 	})
 
 	t.Run("import segment GCed when commit_timestamp <= cpTimestamp", func(t *testing.T) {
-		catalog := catalogmocks.NewDataCoordCatalog(t)
-		catalog.On("ChannelExists", mock.Anything, mock.Anything).Return(true)
-
 		m := &meta{
-			catalog:    catalog,
 			channelCPs: newChannelCps(),
 		}
 
@@ -5836,7 +5828,7 @@ func TestCheckDroppedSegmentGC_CommitTimestamp(t *testing.T) {
 		}}
 
 		// cpTimestamp=6000: effective dml ts is 5000 <= 6000 → should GC (drop tolerance met since DroppedAt=0)
-		result := gc.checkDroppedSegmentGC(segment, nil, typeutil.NewUniqueSet(), 6000)
+		result := gc.checkDroppedSegmentGC(segment, nil, typeutil.NewUniqueSet(), 6000, true)
 		assert.True(t, result, "import segment with commit_ts=5000 should be GCed when cpTimestamp=6000")
 	})
 }

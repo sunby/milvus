@@ -923,16 +923,7 @@ func (gc *garbageCollector) checkDroppedSegmentGC(segment *SegmentInfo,
 	childSegment *SegmentInfo,
 	indexSet typeutil.UniqueSet,
 	cpTimestamp Timestamp,
-) bool {
-	return gc.checkDroppedSegmentGCWithChannelState(segment, childSegment, indexSet, cpTimestamp, false, false)
-}
-
-func (gc *garbageCollector) checkDroppedSegmentGCWithChannelState(segment *SegmentInfo,
-	childSegment *SegmentInfo,
-	indexSet typeutil.UniqueSet,
-	cpTimestamp Timestamp,
 	channelExists bool,
-	channelExistsKnown bool,
 ) bool {
 	log := mlog.With(mlog.FieldSegmentID(segment.ID))
 
@@ -951,10 +942,6 @@ func (gc *garbageCollector) checkDroppedSegmentGCWithChannelState(segment *Segme
 		}
 	}
 
-	segInsertChannel := segment.GetInsertChannel()
-	if !channelExistsKnown {
-		channelExists = gc.meta.catalog.ChannelExists(context.Background(), segInsertChannel)
-	}
 	// Ignore segments from potentially dropped collection. Check if collection is to be dropped by checking if channel is dropped.
 	// We do this because collection meta drop relies on all segment being GCed.
 	if channelExists &&
@@ -1136,7 +1123,6 @@ func (gc *garbageCollector) isDroppedSegmentGCCandidate(
 	compactTo map[int64]*SegmentInfo,
 	indexedSet typeutil.UniqueSet,
 	channelState droppedSegmentGCChannelState,
-	channelExistsKnown bool,
 	loadedSegments typeutil.Set[int64],
 ) bool {
 	if ctx.Err() != nil {
@@ -1187,13 +1173,12 @@ func (gc *garbageCollector) isDroppedSegmentGCCandidate(
 		}
 	}
 
-	if !gc.checkDroppedSegmentGCWithChannelState(
+	if !gc.checkDroppedSegmentGC(
 		segment,
 		compactTo[segment.GetID()],
 		indexedSet,
 		channelState.checkpoint,
 		channelState.exists,
-		channelExistsKnown,
 	) {
 		return false
 	}
@@ -1661,7 +1646,6 @@ func (gc *garbageCollector) recycleDroppedSegmentsInBatches(
 			compactTo,
 			indexedSet,
 			state,
-			true,
 			loadedSegments,
 		) {
 			continue
