@@ -3172,7 +3172,7 @@ func (node *Proxy) Search(ctx context.Context, request *milvuspb.SearchRequest) 
 	rsp := &milvuspb.SearchResults{
 		Status: merr.Success(),
 	}
-	if err := node.ensureCollectionReadyForSearch(ctx, request.GetDbName(), request.GetCollectionName()); err != nil {
+	if err := node.ensureCollectionReady(ctx, request.GetDbName(), request.GetCollectionName()); err != nil {
 		rsp.Status = merr.Status(err)
 		return rsp, nil
 	}
@@ -3466,7 +3466,7 @@ func (node *Proxy) HybridSearch(ctx context.Context, request *milvuspb.HybridSea
 	rsp := &milvuspb.SearchResults{
 		Status: merr.Success(),
 	}
-	if err := node.ensureCollectionReadyForSearch(ctx, request.GetDbName(), request.GetCollectionName()); err != nil {
+	if err := node.ensureCollectionReady(ctx, request.GetDbName(), request.GetCollectionName()); err != nil {
 		rsp.Status = merr.Status(err)
 		return rsp, nil
 	}
@@ -4130,6 +4130,10 @@ func (node *Proxy) query(ctx context.Context, qt *queryTask, sp trace.Span) (*mi
 
 // Query get the records by primary keys.
 func (node *Proxy) Query(ctx context.Context, request *milvuspb.QueryRequest) (*milvuspb.QueryResults, error) {
+	if err := node.ensureCollectionReady(ctx, request.GetDbName(), request.GetCollectionName()); err != nil {
+		return &milvuspb.QueryResults{Status: merr.Status(err)}, nil
+	}
+
 	qt := &queryTask{
 		baseTask: baseTask{
 			metaCache: node.getMetaCache(),
