@@ -5823,6 +5823,9 @@ type dataCoordConfig struct {
 	GCMissingTolerance                     ParamItem `refreshable:"false"`
 	GCDropTolerance                        ParamItem `refreshable:"false"`
 	GCRemoveConcurrent                     ParamItem `refreshable:"false"`
+	GCDroppedSegmentChannelStateBatchSize  ParamItem `refreshable:"true"`
+	GCDroppedSegmentBatchSize              ParamItem `refreshable:"true"`
+	GCIndexFileBatchSize                   ParamItem `refreshable:"true"`
 	GCScanIntervalInHour                   ParamItem `refreshable:"false"`
 	GCSlowDownCPUUsageThreshold            ParamItem `refreshable:"false"`
 	SnapshotPendingTimeout                 ParamItem `refreshable:"true"`
@@ -6796,6 +6799,54 @@ Layout 1 is additionally gated on no QueryNode still reporting an older release 
 		Export: false,
 	}
 	p.GCRemoveConcurrent.Init(base.mgr)
+
+	p.GCDroppedSegmentChannelStateBatchSize = ParamItem{
+		Key:          "dataCoord.gc.droppedSegment.channelStateBatchSize",
+		Version:      "2.6.7",
+		DefaultValue: "64",
+		Formatter: func(value string) string {
+			num, err := strconv.Atoi(value)
+			if err != nil || num <= 0 || num > 1000 {
+				return "64"
+			}
+			return value
+		},
+		Doc:    "maximum number of dropped-segment GC channel markers loaded per catalog batch",
+		Export: true,
+	}
+	p.GCDroppedSegmentChannelStateBatchSize.Init(base.mgr)
+
+	p.GCDroppedSegmentBatchSize = ParamItem{
+		Key:          "dataCoord.gc.droppedSegment.batchDelete.batchSize",
+		Version:      "2.6.7",
+		DefaultValue: "1000",
+		Formatter: func(value string) string {
+			num, err := strconv.Atoi(value)
+			if err != nil || num <= 0 || num > 1000 {
+				return "1000"
+			}
+			return value
+		},
+		Doc:    "maximum dropped-segment candidates or explicit object paths admitted to one deletion batch",
+		Export: true,
+	}
+	p.GCDroppedSegmentBatchSize.Init(base.mgr)
+
+	p.GCIndexFileBatchSize = ParamItem{
+		Key:          "dataCoord.gc.indexFileBatchDelete.batchSize",
+		Version:      "2.6.7",
+		DefaultValue: "1000",
+		Formatter: func(value string) string {
+			num, err := strconv.Atoi(value)
+			if err != nil || num <= 0 || num > 1000 {
+				return "1000"
+			}
+			return value
+		},
+		Doc:    "maximum estimated index-file references in one object-storage delete batch; empty-file SegmentIndexes count as one candidate",
+		Export: true,
+	}
+	p.GCIndexFileBatchSize.Init(base.mgr)
 
 	p.SnapshotPendingTimeout = ParamItem{
 		Key:          "dataCoord.snapshot.pendingTimeout",

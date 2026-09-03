@@ -50,6 +50,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	pkgutil "github.com/milvus-io/milvus/pkg/v3/util"
 	"github.com/milvus-io/milvus/pkg/v3/util/etcd"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
 
@@ -907,14 +908,85 @@ func Test_MarkChannelAdded_SaveError(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func Test_ChannelExists_SaveError(t *testing.T) {
-	txn := mocks.NewMetaKv(t)
-	txn.EXPECT().
-		Load(mock.Anything, mock.Anything).
-		Return("", errors.New("mock error"))
+func TestLoadChannelExistence(t *testing.T) {
+	t.Run("mixed markers and missing key", func(t *testing.T) {
+		txn := mocks.NewMetaKv(t)
+		txn.EXPECT().MaxTxnOps().Return(64)
+		txn.EXPECT().MultiLoad(mock.Anything, []string{
+			buildChannelRemovePath("active"),
+			buildChannelRemovePath("missing"),
+			buildChannelRemovePath("removed"),
+		}).Return(
+			[]string{NonRemoveFlagTomestone, "", RemoveFlagTomestone},
+			merr.WrapErrIoKeyNotFound("missing"),
+		)
 
-	catalog := NewCatalog(txn, rootPath, "")
-	assert.False(t, catalog.ChannelExists(context.TODO(), "test_channel_1"))
+		catalog := NewCatalog(txn, rootPath, "")
+		existence, err := catalog.LoadChannelExistence(
+			context.TODO(),
+			[]string{"active", "missing", "removed", "active"},
+		)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]bool{
+			"active":  true,
+			"missing": false,
+			"removed": false,
+		}, existence)
+	})
+
+	t.Run("storage failure", func(t *testing.T) {
+		txn := mocks.NewMetaKv(t)
+		loadErr := merr.WrapErrIoFailedMsg("mock channel batch load failure")
+		txn.EXPECT().MaxTxnOps().Return(64)
+		txn.EXPECT().
+			MultiLoad(mock.Anything, []string{buildChannelRemovePath("channel-1")}).
+			Return(nil, loadErr)
+
+		catalog := NewCatalog(txn, rootPath, "")
+		existence, err := catalog.LoadChannelExistence(context.TODO(), []string{"channel-1"})
+		assert.Empty(t, existence)
+		assert.ErrorIs(t, err, loadErr)
+	})
+
+	t.Run("split by transaction limit and retain partial results", func(t *testing.T) {
+		txn := mocks.NewMetaKv(t)
+		loadErr := merr.WrapErrIoFailedMsg("mock second channel batch load failure")
+		txn.EXPECT().MaxTxnOps().Return(2)
+		txn.EXPECT().MultiLoad(mock.Anything, []string{
+			buildChannelRemovePath("channel-1"),
+			buildChannelRemovePath("channel-2"),
+		}).Return([]string{NonRemoveFlagTomestone, RemoveFlagTomestone}, nil)
+		txn.EXPECT().MultiLoad(mock.Anything, []string{
+			buildChannelRemovePath("channel-3"),
+			buildChannelRemovePath("channel-4"),
+		}).Return(nil, loadErr)
+
+		catalog := NewCatalog(txn, rootPath, "")
+		existence, err := catalog.LoadChannelExistence(
+			context.TODO(),
+			[]string{"channel-1", "channel-2", "channel-3", "channel-4"},
+		)
+		assert.Equal(t, map[string]bool{"channel-1": true, "channel-2": false}, existence)
+		assert.ErrorIs(t, err, loadErr)
+	})
+
+	t.Run("malformed batch response", func(t *testing.T) {
+		txn := mocks.NewMetaKv(t)
+		txn.EXPECT().MaxTxnOps().Return(64)
+		txn.EXPECT().MultiLoad(mock.Anything, mock.Anything).Return([]string{NonRemoveFlagTomestone}, nil)
+
+		catalog := NewCatalog(txn, rootPath, "")
+		existence, err := catalog.LoadChannelExistence(context.TODO(), []string{"channel-1", "channel-2"})
+		assert.Empty(t, existence)
+		assert.Error(t, err)
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		catalog := NewCatalog(mocks.NewMetaKv(t), rootPath, "")
+		existence, err := catalog.LoadChannelExistence(context.TODO(), nil)
+		require.NoError(t, err)
+		assert.Empty(t, existence)
+	})
 }
 
 func Test_parseBinlogKey(t *testing.T) {
@@ -1158,6 +1230,45 @@ func TestCatalog_DropIndex(t *testing.T) {
 	})
 }
 
+func TestCatalog_DropIndexes(t *testing.T) {
+	oldLimit := paramtable.Get().MetaStoreCfg.MaxEtcdTxnNum.SwapTempValue("2")
+	t.Cleanup(func() {
+		paramtable.Get().MetaStoreCfg.MaxEtcdTxnNum.SwapTempValue(oldLimit)
+	})
+
+	indexes := []*model.Index{
+		{CollectionID: 1, IndexID: 10},
+		{CollectionID: 2, IndexID: 20},
+		{CollectionID: 3, IndexID: 30},
+	}
+
+	t.Run("bounded exact keys", func(t *testing.T) {
+		metakv := mocks.NewMetaKv(t)
+		var calls [][]string
+		metakv.EXPECT().MultiRemove(mock.Anything, mock.Anything).RunAndReturn(
+			func(_ context.Context, keys []string) error {
+				calls = append(calls, append([]string(nil), keys...))
+				return nil
+			}).Times(2)
+		catalog := &Catalog{MetaKv: metakv}
+
+		err := catalog.DropIndexes(context.Background(), indexes)
+
+		require.NoError(t, err)
+		require.Len(t, calls, 2)
+		assert.Equal(t, []string{BuildIndexKey(1, 10), BuildIndexKey(2, 20)}, calls[0])
+		assert.Equal(t, []string{BuildIndexKey(3, 30)}, calls[1])
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		metakv := mocks.NewMetaKv(t)
+		metakv.EXPECT().MultiRemove(mock.Anything, mock.Anything).Return(errors.New("batch remove failed")).Once()
+		catalog := &Catalog{MetaKv: metakv}
+
+		assert.Error(t, catalog.DropIndexes(context.Background(), indexes))
+	})
+}
+
 func TestCatalog_CreateSegmentIndex(t *testing.T) {
 	segIdx := &model.SegmentIndex{
 		SegmentID:           1,
@@ -1364,6 +1475,48 @@ func TestCatalog_DropSegmentIndex(t *testing.T) {
 
 		err := catalog.DropSegmentIndex(context.Background(), 0, 0, 0, 0)
 		assert.Error(t, err)
+	})
+}
+
+func TestCatalog_DropSegmentIndexes(t *testing.T) {
+	oldLimit := paramtable.Get().MetaStoreCfg.MaxEtcdTxnNum.SwapTempValue("2")
+	t.Cleanup(func() {
+		paramtable.Get().MetaStoreCfg.MaxEtcdTxnNum.SwapTempValue(oldLimit)
+	})
+
+	indexes := []*model.SegmentIndex{
+		{CollectionID: 1, PartitionID: 10, SegmentID: 100, BuildID: 1000},
+		{CollectionID: 2, PartitionID: 20, SegmentID: 200, BuildID: 2000},
+		{CollectionID: 3, PartitionID: 30, SegmentID: 300, BuildID: 3000},
+	}
+
+	t.Run("bounded exact keys", func(t *testing.T) {
+		metakv := mocks.NewMetaKv(t)
+		var calls [][]string
+		metakv.EXPECT().MultiRemove(mock.Anything, mock.Anything).RunAndReturn(
+			func(_ context.Context, keys []string) error {
+				calls = append(calls, append([]string(nil), keys...))
+				return nil
+			}).Times(2)
+		catalog := &Catalog{MetaKv: metakv}
+
+		err := catalog.DropSegmentIndexes(context.Background(), indexes)
+
+		require.NoError(t, err)
+		require.Len(t, calls, 2)
+		assert.Equal(t, []string{
+			BuildSegmentIndexKey(1, 10, 100, 1000),
+			BuildSegmentIndexKey(2, 20, 200, 2000),
+		}, calls[0])
+		assert.Equal(t, []string{BuildSegmentIndexKey(3, 30, 300, 3000)}, calls[1])
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		metakv := mocks.NewMetaKv(t)
+		metakv.EXPECT().MultiRemove(mock.Anything, mock.Anything).Return(errors.New("batch remove failed")).Once()
+		catalog := &Catalog{MetaKv: metakv}
+
+		assert.Error(t, catalog.DropSegmentIndexes(context.Background(), indexes))
 	})
 }
 

@@ -1074,6 +1074,103 @@ func (m *meta) DropSegment(ctx context.Context, segment *SegmentInfo) error {
 	return nil
 }
 
+// DropSegments removes a bounded set of dropped segments in one persistence
+// transaction and publishes the corresponding cache tombstones only after the
+// transaction succeeds. Callers must cap the input at the persistence
+// transaction limit. On etcd, cache revisions avoid normal-path per-key reads;
+// TiKV retains its transactional reads and uses the cache version as a recovery
+// watermark. If one compare fails, candidates are retried as individual
+// conditional deletes so unchanged siblings may progress while changed
+// metadata remains retryable.
+func (m *meta) DropSegments(ctx context.Context, candidates []*SegmentInfo) (int, error) {
+	if len(candidates) == 0 {
+		return 0, nil
+	}
+
+	maxBatchSize := Params.MetaStoreCfg.MaxEtcdTxnNum.GetAsInt()
+	if maxBatchSize <= 0 {
+		maxBatchSize = 64
+	}
+	if len(candidates) > maxBatchSize {
+		return 0, merr.WrapErrServiceInternalMsg(
+			"segment metadata batch size %d exceeds persistence transaction limit %d",
+			len(candidates), maxBatchSize)
+	}
+
+	segments := make([]*SegmentInfo, 0, len(candidates))
+	versions := make([]int64, 0, len(candidates))
+	seen := make(typeutil.UniqueSet)
+	for _, candidate := range candidates {
+		if candidate == nil || seen.Contain(candidate.GetID()) {
+			continue
+		}
+		seen.Insert(candidate.GetID())
+		current, version, exists := m.segments.GetSegmentWithVersion(candidate.GetID())
+		if !exists || current.GetState() != commonpb.SegmentState_Dropped {
+			continue
+		}
+		segments = append(segments, current)
+		versions = append(versions, version)
+	}
+	if len(segments) == 0 {
+		return 0, nil
+	}
+
+	txn := m.segmentPersist.Txn(ctx)
+	for i, segment := range segments {
+		txn.DeleteIfVersion(
+			m.segmentKey(segment.GetCollectionID(), segment.GetPartitionID(), segment.GetID()),
+			versions[i],
+		)
+	}
+	results, err := txn.Commit()
+	if err != nil {
+		if errors.Is(err, ErrKeyNotFound) || errors.Is(err, errKeyVersionChanged) {
+			removed := 0
+			var deleteErr error
+			for i, segment := range segments {
+				singleTxn := m.segmentPersist.Txn(ctx)
+				singleTxn.DeleteIfVersion(
+					m.segmentKey(segment.GetCollectionID(), segment.GetPartitionID(), segment.GetID()),
+					versions[i],
+				)
+				singleResults, singleErr := singleTxn.Commit()
+				if singleErr != nil {
+					if errors.Is(singleErr, ErrKeyNotFound) {
+						m.segments.DropSegment(segment.GetID(), math.MaxInt64)
+						removed++
+						continue
+					}
+					deleteErr = merr.Combine(deleteErr, singleErr)
+					continue
+				}
+				if len(singleResults) != 1 {
+					deleteErr = merr.Combine(deleteErr, merr.WrapErrServiceInternalMsg(
+						"segment metadata conditional delete returned %d results for segment %d",
+						len(singleResults), segment.GetID()))
+					continue
+				}
+				metrics.DataCoordNumSegments.WithLabelValues(segmentMetricLabelValues(segment)...).Dec()
+				m.segments.DropSegment(segment.GetID(), singleResults[0].Version)
+				removed++
+			}
+			return removed, deleteErr
+		}
+		return 0, err
+	}
+	if len(results) != len(segments) {
+		return 0, merr.WrapErrServiceInternalMsg(
+			"segment metadata batch returned %d results for %d deletes",
+			len(results), len(segments))
+	}
+
+	for i, segment := range segments {
+		metrics.DataCoordNumSegments.WithLabelValues(segmentMetricLabelValues(segment)...).Dec()
+		m.segments.DropSegment(segment.GetID(), results[i].Version)
+	}
+	return len(segments), nil
+}
+
 // GetHealthySegment returns segment info with provided id
 // if not segment is found, nil will be returned
 func (m *meta) GetHealthySegment(ctx context.Context, segID UniqueID) *SegmentInfo {

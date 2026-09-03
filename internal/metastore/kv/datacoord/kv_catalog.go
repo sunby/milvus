@@ -59,6 +59,8 @@ type Catalog struct {
 	metaRootpath         string
 }
 
+var _ metastore.DataCoordCatalog = (*Catalog)(nil)
+
 const segmentIndexPaginationSize = 10000
 
 func NewCatalog(MetaKv kv.MetaKv, chunkManagerRootPath string, metaRootpath string) *Catalog {
@@ -834,10 +836,68 @@ func (kc *Catalog) ShouldDropChannel(ctx context.Context, channel string) bool {
 	return true
 }
 
-func (kc *Catalog) ChannelExists(ctx context.Context, channel string) bool {
-	key := buildChannelRemovePath(channel)
-	v, err := kc.MetaKv.Load(ctx, key)
-	return err == nil && v == NonRemoveFlagTomestone
+// LoadChannelExistence loads channel markers with batched exact-key reads.
+// Results are returned for every channel whose batch completed, including
+// missing and removed markers as false. If a backend batch fails, results from
+// other completed batches are retained and the first failure is returned.
+func (kc *Catalog) LoadChannelExistence(ctx context.Context, channels []string) (map[string]bool, error) {
+	existence := make(map[string]bool, len(channels))
+	if len(channels) == 0 {
+		return existence, nil
+	}
+
+	uniqueChannels := make([]string, 0, len(channels))
+	seen := make(map[string]struct{}, len(channels))
+	for _, channel := range channels {
+		if _, ok := seen[channel]; ok {
+			continue
+		}
+		seen[channel] = struct{}{}
+		uniqueChannels = append(uniqueChannels, channel)
+	}
+
+	maxTxnOps := kc.MetaKv.MaxTxnOps()
+	if maxTxnOps <= 0 {
+		return existence, merr.WrapErrServiceInternalMsg(
+			"metadata store returned invalid maximum transaction operations: %d",
+			maxTxnOps,
+		)
+	}
+
+	var firstErr error
+	for start := 0; start < len(uniqueChannels); start += maxTxnOps {
+		end := min(start+maxTxnOps, len(uniqueChannels))
+		batchChannels := uniqueChannels[start:end]
+		keys := make([]string, len(batchChannels))
+		for i, channel := range batchChannels {
+			keys[i] = buildChannelRemovePath(channel)
+		}
+
+		values, err := kc.MetaKv.MultiLoad(ctx, keys)
+		if err != nil && !errors.Is(err, merr.ErrIoKeyNotFound) {
+			if firstErr == nil {
+				firstErr = merr.Wrap(err, "failed to load channel existence batch")
+			}
+			if ctx.Err() != nil {
+				break
+			}
+			continue
+		}
+		if len(values) != len(batchChannels) {
+			if firstErr == nil {
+				firstErr = merr.WrapErrServiceInternalMsg(
+					"channel existence batch returned %d values for %d channels",
+					len(values),
+					len(batchChannels),
+				)
+			}
+			continue
+		}
+		for i, channel := range batchChannels {
+			existence[channel] = values[i] == NonRemoveFlagTomestone
+		}
+	}
+	return existence, firstErr
 }
 
 // DropChannel removes channel remove flag after whole procedure is finished
@@ -993,6 +1053,27 @@ func (kc *Catalog) DropIndex(ctx context.Context, collID typeutil.UniqueID, drop
 	return nil
 }
 
+func (kc *Catalog) DropIndexes(ctx context.Context, indexes []*model.Index) error {
+	keys := make([]string, 0, len(indexes))
+	for _, index := range indexes {
+		if index == nil {
+			continue
+		}
+		keys = append(keys, BuildIndexKey(index.CollectionID, index.IndexID))
+	}
+
+	limit := paramtable.Get().MetaStoreCfg.MaxEtcdTxnNum.GetAsInt()
+	err := etcd.RemoveByBatchWithLimit(keys, limit, func(partialKeys []string) error {
+		return kc.MetaKv.MultiRemove(ctx, partialKeys)
+	})
+	if err != nil {
+		mlog.Error(ctx, "drop collection index metadata in batch failed",
+			mlog.Int("indexCount", len(indexes)),
+			mlog.Err(err))
+	}
+	return err
+}
+
 func (kc *Catalog) CreateSegmentIndex(ctx context.Context, segIdx *model.SegmentIndex) error {
 	key := BuildSegmentIndexKey(segIdx.CollectionID, segIdx.PartitionID, segIdx.SegmentID, segIdx.BuildID)
 	value, err := proto.Marshal(model.MarshalSegmentIndexModel(segIdx))
@@ -1070,6 +1151,32 @@ func (kc *Catalog) DropSegmentIndex(ctx context.Context, collID, partID, segID, 
 	}
 
 	return nil
+}
+
+func (kc *Catalog) DropSegmentIndexes(ctx context.Context, indexes []*model.SegmentIndex) error {
+	keys := make([]string, 0, len(indexes))
+	for _, index := range indexes {
+		if index == nil {
+			continue
+		}
+		keys = append(keys, BuildSegmentIndexKey(
+			index.CollectionID,
+			index.PartitionID,
+			index.SegmentID,
+			index.BuildID,
+		))
+	}
+
+	limit := paramtable.Get().MetaStoreCfg.MaxEtcdTxnNum.GetAsInt()
+	err := etcd.RemoveByBatchWithLimit(keys, limit, func(partialKeys []string) error {
+		return kc.MetaKv.MultiRemove(ctx, partialKeys)
+	})
+	if err != nil {
+		mlog.Error(ctx, "drop segment index metadata in batch failed",
+			mlog.Int("indexCount", len(indexes)),
+			mlog.Err(err))
+	}
+	return err
 }
 
 func (kc *Catalog) SaveImportJob(ctx context.Context, job *datapb.ImportJob) error {

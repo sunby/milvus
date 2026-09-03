@@ -3,9 +3,11 @@ package datacoord
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tikverr "github.com/tikv/client-go/v2/error"
@@ -25,8 +27,9 @@ import (
 )
 
 var (
-	ErrKeyAlreadyExists = fmt.Errorf("key already exists")
-	ErrKeyNotFound      = fmt.Errorf("key not found")
+	ErrKeyAlreadyExists  = fmt.Errorf("key already exists")
+	ErrKeyNotFound       = fmt.Errorf("key not found")
+	errKeyVersionChanged = errors.New("key version changed")
 )
 
 // OptimisticTxnPersist is a persist layer that uses optimistic transactions.
@@ -48,8 +51,14 @@ type Txn[K comparable, V any] interface {
 	Upsert(key K, value V, f UpdateFunc[V])
 	// Delete adds a delete for a key that must exist.
 	Delete(key K)
+	// DeleteIfVersion adds a delete guarded by the supplied persistence version.
+	// Etcd and the memory backend use an exact revision; TiKV recovery supplies
+	// a snapshot watermark and rejects values committed after that watermark. A
+	// non-positive version uses Delete semantics and discovers a revision by read.
+	DeleteIfVersion(key K, version int64)
 	// Commit executes all operations atomically. Returns results in the order ops were added.
-	// On CAS failure, retries automatically (re-reads and re-applies UpdateFuncs).
+	// On a refreshable CAS failure, retries automatically (re-reads and reapplies
+	// UpdateFuncs). A fixed DeleteIfVersion mismatch is returned to the caller.
 	Commit() ([]TxnResult[V], error)
 }
 
@@ -118,6 +127,7 @@ type txnOp[K comparable, V any] struct {
 	key        K
 	value      V             // used by Insert, Upsert (insert case)
 	updateFunc UpdateFunc[V] // used by Update, Upsert (update case)
+	version    int64         // optional persistence revision for Delete
 }
 
 // ============================================================
@@ -186,6 +196,10 @@ func (t *etcdTxn[K, V]) Delete(key K) {
 	t.ops = append(t.ops, txnOp[K, V]{kind: opDelete, key: key})
 }
 
+func (t *etcdTxn[K, V]) DeleteIfVersion(key K, version int64) {
+	t.ops = append(t.ops, txnOp[K, V]{kind: opDelete, key: key, version: version})
+}
+
 func (t *etcdTxn[K, V]) Commit() ([]TxnResult[V], error) {
 	results := make([]TxnResult[V], len(t.ops))
 
@@ -206,6 +220,13 @@ func (t *etcdTxn[K, V]) Commit() ([]TxnResult[V], error) {
 func (t *etcdTxn[K, V]) commitBatch(ops []txnOp[K, V], results []TxnResult[V]) error {
 	commitStart := time.Now()
 	retryCount := 0
+	hasVersionedDelete := false
+	for _, op := range ops {
+		if op.kind == opDelete && op.version > 0 {
+			hasVersionedDelete = true
+			break
+		}
+	}
 
 	return retry.Do(t.ctx, func() error {
 		retryCount++
@@ -299,6 +320,12 @@ func (t *etcdTxn[K, V]) commitBatch(ops []txnOp[K, V], results []TxnResult[V]) e
 				written[i] = true
 
 			case opDelete:
+				if op.version > 0 {
+					cmps = append(cmps, clientv3.Compare(clientv3.ModRevision(keyStr), "=", op.version))
+					putOps = append(putOps, clientv3.OpDelete(keyStr))
+					written[i] = true
+					continue
+				}
 				resp, err := t.persist.cli.Get(t.ctx, keyStr, clientv3.WithSerializable(), clientv3.WithKeysOnly())
 				if err != nil {
 					return err
@@ -345,6 +372,39 @@ func (t *etcdTxn[K, V]) commitBatch(ops []txnOp[K, V], results []TxnResult[V]) e
 			return err
 		}
 		if !txnResp.Succeeded {
+			if hasVersionedDelete {
+				missing := false
+				for _, op := range ops {
+					if op.kind != opDelete || op.version <= 0 {
+						continue
+					}
+					resp, err := t.persist.cli.Get(
+						t.ctx,
+						string(op.key),
+						clientv3.WithSerializable(),
+						clientv3.WithKeysOnly(),
+					)
+					if err != nil {
+						return err
+					}
+					if len(resp.Kvs) == 0 {
+						missing = true
+						continue
+					}
+					if resp.Kvs[0].ModRevision != op.version {
+						return retry.Unrecoverable(fmt.Errorf(
+							"%w: %s expected revision %d, got %d",
+							errKeyVersionChanged,
+							op.key,
+							op.version,
+							resp.Kvs[0].ModRevision,
+						))
+					}
+				}
+				if missing {
+					return retry.Unrecoverable(fmt.Errorf("%w: conditional delete target is absent", ErrKeyNotFound))
+				}
+			}
 			return fmt.Errorf("CAS failed, concurrent modification")
 		}
 		for i := range ops {
@@ -385,17 +445,25 @@ func (p *tikvPersist[K, V]) captureCommitTS(txn interface{ SetCommitCallback(fun
 	return &commitTS
 }
 
-func (p *tikvPersist[K, V]) tikvKeyExists(ctx context.Context, txn interface {
+func (p *tikvPersist[K, V]) tikvKeyEntry(ctx context.Context, txn interface {
 	Get(context.Context, []byte, ...tikvkv.GetOption) (tikvkv.ValueEntry, error)
-}, key []byte) ([]byte, bool, error) {
-	entry, err := txn.Get(ctx, key)
+}, key []byte, returnCommitTS bool) (tikvkv.ValueEntry, bool, error) {
+	var options []tikvkv.GetOption
+	if returnCommitTS {
+		options = append(options, tikvkv.WithReturnCommitTS())
+	}
+	entry, err := txn.Get(ctx, key, options...)
 	if err != nil {
 		if tikverr.IsErrNotFound(err) {
-			return nil, false, nil
+			return tikvkv.ValueEntry{}, false, nil
 		}
-		return nil, false, err
+		return tikvkv.ValueEntry{}, false, err
 	}
-	return entry.Value, true, nil
+	return entry, true, nil
+}
+
+func tikvDeleteVersionChanged(cacheVersion int64, entryCommitTS uint64) bool {
+	return cacheVersion > 0 && entryCommitTS > uint64(cacheVersion)
 }
 
 func (p *tikvPersist[K, V]) Scan(ctx context.Context, prefix K) ([]K, []V, []int64, error) {
@@ -455,6 +523,10 @@ func (t *tikvTxn[K, V]) Delete(key K) {
 	t.ops = append(t.ops, txnOp[K, V]{kind: opDelete, key: key})
 }
 
+func (t *tikvTxn[K, V]) DeleteIfVersion(key K, version int64) {
+	t.ops = append(t.ops, txnOp[K, V]{kind: opDelete, key: key, version: version})
+}
+
 func (t *tikvTxn[K, V]) Commit() ([]TxnResult[V], error) {
 	results := make([]TxnResult[V], len(t.ops))
 
@@ -468,10 +540,11 @@ func (t *tikvTxn[K, V]) Commit() ([]TxnResult[V], error) {
 		anyWrite := false
 		for i, op := range t.ops {
 			keyBytes := []byte(op.key)
-			val, exists, err := t.persist.tikvKeyExists(t.ctx, txn, keyBytes)
+			entry, exists, err := t.persist.tikvKeyEntry(t.ctx, txn, keyBytes, op.kind == opDelete && op.version > 0)
 			if err != nil {
 				return err
 			}
+			val := entry.Value
 
 			switch op.kind {
 			case opInsert:
@@ -546,6 +619,22 @@ func (t *tikvTxn[K, V]) Commit() ([]TxnResult[V], error) {
 				if !exists {
 					return retry.Unrecoverable(fmt.Errorf("%w: %s", ErrKeyNotFound, string(op.key)))
 				}
+				// TiKV Scan publishes the read transaction's StartTS as the cache
+				// version. It is a snapshot watermark, not the key's exact CommitTS:
+				// every value returned by that scan has CommitTS <= StartTS. Later
+				// point updates publish their exact CommitTS, for which the same
+				// inequality also detects a newer persisted value. Do not require
+				// equality here or every segment recovered from TiKV would be
+				// permanently rejected by conditional GC.
+				if tikvDeleteVersionChanged(op.version, entry.CommitTS) {
+					return retry.Unrecoverable(fmt.Errorf(
+							"%w: %s cache watermark %d, newer commit %d",
+						errKeyVersionChanged,
+						string(op.key),
+						op.version,
+						entry.CommitTS,
+					))
+				}
 				if err := txn.Delete(keyBytes); err != nil {
 					return err
 				}
@@ -583,6 +672,7 @@ type memEntry[V any] struct {
 }
 
 type memPersist[K comparable, V any] struct {
+	mu        sync.RWMutex
 	data      map[K]*memEntry[V]
 	nextVer   int64
 	marshaler Marshaler[V]
@@ -610,6 +700,9 @@ func (p *memPersist[K, V]) Txn(ctx context.Context) Txn[K, V] {
 }
 
 func (p *memPersist[K, V]) Scan(ctx context.Context, prefix K) ([]K, []V, []int64, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
 	prefixStr := fmt.Sprintf("%v", prefix)
 	var ks []K
 	var vals []V
@@ -650,8 +743,15 @@ func (t *memTxn[K, V]) Delete(key K) {
 	t.ops = append(t.ops, txnOp[K, V]{kind: opDelete, key: key})
 }
 
+func (t *memTxn[K, V]) DeleteIfVersion(key K, version int64) {
+	t.ops = append(t.ops, txnOp[K, V]{kind: opDelete, key: key, version: version})
+}
+
 func (t *memTxn[K, V]) Commit() ([]TxnResult[V], error) {
 	p := t.persist
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	// Validate all ops first (don't partially apply).
 	for _, op := range t.ops {
 		switch op.kind {
@@ -664,8 +764,18 @@ func (t *memTxn[K, V]) Commit() ([]TxnResult[V], error) {
 				return nil, fmt.Errorf("%w: %v", ErrKeyNotFound, op.key)
 			}
 		case opDelete:
-			if _, ok := p.data[op.key]; !ok {
+			entry, ok := p.data[op.key]
+			if !ok {
 				return nil, fmt.Errorf("%w: %v", ErrKeyNotFound, op.key)
+			}
+			if op.version > 0 && entry.version != op.version {
+				return nil, fmt.Errorf(
+					"%w: %v expected %d, got %d",
+					errKeyVersionChanged,
+					op.key,
+					op.version,
+					entry.version,
+				)
 			}
 		case opUpsert:
 			// always valid

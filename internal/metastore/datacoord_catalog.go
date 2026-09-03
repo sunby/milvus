@@ -88,7 +88,7 @@ type DataCoordCatalog interface {
 	// TODO: From MarkChannelAdded to DropChannel, it's totally a redundant design by now, remove it in future.
 	MarkChannelAdded(ctx context.Context, channel string) error
 	ShouldDropChannel(ctx context.Context, channel string) bool
-	ChannelExists(ctx context.Context, channel string) bool
+	LoadChannelExistence(ctx context.Context, channels []string) (map[string]bool, error)
 	DropChannel(ctx context.Context, channel string) error
 
 	ListChannelCheckpoint(ctx context.Context) (map[string]*msgpb.MsgPosition, error)
@@ -100,12 +100,14 @@ type DataCoordCatalog interface {
 	ListIndexes(ctx context.Context) ([]*model.Index, error)
 	AlterIndexes(ctx context.Context, newIndexes []*model.Index) error
 	DropIndex(ctx context.Context, collID, dropIdxID typeutil.UniqueID) error
+	DropIndexes(ctx context.Context, indexes []*model.Index) error
 
 	CreateSegmentIndex(ctx context.Context, segIdx *model.SegmentIndex) error
 	ListSegmentIndexes(ctx context.Context, collectionID int64) ([]*model.SegmentIndex, error)
 	ListPartitionSegmentIndexes(ctx context.Context, collectionID, partitionID int64) ([]*model.SegmentIndex, error)
 	AlterSegmentIndexes(ctx context.Context, newSegIdxes []*model.SegmentIndex) error
 	DropSegmentIndex(ctx context.Context, collID, partID, segID, buildID typeutil.UniqueID) error
+	DropSegmentIndexes(ctx context.Context, indexes []*model.SegmentIndex) error
 
 	SaveImportJob(ctx context.Context, job *datapb.ImportJob) error
 	ListImportJobs(ctx context.Context) ([]*datapb.ImportJob, error)

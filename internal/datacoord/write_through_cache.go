@@ -36,12 +36,19 @@ func NewCache[K comparable, V any](cloneFn func(V) V) *Cache[K, V] {
 
 // Lookup returns the cached value. Returns (zero, false) if not found or tombstone.
 func (c *Cache[K, V]) Lookup(key K) (V, bool) {
+	value, _, ok := c.LookupWithVersion(key)
+	return value, ok
+}
+
+// LookupWithVersion returns the cached value and the persistence revision that
+// published it. Tombstones and missing entries return ok=false.
+func (c *Cache[K, V]) LookupWithVersion(key K) (V, int64, bool) {
 	var zero V
 	entry, ok := c.entries.Get(key)
 	if !ok || entry.deleted {
-		return zero, false
+		return zero, 0, false
 	}
-	return entry.value, true
+	return entry.value, entry.version, true
 }
 
 // Insert creates or overwrites an entry with the given version.

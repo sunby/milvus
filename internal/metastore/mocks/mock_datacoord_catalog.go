@@ -230,53 +230,6 @@ func (_c *DataCoordCatalog_AlterSegments_Call) RunAndReturn(run func(context.Con
 	return _c
 }
 
-// ChannelExists provides a mock function with given fields: ctx, channel
-func (_m *DataCoordCatalog) ChannelExists(ctx context.Context, channel string) bool {
-	ret := _m.Called(ctx, channel)
-
-	if len(ret) == 0 {
-		panic("no return value specified for ChannelExists")
-	}
-
-	var r0 bool
-	if rf, ok := ret.Get(0).(func(context.Context, string) bool); ok {
-		r0 = rf(ctx, channel)
-	} else {
-		r0 = ret.Get(0).(bool)
-	}
-
-	return r0
-}
-
-// DataCoordCatalog_ChannelExists_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ChannelExists'
-type DataCoordCatalog_ChannelExists_Call struct {
-	*mock.Call
-}
-
-// ChannelExists is a helper method to define mock.On call
-//   - ctx context.Context
-//   - channel string
-func (_e *DataCoordCatalog_Expecter) ChannelExists(ctx interface{}, channel interface{}) *DataCoordCatalog_ChannelExists_Call {
-	return &DataCoordCatalog_ChannelExists_Call{Call: _e.mock.On("ChannelExists", ctx, channel)}
-}
-
-func (_c *DataCoordCatalog_ChannelExists_Call) Run(run func(ctx context.Context, channel string)) *DataCoordCatalog_ChannelExists_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(context.Context), args[1].(string))
-	})
-	return _c
-}
-
-func (_c *DataCoordCatalog_ChannelExists_Call) Return(_a0 bool) *DataCoordCatalog_ChannelExists_Call {
-	_c.Call.Return(_a0)
-	return _c
-}
-
-func (_c *DataCoordCatalog_ChannelExists_Call) RunAndReturn(run func(context.Context, string) bool) *DataCoordCatalog_ChannelExists_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
 // CreateIndex provides a mock function with given fields: ctx, index
 func (_m *DataCoordCatalog) CreateIndex(ctx context.Context, index *model.Index) error {
 	ret := _m.Called(ctx, index)
@@ -986,6 +939,53 @@ func (_c *DataCoordCatalog_DropIndex_Call) RunAndReturn(run func(context.Context
 	return _c
 }
 
+// DropIndexes provides a mock function with given fields: ctx, indexes
+func (_m *DataCoordCatalog) DropIndexes(ctx context.Context, indexes []*model.Index) error {
+	ret := _m.Called(ctx, indexes)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DropIndexes")
+	}
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, []*model.Index) error); ok {
+		r0 = rf(ctx, indexes)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
+// DataCoordCatalog_DropIndexes_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DropIndexes'
+type DataCoordCatalog_DropIndexes_Call struct {
+	*mock.Call
+}
+
+// DropIndexes is a helper method to define mock.On call
+//   - ctx context.Context
+//   - indexes []*model.Index
+func (_e *DataCoordCatalog_Expecter) DropIndexes(ctx interface{}, indexes interface{}) *DataCoordCatalog_DropIndexes_Call {
+	return &DataCoordCatalog_DropIndexes_Call{Call: _e.mock.On("DropIndexes", ctx, indexes)}
+}
+
+func (_c *DataCoordCatalog_DropIndexes_Call) Run(run func(ctx context.Context, indexes []*model.Index)) *DataCoordCatalog_DropIndexes_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].([]*model.Index))
+	})
+	return _c
+}
+
+func (_c *DataCoordCatalog_DropIndexes_Call) Return(_a0 error) *DataCoordCatalog_DropIndexes_Call {
+	_c.Call.Return(_a0)
+	return _c
+}
+
+func (_c *DataCoordCatalog_DropIndexes_Call) RunAndReturn(run func(context.Context, []*model.Index) error) *DataCoordCatalog_DropIndexes_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // DropPreImportTask provides a mock function with given fields: ctx, taskID
 func (_m *DataCoordCatalog) DropPreImportTask(ctx context.Context, taskID int64) error {
 	ret := _m.Called(ctx, taskID)
@@ -1126,6 +1126,53 @@ func (_c *DataCoordCatalog_DropSegmentIndex_Call) Return(_a0 error) *DataCoordCa
 }
 
 func (_c *DataCoordCatalog_DropSegmentIndex_Call) RunAndReturn(run func(context.Context, int64, int64, int64, int64) error) *DataCoordCatalog_DropSegmentIndex_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DropSegmentIndexes provides a mock function with given fields: ctx, indexes
+func (_m *DataCoordCatalog) DropSegmentIndexes(ctx context.Context, indexes []*model.SegmentIndex) error {
+	ret := _m.Called(ctx, indexes)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DropSegmentIndexes")
+	}
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, []*model.SegmentIndex) error); ok {
+		r0 = rf(ctx, indexes)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
+// DataCoordCatalog_DropSegmentIndexes_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DropSegmentIndexes'
+type DataCoordCatalog_DropSegmentIndexes_Call struct {
+	*mock.Call
+}
+
+// DropSegmentIndexes is a helper method to define mock.On call
+//   - ctx context.Context
+//   - indexes []*model.SegmentIndex
+func (_e *DataCoordCatalog_Expecter) DropSegmentIndexes(ctx interface{}, indexes interface{}) *DataCoordCatalog_DropSegmentIndexes_Call {
+	return &DataCoordCatalog_DropSegmentIndexes_Call{Call: _e.mock.On("DropSegmentIndexes", ctx, indexes)}
+}
+
+func (_c *DataCoordCatalog_DropSegmentIndexes_Call) Run(run func(ctx context.Context, indexes []*model.SegmentIndex)) *DataCoordCatalog_DropSegmentIndexes_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].([]*model.SegmentIndex))
+	})
+	return _c
+}
+
+func (_c *DataCoordCatalog_DropSegmentIndexes_Call) Return(_a0 error) *DataCoordCatalog_DropSegmentIndexes_Call {
+	_c.Call.Return(_a0)
+	return _c
+}
+
+func (_c *DataCoordCatalog_DropSegmentIndexes_Call) RunAndReturn(run func(context.Context, []*model.SegmentIndex) error) *DataCoordCatalog_DropSegmentIndexes_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -2493,6 +2540,65 @@ func (_c *DataCoordCatalog_ListStatsTasks_Call) Return(_a0 []*indexpb.StatsTask,
 }
 
 func (_c *DataCoordCatalog_ListStatsTasks_Call) RunAndReturn(run func(context.Context) ([]*indexpb.StatsTask, error)) *DataCoordCatalog_ListStatsTasks_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// LoadChannelExistence provides a mock function with given fields: ctx, channels
+func (_m *DataCoordCatalog) LoadChannelExistence(ctx context.Context, channels []string) (map[string]bool, error) {
+	ret := _m.Called(ctx, channels)
+
+	if len(ret) == 0 {
+		panic("no return value specified for LoadChannelExistence")
+	}
+
+	var r0 map[string]bool
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, []string) (map[string]bool, error)); ok {
+		return rf(ctx, channels)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, []string) map[string]bool); ok {
+		r0 = rf(ctx, channels)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(map[string]bool)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, []string) error); ok {
+		r1 = rf(ctx, channels)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// DataCoordCatalog_LoadChannelExistence_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'LoadChannelExistence'
+type DataCoordCatalog_LoadChannelExistence_Call struct {
+	*mock.Call
+}
+
+// LoadChannelExistence is a helper method to define mock.On call
+//   - ctx context.Context
+//   - channels []string
+func (_e *DataCoordCatalog_Expecter) LoadChannelExistence(ctx interface{}, channels interface{}) *DataCoordCatalog_LoadChannelExistence_Call {
+	return &DataCoordCatalog_LoadChannelExistence_Call{Call: _e.mock.On("LoadChannelExistence", ctx, channels)}
+}
+
+func (_c *DataCoordCatalog_LoadChannelExistence_Call) Run(run func(ctx context.Context, channels []string)) *DataCoordCatalog_LoadChannelExistence_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].([]string))
+	})
+	return _c
+}
+
+func (_c *DataCoordCatalog_LoadChannelExistence_Call) Return(_a0 map[string]bool, _a1 error) *DataCoordCatalog_LoadChannelExistence_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *DataCoordCatalog_LoadChannelExistence_Call) RunAndReturn(run func(context.Context, []string) (map[string]bool, error)) *DataCoordCatalog_LoadChannelExistence_Call {
 	_c.Call.Return(run)
 	return _c
 }
