@@ -88,11 +88,7 @@ func TestAssignmentService(t *testing.T) {
 	// Test illegal replicate configuration
 	cfg := &commonpb.ReplicateConfiguration{}
 	b.EXPECT().GetLatestChannelAssignment().Return(&balancer.WatchChannelAssignmentsCallbackParam{
-		PChannelView: &channel.PChannelView{
-			Channels: map[channel.ChannelID]*channel.PChannelMeta{
-				{Name: "by-dev-1"}: channel.NewPChannelMeta("by-dev-1", types.AccessModeRW),
-			},
-		},
+		PChannels: []string{"by-dev-1"},
 	}, nil).Maybe()
 	_, err = as.UpdateReplicateConfiguration(context.Background(), &streamingpb.UpdateReplicateConfigurationRequest{
 		Configuration: cfg,
@@ -119,11 +115,7 @@ func TestAssignmentService(t *testing.T) {
 	// Test idempotent
 	b.EXPECT().GetLatestChannelAssignment().Unset()
 	b.EXPECT().GetLatestChannelAssignment().Return(&balancer.WatchChannelAssignmentsCallbackParam{
-		PChannelView: &channel.PChannelView{
-			Channels: map[channel.ChannelID]*channel.PChannelMeta{
-				{Name: "by-dev-1"}: channel.NewPChannelMeta("by-dev-1", types.AccessModeRW),
-			},
-		},
+		PChannels:              []string{"by-dev-1"},
 		ReplicateConfiguration: cfg,
 	}, nil).Maybe()
 	_, err = as.UpdateReplicateConfiguration(context.Background(), &streamingpb.UpdateReplicateConfigurationRequest{
@@ -145,11 +137,7 @@ func TestAssignmentService(t *testing.T) {
 	// Test update on secondary path, it should be block until the replicate configuration is changed.
 	b.EXPECT().GetLatestChannelAssignment().Unset()
 	b.EXPECT().GetLatestChannelAssignment().Return(&balancer.WatchChannelAssignmentsCallbackParam{
-		PChannelView: &channel.PChannelView{
-			Channels: map[channel.ChannelID]*channel.PChannelMeta{
-				{Name: "by-dev-1"}: channel.NewPChannelMeta("by-dev-1", types.AccessModeRW),
-			},
-		},
+		PChannels: []string{"by-dev-1"},
 		ReplicateConfiguration: &commonpb.ReplicateConfiguration{
 			Clusters: []*commonpb.MilvusCluster{
 				{ClusterId: "by-dev", Pchannels: []string{"by-dev-1"}, ConnectionParam: &commonpb.ConnectionParam{Uri: "http://test:19530", Token: "by-dev"}},
@@ -267,11 +255,7 @@ func TestForcePromoteOnPrimaryCluster(t *testing.T) {
 	b.EXPECT().Close().Return().Maybe()
 	// Current cluster is a primary
 	b.EXPECT().GetLatestChannelAssignment().Return(&balancer.WatchChannelAssignmentsCallbackParam{
-		PChannelView: &channel.PChannelView{
-			Channels: map[channel.ChannelID]*channel.PChannelMeta{
-				{Name: "by-dev-1"}: channel.NewPChannelMeta("by-dev-1", types.AccessModeRW),
-			},
-		},
+		PChannels: []string{"by-dev-1"},
 	}, nil).Maybe()
 	balance.Register(b)
 
@@ -320,11 +304,7 @@ func TestForcePromoteSuccess(t *testing.T) {
 		},
 	}
 	b.EXPECT().GetLatestChannelAssignment().Return(&balancer.WatchChannelAssignmentsCallbackParam{
-		PChannelView: &channel.PChannelView{
-			Channels: map[channel.ChannelID]*channel.PChannelMeta{
-				{Name: "by-dev-1"}: channel.NewPChannelMeta("by-dev-1", types.AccessModeRW),
-			},
-		},
+		PChannels:              []string{"by-dev-1"},
 		ReplicateConfiguration: currentReplicateConfig,
 	}, nil).Maybe()
 	balance.Register(b)
@@ -391,11 +371,7 @@ func TestForcePromoteIdempotent(t *testing.T) {
 		},
 	}
 	b.EXPECT().GetLatestChannelAssignment().Return(&balancer.WatchChannelAssignmentsCallbackParam{
-		PChannelView: &channel.PChannelView{
-			Channels: map[channel.ChannelID]*channel.PChannelMeta{
-				{Name: "by-dev-1"}: channel.NewPChannelMeta("by-dev-1", types.AccessModeRW),
-			},
-		},
+		PChannels:              []string{"by-dev-1"},
 		ReplicateConfiguration: alreadyPromotedConfig,
 	}, nil).Maybe()
 	balance.Register(b)
@@ -546,11 +522,7 @@ func TestForcePromoteBroadcastOtherError(t *testing.T) {
 	b.EXPECT().Close().Return().Maybe()
 
 	b.EXPECT().GetLatestChannelAssignment().Return(&balancer.WatchChannelAssignmentsCallbackParam{
-		PChannelView: &channel.PChannelView{
-			Channels: map[channel.ChannelID]*channel.PChannelMeta{
-				{Name: "by-dev-1"}: channel.NewPChannelMeta("by-dev-1", types.AccessModeRW),
-			},
-		},
+		PChannels: []string{"by-dev-1"},
 	}, nil).Maybe()
 	balance.Register(b)
 
@@ -597,11 +569,7 @@ func TestForcePromoteBroadcastAppendError(t *testing.T) {
 		},
 	}
 	b.EXPECT().GetLatestChannelAssignment().Return(&balancer.WatchChannelAssignmentsCallbackParam{
-		PChannelView: &channel.PChannelView{
-			Channels: map[channel.ChannelID]*channel.PChannelMeta{
-				{Name: "by-dev-1"}: channel.NewPChannelMeta("by-dev-1", types.AccessModeRW),
-			},
-		},
+		PChannels:              []string{"by-dev-1"},
 		ReplicateConfiguration: currentReplicateConfig,
 	}, nil).Maybe()
 	balance.Register(b)
@@ -701,11 +669,7 @@ func TestUpdateReplicateConfigNonPrimaryBroadcastError(t *testing.T) {
 	}).Maybe()
 	b.EXPECT().Close().Return().Maybe()
 	b.EXPECT().GetLatestChannelAssignment().Return(&balancer.WatchChannelAssignmentsCallbackParam{
-		PChannelView: &channel.PChannelView{
-			Channels: map[channel.ChannelID]*channel.PChannelMeta{
-				{Name: "by-dev-1"}: channel.NewPChannelMeta("by-dev-1", types.AccessModeRW),
-			},
-		},
+		PChannels: []string{"by-dev-1"},
 	}, nil).Maybe()
 	balance.Register(b)
 
@@ -757,11 +721,7 @@ func TestUpdateReplicateConfigBroadcastError(t *testing.T) {
 	}).Maybe()
 	b.EXPECT().Close().Return().Maybe()
 	b.EXPECT().GetLatestChannelAssignment().Return(&balancer.WatchChannelAssignmentsCallbackParam{
-		PChannelView: &channel.PChannelView{
-			Channels: map[channel.ChannelID]*channel.PChannelMeta{
-				{Name: "by-dev-1"}: channel.NewPChannelMeta("by-dev-1", types.AccessModeRW),
-			},
-		},
+		PChannels: []string{"by-dev-1"},
 	}, nil).Maybe()
 	balance.Register(b)
 
@@ -834,20 +794,12 @@ func TestUpdateReplicateConfigSecondValidateSameConfig(t *testing.T) {
 		if callCount <= 1 {
 			// First call: config is different (nil)
 			return &balancer.WatchChannelAssignmentsCallbackParam{
-				PChannelView: &channel.PChannelView{
-					Channels: map[channel.ChannelID]*channel.PChannelMeta{
-						{Name: "by-dev-1"}: channel.NewPChannelMeta("by-dev-1", types.AccessModeRW),
-					},
-				},
+				PChannels: []string{"by-dev-1"},
 			}, nil
 		}
 		// Second call: config is now the same (was applied by another path)
 		return &balancer.WatchChannelAssignmentsCallbackParam{
-			PChannelView: &channel.PChannelView{
-				Channels: map[channel.ChannelID]*channel.PChannelMeta{
-					{Name: "by-dev-1"}: channel.NewPChannelMeta("by-dev-1", types.AccessModeRW),
-				},
-			},
+			PChannels:              []string{"by-dev-1"},
 			ReplicateConfiguration: cfg,
 		}, nil
 	})
@@ -1055,11 +1007,7 @@ func TestHandleForcePromoteSameConfigAfterBroadcasterCheck(t *testing.T) {
 	// Return the standalone primary config directly
 	// This tests the idempotent path where config already matches
 	b.EXPECT().GetLatestChannelAssignment().Return(&balancer.WatchChannelAssignmentsCallbackParam{
-		PChannelView: &channel.PChannelView{
-			Channels: map[channel.ChannelID]*channel.PChannelMeta{
-				{Name: "by-dev-1"}: channel.NewPChannelMeta("by-dev-1", types.AccessModeRW),
-			},
-		},
+		PChannels:              []string{"by-dev-1"},
 		ReplicateConfiguration: forcePromoteCfg,
 	}, nil).Maybe()
 	balance.Register(b)
@@ -1106,15 +1054,10 @@ func TestHandleForcePromoteValidatorError(t *testing.T) {
 		return ctx.Err()
 	}).Maybe()
 	b.EXPECT().Close().Return().Maybe()
-	// Return config with extra pchannel in PChannelView that causes validator to fail
-	// PChannelView has 2 pchannels but current config's cluster has only 1
+	// Return an assignment with an extra pchannel that causes validator to fail.
+	// The assignment has 2 pchannels but the current cluster configuration has only 1.
 	b.EXPECT().GetLatestChannelAssignment().Return(&balancer.WatchChannelAssignmentsCallbackParam{
-		PChannelView: &channel.PChannelView{
-			Channels: map[channel.ChannelID]*channel.PChannelMeta{
-				{Name: "by-dev-1"}: channel.NewPChannelMeta("by-dev-1", types.AccessModeRW),
-				{Name: "other-1"}:  channel.NewPChannelMeta("other-1", types.AccessModeRW),
-			},
-		},
+		PChannels: []string{"by-dev-1", "other-1"},
 		ReplicateConfiguration: &commonpb.ReplicateConfiguration{
 			Clusters: []*commonpb.MilvusCluster{
 				{ClusterId: "primary", Pchannels: []string{"primary-1"}, ConnectionParam: &commonpb.ConnectionParam{Uri: "http://primary:19530", Token: "primary"}},
@@ -1169,11 +1112,7 @@ func TestHandleForcePromoteNoCurrentConfig(t *testing.T) {
 	b.EXPECT().Close().Return().Maybe()
 	// Return assignment with nil ReplicateConfiguration
 	b.EXPECT().GetLatestChannelAssignment().Return(&balancer.WatchChannelAssignmentsCallbackParam{
-		PChannelView: &channel.PChannelView{
-			Channels: map[channel.ChannelID]*channel.PChannelMeta{
-				{Name: "by-dev-1"}: channel.NewPChannelMeta("by-dev-1", types.AccessModeRW),
-			},
-		},
+		PChannels:              []string{"by-dev-1"},
 		ReplicateConfiguration: nil, // No config exists
 	}, nil).Maybe()
 	balance.Register(b)
@@ -1220,11 +1159,7 @@ func TestHandleForcePromoteClusterNotFound(t *testing.T) {
 	b.EXPECT().Close().Return().Maybe()
 	// Return config with different cluster ID (not "by-dev")
 	b.EXPECT().GetLatestChannelAssignment().Return(&balancer.WatchChannelAssignmentsCallbackParam{
-		PChannelView: &channel.PChannelView{
-			Channels: map[channel.ChannelID]*channel.PChannelMeta{
-				{Name: "by-dev-1"}: channel.NewPChannelMeta("by-dev-1", types.AccessModeRW),
-			},
-		},
+		PChannels: []string{"by-dev-1"},
 		ReplicateConfiguration: &commonpb.ReplicateConfiguration{
 			Clusters: []*commonpb.MilvusCluster{
 				{ClusterId: "other-cluster", Pchannels: []string{"other-1"}, ConnectionParam: &commonpb.ConnectionParam{Uri: "http://other:19530", Token: "other"}},
@@ -1285,11 +1220,7 @@ func TestSecondValidateNonSameError(t *testing.T) {
 		callCount++
 		if callCount <= 1 {
 			return &balancer.WatchChannelAssignmentsCallbackParam{
-				PChannelView: &channel.PChannelView{
-					Channels: map[channel.ChannelID]*channel.PChannelMeta{
-						{Name: "by-dev-1"}: channel.NewPChannelMeta("by-dev-1", types.AccessModeRW),
-					},
-				},
+				PChannels: []string{"by-dev-1"},
 			}, nil
 		}
 		// Second call after lock: return error
@@ -1389,12 +1320,7 @@ func TestForcePromoteMultiplePChannels(t *testing.T) {
 	}
 	// Multiple pchannels - by-dev-1 matches control channel, by-dev-2 does not
 	b.EXPECT().GetLatestChannelAssignment().Return(&balancer.WatchChannelAssignmentsCallbackParam{
-		PChannelView: &channel.PChannelView{
-			Channels: map[channel.ChannelID]*channel.PChannelMeta{
-				{Name: "by-dev-1"}: channel.NewPChannelMeta("by-dev-1", types.AccessModeRW),
-				{Name: "by-dev-2"}: channel.NewPChannelMeta("by-dev-2", types.AccessModeRW),
-			},
-		},
+		PChannels:              []string{"by-dev-1", "by-dev-2"},
 		ReplicateConfiguration: currentReplicateConfig,
 	}, nil).Maybe()
 	balance.Register(b)

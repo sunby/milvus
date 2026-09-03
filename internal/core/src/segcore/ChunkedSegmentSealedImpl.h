@@ -99,6 +99,33 @@ class PkIndexCell;
 class TimestampData;
 class TimestampIndex;
 
+// Generation-bound facade for JSON key stats. The facade itself is published
+// in RuntimeResourceState; the potentially expensive remote metadata and
+// parquet reader initialization happens on first eligible query access.
+class LazyJsonStats {
+ public:
+    using Loader =
+        std::function<std::shared_ptr<index::JsonKeyStats>(milvus::OpContext*)>;
+
+    LazyJsonStats(int64_t segment_id, FieldId field_id, Loader loader);
+
+    LazyJsonStats(int64_t segment_id,
+                  FieldId field_id,
+                  std::shared_ptr<index::JsonKeyStats> stats);
+
+    ~LazyJsonStats();
+
+    std::shared_ptr<index::JsonKeyStats>
+    Materialize(milvus::OpContext* op_ctx);
+
+    std::shared_ptr<index::JsonKeyStats>
+    MaterializedIfReady() const;
+
+ private:
+    struct State;
+    std::unique_ptr<State> state_;
+};
+
 using namespace milvus::cachinglayer;
 
 // Test-only accessor that simulates v2/v3 segment state (raw timestamp column
@@ -352,8 +379,7 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
         std::unordered_map<FieldId, std::string> text_lob_paths;
         std::unordered_map<FieldId, TextIndexVariant> text_indexes;
         std::vector<JsonIndex> json_indices;
-        std::unordered_map<FieldId, std::shared_ptr<index::JsonKeyStats>>
-            json_stats;
+        std::unordered_map<FieldId, std::shared_ptr<LazyJsonStats>> json_stats;
         std::shared_ptr<milvus_storage::api::Reader> reader;
         std::shared_ptr<TimestampData> timestamps;
         std::shared_ptr<const TimestampIndex> timestamp_index;
@@ -1699,11 +1725,14 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
                        milvus::OpContext* op_ctx = nullptr,
                        PublishMode publish_mode = PublishMode::Drain);
 
-    std::shared_ptr<index::JsonKeyStats>
+    std::shared_ptr<LazyJsonStats>
     BuildJsonKeyStatsIndex(
         milvus::OpContext* op_ctx,
         const std::shared_ptr<milvus::proto::indexcgo::LoadJsonKeyIndexInfo>&
-            info_proto);
+            info_proto,
+        const SegmentLoadInfo& segment_load_info,
+        const SchemaPtr& schema_snapshot,
+        bool lazy_manifest_reader_enabled);
 
     void
     LoadBatchJsonKeyIndexes(
@@ -1713,6 +1742,8 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
             std::shared_ptr<milvus::proto::indexcgo::LoadJsonKeyIndexInfo>>&
             infos,
         const SchemaPtr& schema_snapshot,
+        const SegmentLoadInfo& segment_load_info,
+        bool lazy_manifest_reader_enabled,
         StagedStateCommitter& committer);
 
     template <typename Mutator>
@@ -2690,7 +2721,58 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
         auto current = CapturePublishedState();
         auto next = ClonePublishedState(current);
         auto runtime = CloneRuntimeResourceState(current->runtime);
-        runtime->json_stats[field_id] = std::move(stats);
+        runtime->json_stats[field_id] =
+            std::make_shared<LazyJsonStats>(id_, field_id, std::move(stats));
+        next->runtime = ToConstRuntimeState(std::move(runtime));
+        NormalizePublishedState(*next);
+        PublishStateOnline(std::move(next));
+    }
+
+    void
+    SetLazyJsonStatsForTesting(FieldId field_id, LazyJsonStats::Loader loader) {
+        std::lock_guard<std::mutex> reopen_guard(reopen_mutex_);
+        auto current = CapturePublishedState();
+        auto next = ClonePublishedState(current);
+        auto runtime = CloneRuntimeResourceState(current->runtime);
+        runtime->json_stats[field_id] =
+            std::make_shared<LazyJsonStats>(id_, field_id, std::move(loader));
+        next->runtime = ToConstRuntimeState(std::move(runtime));
+        NormalizePublishedState(*next);
+        PublishStateOnline(std::move(next));
+    }
+
+    bool
+    JsonStatsMaterializedForTesting(FieldId field_id) const {
+        auto runtime = CaptureRuntimeResourceState();
+        auto it = runtime->json_stats.find(field_id);
+        return it != runtime->json_stats.end() && it->second != nullptr &&
+               it->second->MaterializedIfReady() != nullptr;
+    }
+
+    void
+    LoadJsonStatsForTesting(
+        const std::shared_ptr<milvus::proto::indexcgo::LoadJsonKeyIndexInfo>&
+            info,
+        const SegmentLoadInfo& segment_load_info,
+        bool lazy_manifest_reader_enabled) {
+        std::lock_guard<std::mutex> reopen_guard(reopen_mutex_);
+        auto current = CapturePublishedState();
+        auto next = ClonePublishedState(current);
+        auto runtime = CloneRuntimeResourceState(current->runtime);
+        next->load_info =
+            std::make_shared<const SegmentLoadInfo>(segment_load_info);
+        next->runtime = ToConstRuntimeState(runtime);
+        StagedStateCommitter committer(*this, runtime.get(), next.get());
+        std::unordered_map<
+            FieldId,
+            std::shared_ptr<milvus::proto::indexcgo::LoadJsonKeyIndexInfo>>
+            infos{{FieldId(info->fieldid()), info}};
+        LoadBatchJsonKeyIndexes(nullptr,
+                                infos,
+                                current->schema,
+                                segment_load_info,
+                                lazy_manifest_reader_enabled,
+                                committer);
         next->runtime = ToConstRuntimeState(std::move(runtime));
         NormalizePublishedState(*next);
         PublishStateOnline(std::move(next));

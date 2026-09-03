@@ -168,7 +168,206 @@ struct ChunkedSegmentSealedImpl::ColumnSizeEstimateState {
     storagev2translator::ColumnSizeEstimateResult estimate_;
 };
 
+struct LazyJsonStats::State {
+    struct BuildAttempt {
+        std::condition_variable cv;
+        bool done{false};
+        std::exception_ptr error;
+    };
+
+    State(int64_t segment_id, FieldId field_id, Loader loader)
+        : segment_id(segment_id),
+          field_id(field_id),
+          loader(std::move(loader)) {
+    }
+
+    State(int64_t segment_id,
+          FieldId field_id,
+          std::shared_ptr<index::JsonKeyStats> stats)
+        : segment_id(segment_id), field_id(field_id), stats(std::move(stats)) {
+    }
+
+    int64_t segment_id;
+    FieldId field_id;
+    Loader loader;
+    mutable std::mutex mutex;
+    std::shared_ptr<index::JsonKeyStats> stats;
+    std::shared_ptr<BuildAttempt> attempt;
+};
+
+LazyJsonStats::LazyJsonStats(int64_t segment_id,
+                             FieldId field_id,
+                             Loader loader)
+    : state_(std::make_unique<State>(segment_id, field_id, std::move(loader))) {
+}
+
+LazyJsonStats::LazyJsonStats(int64_t segment_id,
+                             FieldId field_id,
+                             std::shared_ptr<index::JsonKeyStats> stats)
+    : state_(std::make_unique<State>(segment_id, field_id, std::move(stats))) {
+}
+
+LazyJsonStats::~LazyJsonStats() = default;
+
+std::shared_ptr<index::JsonKeyStats>
+LazyJsonStats::Materialize(milvus::OpContext* op_ctx) {
+    std::shared_ptr<State::BuildAttempt> attempt;
+    Loader loader;
+    while (true) {
+        CheckCancellation(op_ctx,
+                          state_->segment_id,
+                          state_->field_id.get(),
+                          "LazyJsonStats::Materialize()");
+        std::unique_lock<std::mutex> lock(state_->mutex);
+        if (state_->stats != nullptr) {
+            return state_->stats;
+        }
+        AssertInfo(state_->loader != nullptr,
+                   "json stats loader is null, segment {}, field {}",
+                   state_->segment_id,
+                   state_->field_id.get());
+        if (state_->attempt != nullptr) {
+            attempt = state_->attempt;
+            while (!attempt->done) {
+                attempt->cv.wait_for(lock, std::chrono::milliseconds(20));
+                CheckCancellation(op_ctx,
+                                  state_->segment_id,
+                                  state_->field_id.get(),
+                                  "LazyJsonStats::Materialize()");
+            }
+            if (attempt->error != nullptr) {
+                std::rethrow_exception(attempt->error);
+            }
+            if (state_->stats != nullptr) {
+                return state_->stats;
+            }
+            continue;
+        }
+
+        attempt = std::make_shared<State::BuildAttempt>();
+        state_->attempt = attempt;
+        loader = state_->loader;
+        break;
+    }
+
+    std::shared_ptr<index::JsonKeyStats> stats;
+    std::exception_ptr error;
+    bool cancelled = false;
+    try {
+        stats = loader(op_ctx);
+        AssertInfo(stats != nullptr,
+                   "json stats loader returned null, segment {}, field {}",
+                   state_->segment_id,
+                   state_->field_id.get());
+        CheckCancellation(op_ctx,
+                          state_->segment_id,
+                          state_->field_id.get(),
+                          "LazyJsonStats::Materialize()");
+    } catch (const SegcoreError& e) {
+        cancelled = e.get_error_code() == ErrorCode::FollyCancel;
+        error = std::current_exception();
+    } catch (...) {
+        error = std::current_exception();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        if (error == nullptr) {
+            state_->stats = stats;
+            state_->loader = nullptr;
+        } else if (!cancelled) {
+            attempt->error = error;
+        }
+        attempt->done = true;
+        if (state_->attempt == attempt) {
+            state_->attempt.reset();
+        }
+    }
+    attempt->cv.notify_all();
+    if (error != nullptr) {
+        std::rethrow_exception(error);
+    }
+    return stats;
+}
+
+std::shared_ptr<index::JsonKeyStats>
+LazyJsonStats::MaterializedIfReady() const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->stats;
+}
+
 namespace {
+
+struct JsonStatsBuildContext {
+    int64_t segment_id;
+    FieldId field_id;
+    int64_t build_id;
+    int64_t version;
+    int file_count;
+    std::string base_path;
+    bool enable_mmap;
+    int64_t stats_size;
+    storage::FileManagerContext file_manager_context;
+    milvus::Config config;
+};
+
+std::shared_ptr<index::JsonKeyStats>
+CreateJsonKeyStats(const JsonStatsBuildContext& context,
+                   milvus::OpContext* op_ctx) {
+    CheckCancellation(op_ctx,
+                      context.segment_id,
+                      context.field_id.get(),
+                      "LazyJsonStats::Materialize()");
+    LOG_INFO(
+        "start load json key stats, segment:{}, field:{}, build:{}, "
+        "version:{}, file_count:{}, base_path:{}, enable_mmap:{}, "
+        "stats_size:{}",
+        context.segment_id,
+        context.field_id.get(),
+        context.build_id,
+        context.version,
+        context.file_count,
+        context.base_path,
+        context.enable_mmap,
+        context.stats_size);
+
+    auto index = std::make_shared<milvus::index::JsonKeyStats>(
+        context.file_manager_context, true);
+    milvus::tracer::TraceContext trace_ctx;
+    try {
+        milvus::ScopedTimer timer(
+            "json_stats_load",
+            [](double us) {
+                milvus::monitor::internal_json_stats_latency_load.Observe(
+                    us / 1000.0);
+            },
+            milvus::ScopedTimer::LogLevel::Info);
+        index->Load(trace_ctx, context.config);
+        CheckCancellation(op_ctx,
+                          context.segment_id,
+                          context.field_id.get(),
+                          "LazyJsonStats::Materialize()");
+    } catch (const std::exception& e) {
+        LOG_WARN(
+            "failed load json key stats, segment:{}, field:{}, build:{}, "
+            "version:{}, error:{}",
+            context.segment_id,
+            context.field_id.get(),
+            context.build_id,
+            context.version,
+            e.what());
+        throw;
+    }
+
+    LOG_INFO(
+        "load json key stats success, segment:{}, field:{}, build:{}, "
+        "version:{}",
+        context.segment_id,
+        context.field_id.get(),
+        context.build_id,
+        context.version);
+    return index;
+}
 
 struct ManifestColumnGroupBuildContext {
     int64_t segment_id;
@@ -2405,10 +2604,10 @@ ChunkedSegmentSealedImpl::GetJsonStats(milvus::OpContext* op_ctx,
         return nullptr;
     }
     auto iter = runtime->json_stats.find(field_id);
-    if (iter == runtime->json_stats.end()) {
+    if (iter == runtime->json_stats.end() || iter->second == nullptr) {
         return nullptr;
     }
-    return iter->second;
+    return iter->second->Materialize(op_ctx);
 }
 
 void
@@ -6483,11 +6682,14 @@ ChunkedSegmentSealedImpl::BuildTextIndexFromFiles(
     return cache_slot;
 }
 
-std::shared_ptr<index::JsonKeyStats>
+std::shared_ptr<LazyJsonStats>
 ChunkedSegmentSealedImpl::BuildJsonKeyStatsIndex(
     milvus::OpContext* op_ctx,
     const std::shared_ptr<milvus::proto::indexcgo::LoadJsonKeyIndexInfo>&
-        info_proto) {
+        info_proto,
+    const SegmentLoadInfo& segment_load_info,
+    const SchemaPtr& schema_snapshot,
+    bool lazy_manifest_reader_enabled) {
     auto field_id = milvus::FieldId(info_proto->fieldid());
     CheckCancellation(op_ctx,
                       id_,
@@ -6504,19 +6706,6 @@ ChunkedSegmentSealedImpl::BuildJsonKeyStatsIndex(
             info_proto->version());
         return nullptr;
     }
-
-    LOG_INFO(
-        "start load json key stats, segment:{}, field:{}, build:{}, "
-        "version:{}, "
-        "file_count:{}, base_path:{}, enable_mmap:{}, stats_size:{}",
-        id_,
-        info_proto->fieldid(),
-        info_proto->buildid(),
-        info_proto->version(),
-        info_proto->files_size(),
-        info_proto->base_path(),
-        info_proto->enable_mmap(),
-        info_proto->stats_size());
 
     milvus::storage::FieldDataMeta field_data_meta{info_proto->collectionid(),
                                                    info_proto->partitionid(),
@@ -6552,42 +6741,57 @@ ChunkedSegmentSealedImpl::BuildJsonKeyStatsIndex(
     if (!info_proto->base_path().empty()) {
         config[STATS_BASE_PATH_KEY] = info_proto->base_path();
     }
-    auto load_info_snapshot = CaptureLoadInfoSnapshot();
-    config[JSON_STATS_CACHE_SHARD_KEY] = load_info_snapshot->GetInsertChannel();
+    config[JSON_STATS_CACHE_SHARD_KEY] = segment_load_info.GetInsertChannel();
 
     milvus::storage::FileManagerContext file_ctx(
         field_data_meta, index_meta, remote_chunk_manager, fs);
-    auto index = std::make_shared<milvus::index::JsonKeyStats>(file_ctx, true);
-    milvus::tracer::TraceContext trace_ctx;
-    try {
-        milvus::ScopedTimer timer(
-            "json_stats_load",
-            [](double us) {
-                milvus::monitor::internal_json_stats_latency_load.Observe(
-                    us / 1000.0);
-            },
-            milvus::ScopedTimer::LogLevel::Info);
-        index->Load(trace_ctx, config);
-    } catch (std::exception& e) {
-        LOG_WARN(
-            "failed load json key stats, segment:{}, field:{}, build:{}, "
-            "version:{}, error:{}",
+    auto effective_warmup = getCacheWarmupPolicy(info_proto->warmup_policy(),
+                                                 /*is_vector=*/false,
+                                                 /*is_index=*/false,
+                                                 /*in_load_list=*/true);
+    const bool can_defer =
+        lazy_manifest_reader_enabled &&
+        segment_load_info.GetStorageVersion() == STORAGE_V3 &&
+        segment_load_info.HasManifestPath() &&
+        !schema_snapshot->is_external_collection() &&
+        effective_warmup == CacheWarmupPolicy::CacheWarmupPolicy_Disable;
+    if (can_defer) {
+        // Bind the resolved policy to this generation. A later global config
+        // refresh must not make a published cold facade warm its child caches.
+        config[milvus::index::WARMUP] = "disable";
+    }
+
+    JsonStatsBuildContext build_context{
+        .segment_id = id_,
+        .field_id = field_id,
+        .build_id = info_proto->buildid(),
+        .version = info_proto->version(),
+        .file_count = info_proto->files_size(),
+        .base_path = info_proto->base_path(),
+        .enable_mmap = info_proto->enable_mmap(),
+        .stats_size = info_proto->stats_size(),
+        .file_manager_context = std::move(file_ctx),
+        .config = std::move(config),
+    };
+    auto loader = [context = std::move(build_context)](
+                      milvus::OpContext* materialize_ctx) {
+        return CreateJsonKeyStats(context, materialize_ctx);
+    };
+    auto stats =
+        std::make_shared<LazyJsonStats>(id_, field_id, std::move(loader));
+    if (can_defer) {
+        LOG_INFO(
+            "defer load json key stats until first access, segment:{}, "
+            "field:{}, build:{}, version:{}",
             id_,
             info_proto->fieldid(),
             info_proto->buildid(),
-            info_proto->version(),
-            e.what());
-        throw;
+            info_proto->version());
+        return stats;
     }
 
-    LOG_INFO(
-        "load json key stats success, segment:{}, field:{}, build:{}, "
-        "version:{}",
-        id_,
-        info_proto->fieldid(),
-        info_proto->buildid(),
-        info_proto->version());
-    return index;
+    stats->Materialize(op_ctx);
+    return stats;
 }
 
 void
@@ -6597,19 +6801,25 @@ ChunkedSegmentSealedImpl::LoadBatchJsonKeyIndexes(
         FieldId,
         std::shared_ptr<milvus::proto::indexcgo::LoadJsonKeyIndexInfo>>& infos,
     const SchemaPtr& schema_snapshot,
+    const SegmentLoadInfo& segment_load_info,
+    bool lazy_manifest_reader_enabled,
     StagedStateCommitter& committer) {
     for (const auto& [field_id, info_proto] : infos) {
         AssertInfo(field_exists_in_schema(schema_snapshot, field_id),
                    "field {} not found in schema when loading json stats",
                    field_id.get());
-        auto index = BuildJsonKeyStatsIndex(op_ctx, info_proto);
-        if (index == nullptr) {
+        auto stats = BuildJsonKeyStatsIndex(op_ctx,
+                                            info_proto,
+                                            segment_load_info,
+                                            schema_snapshot,
+                                            lazy_manifest_reader_enabled);
+        if (stats == nullptr) {
             continue;
         }
         committer.Commit(
-            [field_id = field_id, index = std::move(index)](
+            [field_id = field_id, stats = std::move(stats)](
                 RuntimeResourceState& runtime, PublishedSegmentState&) mutable {
-                runtime.json_stats[field_id] = std::move(index);
+                runtime.json_stats[field_id] = std::move(stats);
             });
     }
 }
@@ -8135,6 +8345,8 @@ ChunkedSegmentSealedImpl::PrepareLoadDiffForReopen(
     const SchemaPtr& schema_snapshot,
     StagedStateCommitter& committer) {
     milvus::tracer::TraceContext trace_ctx;
+    const bool lazy_manifest_reader_enabled =
+        segcore_config_.get_lazy_manifest_reader_enabled();
 
     CheckCancellation(op_ctx, id_, "ChunkedSegmentSealedImpl::ApplyLoadDiff()");
     if (!diff.indexes_to_load.empty()) {
@@ -8178,8 +8390,6 @@ ChunkedSegmentSealedImpl::PrepareLoadDiffForReopen(
                 *milvus::storage::LoonFFIPropertiesSingleton::GetInstance()
                      .GetProperties());
             auto column_groups = segment_load_info.GetColumnGroups();
-            const bool lazy_manifest_reader_enabled =
-                segcore_config_.get_lazy_manifest_reader_enabled();
             auto arrow_schema = schema_snapshot->ConvertToLoonArrowSchema(
                 /*text_lob_as_binary=*/true);
             auto needed_columns = std::make_shared<std::vector<std::string>>();
@@ -8285,12 +8495,20 @@ ChunkedSegmentSealedImpl::PrepareLoadDiffForReopen(
 
     CheckCancellation(op_ctx, id_, "ChunkedSegmentSealedImpl::ApplyLoadDiff()");
     if (!diff.json_stats_to_load.empty()) {
-        LoadBatchJsonKeyIndexes(
-            op_ctx, diff.json_stats_to_load, schema_snapshot, committer);
+        LoadBatchJsonKeyIndexes(op_ctx,
+                                diff.json_stats_to_load,
+                                schema_snapshot,
+                                segment_load_info,
+                                lazy_manifest_reader_enabled,
+                                committer);
     }
     if (!diff.json_stats_to_replace.empty()) {
-        LoadBatchJsonKeyIndexes(
-            op_ctx, diff.json_stats_to_replace, schema_snapshot, committer);
+        LoadBatchJsonKeyIndexes(op_ctx,
+                                diff.json_stats_to_replace,
+                                schema_snapshot,
+                                segment_load_info,
+                                lazy_manifest_reader_enabled,
+                                committer);
     }
 
     CheckCancellation(op_ctx, id_, "ChunkedSegmentSealedImpl::ApplyLoadDiff()");

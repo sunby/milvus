@@ -4296,7 +4296,7 @@ Defaults to "sync".`,
 		Key:          "queryNode.segcore.tieredStorage.lazyManifestReaderEnabled",
 		Version:      "3.0.0",
 		DefaultValue: "false",
-		Doc:          "When enabled, Storage V3 manifest fields with warmup=disable and no load-time side effects defer projected ChunkReader, translator, and cache creation until first access.",
+		Doc:          "When enabled, Storage V3 manifest fields with warmup=disable defer projected readers and eligible JSON stats metadata initialization until first access.",
 		Export:       true,
 	}
 	p.TieredLazyManifestReaderEnabled.Init(base.mgr)

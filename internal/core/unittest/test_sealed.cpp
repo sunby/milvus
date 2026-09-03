@@ -81,6 +81,7 @@
 #include "segcore/SegmentLoadInfo.h"
 #include "segcore/SegmentSealed.h"
 #include "segcore/Types.h"
+#include "segcore/default_fs.h"
 #include "segcore/storagev2translator/SystemIndexTranslator.h"
 #include "storage/FileManager.h"
 #include "storage/InsertData.h"
@@ -165,6 +166,47 @@ CreateWarmupPolicySchema(bool include_vector) {
     auto schema = Schema::ParseFrom(schema_proto);
     schema->set_schema_version(include_vector ? 200 : 100);
     return schema;
+}
+
+std::shared_ptr<milvus::index::JsonKeyStats>
+MakeUnloadedJsonStats(FieldId field_id) {
+    proto::schema::FieldSchema field_schema;
+    field_schema.set_fieldid(field_id.get());
+    field_schema.set_name("payload");
+    field_schema.set_data_type(proto::schema::DataType::JSON);
+    storage::FieldDataMeta field_data_meta{/*collection_id=*/1,
+                                           /*partition_id=*/2,
+                                           /*segment_id=*/3,
+                                           field_id.get(),
+                                           field_schema};
+    storage::IndexMeta index_meta{
+        /*segment_id=*/3, field_id.get(), /*build_id=*/4, /*version=*/5};
+    auto chunk_manager = storage::RemoteChunkManagerSingleton::GetInstance()
+                             .GetRemoteChunkManager();
+    storage::FileManagerContext file_context(
+        field_data_meta,
+        index_meta,
+        chunk_manager,
+        milvus::segcore::GetDefaultArrowFileSystem());
+    return std::make_shared<milvus::index::JsonKeyStats>(file_context, true);
+}
+
+std::shared_ptr<proto::indexcgo::LoadJsonKeyIndexInfo>
+MakeInvalidJsonStatsLoadInfo(FieldId field_id,
+                             const FieldMeta& field_meta,
+                             const std::string& warmup_policy) {
+    auto info = std::make_shared<proto::indexcgo::LoadJsonKeyIndexInfo>();
+    info->set_collectionid(1);
+    info->set_partitionid(2);
+    info->set_fieldid(field_id.get());
+    info->set_buildid(4);
+    info->set_version(5);
+    info->set_stats_size(64);
+    info->set_base_path("/unused-json-stats-test-path");
+    info->set_warmup_policy(warmup_policy);
+    info->add_files("unsupported.stats");
+    *info->mutable_schema() = field_meta.ToProto();
+    return info;
 }
 
 std::shared_ptr<milvus_storage::api::ColumnGroups>
@@ -5730,6 +5772,200 @@ TEST(SealedSegmentCowState, JsonIndexReplaceNgramWithScalarErasesNgramPath) {
     ASSERT_EQ(current->runtime->ngram_indexings.count(json), 1);
     EXPECT_EQ(current->runtime->ngram_indexings.at(json).at("a"),
               original_index);
+}
+
+TEST(SealedSegmentCowState, LazyJsonStatsConcurrentFirstAccessLoadsOnce) {
+    auto schema = std::make_shared<Schema>();
+    auto pk = schema->AddDebugField("pk", DataType::INT64);
+    auto json = schema->AddDebugField("payload", DataType::JSON);
+    schema->set_primary_field_id(pk);
+
+    auto segment = CreateSealedSegment(schema, nullptr, 7001);
+    auto* sealed = dynamic_cast<ChunkedSegmentSealedImpl*>(segment.get());
+    ASSERT_NE(sealed, nullptr);
+    auto stats = MakeUnloadedJsonStats(json);
+
+    std::atomic<int> load_calls{0};
+    sealed->SetLazyJsonStatsForTesting(
+        json, [stats, &load_calls](milvus::OpContext*) {
+            load_calls.fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            return stats;
+        });
+    EXPECT_FALSE(sealed->JsonStatsMaterializedForTesting(json));
+
+    constexpr int kThreadCount = 16;
+    std::atomic<int> ready{0};
+    std::atomic<bool> start{false};
+    std::atomic<bool> failed{false};
+    std::vector<std::thread> workers;
+    workers.reserve(kThreadCount);
+    for (int i = 0; i < kThreadCount; ++i) {
+        workers.emplace_back([&]() {
+            ready.fetch_add(1, std::memory_order_acq_rel);
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            try {
+                if (sealed->GetJsonStats(nullptr, json) != stats) {
+                    failed.store(true, std::memory_order_release);
+                }
+            } catch (...) {
+                failed.store(true, std::memory_order_release);
+            }
+        });
+    }
+    while (ready.load(std::memory_order_acquire) != kThreadCount) {
+        std::this_thread::yield();
+    }
+    start.store(true, std::memory_order_release);
+    for (auto& worker : workers) {
+        worker.join();
+    }
+
+    EXPECT_FALSE(failed.load(std::memory_order_acquire));
+    EXPECT_EQ(load_calls.load(std::memory_order_relaxed), 1);
+    EXPECT_TRUE(sealed->JsonStatsMaterializedForTesting(json));
+    EXPECT_EQ(sealed->GetJsonStats(nullptr, json), stats);
+    EXPECT_EQ(load_calls.load(std::memory_order_relaxed), 1);
+}
+
+TEST(SealedSegmentCowState, LazyJsonStatsCancellationAllowsFreshRetry) {
+    auto schema = std::make_shared<Schema>();
+    auto pk = schema->AddDebugField("pk", DataType::INT64);
+    auto json = schema->AddDebugField("payload", DataType::JSON);
+    schema->set_primary_field_id(pk);
+
+    auto segment = CreateSealedSegment(schema, nullptr, 7002);
+    auto* sealed = dynamic_cast<ChunkedSegmentSealedImpl*>(segment.get());
+    ASSERT_NE(sealed, nullptr);
+    auto stats = MakeUnloadedJsonStats(json);
+
+    std::atomic<int> load_calls{0};
+    sealed->SetLazyJsonStatsForTesting(
+        json, [stats, &load_calls](milvus::OpContext*) {
+            load_calls.fetch_add(1, std::memory_order_relaxed);
+            return stats;
+        });
+
+    folly::CancellationSource source;
+    source.requestCancellation();
+    milvus::OpContext cancelled_ctx(source.getToken());
+    try {
+        (void)sealed->GetJsonStats(&cancelled_ctx, json);
+        FAIL() << "expected cancelled JSON stats materialization";
+    } catch (const SegcoreError& error) {
+        EXPECT_EQ(error.get_error_code(), ErrorCode::FollyCancel);
+    }
+    EXPECT_EQ(load_calls.load(std::memory_order_relaxed), 0);
+    EXPECT_FALSE(sealed->JsonStatsMaterializedForTesting(json));
+
+    EXPECT_EQ(sealed->GetJsonStats(nullptr, json), stats);
+    EXPECT_EQ(load_calls.load(std::memory_order_relaxed), 1);
+    EXPECT_TRUE(sealed->JsonStatsMaterializedForTesting(json));
+}
+
+TEST(SealedSegmentCowState, LazyJsonStatsFailureIsRetryable) {
+    auto schema = std::make_shared<Schema>();
+    auto pk = schema->AddDebugField("pk", DataType::INT64);
+    auto json = schema->AddDebugField("payload", DataType::JSON);
+    schema->set_primary_field_id(pk);
+
+    auto segment = CreateSealedSegment(schema, nullptr, 7003);
+    auto* sealed = dynamic_cast<ChunkedSegmentSealedImpl*>(segment.get());
+    ASSERT_NE(sealed, nullptr);
+    auto stats = MakeUnloadedJsonStats(json);
+
+    std::atomic<int> load_calls{0};
+    sealed->SetLazyJsonStatsForTesting(
+        json, [stats, &load_calls](milvus::OpContext*) {
+            if (load_calls.fetch_add(1, std::memory_order_relaxed) == 0) {
+                throw std::runtime_error("injected JSON stats load failure");
+            }
+            return stats;
+        });
+
+    EXPECT_THROW((void)sealed->GetJsonStats(nullptr, json), std::runtime_error);
+    EXPECT_FALSE(sealed->JsonStatsMaterializedForTesting(json));
+    EXPECT_EQ(sealed->GetJsonStats(nullptr, json), stats);
+    EXPECT_EQ(load_calls.load(std::memory_order_relaxed), 2);
+    EXPECT_TRUE(sealed->JsonStatsMaterializedForTesting(json));
+}
+
+TEST(SealedSegmentCowState, LazyJsonStatsHonorsWarmupAndFeatureGate) {
+    auto schema = std::make_shared<Schema>();
+    auto pk = schema->AddDebugField("pk", DataType::INT64);
+    auto json = schema->AddDebugField("payload", DataType::JSON);
+    schema->set_primary_field_id(pk);
+
+    proto::segcore::SegmentLoadInfo load_proto;
+    load_proto.set_segmentid(7004);
+    load_proto.set_partitionid(2);
+    load_proto.set_collectionid(1);
+    load_proto.set_num_of_rows(1);
+    load_proto.set_storageversion(STORAGE_V3);
+    load_proto.set_manifest_path("unused-manifest-path");
+    load_proto.set_insert_channel("lazy-json-stats-test-channel");
+    SegmentLoadInfo segment_load_info(load_proto, schema);
+
+    auto lazy_segment = CreateSealedSegment(schema, nullptr, 7004);
+    auto* lazy = dynamic_cast<ChunkedSegmentSealedImpl*>(lazy_segment.get());
+    ASSERT_NE(lazy, nullptr);
+    auto disabled_warmup =
+        MakeInvalidJsonStatsLoadInfo(json, schema->operator[](json), "disable");
+    EXPECT_NO_THROW(lazy->LoadJsonStatsForTesting(
+        disabled_warmup, segment_load_info, /*lazy_enabled=*/true));
+    EXPECT_FALSE(lazy->JsonStatsMaterializedForTesting(json));
+    EXPECT_THROW((void)lazy->GetJsonStats(nullptr, json), SegcoreError);
+    EXPECT_FALSE(lazy->JsonStatsMaterializedForTesting(json));
+
+    auto sync_segment = CreateSealedSegment(schema, nullptr, 7004);
+    auto* sync = dynamic_cast<ChunkedSegmentSealedImpl*>(sync_segment.get());
+    ASSERT_NE(sync, nullptr);
+    auto sync_warmup =
+        MakeInvalidJsonStatsLoadInfo(json, schema->operator[](json), "sync");
+    EXPECT_THROW(sync->LoadJsonStatsForTesting(sync_warmup,
+                                               segment_load_info,
+                                               /*lazy_enabled=*/true),
+                 SegcoreError);
+    EXPECT_FALSE(sync->JsonStatsMaterializedForTesting(json));
+
+    auto disabled_segment = CreateSealedSegment(schema, nullptr, 7004);
+    auto* disabled =
+        dynamic_cast<ChunkedSegmentSealedImpl*>(disabled_segment.get());
+    ASSERT_NE(disabled, nullptr);
+    EXPECT_THROW(disabled->LoadJsonStatsForTesting(disabled_warmup,
+                                                   segment_load_info,
+                                                   /*lazy_enabled=*/false),
+                 SegcoreError);
+    EXPECT_FALSE(disabled->JsonStatsMaterializedForTesting(json));
+
+    proto::segcore::SegmentLoadInfo storage_v2_proto = load_proto;
+    storage_v2_proto.set_storageversion(STORAGE_V2);
+    SegmentLoadInfo storage_v2_load_info(storage_v2_proto, schema);
+    auto storage_v2_segment = CreateSealedSegment(schema, nullptr, 7004);
+    auto* storage_v2 =
+        dynamic_cast<ChunkedSegmentSealedImpl*>(storage_v2_segment.get());
+    ASSERT_NE(storage_v2, nullptr);
+    EXPECT_THROW(storage_v2->LoadJsonStatsForTesting(disabled_warmup,
+                                                     storage_v2_load_info,
+                                                     /*lazy_enabled=*/true),
+                 SegcoreError);
+    EXPECT_FALSE(storage_v2->JsonStatsMaterializedForTesting(json));
+
+    auto external_schema = std::make_shared<Schema>(*schema);
+    external_schema->set_external_source("s3://unused-json-stats-test");
+    external_schema->set_external_spec(R"({"format":"parquet"})");
+    SegmentLoadInfo external_load_info(load_proto, external_schema);
+    auto external_segment = CreateSealedSegment(external_schema, nullptr, 7004);
+    auto* external =
+        dynamic_cast<ChunkedSegmentSealedImpl*>(external_segment.get());
+    ASSERT_NE(external, nullptr);
+    EXPECT_THROW(external->LoadJsonStatsForTesting(disabled_warmup,
+                                                   external_load_info,
+                                                   /*lazy_enabled=*/true),
+                 SegcoreError);
+    EXPECT_FALSE(external->JsonStatsMaterializedForTesting(json));
 }
 
 TEST(SealedSegmentCowState, JsonStatsLivesInRuntimeSnapshot) {

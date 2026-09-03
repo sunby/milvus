@@ -324,10 +324,8 @@ func (s *assignmentServiceImpl) buildForcePromoteConfiguration(ctx context.Conte
 		return nil, nil, status.NewInvalidArgument("force promote requires current cluster in existing configuration; cluster %s not found in config", currentClusterID)
 	}
 
-	// Get pchannels from PChannelView for validation
-	pchannels := lo.MapToSlice(latestAssignment.PChannelView.Channels, func(_ channel.ChannelID, ch *channel.PChannelMeta) string {
-		return ch.Name()
-	})
+	// Copy before sorting because the assignment snapshot may be shared with other readers.
+	pchannels := append([]string(nil), latestAssignment.PChannels...)
 	// Sort pchannels for consistent ordering (map iteration order is randomized)
 	sort.Strings(pchannels)
 
