@@ -19,6 +19,7 @@ package datacoord
 import (
 	"context"
 	"path"
+	"slices"
 	"testing"
 	"time"
 
@@ -41,7 +42,7 @@ import (
 )
 
 // Exercise real etcd metadata and local object deletion through the GC sweep.
-// Faults affect only channel-marker Load; segment reads and deletion stay healthy.
+// Faults affect only channel-marker reads; segment reads and deletion stay healthy.
 func TestGarbageCollector_ChannelLookup(t *testing.T) {
 	ctx := context.Background()
 	client, err := clientv3.New(clientv3.Config{
@@ -110,8 +111,8 @@ func TestGarbageCollector_ChannelLookup(t *testing.T) {
 			require.NoError(t, cli.Write(ctx, objectPath, []byte("segment data")))
 
 			markerReads, injected := 0, 0
-			patch := mockey.Mock(mockey.GetMethod(kv, "Load")).When(func(_ context.Context, key string) bool {
-				if key != markerKey {
+			patch := mockey.Mock(mockey.GetMethod(kv, "MultiLoad")).When(func(_ context.Context, keys []string) bool {
+				if !slices.Contains(keys, markerKey) {
 					return false
 				}
 				markerReads++
@@ -120,7 +121,7 @@ func TestGarbageCollector_ChannelLookup(t *testing.T) {
 					return true
 				}
 				return false
-			}).Return("", tc.lookupErr).Build()
+			}).Return(nil, tc.lookupErr).Build()
 			defer patch.UnPatch()
 
 			assertState := func(retained bool) {

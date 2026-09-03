@@ -145,7 +145,7 @@ func TestRestoreL0CommitAndTaskSaveCrash(t *testing.T) {
 		require.True(t, task.GetTaskProto().RestoreCompleted, "cleanup retains successful completion")
 		require.NoError(t, task.saveSegmentMeta(nil), "replaying an applied result does not append twice")
 		gc := &garbageCollector{}
-		require.False(t, gc.checkDroppedSegmentGC(m.GetSegment(ctx, 1), nil, nil, 0))
+		require.False(t, gc.checkDroppedSegmentGC(m.GetSegment(ctx, 1), nil, nil, droppedSegmentGCChannelState{}))
 	})
 }
 
