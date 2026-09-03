@@ -3977,6 +3977,7 @@ type queryNodeConfig struct {
 	StorageUsageTrackingEnabled     ParamItem `refreshable:"true"`
 	TieredRejectRemoteVectorOutput  ParamItem `refreshable:"true"`
 	TieredLazyManifestReaderEnabled ParamItem `refreshable:"true"`
+	TieredLazyJsonStatsEnabled      ParamItem `refreshable:"true"`
 
 	KnowhereScoreConsistency ParamItem `refreshable:"false"`
 
@@ -4296,10 +4297,19 @@ Defaults to "sync".`,
 		Key:          "queryNode.segcore.tieredStorage.lazyManifestReaderEnabled",
 		Version:      "3.0.0",
 		DefaultValue: "false",
-		Doc:          "When enabled, Storage V3 manifest fields with warmup=disable defer projected readers and eligible JSON stats metadata initialization until first access.",
+		Doc:          "When enabled, Storage V3 manifest fields with warmup=disable defer projected readers until first access.",
 		Export:       true,
 	}
 	p.TieredLazyManifestReaderEnabled.Init(base.mgr)
+
+	p.TieredLazyJsonStatsEnabled = ParamItem{
+		Key:          "queryNode.segcore.tieredStorage.lazyJsonStatsEnabled",
+		Version:      "3.0.0",
+		DefaultValue: "true",
+		Doc:          "When enabled, eligible Storage V3 JSON stats metadata initialization is deferred until first access.",
+		Export:       true,
+	}
+	p.TieredLazyJsonStatsEnabled.Init(base.mgr)
 
 	p.TieredEvictionEnabled = ParamItem{
 		Key:          "queryNode.segcore.tieredStorage.evictionEnabled",

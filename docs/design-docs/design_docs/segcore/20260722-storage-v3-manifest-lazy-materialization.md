@@ -12,9 +12,9 @@
 - `ChunkedColumnGroup`；
 - 真实 `ProxyChunkColumn`。
 
-同一开关也允许将 JSON key stats 顶层对象的远端 `meta.json`、Parquet metadata、
-projected reader 和 cache tree 初始化延迟到首个可使用 stats 的表达式。Ready 阶段只发布
-绑定当前 generation 的 `LazyJsonStats` facade。
+独立的 `lazyJsonStatsEnabled` 开关允许将 JSON key stats 顶层对象的远端 `meta.json`、
+Parquet metadata、projected reader 和 cache tree 初始化延迟到首个可使用 stats 的表达式。
+Ready 阶段只发布绑定当前 generation 的 `LazyJsonStats` facade。
 
 设计边界如下：
 
@@ -40,9 +40,10 @@ Task 仅在以下条件同时满足时进入延迟物化：
 Task，避免同一 generation 内出现部分 eager、部分 lazy 的混合状态。已发布 Task 不随
 动态配置变化而改变。
 
-JSON stats 在前四个条件成立且其 effective scalar-field warmup policy 为 `disable` 时
-延迟物化。`sync`、`async`、配置关闭以及非 Storage V3 segment 继续在 Load 阶段初始化，
-保持既有行为。
+JSON stats 不依赖 `lazyManifestReaderEnabled`。它在
+`queryNode.segcore.tieredStorage.lazyJsonStatsEnabled=true`、上述第 2 至第 4 个条件成立，
+且 effective scalar-field warmup policy 为 `disable` 时延迟物化。`sync`、`async`、
+JSON stats 配置关闭以及非 Storage V3 segment 继续在 Load 阶段初始化，保持既有行为。
 
 ## 3. Task 不变量
 
@@ -231,14 +232,15 @@ queryNode:
   segcore:
     tieredStorage:
       lazyManifestReaderEnabled: false
+      lazyJsonStatsEnabled: true
 ```
 
-配置默认关闭并支持动态刷新。Go paramtable 通过 C bridge 更新 `SegcoreConfig` 中的原子
-布尔值。
+Manifest reader 延迟加载默认关闭，JSON stats 延迟加载默认开启；两个开关相互独立且均
+支持动态刷新。Go paramtable 通过 C bridge 更新 `SegcoreConfig` 中各自的原子布尔值。
 
 ## 12. 兼容性
 
-- 配置关闭时走原 eager 路径；
+- 对应配置关闭时各自走原 eager 路径；
 - Storage V1/V2 和无 ManifestPath segment 不进入本路径；
 - external collection 保持既有加载方式；
 - 不修改 milvus-storage API；

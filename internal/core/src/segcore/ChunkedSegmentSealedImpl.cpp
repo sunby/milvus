@@ -6689,7 +6689,7 @@ ChunkedSegmentSealedImpl::BuildJsonKeyStatsIndex(
         info_proto,
     const SegmentLoadInfo& segment_load_info,
     const SchemaPtr& schema_snapshot,
-    bool lazy_manifest_reader_enabled) {
+    bool lazy_json_stats_enabled) {
     auto field_id = milvus::FieldId(info_proto->fieldid());
     CheckCancellation(op_ctx,
                       id_,
@@ -6750,7 +6750,7 @@ ChunkedSegmentSealedImpl::BuildJsonKeyStatsIndex(
                                                  /*is_index=*/false,
                                                  /*in_load_list=*/true);
     const bool can_defer =
-        lazy_manifest_reader_enabled &&
+        lazy_json_stats_enabled &&
         segment_load_info.GetStorageVersion() == STORAGE_V3 &&
         segment_load_info.HasManifestPath() &&
         !schema_snapshot->is_external_collection() &&
@@ -6802,7 +6802,7 @@ ChunkedSegmentSealedImpl::LoadBatchJsonKeyIndexes(
         std::shared_ptr<milvus::proto::indexcgo::LoadJsonKeyIndexInfo>>& infos,
     const SchemaPtr& schema_snapshot,
     const SegmentLoadInfo& segment_load_info,
-    bool lazy_manifest_reader_enabled,
+    bool lazy_json_stats_enabled,
     StagedStateCommitter& committer) {
     for (const auto& [field_id, info_proto] : infos) {
         AssertInfo(field_exists_in_schema(schema_snapshot, field_id),
@@ -6812,7 +6812,7 @@ ChunkedSegmentSealedImpl::LoadBatchJsonKeyIndexes(
                                             info_proto,
                                             segment_load_info,
                                             schema_snapshot,
-                                            lazy_manifest_reader_enabled);
+                                            lazy_json_stats_enabled);
         if (stats == nullptr) {
             continue;
         }
@@ -8347,6 +8347,8 @@ ChunkedSegmentSealedImpl::PrepareLoadDiffForReopen(
     milvus::tracer::TraceContext trace_ctx;
     const bool lazy_manifest_reader_enabled =
         segcore_config_.get_lazy_manifest_reader_enabled();
+    const bool lazy_json_stats_enabled =
+        segcore_config_.get_lazy_json_stats_enabled();
 
     CheckCancellation(op_ctx, id_, "ChunkedSegmentSealedImpl::ApplyLoadDiff()");
     if (!diff.indexes_to_load.empty()) {
@@ -8499,7 +8501,7 @@ ChunkedSegmentSealedImpl::PrepareLoadDiffForReopen(
                                 diff.json_stats_to_load,
                                 schema_snapshot,
                                 segment_load_info,
-                                lazy_manifest_reader_enabled,
+                                lazy_json_stats_enabled,
                                 committer);
     }
     if (!diff.json_stats_to_replace.empty()) {
@@ -8507,7 +8509,7 @@ ChunkedSegmentSealedImpl::PrepareLoadDiffForReopen(
                                 diff.json_stats_to_replace,
                                 schema_snapshot,
                                 segment_load_info,
-                                lazy_manifest_reader_enabled,
+                                lazy_json_stats_enabled,
                                 committer);
     }
 

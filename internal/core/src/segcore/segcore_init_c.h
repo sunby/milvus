@@ -119,6 +119,9 @@ void
 SegcoreSetLazyManifestReaderEnabled(const bool value);
 
 void
+SegcoreSetLazyJsonStatsEnabled(const bool value);
+
+void
 SegcoreCloseGlog();
 
 int32_t

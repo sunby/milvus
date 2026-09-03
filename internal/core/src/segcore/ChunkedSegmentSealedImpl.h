@@ -1732,7 +1732,7 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
             info_proto,
         const SegmentLoadInfo& segment_load_info,
         const SchemaPtr& schema_snapshot,
-        bool lazy_manifest_reader_enabled);
+        bool lazy_json_stats_enabled);
 
     void
     LoadBatchJsonKeyIndexes(
@@ -1743,7 +1743,7 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
             infos,
         const SchemaPtr& schema_snapshot,
         const SegmentLoadInfo& segment_load_info,
-        bool lazy_manifest_reader_enabled,
+        bool lazy_json_stats_enabled,
         StagedStateCommitter& committer);
 
     template <typename Mutator>
@@ -2754,7 +2754,7 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
         const std::shared_ptr<milvus::proto::indexcgo::LoadJsonKeyIndexInfo>&
             info,
         const SegmentLoadInfo& segment_load_info,
-        bool lazy_manifest_reader_enabled) {
+        bool lazy_json_stats_enabled) {
         std::lock_guard<std::mutex> reopen_guard(reopen_mutex_);
         auto current = CapturePublishedState();
         auto next = ClonePublishedState(current);
@@ -2771,7 +2771,7 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
                                 infos,
                                 current->schema,
                                 segment_load_info,
-                                lazy_manifest_reader_enabled,
+                                lazy_json_stats_enabled,
                                 committer);
         next->runtime = ToConstRuntimeState(std::move(runtime));
         NormalizePublishedState(*next);

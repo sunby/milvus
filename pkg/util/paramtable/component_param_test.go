@@ -332,6 +332,23 @@ func TestComponentParam_LazyManifestReaderEnabled(t *testing.T) {
 	assert.False(t, item.GetAsBool())
 }
 
+func TestComponentParam_LazyJsonStatsEnabled(t *testing.T) {
+	Init()
+	params := Get()
+	item := &params.QueryNodeCfg.TieredLazyJsonStatsEnabled
+	t.Cleanup(func() { params.Reset(item.Key) })
+
+	assert.Equal(t, "queryNode.segcore.tieredStorage.lazyJsonStatsEnabled", item.Key)
+	assert.Equal(t, "true", item.DefaultValue)
+	assert.True(t, item.Export)
+	assert.True(t, item.GetAsBool())
+
+	assert.NoError(t, params.Save(item.Key, "false"))
+	assert.False(t, item.GetAsBool())
+	assert.NoError(t, params.Save(item.Key, "true"))
+	assert.True(t, item.GetAsBool())
+}
+
 func TestComponentParam_IDFLazyLoadSealedStats(t *testing.T) {
 	Init()
 	params := Get()
