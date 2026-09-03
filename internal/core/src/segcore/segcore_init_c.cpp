@@ -141,6 +141,13 @@ SegcoreSetLazyManifestReaderEnabled(const bool value) {
 }
 
 extern "C" void
+SegcoreSetLazyJsonStatsEnabled(const bool value) {
+    milvus::segcore::SegcoreConfig& config =
+        milvus::segcore::SegcoreConfig::default_config();
+    config.set_lazy_json_stats_enabled(value);
+}
+
+extern "C" void
 SegcoreSetNlist(const int64_t value) {
     milvus::segcore::SegcoreConfig& config =
         milvus::segcore::SegcoreConfig::default_config();

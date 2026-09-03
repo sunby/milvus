@@ -2745,12 +2745,12 @@ class SegmentExpr : public Expr {
         return false;
     }
 
-    // Check whether this expression can use JsonStats without pinning.
-    // All conditions are available before execution path determination.
+    // Check cheap expression constraints before the presence check, which may
+    // materialize lazy JsonStats on the first eligible query.
     bool
     CanUseJsonStatsAtInit() const {
-        return plan_options_.expr_use_json_stats && HasJsonStats(field_id_) &&
-               !nested_path_.empty() && !PathContainsInteger(nested_path_);
+        return plan_options_.expr_use_json_stats && !nested_path_.empty() &&
+               !PathContainsInteger(nested_path_) && HasJsonStats(field_id_);
     }
 
     virtual bool

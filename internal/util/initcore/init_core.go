@@ -395,6 +395,7 @@ func InitTieredStorage(params *paramtable.ComponentParam) error {
 
 	storageUsageTrackingEnabled := C.bool(params.QueryNodeCfg.StorageUsageTrackingEnabled.GetAsBool())
 	lazyManifestReaderEnabled := C.bool(params.QueryNodeCfg.TieredLazyManifestReaderEnabled.GetAsBool())
+	lazyJsonStatsEnabled := C.bool(params.QueryNodeCfg.TieredLazyJsonStatsEnabled.GetAsBool())
 	evictionEnabled := C.bool(params.QueryNodeCfg.TieredEvictionEnabled.GetAsBool())
 	cacheTouchWindowMs := C.int64_t(params.QueryNodeCfg.TieredCacheTouchWindowMs.GetAsInt64())
 	backgroundEvictionEnabled := C.bool(params.QueryNodeCfg.TieredBackgroundEvictionEnabled.GetAsBool())
@@ -412,6 +413,7 @@ func InitTieredStorage(params *paramtable.ComponentParam) error {
 	prefetchPoolThreads := C.uint32_t(hardware.GetCPUNum() * params.CommonCfg.LowPriorityThreadCoreCoefficient.GetAsInt())
 
 	C.SegcoreSetLazyManifestReaderEnabled(lazyManifestReaderEnabled)
+	C.SegcoreSetLazyJsonStatsEnabled(lazyJsonStatsEnabled)
 	C.ConfigureTieredStorage(scalarFieldCacheWarmupPolicy,
 		vectorFieldCacheWarmupPolicy,
 		scalarIndexCacheWarmupPolicy,
@@ -467,9 +469,11 @@ func UpdateTieredStorageConfig(params *paramtable.ComponentParam) error {
 	warmupLoadingTimeoutMs := C.int64_t(params.QueryNodeCfg.TieredWarmupLoadingTimeoutMs.GetAsInt64())
 	storageUsageTrackingEnabled := C.bool(params.QueryNodeCfg.StorageUsageTrackingEnabled.GetAsBool())
 	lazyManifestReaderEnabled := C.bool(params.QueryNodeCfg.TieredLazyManifestReaderEnabled.GetAsBool())
+	lazyJsonStatsEnabled := C.bool(params.QueryNodeCfg.TieredLazyJsonStatsEnabled.GetAsBool())
 	rejectRemoteVectorOutput := C.bool(params.QueryNodeCfg.TieredRejectRemoteVectorOutput.GetAsBool())
 
 	C.SegcoreSetLazyManifestReaderEnabled(lazyManifestReaderEnabled)
+	C.SegcoreSetLazyJsonStatsEnabled(lazyJsonStatsEnabled)
 	C.UpdateTieredStorageConfig(
 		loadingTimeoutMs,
 		warmupLoadingTimeoutMs,
@@ -795,6 +799,7 @@ func SetupCoreConfigChangelCallback() {
 		paramtable.Get().QueryNodeCfg.TieredWarmupScalarIndex.RegisterCallback(updateTieredStorageConfigCallback)
 		paramtable.Get().QueryNodeCfg.TieredWarmupVectorIndex.RegisterCallback(updateTieredStorageConfigCallback)
 		paramtable.Get().QueryNodeCfg.TieredLazyManifestReaderEnabled.RegisterCallback(updateTieredStorageConfigCallback)
+		paramtable.Get().QueryNodeCfg.TieredLazyJsonStatsEnabled.RegisterCallback(updateTieredStorageConfigCallback)
 	})
 }
 

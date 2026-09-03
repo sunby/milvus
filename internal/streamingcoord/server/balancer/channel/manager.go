@@ -42,7 +42,7 @@ type (
 		StreamingVersion       *streamingpb.StreamingVersion
 		Version                typeutil.VersionInt64Pair
 		CChannelAssignment     *streamingpb.CChannelAssignment
-		PChannelView           *PChannelView
+		PChannels              []string
 		Relations              []types.PChannelInfoAssigned
 		ShardAssignments       map[int64]types.ShardAssignmentInfo
 		ReplicateConfiguration *commonpb.ReplicateConfiguration
@@ -738,14 +738,15 @@ func (cm *ChannelManager) getNewIncomingTask(newConfig *replicateutil.ConfigHelp
 func (cm *ChannelManager) applyAssignments(cb WatchChannelAssignmentsCallback) (typeutil.VersionInt64Pair, error) {
 	cm.cond.L.Lock()
 	assignments := make([]types.PChannelInfoAssigned, 0, len(cm.channels))
+	pchannels := make([]string, 0, len(cm.channels))
 	for _, c := range cm.channels {
+		pchannels = append(pchannels, c.Name())
 		if c.IsAssigned() {
 			assignments = append(assignments, c.CurrentAssignment())
 		}
 	}
 	version := cm.version
 	cchannelAssignment := proto.Clone(cm.cchannelMeta).(*streamingpb.CChannelMeta)
-	pchannelViews := newPChannelView(cm.channels)
 	shardAssignmentProvider := cm.shardAssignmentProvider
 	cm.cond.L.Unlock()
 
@@ -760,7 +761,7 @@ func (cm *ChannelManager) applyAssignments(cb WatchChannelAssignmentsCallback) (
 		CChannelAssignment: &streamingpb.CChannelAssignment{
 			Meta: cchannelAssignment,
 		},
-		PChannelView:           pchannelViews,
+		PChannels:              pchannels,
 		Relations:              assignments,
 		ShardAssignments:       shardAssignments,
 		ReplicateConfiguration: replicateConfig,

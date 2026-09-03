@@ -159,6 +159,7 @@ func TestChannelManager(t *testing.T) {
 		param, err := m.GetLatestChannelAssignment()
 		oldLocalVersion := param.Version.Local
 		assert.NoError(t, err)
+		assert.ElementsMatch(t, []string{"test-channel"}, param.PChannels)
 		assert.Equal(t, m.ReplicateRole(), replicateutil.RolePrimary)
 
 		// Test update replicate configurations
@@ -692,6 +693,7 @@ func TestChannelManagerWatch(t *testing.T) {
 	go func() {
 		defer close(done)
 		err := manager.WatchAssignmentResult(ctx, func(param WatchChannelAssignmentsCallbackParam) error {
+			assert.ElementsMatch(t, []string{"test-channel"}, param.PChannels)
 			select {
 			case called <- struct{}{}:
 			default:

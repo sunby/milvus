@@ -1,4 +1,4 @@
-# Storage V3 Manifest Task 延迟物化设计
+# Storage V3 Manifest Task 与 JSON Stats 延迟物化设计
 
 ## 1. 目标
 
@@ -12,13 +12,17 @@
 - `ChunkedColumnGroup`；
 - 真实 `ProxyChunkColumn`。
 
+独立的 `lazyJsonStatsEnabled` 开关允许将 JSON key stats 顶层对象的远端 `meta.json`、
+Parquet metadata、projected reader 和 cache tree 初始化延迟到首个可使用 stats 的表达式。
+Ready 阶段只发布绑定当前 generation 的 `LazyJsonStats` facade。
+
 设计边界如下：
 
 - 保持 `SegmentLoadInfo` 已有 Task、projection 和 eager/lazy fallback 粒度；
 - 不因开启本功能而按字段重新拆分 Column Group；
 - 支持普通字段、RowID、Timestamp、INT64 PK 和 VARCHAR PK；
 - Ready 阶段保持 manifest Task 延迟，查询期需要数据时允许正常物化；
-- 正确性优先，不增加 JSON、Tantivy、PK 或 MVCC 专用的“保冷”执行路径；
+- 正确性优先，不增加 Tantivy、PK 或 MVCC 专用的“保冷”执行路径；
 - 保持 Storage V1/V2、external collection 和配置关闭时的行为不变。
 
 ## 2. 生效条件
@@ -35,6 +39,11 @@ Task 仅在以下条件同时满足时进入延迟物化：
 一次初始 Load 或 Reopen 在开始时只读取一次配置值，并把该值传给本次并行创建的全部
 Task，避免同一 generation 内出现部分 eager、部分 lazy 的混合状态。已发布 Task 不随
 动态配置变化而改变。
+
+JSON stats 不依赖 `lazyManifestReaderEnabled`。它在
+`queryNode.segcore.tieredStorage.lazyJsonStatsEnabled=true`、上述第 2 至第 4 个条件成立，
+且 effective scalar-field warmup policy 为 `disable` 时延迟物化。`sync`、`async`、
+JSON stats 配置关闭以及非 Storage V3 segment 继续在 Load 阶段初始化，保持既有行为。
 
 ## 3. Task 不变量
 
@@ -55,15 +64,21 @@ Ready 阶段的对象关系如下：
 ```text
 RuntimeResourceState
 ├── generation runtime Reader
-└── fields
-    └── LazyManifestProxyColumn
-        └── Task-scoped LazyManifestColumnGroup
-            └── ManifestColumnGroupBuildContext
-                ├── generation Reader 强引用
-                ├── 原始 column-group index
-                ├── Task projection
-                ├── FieldMeta 快照
-                └── mmap、priority、cache key 等 Translator 输入
+├── fields
+│   └── LazyManifestProxyColumn
+│       └── Task-scoped LazyManifestColumnGroup
+│           └── ManifestColumnGroupBuildContext
+│               ├── generation Reader 强引用
+│               ├── 原始 column-group index
+│               ├── Task projection
+│               ├── FieldMeta 快照
+│               └── mmap、priority、cache key 等 Translator 输入
+└── json_stats
+    └── LazyJsonStats
+        └── JsonStatsBuildContext
+            ├── generation FileManagerContext
+            ├── files、base path、mmap 与 priority
+            └── generation insert channel 与 resolved warmup policy
 ```
 
 每个 Load/Reopen generation 创建并发布自己的 runtime Reader。Lazy Task 直接强引用
@@ -101,6 +116,9 @@ Materialize(op_ctx)
 - 失败时不发布半成品 group；
 - 成功后所有 facade 复用同一 group。
 
+`LazyJsonStats` 使用相同的 single-flight、独立取消和失败重试语义。成功前不发布
+`JsonKeyStats`；原有 `internal_json_stats_latency_load` 只记录真正发生的物化耗时。
+
 ## 6. Facade 接口语义
 
 `LazyManifestProxyColumn` 保存共享 Task、FieldId、FieldMeta 和行数。
@@ -124,6 +142,9 @@ Materialize(op_ctx)
 
 `CellsLoaded()` 仅表示对应 cache cell 是否已经加载。真实 group 已创建但 cell 尚未加载
 时仍可返回 false，因此它可以作为非物化状态探针。
+
+JSON stats facade 的存在性检查只在表达式已满足开关、非空 path 且 path 不含数组下标后
+触发物化。首个符合条件的表达式加载 stats，之后同 generation 的查询复用同一实例。
 
 ## 7. Lazy 资格
 
@@ -187,6 +208,7 @@ Column Group identity 包含：
 
 - 旧 snapshot 可以继续读取旧 generation；
 - 新 facade 不捕获 committer、可变 runtime 或当前 PublishedState；
+- JSON stats facade 捕获本 generation 的 FileManagerContext、insert channel 与配置；
 - Reopen 失败不发布 staged state；
 - 同一 generation 内全部新 Task 使用同一个配置快照。
 
@@ -210,19 +232,20 @@ queryNode:
   segcore:
     tieredStorage:
       lazyManifestReaderEnabled: false
+      lazyJsonStatsEnabled: true
 ```
 
-配置默认关闭并支持动态刷新。Go paramtable 通过 C bridge 更新 `SegcoreConfig` 中的原子
-布尔值。
+Manifest reader 延迟加载默认关闭，JSON stats 延迟加载默认开启；两个开关相互独立且均
+支持动态刷新。Go paramtable 通过 C bridge 更新 `SegcoreConfig` 中各自的原子布尔值。
 
 ## 12. 兼容性
 
-- 配置关闭时走原 eager 路径；
+- 对应配置关闭时各自走原 eager 路径；
 - Storage V1/V2 和无 ManifestPath segment 不进入本路径；
 - external collection 保持既有加载方式；
 - 不修改 milvus-storage API；
 - 不改变既有 Task/projection 划分；
-- 不为 JSON、Tantivy 或其他索引增加专用的“不物化”执行分支；
+- JSON stats 仅延迟顶层初始化，查询执行逻辑与 raw-data fallback 选择不变；
 - 查询链路需要 chunk 布局、大小或原始数据时正常物化。
 
 ## 13. 验证
@@ -233,6 +256,8 @@ queryNode:
 - Ready 阶段 facade 与未缓存的 PK/Timestamp slot；
 - 多字段 Task 的 sibling 共享和并发 single-flight；
 - cancellation 与非取消失败后的重试；
+- JSON stats 的 Ready 冷态、并发首访 single-flight、取消和失败重试；
+- JSON stats 的 `disable`、`sync`、配置关闭与非 Storage V3 边界；
 - `DataByteSize()`、布局接口和真实读取的按需物化；
 - RowID、INT64/VARCHAR PK、Timestamp 与 commit timestamp；
 - Reopen generation 重绑和 schema-only drop；
