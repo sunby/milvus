@@ -2,9 +2,11 @@ package segment
 
 import (
 	"context"
+	"errors"
 	"strconv"
 
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/streamingpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
@@ -44,6 +46,17 @@ func (w *segmentLifecycleWriter) CommitL1Segment(ctx context.Context, meta *stre
 	err := retry.Do(ctx, func() error {
 		resp, err := w.coord.SaveBinlogPaths(ctx, req)
 		if err := merr.CheckRPCCall(resp, err); err != nil {
+			if errors.Is(err, merr.ErrSegmentNotFound) {
+				// The segment no longer exists in DataCoord (dropped or removed):
+				// there is nothing to commit, so ignore the error and treat the
+				// commit as done. DataCoord itself ignores writes to dropped
+				// segments (returns success), and retrying or failing the segment
+				// here would only surface a lifecycle event as a task failure.
+				mlog.Warn(ctx, "segment no longer exists in DataCoord, ignore the L1 commit",
+					mlog.Int64("segmentID", meta.GetSegmentId()),
+					mlog.String("vchannel", meta.GetVchannel()))
+				return nil
+			}
 			return err
 		}
 		version = dataVersionFromStatus(resp.GetExtraInfo())
