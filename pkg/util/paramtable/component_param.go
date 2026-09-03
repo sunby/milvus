@@ -5808,27 +5808,27 @@ type dataCoordConfig struct {
 	LevelZeroCompactionForceSelectAll        ParamItem `refreshable:"true"`
 
 	// Garbage Collection
-	EnableGarbageCollection                   ParamItem `refreshable:"false"`
-	GCInterval                                ParamItem `refreshable:"false"`
-	GCMissingTolerance                        ParamItem `refreshable:"false"`
-	GCDropTolerance                           ParamItem `refreshable:"false"`
-	GCRemoveConcurrent                        ParamItem `refreshable:"false"`
-	GCDroppedSegmentChannelStateMaxConcurrent ParamItem `refreshable:"true"`
-	GCDroppedSegmentBatchSize                 ParamItem `refreshable:"true"`
-	GCIndexFileBatchSize                      ParamItem `refreshable:"true"`
-	GCScanIntervalInHour                      ParamItem `refreshable:"false"`
-	GCSlowDownCPUUsageThreshold               ParamItem `refreshable:"false"`
-	SnapshotPendingTimeout                    ParamItem `refreshable:"true"`
-	SnapshotRefIndexLoadInterval              ParamItem `refreshable:"true"`
-	SnapshotRefIndexLoadTimeout               ParamItem `refreshable:"true"`
-	SnapshotMaxCompactionProtectionSeconds    ParamItem `refreshable:"true"`
-	SnapshotRestorePinTTLSeconds              ParamItem `refreshable:"true"`
-	SnapshotCrossBucketEndpointAllowlist      ParamItem `refreshable:"true"`
-	SnapshotExportCopyConcurrency             ParamItem `refreshable:"true"`
-	SnapshotExportJobTimeout                  ParamItem `refreshable:"true"`
-	SnapshotExportJobRetention                ParamItem `refreshable:"true"`
-	SnapshotExportMaxConcurrentJobs           ParamItem `refreshable:"true"`
-	EnableActiveStandby                       ParamItem `refreshable:"false"`
+	EnableGarbageCollection                ParamItem `refreshable:"false"`
+	GCInterval                             ParamItem `refreshable:"false"`
+	GCMissingTolerance                     ParamItem `refreshable:"false"`
+	GCDropTolerance                        ParamItem `refreshable:"false"`
+	GCRemoveConcurrent                     ParamItem `refreshable:"false"`
+	GCDroppedSegmentChannelStateBatchSize  ParamItem `refreshable:"true"`
+	GCDroppedSegmentBatchSize              ParamItem `refreshable:"true"`
+	GCIndexFileBatchSize                   ParamItem `refreshable:"true"`
+	GCScanIntervalInHour                   ParamItem `refreshable:"false"`
+	GCSlowDownCPUUsageThreshold            ParamItem `refreshable:"false"`
+	SnapshotPendingTimeout                 ParamItem `refreshable:"true"`
+	SnapshotRefIndexLoadInterval           ParamItem `refreshable:"true"`
+	SnapshotRefIndexLoadTimeout            ParamItem `refreshable:"true"`
+	SnapshotMaxCompactionProtectionSeconds ParamItem `refreshable:"true"`
+	SnapshotRestorePinTTLSeconds           ParamItem `refreshable:"true"`
+	SnapshotCrossBucketEndpointAllowlist   ParamItem `refreshable:"true"`
+	SnapshotExportCopyConcurrency          ParamItem `refreshable:"true"`
+	SnapshotExportJobTimeout               ParamItem `refreshable:"true"`
+	SnapshotExportJobRetention             ParamItem `refreshable:"true"`
+	SnapshotExportMaxConcurrentJobs        ParamItem `refreshable:"true"`
+	EnableActiveStandby                    ParamItem `refreshable:"false"`
 
 	// LOB Garbage Collection
 	GCLOBEnabled       ParamItem `refreshable:"false"`
@@ -6790,21 +6790,21 @@ Layout 1 is additionally gated on no QueryNode still reporting an older release 
 	}
 	p.GCRemoveConcurrent.Init(base.mgr)
 
-	p.GCDroppedSegmentChannelStateMaxConcurrent = ParamItem{
-		Key:          "dataCoord.gc.droppedSegment.channelStateMaxConcurrent",
+	p.GCDroppedSegmentChannelStateBatchSize = ParamItem{
+		Key:          "dataCoord.gc.droppedSegment.channelStateBatchSize",
 		Version:      "2.6.7",
-		DefaultValue: "1",
+		DefaultValue: "64",
 		Formatter: func(value string) string {
 			num, err := strconv.Atoi(value)
-			if err != nil || num <= 0 || num > 128 {
-				return "1"
+			if err != nil || num <= 0 || num > 1000 {
+				return "64"
 			}
 			return value
 		},
-		Doc:    "maximum dropped-segment GC channel-state lookups processed concurrently",
+		Doc:    "maximum number of dropped-segment GC channel markers loaded per catalog batch",
 		Export: true,
 	}
-	p.GCDroppedSegmentChannelStateMaxConcurrent.Init(base.mgr)
+	p.GCDroppedSegmentChannelStateBatchSize.Init(base.mgr)
 
 	p.GCDroppedSegmentBatchSize = ParamItem{
 		Key:          "dataCoord.gc.droppedSegment.batchDelete.batchSize",

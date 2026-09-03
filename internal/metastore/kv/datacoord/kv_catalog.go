@@ -836,24 +836,68 @@ func (kc *Catalog) ShouldDropChannel(ctx context.Context, channel string) bool {
 	return true
 }
 
-func (kc *Catalog) ChannelExists(ctx context.Context, channel string) bool {
-	exists, err := kc.ChannelExistsWithError(ctx, channel)
-	return err == nil && exists
-}
+// LoadChannelExistence loads channel markers with batched exact-key reads.
+// Results are returned for every channel whose batch completed, including
+// missing and removed markers as false. If a backend batch fails, results from
+// other completed batches are retained and the first failure is returned.
+func (kc *Catalog) LoadChannelExistence(ctx context.Context, channels []string) (map[string]bool, error) {
+	existence := make(map[string]bool, len(channels))
+	if len(channels) == 0 {
+		return existence, nil
+	}
 
-// ChannelExistsWithError distinguishes a missing channel marker from a metadata
-// storage failure. Callers that cache the result must use this method so a
-// transient failure is not amplified into a cached "channel does not exist".
-func (kc *Catalog) ChannelExistsWithError(ctx context.Context, channel string) (bool, error) {
-	key := buildChannelRemovePath(channel)
-	v, err := kc.MetaKv.Load(ctx, key)
-	if errors.Is(err, merr.ErrIoKeyNotFound) {
-		return false, nil
+	uniqueChannels := make([]string, 0, len(channels))
+	seen := make(map[string]struct{}, len(channels))
+	for _, channel := range channels {
+		if _, ok := seen[channel]; ok {
+			continue
+		}
+		seen[channel] = struct{}{}
+		uniqueChannels = append(uniqueChannels, channel)
 	}
-	if err != nil {
-		return false, err
+
+	maxTxnOps := kc.MetaKv.MaxTxnOps()
+	if maxTxnOps <= 0 {
+		return existence, merr.WrapErrServiceInternalMsg(
+			"metadata store returned invalid maximum transaction operations: %d",
+			maxTxnOps,
+		)
 	}
-	return v == NonRemoveFlagTomestone, nil
+
+	var firstErr error
+	for start := 0; start < len(uniqueChannels); start += maxTxnOps {
+		end := min(start+maxTxnOps, len(uniqueChannels))
+		batchChannels := uniqueChannels[start:end]
+		keys := make([]string, len(batchChannels))
+		for i, channel := range batchChannels {
+			keys[i] = buildChannelRemovePath(channel)
+		}
+
+		values, err := kc.MetaKv.MultiLoad(ctx, keys)
+		if err != nil && !errors.Is(err, merr.ErrIoKeyNotFound) {
+			if firstErr == nil {
+				firstErr = merr.Wrap(err, "failed to load channel existence batch")
+			}
+			if ctx.Err() != nil {
+				break
+			}
+			continue
+		}
+		if len(values) != len(batchChannels) {
+			if firstErr == nil {
+				firstErr = merr.WrapErrServiceInternalMsg(
+					"channel existence batch returned %d values for %d channels",
+					len(values),
+					len(batchChannels),
+				)
+			}
+			continue
+		}
+		for i, channel := range batchChannels {
+			existence[channel] = values[i] == NonRemoveFlagTomestone
+		}
+	}
+	return existence, firstErr
 }
 
 // DropChannel removes channel remove flag after whole procedure is finished

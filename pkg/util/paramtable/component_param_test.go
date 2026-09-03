@@ -99,16 +99,16 @@ func TestComponentParam_DataCoordDroppedSegmentBatch(t *testing.T) {
 	params.Init(base)
 	cfg := &params.DataCoordCfg
 
-	assert.Equal(t, "dataCoord.gc.droppedSegment.channelStateMaxConcurrent", cfg.GCDroppedSegmentChannelStateMaxConcurrent.Key)
-	assert.Equal(t, 1, cfg.GCDroppedSegmentChannelStateMaxConcurrent.GetAsInt())
-	assert.NoError(t, base.Save(cfg.GCDroppedSegmentChannelStateMaxConcurrent.Key, "16"))
-	assert.Equal(t, 16, cfg.GCDroppedSegmentChannelStateMaxConcurrent.GetAsInt())
-	for _, value := range []string{"0", "-1", "129", "invalid"} {
-		assert.NoError(t, base.Save(cfg.GCDroppedSegmentChannelStateMaxConcurrent.Key, value))
-		assert.Equal(t, 1, cfg.GCDroppedSegmentChannelStateMaxConcurrent.GetAsInt())
+	assert.Equal(t, "dataCoord.gc.droppedSegment.channelStateBatchSize", cfg.GCDroppedSegmentChannelStateBatchSize.Key)
+	assert.Equal(t, 64, cfg.GCDroppedSegmentChannelStateBatchSize.GetAsInt())
+	assert.NoError(t, base.Save(cfg.GCDroppedSegmentChannelStateBatchSize.Key, "128"))
+	assert.Equal(t, 128, cfg.GCDroppedSegmentChannelStateBatchSize.GetAsInt())
+	for _, value := range []string{"0", "-1", "1001", "invalid"} {
+		assert.NoError(t, base.Save(cfg.GCDroppedSegmentChannelStateBatchSize.Key, value))
+		assert.Equal(t, 64, cfg.GCDroppedSegmentChannelStateBatchSize.GetAsInt())
 	}
 
-	field, ok := reflect.TypeOf(dataCoordConfig{}).FieldByName("GCDroppedSegmentChannelStateMaxConcurrent")
+	field, ok := reflect.TypeOf(dataCoordConfig{}).FieldByName("GCDroppedSegmentChannelStateBatchSize")
 	assert.True(t, ok)
 	assert.Equal(t, "true", field.Tag.Get("refreshable"))
 

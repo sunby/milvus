@@ -962,13 +962,6 @@ type droppedSegmentGCChannelState struct {
 	loadErr    error
 }
 
-// droppedSegmentGCChannelExistenceCatalog is an optional extension used by the
-// batch candidate scan. The base DataCoordCatalog method returns only a bool
-// and cannot distinguish a missing marker from a metadata storage failure.
-type droppedSegmentGCChannelExistenceCatalog interface {
-	ChannelExistsWithError(ctx context.Context, channel string) (bool, error)
-}
-
 // recycleDroppedSegments scans all segments and remove those dropped segments from meta and oss.
 func (gc *garbageCollector) recycleDroppedSegments(ctx context.Context, signal <-chan gcCmd) {
 	start := time.Now()
@@ -1042,12 +1035,12 @@ func (gc *garbageCollector) recycleDroppedSegments(ctx context.Context, signal <
 	log.Info(ctx, "start to GC segments", mlog.Int("drop_num", len(drops)))
 	candidateStart := time.Now()
 	processedDroppedSegments := 0
-	channelStateMaxConcurrent := Params.DataCoordCfg.GCDroppedSegmentChannelStateMaxConcurrent.GetAsInt()
+	channelStateBatchSize := Params.DataCoordCfg.GCDroppedSegmentChannelStateBatchSize.GetAsInt()
 	defer func() {
 		log.Info(ctx, "recycleDroppedSegments candidates done",
 			mlog.Int("droppedSegments", len(drops)),
 			mlog.Int("processedDroppedSegments", processedDroppedSegments),
-			mlog.Int("channelStateMaxConcurrent", channelStateMaxConcurrent),
+			mlog.Int("channelStateBatchSize", channelStateBatchSize),
 			mlog.Duration("timeCost", time.Since(candidateStart)))
 	}()
 	processedDroppedSegments = gc.recycleDroppedSegmentsInBatches(
@@ -1058,7 +1051,7 @@ func (gc *garbageCollector) recycleDroppedSegments(ctx context.Context, signal <
 		indexedSet,
 		channelStates,
 		loadedSegments,
-		channelStateMaxConcurrent,
+		channelStateBatchSize,
 	)
 }
 
@@ -1135,11 +1128,12 @@ func (gc *garbageCollector) loadDroppedSegmentChannelStates(
 	ctx context.Context,
 	signal <-chan gcCmd,
 	channelStates map[string]droppedSegmentGCChannelState,
-	workerPool *conc.Pool[struct{}],
 	batchSize int,
 ) {
+	if batchSize <= 0 {
+		batchSize = 1
+	}
 	channels := make([]string, 0, batchSize)
-	var channelStateMu sync.Mutex
 	flush := func() bool {
 		if len(channels) == 0 {
 			gc.ackSignal(signal)
@@ -1147,34 +1141,37 @@ func (gc *garbageCollector) loadDroppedSegmentChannelStates(
 		}
 
 		gc.ackSignal(signal)
-		futures := make([]*conc.Future[struct{}], 0, len(channels))
+		existence, batchErr := gc.meta.catalog.LoadChannelExistence(ctx, channels)
+		failedChannels := 0
+		var missingResultErr error
 		for _, channel := range channels {
-			channel := channel
-			futures = append(futures, workerPool.Submit(func() (struct{}, error) {
-				var (
-					exists  bool
-					loadErr error
-				)
-				if catalog, ok := gc.meta.catalog.(droppedSegmentGCChannelExistenceCatalog); ok {
-					exists, loadErr = catalog.ChannelExistsWithError(ctx, channel)
-				} else {
-					exists = gc.meta.catalog.ChannelExists(ctx, channel)
-				}
-				channelStateMu.Lock()
-				state := channelStates[channel]
+			state := channelStates[channel]
+			exists, ok := existence[channel]
+			if ok {
 				state.exists = exists
-				state.loadErr = loadErr
-				channelStates[channel] = state
-				channelStateMu.Unlock()
-				if loadErr != nil && ctx.Err() == nil {
-					mlog.RatedWarn(ctx, rate.Limit(1), "skip dropped segment GC for channel since channel state lookup failed",
-						mlog.FieldVChannel(channel),
-						mlog.Err(loadErr))
+			} else {
+				state.loadErr = batchErr
+				if state.loadErr == nil {
+					if missingResultErr == nil {
+						missingResultErr = merr.WrapErrServiceInternalMsg(
+							"channel existence batch omitted a requested channel",
+						)
+					}
+					state.loadErr = missingResultErr
 				}
-				return struct{}{}, nil
-			}))
+				failedChannels++
+			}
+			channelStates[channel] = state
 		}
-		_ = conc.BlockOnAll(futures...)
+		if failedChannels > 0 && ctx.Err() == nil {
+			loadErr := batchErr
+			if loadErr == nil {
+				loadErr = missingResultErr
+			}
+			mlog.RatedWarn(ctx, rate.Limit(1), "skip dropped segment GC for channels whose batch state lookup failed",
+				mlog.Int("channels", failedChannels),
+				mlog.Err(loadErr))
+		}
 		channels = channels[:0]
 		gc.ackSignal(signal)
 		return ctx.Err() == nil
@@ -1503,14 +1500,9 @@ func (gc *garbageCollector) recycleDroppedSegmentsInBatches(
 	indexedSet typeutil.UniqueSet,
 	channelStates map[string]droppedSegmentGCChannelState,
 	loadedSegments typeutil.Set[int64],
-	channelStateMaxConcurrent int,
+	channelStateBatchSize int,
 ) int {
-	if channelStateMaxConcurrent <= 0 {
-		channelStateMaxConcurrent = 1
-	}
-	workerPool := conc.NewPool[struct{}](channelStateMaxConcurrent, conc.WithExpiryDuration(time.Minute))
-	defer workerPool.Release()
-	gc.loadDroppedSegmentChannelStates(ctx, signal, channelStates, workerPool, channelStateMaxConcurrent)
+	gc.loadDroppedSegmentChannelStates(ctx, signal, channelStates, channelStateBatchSize)
 	if ctx.Err() != nil {
 		return 0
 	}

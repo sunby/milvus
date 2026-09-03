@@ -887,7 +887,7 @@ dataCoord:
     missingTolerance: 86400 # The retention duration of the unrecorded binary log (binlog) files. Setting a reasonably large value for this parameter avoids erroneously deleting the newly created binlog files that lack metadata. Unit: second.
     dropTolerance: 10800 # The retention duration of the binlog files of the deleted segments before they are cleared, unit: second.
     droppedSegment:
-      channelStateMaxConcurrent: 1 # Maximum dropped-segment GC channel-state lookups processed concurrently
+      channelStateBatchSize: 64 # Maximum number of dropped-segment GC channel markers loaded per catalog batch
       batchDelete:
         batchSize: 1000 # Maximum segment candidates or explicit object paths admitted to one batch
     scanInterval: 168 # orphan file (file on oss but has not been registered on meta) on object storage garbage collection scanning interval in hours

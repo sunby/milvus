@@ -65,7 +65,7 @@ const (
 	gcPerfDroppedIndexLatencyEnv    = "MILVUS_GC_PERF_DROPPED_INDEX_KV_LATENCY"
 	gcPerfDroppedSegmentLatencyEnv  = "MILVUS_GC_PERF_DROPPED_SEGMENT_KV_LATENCY"
 	gcPerfDroppedApplyLatencyEnv    = "MILVUS_GC_PERF_DROPPED_APPLY_LATENCY"
-	gcPerfDroppedMaxConcurrentEnv   = "MILVUS_GC_PERF_DROPPED_CHANNEL_STATE_MAX_CONCURRENT"
+	gcPerfDroppedChannelBatchEnv    = "MILVUS_GC_PERF_DROPPED_CHANNEL_STATE_BATCH_SIZE"
 	gcPerfDroppedBatchDeleteEnv     = "MILVUS_GC_PERF_DROPPED_NATIVE_FILE_BATCH"
 	gcPerfDroppedBatchSizeEnv       = "MILVUS_GC_PERF_DROPPED_BATCH_SIZE"
 
@@ -78,22 +78,21 @@ type gcPerfDroppedSegmentCatalog struct {
 	indexLatency   time.Duration
 	applyLatency   bool
 
-	channelExistsCalls    atomic.Int64
+	channelExistenceCalls atomic.Int64
 	dropSegmentIndexCalls atomic.Int64
 	dropSegmentIndexTxns  atomic.Int64
 }
 
-func (c *gcPerfDroppedSegmentCatalog) ChannelExists(ctx context.Context, channel string) bool {
-	exists, _ := c.ChannelExistsWithError(ctx, channel)
-	return exists
-}
-
-func (c *gcPerfDroppedSegmentCatalog) ChannelExistsWithError(context.Context, string) (bool, error) {
-	c.channelExistsCalls.Add(1)
+func (c *gcPerfDroppedSegmentCatalog) LoadChannelExistence(_ context.Context, channels []string) (map[string]bool, error) {
+	c.channelExistenceCalls.Add(1)
 	if c.applyLatency && c.channelLatency > 0 {
 		time.Sleep(c.channelLatency)
 	}
-	return false, nil
+	existence := make(map[string]bool, len(channels))
+	for _, channel := range channels {
+		existence[channel] = false
+	}
+	return existence, nil
 }
 
 func (c *gcPerfDroppedSegmentCatalog) DropSegmentIndex(context.Context, int64, int64, int64, int64) error {
@@ -983,23 +982,23 @@ func TestDataCoordDroppedSegmentGCLargeScalePerformance(t *testing.T) {
 	indexLatency := gcPerfEnvDuration(t, gcPerfDroppedIndexLatencyEnv, time.Millisecond)
 	segmentLatency := gcPerfEnvDuration(t, gcPerfDroppedSegmentLatencyEnv, time.Millisecond)
 	applyLatency := gcPerfEnvBool(t, gcPerfDroppedApplyLatencyEnv, false)
-	channelStateMaxConcurrent := gcPerfEnvInt(t, gcPerfDroppedMaxConcurrentEnv, 1)
+	channelStateBatchSize := gcPerfEnvInt(t, gcPerfDroppedChannelBatchEnv, 64)
 	nativeFileBatchEnabled := gcPerfEnvBool(t, gcPerfDroppedBatchDeleteEnv, false)
 	batchSize := gcPerfEnvInt(t, gcPerfDroppedBatchSizeEnv, 1000)
 
-	oldMaxConcurrent := Params.DataCoordCfg.GCDroppedSegmentChannelStateMaxConcurrent.GetValue()
+	oldChannelBatchSize := Params.DataCoordCfg.GCDroppedSegmentChannelStateBatchSize.GetValue()
 	oldBatchSize := Params.DataCoordCfg.GCDroppedSegmentBatchSize.GetValue()
-	if err := Params.Save(Params.DataCoordCfg.GCDroppedSegmentChannelStateMaxConcurrent.Key, strconv.Itoa(channelStateMaxConcurrent)); err != nil {
-		t.Fatalf("set dropped-segment max concurrency: %v", err)
+	if err := Params.Save(Params.DataCoordCfg.GCDroppedSegmentChannelStateBatchSize.Key, strconv.Itoa(channelStateBatchSize)); err != nil {
+		t.Fatalf("set dropped-segment channel batch size: %v", err)
 	}
 	if err := Params.Save(Params.DataCoordCfg.GCDroppedSegmentBatchSize.Key, strconv.Itoa(batchSize)); err != nil {
 		t.Fatalf("set dropped-segment batch size: %v", err)
 	}
-	channelStateMaxConcurrent = Params.DataCoordCfg.GCDroppedSegmentChannelStateMaxConcurrent.GetAsInt()
+	channelStateBatchSize = Params.DataCoordCfg.GCDroppedSegmentChannelStateBatchSize.GetAsInt()
 	batchSize = Params.DataCoordCfg.GCDroppedSegmentBatchSize.GetAsInt()
 	t.Cleanup(func() {
-		if err := Params.Save(Params.DataCoordCfg.GCDroppedSegmentChannelStateMaxConcurrent.Key, oldMaxConcurrent); err != nil {
-			t.Errorf("restore dropped-segment max concurrency: %v", err)
+		if err := Params.Save(Params.DataCoordCfg.GCDroppedSegmentChannelStateBatchSize.Key, oldChannelBatchSize); err != nil {
+			t.Errorf("restore dropped-segment channel batch size: %v", err)
 		}
 		if err := Params.Save(Params.DataCoordCfg.GCDroppedSegmentBatchSize.Key, oldBatchSize); err != nil {
 			t.Errorf("restore dropped-segment batch size: %v", err)
@@ -1012,7 +1011,8 @@ func TestDataCoordDroppedSegmentGCLargeScalePerformance(t *testing.T) {
 	}
 	filesPerSegment := indexesPerSegment * filesPerIndex
 	modeledDataViewRequests := int64(segmentCount)
-	modeledChannelRequests := int64(min(collectionCount, segmentCount))
+	modeledChannelKeys := int64(min(collectionCount, segmentCount))
+	modeledChannelRequests := (modeledChannelKeys + int64(channelStateBatchSize) - 1) / int64(channelStateBatchSize)
 	modeledFileRequests := int64(segmentCount * filesPerSegment)
 	modeledIndexRequests := int64(segmentCount * indexesPerSegment)
 	batchModel := gcPerfModelDroppedSegmentBatches(
@@ -1032,26 +1032,25 @@ func TestDataCoordDroppedSegmentGCLargeScalePerformance(t *testing.T) {
 	modeledSegmentGetRequests := int64(0)
 	modeledSegmentTxnRequests := batchModel.segmentRequests
 	modeledSerialIO := time.Duration(modeledDataViewRequests)*dataViewLatency +
-		time.Duration(modeledChannelRequests)*channelLatency +
+		time.Duration(modeledChannelKeys)*channelLatency +
 		time.Duration(modeledFileBackendRequests)*fileLatency +
 		time.Duration(modeledIndexTxnRequests)*indexLatency +
 		time.Duration(modeledSegmentGetRequests+modeledSegmentTxnRequests)*segmentLatency
-	channelRounds := (int(modeledChannelRequests) + channelStateMaxConcurrent - 1) / channelStateMaxConcurrent
-	// Candidate admission (including DataView) and metadata batches are serial.
-	// Unique-channel reads and fallback file removals are bounded concurrently.
-	modeledParallelIO := time.Duration(channelRounds)*channelLatency +
+	// Candidate admission (including DataView), channel-state reads, and metadata
+	// batches are serial. Exact channel marker reads are grouped into catalog batches.
+	modeledBatchedIO := time.Duration(modeledChannelRequests)*channelLatency +
 		time.Duration(modeledDataViewRequests)*dataViewLatency +
 		time.Duration(modeledFileLatencyUnits)*fileLatency +
 		time.Duration(modeledIndexTxnRequests)*indexLatency +
 		time.Duration(modeledSegmentGetRequests+modeledSegmentTxnRequests)*segmentLatency
 	t.Logf(
-		"DROPPED_SEGMENT_GC_PERF config segments=%d collections=%d indexes_per_segment=%d files_per_index=%d remove_concurrency=%d channel_state_max_concurrent=%d native_file_batch=%t batch_size=%d dataview_latency=%s channel_latency=%s file_latency=%s index_kv_latency=%s segment_kv_latency=%s apply_latency=%t modeled_serial_io=%s modeled_parallel_io=%s",
+		"DROPPED_SEGMENT_GC_PERF config segments=%d collections=%d indexes_per_segment=%d files_per_index=%d remove_concurrency=%d channel_state_batch_size=%d native_file_batch=%t batch_size=%d dataview_latency=%s channel_latency=%s file_latency=%s index_kv_latency=%s segment_kv_latency=%s apply_latency=%t modeled_serial_io=%s modeled_batched_io=%s",
 		segmentCount,
 		collectionCount,
 		indexesPerSegment,
 		filesPerIndex,
 		removeConcurrency,
-		channelStateMaxConcurrent,
+		channelStateBatchSize,
 		nativeFileBatchEnabled,
 		batchSize,
 		dataViewLatency,
@@ -1061,7 +1060,7 @@ func TestDataCoordDroppedSegmentGCLargeScalePerformance(t *testing.T) {
 		segmentLatency,
 		applyLatency,
 		modeledSerialIO,
-		modeledParallelIO,
+		modeledBatchedIO,
 	)
 
 	oldLogLevel := mlog.GetLevel()
@@ -1175,7 +1174,7 @@ func TestDataCoordDroppedSegmentGCLargeScalePerformance(t *testing.T) {
 	if got := dataViewCatalog.listCalls.Load(); got != modeledDataViewRequests {
 		t.Fatalf("DataView list requests = %d, want %d", got, modeledDataViewRequests)
 	}
-	if got := segmentCatalog.channelExistsCalls.Load(); got != modeledChannelRequests {
+	if got := segmentCatalog.channelExistenceCalls.Load(); got != modeledChannelRequests {
 		t.Fatalf("channel existence requests = %d, want %d", got, modeledChannelRequests)
 	}
 	if got := chunkManager.removeCalls.Load(); got != modeledFileRequests {
@@ -1212,14 +1211,14 @@ func TestDataCoordDroppedSegmentGCLargeScalePerformance(t *testing.T) {
 	}
 
 	t.Logf(
-		"DROPPED_SEGMENT_GC_PERF result segments=%d collections=%d channel_state_max_concurrent=%d native_file_batch=%t batch_size=%d dataview_requests=%d channel_requests=%d logical_file_deletes=%d native_file_requests=%d segment_index_kv_deletes=%d segment_index_kv_txn_requests=%d segment_kv_get_requests=%d segment_kv_txn_requests=%d elapsed=%s throughput=%.0f_segments/s latency_applied=%t modeled_serial_io=%s modeled_parallel_io=%s",
+		"DROPPED_SEGMENT_GC_PERF result segments=%d collections=%d channel_state_batch_size=%d native_file_batch=%t batch_size=%d dataview_requests=%d channel_requests=%d logical_file_deletes=%d native_file_requests=%d segment_index_kv_deletes=%d segment_index_kv_txn_requests=%d segment_kv_get_requests=%d segment_kv_txn_requests=%d elapsed=%s throughput=%.0f_segments/s latency_applied=%t modeled_serial_io=%s modeled_batched_io=%s",
 		segmentCount,
 		collectionCount,
-		channelStateMaxConcurrent,
+		channelStateBatchSize,
 		nativeFileBatchEnabled,
 		batchSize,
 		dataViewCatalog.listCalls.Load(),
-		segmentCatalog.channelExistsCalls.Load(),
+		segmentCatalog.channelExistenceCalls.Load(),
 		chunkManager.removeCalls.Load(),
 		chunkManager.batchRequestCalls.Load(),
 		segmentCatalog.dropSegmentIndexCalls.Load(),
@@ -1230,7 +1229,7 @@ func TestDataCoordDroppedSegmentGCLargeScalePerformance(t *testing.T) {
 		float64(segmentCount)/stageElapsed.Seconds(),
 		applyLatency,
 		modeledSerialIO,
-		modeledParallelIO,
+		modeledBatchedIO,
 	)
 
 	runtime.KeepAlive(fileKeys)

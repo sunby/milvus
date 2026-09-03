@@ -676,11 +676,19 @@ type batchIndexDeleteCatalog struct {
 
 type droppedSegmentGCChannelStateCatalog struct {
 	metastore.DataCoordCatalog
-	channelExistsWithError func(context.Context, string) (bool, error)
+	loadChannelExistence func(context.Context, []string) (map[string]bool, error)
 }
 
-func (c *droppedSegmentGCChannelStateCatalog) ChannelExistsWithError(ctx context.Context, channel string) (bool, error) {
-	return c.channelExistsWithError(ctx, channel)
+func (c *droppedSegmentGCChannelStateCatalog) LoadChannelExistence(ctx context.Context, channels []string) (map[string]bool, error) {
+	return c.loadChannelExistence(ctx, channels)
+}
+
+func loadExistingChannels(_ context.Context, channels []string) (map[string]bool, error) {
+	existence := make(map[string]bool, len(channels))
+	for _, channel := range channels {
+		existence[channel] = true
+	}
+	return existence, nil
 }
 
 func (c *batchIndexDeleteCatalog) DropIndexes(ctx context.Context, indexes []*model.Index) error {
@@ -2063,10 +2071,10 @@ func TestGarbageCollector_recycleUnusedIndexFilesV1(t *testing.T) {
 
 func TestGarbageCollector_clearETCD(t *testing.T) {
 	catalog := catalogmocks.NewDataCoordCatalog(t)
-	catalog.On("ChannelExists",
+	catalog.On("LoadChannelExistence",
 		mock.Anything,
 		mock.Anything,
-	).Return(true)
+	).Return(map[string]bool{"dmlChannel": true}, nil)
 	catalog.On("DropChannelCheckpoint",
 		mock.Anything,
 		mock.Anything,
@@ -3180,10 +3188,8 @@ func TestGarbageCollector_recycleDroppedSegments_SnapshotReference(t *testing.T)
 	// Create meta
 	meta := &meta{
 		catalog: &droppedSegmentGCChannelStateCatalog{
-			DataCoordCatalog: catalog,
-			channelExistsWithError: func(context.Context, string) (bool, error) {
-				return true, nil
-			},
+			DataCoordCatalog:     catalog,
+			loadChannelExistence: loadExistingChannels,
 		},
 		snapshotMeta: smMeta,
 		segments:     NewCachedSegmentsInfo(),
@@ -3312,15 +3318,15 @@ func TestGarbageCollector_recycleDroppedSegments_DataViewReference(t *testing.T)
 	}
 }
 
-func setDroppedSegmentChannelStateConcurrency(t *testing.T, concurrency int) {
+func setDroppedSegmentChannelStateBatchSize(t *testing.T, batchSize int) {
 	t.Helper()
-	oldValue := Params.DataCoordCfg.GCDroppedSegmentChannelStateMaxConcurrent.GetValue()
+	oldValue := Params.DataCoordCfg.GCDroppedSegmentChannelStateBatchSize.GetValue()
 	require.NoError(t, Params.Save(
-		Params.DataCoordCfg.GCDroppedSegmentChannelStateMaxConcurrent.Key,
-		strconv.Itoa(concurrency),
+		Params.DataCoordCfg.GCDroppedSegmentChannelStateBatchSize.Key,
+		strconv.Itoa(batchSize),
 	))
 	t.Cleanup(func() {
-		require.NoError(t, Params.Save(Params.DataCoordCfg.GCDroppedSegmentChannelStateMaxConcurrent.Key, oldValue))
+		require.NoError(t, Params.Save(Params.DataCoordCfg.GCDroppedSegmentChannelStateBatchSize.Key, oldValue))
 	})
 }
 
@@ -3334,7 +3340,7 @@ func setDroppedSegmentBatchSize(t *testing.T, batchSize int) {
 }
 
 func TestGarbageCollector_recycleDroppedSegmentsBatchChannelStateResolution(t *testing.T) {
-	setDroppedSegmentChannelStateConcurrency(t, 4)
+	setDroppedSegmentChannelStateBatchSize(t, 4)
 	ctx := context.Background()
 	m, err := newMemoryMeta(t)
 	require.NoError(t, err)
@@ -3353,25 +3359,16 @@ func TestGarbageCollector_recycleDroppedSegmentsBatchChannelStateResolution(t *t
 		}}))
 	}
 
-	var stateMu sync.Mutex
-	active := 0
-	maxActive := 0
-	channelCalls := 0
+	var channelBatches [][]string
 	m.catalog = &droppedSegmentGCChannelStateCatalog{
 		DataCoordCatalog: m.catalog,
-		channelExistsWithError: func(context.Context, string) (bool, error) {
-			stateMu.Lock()
-			channelCalls++
-			active++
-			if active > maxActive {
-				maxActive = active
+		loadChannelExistence: func(_ context.Context, channels []string) (map[string]bool, error) {
+			channelBatches = append(channelBatches, append([]string(nil), channels...))
+			existence := make(map[string]bool, len(channels))
+			for _, channel := range channels {
+				existence[channel] = false
 			}
-			stateMu.Unlock()
-			time.Sleep(20 * time.Millisecond)
-			stateMu.Lock()
-			active--
-			stateMu.Unlock()
-			return false, nil
+			return existence, nil
 		},
 	}
 
@@ -3382,38 +3379,41 @@ func TestGarbageCollector_recycleDroppedSegmentsBatchChannelStateResolution(t *t
 	defer gc.close()
 	gc.recycleDroppedSegments(ctx, nil)
 
-	stateMu.Lock()
-	assert.Equal(t, 2, channelCalls, "each unique channel should be resolved once per sweep")
-	assert.Greater(t, maxActive, 1, "channel resolution should use bounded concurrency")
-	stateMu.Unlock()
+	require.Len(t, channelBatches, 1)
+	assert.ElementsMatch(t, []string{"channel-1", "channel-2"}, channelBatches[0])
 	for segmentID := int64(1); segmentID <= 4; segmentID++ {
 		assert.Nil(t, m.GetSegment(ctx, segmentID))
 	}
 }
 
 func TestGarbageCollector_recycleDroppedSegmentsBatch_ChannelStateFailureKeepsMeta(t *testing.T) {
-	setDroppedSegmentChannelStateConcurrency(t, 4)
+	setDroppedSegmentChannelStateBatchSize(t, 1)
 	ctx := context.Background()
 	m, err := newMemoryMeta(t)
 	require.NoError(t, err)
 	m.dataViewManager = nil
 	m.snapshotMeta = nil
 
-	segment := &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
-		ID:            1,
-		CollectionID:  1,
-		PartitionID:   1,
-		InsertChannel: "channel-1",
-		State:         commonpb.SegmentState_Dropped,
-		DroppedAt:     uint64(time.Now().Add(-time.Hour).UnixNano()),
-	}}
-	require.NoError(t, m.AddSegment(ctx, segment))
+	for segmentID, channel := range map[int64]string{1: "channel-success", 2: "channel-failure"} {
+		require.NoError(t, m.AddSegment(ctx, &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
+			ID:            segmentID,
+			CollectionID:  segmentID,
+			PartitionID:   segmentID,
+			InsertChannel: channel,
+			State:         commonpb.SegmentState_Dropped,
+			DroppedAt:     uint64(time.Now().Add(-time.Hour).UnixNano()),
+		}}))
+	}
 
 	loadErr := merr.WrapErrIoFailedMsg("mock channel state lookup failure")
 	m.catalog = &droppedSegmentGCChannelStateCatalog{
 		DataCoordCatalog: m.catalog,
-		channelExistsWithError: func(context.Context, string) (bool, error) {
-			return false, loadErr
+		loadChannelExistence: func(_ context.Context, channels []string) (map[string]bool, error) {
+			require.Len(t, channels, 1)
+			if channels[0] == "channel-failure" {
+				return nil, loadErr
+			}
+			return map[string]bool{channels[0]: false}, nil
 		},
 	}
 
@@ -3424,11 +3424,12 @@ func TestGarbageCollector_recycleDroppedSegmentsBatch_ChannelStateFailureKeepsMe
 	defer gc.close()
 	gc.recycleDroppedSegments(ctx, nil)
 
-	assert.NotNil(t, m.GetSegment(ctx, segment.GetID()))
+	assert.Nil(t, m.GetSegment(ctx, 1))
+	assert.NotNil(t, m.GetSegment(ctx, 2))
 }
 
 func TestGarbageCollector_recycleDroppedSegmentsBatchFallbackWithIndexes(t *testing.T) {
-	setDroppedSegmentChannelStateConcurrency(t, 4)
+	setDroppedSegmentChannelStateBatchSize(t, 4)
 	ctx := context.Background()
 	m, err := newMemoryMeta(t)
 	require.NoError(t, err)
@@ -3509,7 +3510,7 @@ func setupDroppedSegmentBatchFixture(t *testing.T, count int) *meta {
 func TestGarbageCollector_recycleDroppedSegmentsInBatches(t *testing.T) {
 	t.Run("batches files and both metadata levels", func(t *testing.T) {
 		setDroppedSegmentBatchSize(t, 100)
-		setDroppedSegmentChannelStateConcurrency(t, 2)
+		setDroppedSegmentChannelStateBatchSize(t, 2)
 		ctx := context.Background()
 		m := setupDroppedSegmentBatchFixture(t, 3)
 		cm := &batchRemoveChunkManager{rootPath: "root"}
@@ -3705,7 +3706,7 @@ func TestGarbageCollector_recycleDroppedSegmentsInBatches(t *testing.T) {
 }
 
 func TestGarbageCollector_recycleDroppedSegmentsBatchFallbackPauseBarrier(t *testing.T) {
-	setDroppedSegmentChannelStateConcurrency(t, 2)
+	setDroppedSegmentChannelStateBatchSize(t, 2)
 	ctx := context.Background()
 	m, err := newMemoryMeta(t)
 	require.NoError(t, err)
@@ -3777,7 +3778,7 @@ func TestGarbageCollector_recycleDroppedSegmentsBatchFallbackPauseBarrier(t *tes
 
 func TestGarbageCollector_recycleDroppedSegmentsBatchPauseBarrier(t *testing.T) {
 	setDroppedSegmentBatchSize(t, 100)
-	setDroppedSegmentChannelStateConcurrency(t, 2)
+	setDroppedSegmentChannelStateBatchSize(t, 2)
 	ctx := context.Background()
 	m, err := newMemoryMeta(t)
 	require.NoError(t, err)
@@ -4447,10 +4448,8 @@ func TestGarbageCollector_recycleDroppedSegments_SnapshotMetaNil(t *testing.T) {
 	// Create meta with nil snapshotMeta
 	meta := &meta{
 		catalog: &droppedSegmentGCChannelStateCatalog{
-			DataCoordCatalog: catalog,
-			channelExistsWithError: func(context.Context, string) (bool, error) {
-				return true, nil
-			},
+			DataCoordCatalog:     catalog,
+			loadChannelExistence: loadExistingChannels,
 		},
 		snapshotMeta: nil, // nil snapshot meta
 		segments:     NewCachedSegmentsInfo(),
@@ -5313,10 +5312,8 @@ func TestGarbageCollector_recycleDroppedSegments_V3(t *testing.T) {
 
 	m := &meta{
 		catalog: &droppedSegmentGCChannelStateCatalog{
-			DataCoordCatalog: catalog,
-			channelExistsWithError: func(context.Context, string) (bool, error) {
-				return true, nil
-			},
+			DataCoordCatalog:     catalog,
+			loadChannelExistence: loadExistingChannels,
 		},
 		snapshotMeta: smMeta,
 		segments:     NewCachedSegmentsInfo(),

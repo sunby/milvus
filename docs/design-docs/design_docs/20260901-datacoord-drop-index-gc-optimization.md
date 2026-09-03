@@ -68,12 +68,12 @@ dropped-segment GC 原来逐 segment 串行执行完整流水线；中间版本�
 `recycleDroppedSegmentsConcurrently` 路径。当前实现已经删除该分叉，所有 storage 后端
 都执行同一条分阶段 batch 流水线：
 
-1. 在单次 pass 内按唯一 insert channel 缓存 channel checkpoint 和
-   `ChannelExists` 结果。动态配置
-   `dataCoord.gc.droppedSegment.channelStateMaxConcurrent` 只控制这些唯一 channel 的查询
-   并发度，不控制 segment 删除流水线并发。
-2. `ChannelExistsWithError` 区分 marker 不存在和 metadata storage 读取失败；读取失败时
-   对该 channel fail-closed，本轮不回收其 segment，避免错误结果被整条 channel 复用。
+1. 在单次 pass 内按唯一 insert channel 缓存 channel checkpoint，并通过
+   `LoadChannelExistence` 对精确 marker key 做批量读取。动态配置
+   `dataCoord.gc.droppedSegment.channelStateBatchSize` 控制 GC pause barrier 之间提交给 catalog
+   的 channel 数；catalog 还会按 `MetaKv.MaxTxnOps()` 拆分底层 `MultiLoad`。
+2. marker 不存在或值为 `removed` 时返回 `false`；metadata storage 批量读取失败时，对该批
+   未解析 channel fail-closed，本轮不回收其 segment，避免将读取错误解释成 marker 不存在。
 3. candidate 按 segment 数和估算精确 path 数组成有界批次，严格分为“文件删除 ->
    SegmentIndex 元数据删除 -> segment 元数据删除”三个 stage。前一 stage 未确认成功的
    segment 不进入后一 stage。
@@ -82,9 +82,6 @@ dropped-segment GC 原来逐 segment 串行执行完整流水线；中间版本�
    再改变上层 GC 算法。
 5. pause 只在 batch barrier 确认；已经进入的 storage 或 metadata batch 收敛后才 ACK，
    避免 ACK 后仍有该 Collection 的删除在飞。
-6. 每轮汇总文件、SegmentIndex metadata 和 segment metadata 各 stage 的尝试数、失败数、
-   batch 数和耗时，不增加每个 segment 的成功耗时日志。
-
 当前 DataView 引用检查仍按 candidate 执行，V3 prefix 仍需逐 prefix list；真实集群启用
 前仍需测量 etcd/对象存储限流和前台延迟。
 
@@ -557,7 +554,7 @@ reconciliation，以处理历史或不一致元数据。
 | 配置项 | 初始默认值 | 动态刷新 | 作用 |
 |---|---:|---|---|
 | `dataCoord.gc.indexFileBatchDelete.batchSize` | `1000` | 是 | 一个 GC storage batch 最多估算的文件引用数；无文件条目按一个候选计数 |
-| `dataCoord.gc.droppedSegment.channelStateMaxConcurrent` | `1` | 是 | 每轮唯一 channel 的状态查询并发数；范围 1--128，不控制 segment 删除并发 |
+| `dataCoord.gc.droppedSegment.channelStateBatchSize` | `64` | 是 | 一个 catalog batch 最多读取的唯一 channel marker 数；范围 1--1000，底层仍受 `MetaKv.MaxTxnOps()` 限制 |
 | `dataCoord.gc.droppedSegment.batchDelete.batchSize` | `1000` | 是 | 单批最多容纳的 candidate 数或估算精确对象 key 数；范围 1--1000 |
 
 原生 batch request 并发配置尚未实现；当前批次串行提交。是否增加
@@ -825,12 +822,12 @@ KV 时间   = 175,625 * 1 ms = 175.625 s
 #### dropped-segment GC A/B（已删除并发原型的历史结果）
 
 `TestDataCoordDroppedSegmentGCLargeScalePerformance` 直接调用生产
-`recycleDroppedSegments`，分别统计 DataView、`ChannelExists`、文件、SegmentIndex KV
+`recycleDroppedSegments`，分别统计 DataView、channel marker batch、文件、SegmentIndex KV
 和 segment Get/Txn 的逻辑调用数。
 
 以下“有界并发”数据来自已经删除的 `recycleDroppedSegmentsConcurrently` 原型，仅保留为
-方案演进依据；当前代码不能再通过配置切回该原型。当前参数只并发唯一 channel 状态查询，
-所有 segment 都进入后续统一 batch pipeline。
+方案演进依据；当前代码不能再通过配置切回该原型。当前代码已经把唯一 channel 状态查询
+替换为精确 key batch，所有 segment 都进入后续统一 batch pipeline。
 
 100 万 dropped segment、100 万 Collection、每 segment 一个 SegmentIndex 和一个文件，
 所有 mock 延迟为零。这是每个 channel 只有一个 segment 的保守场景，无法通过 channel
@@ -882,8 +879,8 @@ KV 时间   = 175,625 * 1 ms = 175.625 s
 各组历史测试最终都删除了全部目标元数据，逻辑删除计数没有丢失。延迟注入结果只说明
 当时的并发原型能隐藏 mock I/O 等待，不代表真实 etcd/MinIO 能线性扩展。
 
-当前正确性测试仍覆盖 channel marker 读取失败：统一 batch 路径会保留该 channel 的 segment
-metadata，待下一轮重试，而不是把读取错误当作 marker 不存在。
+当前正确性测试仍覆盖 channel marker 批量读取失败：统一 batch 路径会保留未解析 channel 的
+segment metadata，待下一轮重试，而不是把读取错误当作 marker 不存在。
 
 #### dropped-segment 分阶段批删 A/B（统一前的历史结果，2026-09-02）
 
