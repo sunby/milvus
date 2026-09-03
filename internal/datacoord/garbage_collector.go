@@ -1428,7 +1428,7 @@ func (gc *garbageCollector) recycleDroppedSegmentBatch(
 		segmentIndexes = append(segmentIndexes, candidate.segIndexes...)
 	}
 
-	if gc.meta.indexMeta != nil && gc.meta.indexMeta.supportsBatchIndexDeletion() {
+	if gc.meta.indexMeta != nil {
 		metadataBatchSize := Params.MetaStoreCfg.MaxEtcdTxnNum.GetAsInt()
 		if metadataBatchSize <= 0 {
 			metadataBatchSize = 64
@@ -1441,17 +1441,6 @@ func (gc *garbageCollector) recycleDroppedSegmentBatch(
 			if _, err := gc.meta.indexMeta.RemoveSegmentIndexes(ctx, segmentIndexes[start:end]); err != nil {
 				mlog.RatedWarn(ctx, rate.Limit(1), "failed to remove dropped segment index metadata batch",
 					mlog.Int("segmentIndexes", end-start),
-					mlog.Err(err))
-			}
-		}
-	} else {
-		for _, candidate := range fileComplete {
-			if ctx.Err() != nil {
-				break
-			}
-			if err := gc.removeDroppedSegmentIndexMeta(ctx, candidate.segIndexes); err != nil {
-				mlog.RatedWarn(ctx, rate.Limit(1), "failed to remove dropped segment index metadata",
-					mlog.FieldSegmentID(candidate.segmentID),
 					mlog.Err(err))
 			}
 		}
@@ -1703,18 +1692,6 @@ func (gc *garbageCollector) removeDroppedSegmentFiles(ctx context.Context, clone
 	return nil
 }
 
-func (gc *garbageCollector) removeDroppedSegmentIndexMeta(ctx context.Context, segIndexes []*model.SegmentIndex) error {
-	if len(segIndexes) == 0 {
-		return nil
-	}
-	for _, segIdx := range segIndexes {
-		if err := gc.meta.indexMeta.RemoveSegmentIndex(ctx, segIdx.BuildID); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (gc *garbageCollector) recycleChannelCPMeta(ctx context.Context, signal <-chan gcCmd) {
 	channelCPs, err := gc.meta.catalog.ListChannelCheckpoint(ctx)
 	if err != nil {
@@ -1935,42 +1912,6 @@ type segmentIndexGCCandidate struct {
 	fileEnd      int
 }
 
-type segmentIndexGCBatchStats struct {
-	scanned              int
-	eligible             int
-	nonterminal          int
-	snapshotBlocked      int
-	paused               int
-	fileDeleteSuccess    int
-	fileDeleteFailed     int
-	segmentDeleteSuccess int
-	segmentDeleteFailed  int
-	segmentDeleteSkipped int
-	batchCount           int
-	metadataBatchCount   int
-	candidateTime        time.Duration
-	fileDeleteTime       time.Duration
-	segmentDeleteTime    time.Duration
-}
-
-func (stats *segmentIndexGCBatchStats) add(other segmentIndexGCBatchStats) {
-	stats.scanned += other.scanned
-	stats.eligible += other.eligible
-	stats.nonterminal += other.nonterminal
-	stats.snapshotBlocked += other.snapshotBlocked
-	stats.paused += other.paused
-	stats.fileDeleteSuccess += other.fileDeleteSuccess
-	stats.fileDeleteFailed += other.fileDeleteFailed
-	stats.segmentDeleteSuccess += other.segmentDeleteSuccess
-	stats.segmentDeleteFailed += other.segmentDeleteFailed
-	stats.segmentDeleteSkipped += other.segmentDeleteSkipped
-	stats.batchCount += other.batchCount
-	stats.metadataBatchCount += other.metadataBatchCount
-	stats.candidateTime += other.candidateTime
-	stats.fileDeleteTime += other.fileDeleteTime
-	stats.segmentDeleteTime += other.segmentDeleteTime
-}
-
 type removeOutcome struct {
 	seen bool
 	err  error
@@ -1985,16 +1926,14 @@ type removeOutcome struct {
 func (gc *garbageCollector) recycleUnusedSegIndexBatch(
 	ctx context.Context,
 	batch []*model.SegmentIndex,
-) segmentIndexGCBatchStats {
-	stats := segmentIndexGCBatchStats{scanned: len(batch), batchCount: 1}
+) {
 	candidates := make([]segmentIndexGCCandidate, 0, len(batch))
 	filePaths := make([]string, 0, len(batch))
 	log := mlog.With(mlog.String("gcName", "recycleUnusedSegIndexes"))
 
-	candidateStart := time.Now()
 	for _, candidate := range batch {
 		if ctx.Err() != nil {
-			return stats
+			return
 		}
 
 		segIdx, ok := gc.getLatestSegmentIndexForGC(candidate)
@@ -2002,24 +1941,20 @@ func (gc *garbageCollector) recycleUnusedSegIndexBatch(
 			continue
 		}
 		if gc.collectionGCPaused(segIdx.CollectionID) {
-			stats.paused++
 			continue
 		}
 		if gc.meta.GetSegment(ctx, segIdx.SegmentID) != nil && gc.meta.indexMeta.IsIndexExist(segIdx.CollectionID, segIdx.IndexID) {
 			continue
 		}
-		stats.eligible++
 
 		if segIdx.IndexState == commonpb.IndexState_Unissued ||
 			segIdx.IndexState == commonpb.IndexState_InProgress ||
 			segIdx.IndexState == commonpb.IndexState_Retry {
-			stats.nonterminal++
 			continue
 		}
 
 		if snapshotMeta := gc.meta.GetSnapshotMeta(); snapshotMeta != nil &&
 			snapshotMeta.IsBuildIDGCBlocked(segIdx.CollectionID, segIdx.BuildID) {
-			stats.snapshotBlocked++
 			continue
 		}
 
@@ -2031,29 +1966,17 @@ func (gc *garbageCollector) recycleUnusedSegIndexBatch(
 			fileEnd:      len(filePaths),
 		})
 	}
-	stats.candidateTime = time.Since(candidateStart)
 
-	fileDeleteStart := time.Now()
 	outcomes := make(map[string]removeOutcome, len(filePaths))
 	var batchErr error
 	if len(filePaths) > 0 {
 		outcomes, batchErr = collectBatchRemoveOutcomes(filePaths, gc.removeObjectFilesWithResult(ctx, filePaths))
 	}
 
-	for _, filePath := range filePaths {
-		if batchRemovePathError(filePath, outcomes, batchErr) != nil {
-			stats.fileDeleteFailed++
-		} else {
-			stats.fileDeleteSuccess++
-		}
-	}
-	stats.fileDeleteTime = time.Since(fileDeleteStart)
-
-	segmentDeleteStart := time.Now()
 	metadataCandidates := make([]*model.SegmentIndex, 0, len(candidates))
 	for _, candidate := range candidates {
 		if ctx.Err() != nil {
-			return stats
+			return
 		}
 
 		var fileErr error
@@ -2071,44 +1994,24 @@ func (gc *garbageCollector) recycleUnusedSegIndexBatch(
 		metadataCandidates = append(metadataCandidates, candidate.segmentIndex)
 	}
 
-	if gc.meta.indexMeta.supportsBatchIndexDeletion() {
-		metadataBatchSize := Params.MetaStoreCfg.MaxEtcdTxnNum.GetAsInt()
-		if metadataBatchSize <= 0 {
-			metadataBatchSize = 64
+	metadataBatchSize := Params.MetaStoreCfg.MaxEtcdTxnNum.GetAsInt()
+	if metadataBatchSize <= 0 {
+		metadataBatchSize = 64
+	}
+	for start := 0; start < len(metadataCandidates); start += metadataBatchSize {
+		if ctx.Err() != nil {
+			break
 		}
-		for start := 0; start < len(metadataCandidates); start += metadataBatchSize {
-			if ctx.Err() != nil {
-				break
-			}
-			end := min(start+metadataBatchSize, len(metadataCandidates))
-			batch := metadataCandidates[start:end]
-			stats.metadataBatchCount++
-			removed, err := gc.meta.indexMeta.RemoveSegmentIndexes(ctx, batch)
-			if err != nil {
-				stats.segmentDeleteFailed += len(batch)
-				log.RatedWarn(ctx, rate.Limit(1), "failed to remove segment index metadata batch",
-					mlog.Int("segmentIndexes", len(batch)),
-					mlog.Err(err))
-				continue
-			}
-			stats.segmentDeleteSuccess += removed
-			stats.segmentDeleteSkipped += len(batch) - removed
-		}
-	} else {
-		for _, candidate := range metadataCandidates {
-			if err := gc.meta.indexMeta.RemoveSegmentIndex(ctx, candidate.BuildID); err != nil {
-				stats.segmentDeleteFailed++
-				log.RatedWarn(ctx, rate.Limit(1), "failed to remove segment index metadata after file batch",
-					mlog.FieldBuildID(candidate.BuildID),
-					mlog.Err(err))
-				continue
-			}
-			stats.segmentDeleteSuccess++
+		end := min(start+metadataBatchSize, len(metadataCandidates))
+		batch := metadataCandidates[start:end]
+		_, err := gc.meta.indexMeta.RemoveSegmentIndexes(ctx, batch)
+		if err != nil {
+			log.RatedWarn(ctx, rate.Limit(1), "failed to remove segment index metadata batch",
+				mlog.Int("segmentIndexes", len(batch)),
+				mlog.Err(err))
+			continue
 		}
 	}
-	stats.segmentDeleteTime = time.Since(segmentDeleteStart)
-
-	return stats
 }
 
 func (gc *garbageCollector) recycleUnusedSegIndexesInBatches(
@@ -2120,7 +2023,6 @@ func (gc *garbageCollector) recycleUnusedSegIndexesInBatches(
 		batchSize = 1000
 	}
 
-	stats := segmentIndexGCBatchStats{}
 	batch := make([]*model.SegmentIndex, 0, batchSize)
 	batchFileEstimate := 0
 	flush := func() bool {
@@ -2133,7 +2035,7 @@ func (gc *garbageCollector) recycleUnusedSegIndexesInBatches(
 		// signal here guarantees previously admitted work is complete; candidate
 		// validation below observes the new pause record before deleting files.
 		gc.ackSignal(signal)
-		stats.add(gc.recycleUnusedSegIndexBatch(ctx, batch))
+		gc.recycleUnusedSegIndexBatch(ctx, batch)
 		batch = batch[:0]
 		batchFileEstimate = 0
 		gc.ackSignal(signal)
@@ -2161,23 +2063,6 @@ func (gc *garbageCollector) recycleUnusedSegIndexesInBatches(
 	if ctx.Err() == nil {
 		flush()
 	}
-
-	mlog.Info(ctx, "recycle unused segment indexes batch summary",
-		mlog.Int("scanned", stats.scanned),
-		mlog.Int("eligible", stats.eligible),
-		mlog.Int("nonterminal", stats.nonterminal),
-		mlog.Int("snapshotBlocked", stats.snapshotBlocked),
-		mlog.Int("paused", stats.paused),
-		mlog.Int("fileDeleteSuccess", stats.fileDeleteSuccess),
-		mlog.Int("fileDeleteFailed", stats.fileDeleteFailed),
-		mlog.Int("segmentDeleteSuccess", stats.segmentDeleteSuccess),
-		mlog.Int("segmentDeleteFailed", stats.segmentDeleteFailed),
-		mlog.Int("segmentDeleteSkipped", stats.segmentDeleteSkipped),
-		mlog.Int("batchCount", stats.batchCount),
-		mlog.Int("metadataBatchCount", stats.metadataBatchCount),
-		mlog.Duration("candidateTime", stats.candidateTime),
-		mlog.Duration("fileDeleteTime", stats.fileDeleteTime),
-		mlog.Duration("segmentDeleteTime", stats.segmentDeleteTime))
 }
 
 type fieldIndexGCBatchStats struct {
@@ -2263,27 +2148,7 @@ func (gc *garbageCollector) recycleUnusedIndexes(ctx context.Context, signal <-c
 	}()
 
 	deletedIndexes := gc.meta.indexMeta.GetDeletedIndexes()
-	if gc.meta.indexMeta.supportsBatchIndexDeletion() {
-		gc.recycleUnusedIndexesInBatches(ctx, signal, deletedIndexes)
-		return
-	}
-	for _, index := range deletedIndexes {
-		if ctx.Err() != nil {
-			// process canceled.
-			return
-		}
-		if gc.collectionGCPaused(index.CollectionID) {
-			continue
-		}
-		gc.ackSignal(signal)
-
-		log := mlog.With(mlog.Int64("collectionID", index.CollectionID), mlog.Int64("fieldID", index.FieldID), mlog.Int64("indexID", index.IndexID))
-		if err := gc.meta.indexMeta.RemoveIndex(ctx, index.CollectionID, index.IndexID); err != nil {
-			log.Warn(ctx, "remove index on collection fail", mlog.Err(err))
-			continue
-		}
-		log.Info(ctx, "remove index on collection done")
-	}
+	gc.recycleUnusedIndexesInBatches(ctx, signal, deletedIndexes)
 }
 
 // recycleUnusedSegIndexes remove the index of segment if index is deleted or segment itself is deleted.

@@ -44,19 +44,19 @@ SegmentIndex KV。不同 SegmentIndex 之间串行处理。
   物化完整候选 map。
 - 跨 SegmentIndex 组成有界文件批次；只有全部文件成功或不存在的 buildID 才进入
   元数据删除阶段。
-- 增加可选的 `DataCoordIndexBatchCatalog`；KV catalog 构造精确 key，并按
+- `DataCoordCatalog` 提供 `DropIndexes` 和 `DropSegmentIndexes`；KV catalog 构造精确 key，并按
   `metastore.maxEtcdTxnNum` 调用 `MetaKv.MultiRemove`。
 - field-index 和 SegmentIndex 都在 KV 成功后才发布内存删除；SegmentIndex 会按
   buildID 加锁并重新校验状态和文件版本，已经变化的候选项留待下一轮处理。
 - SegmentIndex 元数据发布批次限制为 `metastore.maxEtcdTxnNum`，避免一次持有 1000
   个 `KeyLock`，并保证一次发布批次只对应一个 etcd transaction。
-- 增加 batch 汇总计数以及候选校验、文件删除、SegmentIndex 元数据删除耗时。
+- SegmentIndex batch 不维护额外汇总 stats；保留外层 stage 总耗时和失败 Warn。
 - 所有 `ChunkManager` 都进入相同的有界 batch GC 流水线；实现
   `BatchRemoveChunkManager` 时使用逐 path 结果的后端批删，否则在流水线内部通过
   `dataCoord.gc.removeConcurrent` 有界调用 `Remove`。不会因 storage 能力不同切回另一套
   GC 遍历和提交顺序。
-- catalog 实现 `DataCoordIndexBatchCatalog` 时使用元数据批删；能力缺失时仅在 metadata
-  stage 内逐条发布，不改变候选和文件 batch 流水线。
+- field-index 和 SegmentIndex metadata 统一使用 catalog 批删，不保留运行时能力判断或
+  逐条删除 fallback。
 
 尚未实现：原生 batch 并发、Azure/GCP Native 原生批删、真实 MinIO/etcd 集成和
 在线集群灰度。当前 mock 结果证明客户端请求数、CPU 和临时分配下降，但不能替代真实
@@ -462,9 +462,8 @@ SegmentIndex KV    = 10,000 * ceil(1,000 / 64) = 160,000
 事务失败时，该批次不能从内存元数据删除，从而保持重试能力并避免内存与 etcd
 不一致。
 
-catalog 不支持 `DataCoordIndexBatchCatalog` 时继续使用现有单条 `RemoveIndex` /
-`RemoveSegmentIndex` 路径。SegmentIndex 元数据批删当前依赖文件批删 traversal；只有
-对象存储和 catalog 都暴露批量能力时才会进入该路径。field-index 只依赖 catalog 能力。
+SegmentIndex 元数据批删沿用同一条文件批删 traversal；文件阶段完成后，field-index 和
+SegmentIndex 都通过 `DataCoordCatalog` 的批量接口提交 metadata 删除。
 
 ### 6.6 OPT-5：聚合热路径日志和指标
 

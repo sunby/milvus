@@ -1314,11 +1314,6 @@ func (m *indexMeta) RangeSegmentIndexes(f func(*model.SegmentIndex) bool) {
 	m.segmentBuildInfo.Range(f)
 }
 
-func (m *indexMeta) supportsBatchIndexDeletion() bool {
-	_, ok := m.catalog.(metastore.DataCoordIndexBatchCatalog)
-	return ok
-}
-
 func sameSegmentIndexGCVersion(candidate, current *model.SegmentIndex) bool {
 	if candidate == nil || current == nil {
 		return false
@@ -1340,10 +1335,6 @@ func sameSegmentIndexGCVersion(candidate, current *model.SegmentIndex) bool {
 // retry. The input is capped at the metastore transaction limit so this method
 // never spans multiple persistence transactions.
 func (m *indexMeta) RemoveSegmentIndexes(ctx context.Context, candidates []*model.SegmentIndex) (int, error) {
-	batchCatalog, ok := m.catalog.(metastore.DataCoordIndexBatchCatalog)
-	if !ok {
-		return 0, merr.WrapErrServiceInternalMsg("DataCoord catalog does not support batch index deletion")
-	}
 	maxBatchSize := Params.MetaStoreCfg.MaxEtcdTxnNum.GetAsInt()
 	if maxBatchSize <= 0 {
 		maxBatchSize = 64
@@ -1387,7 +1378,7 @@ func (m *indexMeta) RemoveSegmentIndexes(ctx context.Context, candidates []*mode
 		return 0, nil
 	}
 
-	if err := batchCatalog.DropSegmentIndexes(ctx, currentIndexes); err != nil {
+	if err := m.catalog.DropSegmentIndexes(ctx, currentIndexes); err != nil {
 		return 0, err
 	}
 
@@ -1501,10 +1492,6 @@ func (m *indexMeta) RemoveIndex(ctx context.Context, collID, indexID UniqueID) e
 // field-index removals. Collection locks keep the candidate revalidation and
 // publication ordered with concurrent index DDL.
 func (m *indexMeta) RemoveIndexes(ctx context.Context, candidates []*model.Index) (int, error) {
-	batchCatalog, ok := m.catalog.(metastore.DataCoordIndexBatchCatalog)
-	if !ok {
-		return 0, merr.WrapErrServiceInternalMsg("DataCoord catalog does not support batch index deletion")
-	}
 	maxBatchSize := Params.MetaStoreCfg.MaxEtcdTxnNum.GetAsInt()
 	if maxBatchSize <= 0 {
 		maxBatchSize = 64
@@ -1547,7 +1534,7 @@ func (m *indexMeta) RemoveIndexes(ctx context.Context, candidates []*model.Index
 		return 0, nil
 	}
 
-	if err := batchCatalog.DropIndexes(ctx, currentIndexes); err != nil {
+	if err := m.catalog.DropIndexes(ctx, currentIndexes); err != nil {
 		return 0, err
 	}
 

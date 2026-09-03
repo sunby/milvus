@@ -54,7 +54,6 @@ const (
 	gcPerfIndexApplyLatencyEnv      = "MILVUS_GC_PERF_INDEX_APPLY_LATENCY"
 	gcPerfIndexBatchDeleteEnv       = "MILVUS_GC_PERF_INDEX_NATIVE_FILE_BATCH"
 	gcPerfIndexBatchSizeEnv         = "MILVUS_GC_PERF_INDEX_BATCH_SIZE"
-	gcPerfIndexMetaBatchDeleteEnv   = "MILVUS_GC_PERF_INDEX_META_BATCH_DELETE"
 	gcPerfDroppedSegmentsEnv        = "MILVUS_GC_PERF_DROPPED_SEGMENTS"
 	gcPerfDroppedCollectionsEnv     = "MILVUS_GC_PERF_DROPPED_COLLECTIONS"
 	gcPerfDroppedIndexesEnv         = "MILVUS_GC_PERF_DROPPED_INDEXES_PER_SEGMENT"
@@ -294,11 +293,7 @@ func gcPerfModelDroppedSegmentBatches(
 	return model
 }
 
-type gcPerfDropIndexBatchCatalog struct {
-	*gcPerfDropIndexCatalog
-}
-
-func (c *gcPerfDropIndexBatchCatalog) DropIndexes(_ context.Context, indexes []*model.Index) error {
+func (c *gcPerfDropIndexCatalog) DropIndexes(_ context.Context, indexes []*model.Index) error {
 	requests := gcPerfEtcdTxnRequests(len(indexes))
 	c.dropIndexCalls.Add(int64(len(indexes)))
 	c.dropIndexTxnRequests.Add(requests)
@@ -306,7 +301,7 @@ func (c *gcPerfDropIndexBatchCatalog) DropIndexes(_ context.Context, indexes []*
 	return nil
 }
 
-func (c *gcPerfDropIndexBatchCatalog) DropSegmentIndexes(_ context.Context, indexes []*model.SegmentIndex) error {
+func (c *gcPerfDropIndexCatalog) DropSegmentIndexes(_ context.Context, indexes []*model.SegmentIndex) error {
 	requests := gcPerfEtcdTxnRequests(len(indexes))
 	c.dropSegmentIndexCalls.Add(int64(len(indexes)))
 	c.dropSegmentIndexTxnRequests.Add(requests)
@@ -710,10 +705,8 @@ func TestDataCoordDataViewGCLargeScalePerformance(t *testing.T) {
 // latency into every fallback per-path delete or modeled native request and
 // validate the projection against wall time.
 // MILVUS_GC_PERF_INDEX_NATIVE_FILE_BATCH controls whether the file mock
-// exposes native batch deletion, while
-// MILVUS_GC_PERF_INDEX_META_BATCH_DELETE controls whether the catalog mock
-// exposes bounded exact-key transactions. Both storage variants use the same
-// bounded SegmentIndex GC traversal.
+// exposes native batch deletion. Metadata always uses bounded exact-key
+// transactions through DataCoordCatalog.
 func TestDataCoordDropIndexGCLargeScalePerformance(t *testing.T) {
 	if os.Getenv(runDropIndexGCPerfTestEnv) != "1" {
 		t.Skipf("set %s=1 to run the DropIndex GC performance test", runDropIndexGCPerfTestEnv)
@@ -727,7 +720,6 @@ func TestDataCoordDropIndexGCLargeScalePerformance(t *testing.T) {
 	applyLatency := gcPerfEnvBool(t, gcPerfIndexApplyLatencyEnv, false)
 	nativeFileBatchEnabled := gcPerfEnvBool(t, gcPerfIndexBatchDeleteEnv, false)
 	batchSize := gcPerfEnvInt(t, gcPerfIndexBatchSizeEnv, Params.DataCoordCfg.GCIndexFileBatchSize.GetAsInt())
-	metaBatchDeleteEnabled := gcPerfEnvBool(t, gcPerfIndexMetaBatchDeleteEnv, false)
 
 	oldBatchSize := Params.DataCoordCfg.GCIndexFileBatchSize.GetValue()
 	if err := Params.Save(Params.DataCoordCfg.GCIndexFileBatchSize.Key, strconv.Itoa(batchSize)); err != nil {
@@ -768,22 +760,17 @@ func TestDataCoordDropIndexGCLargeScalePerformance(t *testing.T) {
 		}
 		modeledFileLatencyUnits = modeledFileRequests
 	}
-	modeledFieldKVRequests := int64(definitionCount)
-	modeledSegmentKVRequests := int64(entryCount)
-	if metaBatchDeleteEnabled {
-		modeledFieldKVRequests = gcPerfEtcdTxnRequests(definitionCount)
-		modeledSegmentKVRequests = int64(fullCandidateBatches) * gcPerfEtcdTxnRequests(candidatesPerBatch)
-		modeledSegmentKVRequests += gcPerfEtcdTxnRequests(remainingCandidates)
-	}
+	modeledFieldKVRequests := gcPerfEtcdTxnRequests(definitionCount)
+	modeledSegmentKVRequests := int64(fullCandidateBatches) * gcPerfEtcdTxnRequests(candidatesPerBatch)
+	modeledSegmentKVRequests += gcPerfEtcdTxnRequests(remainingCandidates)
 	modeledIOTime := time.Duration(modeledFieldKVRequests+modeledSegmentKVRequests)*kvDeleteLatency +
 		time.Duration(modeledFileLatencyUnits)*fileDeleteLatency
 	t.Logf(
-		"DROP_INDEX_GC_PERF config definitions=%d entries=%d files_per_entry=%d native_file_batch=%t meta_batch_delete=%t file_batch_size=%d remove_concurrency=%d kv_delete_latency=%s file_delete_latency=%s apply_latency=%t modeled_field_kv_requests=%d modeled_segment_kv_requests=%d modeled_file_requests=%d modeled_total_io=%s",
+		"DROP_INDEX_GC_PERF config definitions=%d entries=%d files_per_entry=%d native_file_batch=%t file_batch_size=%d remove_concurrency=%d kv_delete_latency=%s file_delete_latency=%s apply_latency=%t modeled_field_kv_requests=%d modeled_segment_kv_requests=%d modeled_file_requests=%d modeled_total_io=%s",
 		definitionCount,
 		entryCount,
 		filesPerEntry,
 		nativeFileBatchEnabled,
-		metaBatchDeleteEnabled,
 		batchSize,
 		removeConcurrency,
 		kvDeleteLatency,
@@ -805,9 +792,6 @@ func TestDataCoordDropIndexGCLargeScalePerformance(t *testing.T) {
 		applyLatency:  applyLatency,
 	}
 	gcCatalog := metastore.DataCoordCatalog(catalog)
-	if metaBatchDeleteEnabled {
-		gcCatalog = &gcPerfDropIndexBatchCatalog{gcPerfDropIndexCatalog: catalog}
-	}
 	chunkManager := &gcPerfDropIndexChunkManager{
 		deleteLatency: fileDeleteLatency,
 		applyLatency:  applyLatency,
@@ -940,11 +924,10 @@ func TestDataCoordDropIndexGCLargeScalePerformance(t *testing.T) {
 	}
 
 	t.Logf(
-		"DROP_INDEX_GC_PERF result definitions=%d entries=%d native_file_batch=%t meta_batch_delete=%t field_kv_deletes=%d field_kv_txn_requests=%d segment_kv_deletes=%d segment_kv_txn_requests=%d logical_file_deletes=%d native_file_requests=%d measured_field_stage=%s measured_segment_stage=%s measured_segment_throughput=%.0f_entries/s latency_applied=%t modeled_total_io=%s",
+		"DROP_INDEX_GC_PERF result definitions=%d entries=%d native_file_batch=%t field_kv_deletes=%d field_kv_txn_requests=%d segment_kv_deletes=%d segment_kv_txn_requests=%d logical_file_deletes=%d native_file_requests=%d measured_field_stage=%s measured_segment_stage=%s measured_segment_throughput=%.0f_entries/s latency_applied=%t modeled_total_io=%s",
 		definitionCount,
 		entryCount,
 		nativeFileBatchEnabled,
-		metaBatchDeleteEnabled,
 		catalog.dropIndexCalls.Load(),
 		catalog.dropIndexTxnRequests.Load(),
 		catalog.dropSegmentIndexCalls.Load(),

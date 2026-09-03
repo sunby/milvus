@@ -59,7 +59,7 @@ type Catalog struct {
 	metaRootpath         string
 }
 
-var _ metastore.DataCoordIndexBatchCatalog = (*Catalog)(nil)
+var _ metastore.DataCoordCatalog = (*Catalog)(nil)
 
 const segmentIndexPaginationSize = 10000
 

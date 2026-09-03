@@ -647,22 +647,14 @@ func createMetaForRecycleUnusedIndexes(catalog metastore.DataCoordCatalog) *meta
 func TestGarbageCollector_recycleUnusedIndexes(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		catalog := catalogmocks.NewDataCoordCatalog(t)
-		catalog.On("DropIndex",
-			mock.Anything,
-			mock.Anything,
-			mock.Anything,
-		).Return(nil)
+		catalog.On("DropIndexes", mock.Anything, mock.Anything).Return(nil)
 		gc := newGarbageCollector(createMetaForRecycleUnusedIndexes(catalog), nil, GcOption{})
 		gc.recycleUnusedIndexes(context.TODO(), nil)
 	})
 
 	t.Run("fail", func(t *testing.T) {
 		catalog := catalogmocks.NewDataCoordCatalog(t)
-		catalog.On("DropIndex",
-			mock.Anything,
-			mock.Anything,
-			mock.Anything,
-		).Return(errors.New("fail"))
+		catalog.On("DropIndexes", mock.Anything, mock.Anything).Return(errors.New("fail"))
 		gc := newGarbageCollector(createMetaForRecycleUnusedIndexes(catalog), nil, GcOption{})
 		gc.recycleUnusedIndexes(context.TODO(), nil)
 	})
@@ -961,13 +953,7 @@ func TestGarbageCollector_recycleUnusedSegIndexes(t *testing.T) {
 		mockChunkManager.EXPECT().RootPath().Return("root")
 		mockChunkManager.EXPECT().Remove(mock.Anything, mock.Anything).Return(nil)
 		catalog := catalogmocks.NewDataCoordCatalog(t)
-		catalog.On("DropSegmentIndex",
-			mock.Anything,
-			mock.Anything,
-			mock.Anything,
-			mock.Anything,
-			mock.Anything,
-		).Return(nil)
+		catalog.On("DropSegmentIndexes", mock.Anything, mock.Anything).Return(nil)
 		gc := newGarbageCollector(createMetaForRecycleUnusedSegIndexes(catalog), nil, GcOption{
 			cli: mockChunkManager,
 		})
@@ -982,13 +968,7 @@ func TestGarbageCollector_recycleUnusedSegIndexes(t *testing.T) {
 		mockChunkManager := mocks.NewChunkManager(t)
 		mockChunkManager.EXPECT().RootPath().Return("root")
 		mockChunkManager.EXPECT().Remove(mock.Anything, mock.Anything).Return(nil)
-		catalog.On("DropSegmentIndex",
-			mock.Anything,
-			mock.Anything,
-			mock.Anything,
-			mock.Anything,
-			mock.Anything,
-		).Return(errors.New("fail"))
+		catalog.On("DropSegmentIndexes", mock.Anything, mock.Anything).Return(errors.New("fail"))
 		gc := newGarbageCollector(createMetaForRecycleUnusedSegIndexes(catalog), nil, GcOption{
 			cli: mockChunkManager,
 		})
@@ -1007,7 +987,7 @@ func TestGarbageCollector_recycleUnusedSegIndexes(t *testing.T) {
 		)
 
 		catalog := catalogmocks.NewDataCoordCatalog(t)
-		catalog.EXPECT().DropSegmentIndex(mock.Anything, collID, partID, segID, buildID).Return(nil)
+		catalog.EXPECT().DropSegmentIndexes(mock.Anything, mock.Anything).Return(nil)
 
 		meta := &meta{
 			segments: NewCachedSegmentsInfo(),
@@ -1108,7 +1088,7 @@ func TestGarbageCollector_recycleUnusedSegIndexes(t *testing.T) {
 
 		_, ok := meta.indexMeta.segmentBuildInfo.Get(buildID)
 		assert.True(t, ok)
-		catalog.AssertNotCalled(t, "DropSegmentIndex", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+		catalog.AssertNotCalled(t, "DropSegmentIndexes", mock.Anything, mock.Anything)
 		cm.AssertNotCalled(t, "Remove", mock.Anything, mock.Anything)
 	})
 
@@ -1122,7 +1102,7 @@ func TestGarbageCollector_recycleUnusedSegIndexes(t *testing.T) {
 		)
 
 		catalog := catalogmocks.NewDataCoordCatalog(t)
-		catalog.EXPECT().DropSegmentIndex(mock.Anything, collID, partID, segID, buildID).Return(nil)
+		catalog.EXPECT().DropSegmentIndexes(mock.Anything, mock.Anything).Return(nil)
 		meta := &meta{
 			segments: NewCachedSegmentsInfo(),
 			indexMeta: &indexMeta{
@@ -1274,12 +1254,11 @@ func TestGarbageCollector_recycleUnusedSegIndexesInBatches(t *testing.T) {
 		assert.Equal(t, int64(700), current.BuildID)
 	})
 
-	t.Run("deletes files across segment indexes in one batch", func(t *testing.T) {
+	t.Run("deletes files and metadata across segment indexes in batches", func(t *testing.T) {
 		setSegmentIndexFileBatchSize(t, 100)
 
 		catalog := catalogmocks.NewDataCoordCatalog(t)
-		catalog.EXPECT().DropSegmentIndex(mock.Anything, int64(100), int64(200), int64(500), int64(600)).Return(nil)
-		catalog.EXPECT().DropSegmentIndex(mock.Anything, int64(100), int64(200), int64(501), int64(601)).Return(nil)
+		catalog.EXPECT().DropSegmentIndexes(mock.Anything, mock.Anything).Return(nil).Once()
 		meta := createMetaForRecycleUnusedSegIndexes(catalog)
 		cm := &batchRemoveChunkManager{rootPath: "root"}
 		mockIsBuildIDBlocked := mockey.Mock((*snapshotMeta).IsBuildIDGCBlocked).Return(false).Build()
@@ -1300,8 +1279,7 @@ func TestGarbageCollector_recycleUnusedSegIndexesInBatches(t *testing.T) {
 		setSegmentIndexFileBatchSize(t, 3)
 
 		catalog := catalogmocks.NewDataCoordCatalog(t)
-		catalog.EXPECT().DropSegmentIndex(mock.Anything, int64(100), int64(200), int64(500), int64(600)).Return(nil)
-		catalog.EXPECT().DropSegmentIndex(mock.Anything, int64(100), int64(200), int64(501), int64(601)).Return(nil)
+		catalog.EXPECT().DropSegmentIndexes(mock.Anything, mock.Anything).Return(nil).Times(2)
 		meta := createMetaForRecycleUnusedSegIndexes(catalog)
 		cm := &batchRemoveChunkManager{rootPath: "root"}
 		mockIsBuildIDBlocked := mockey.Mock((*snapshotMeta).IsBuildIDGCBlocked).Return(false).Build()
@@ -1319,7 +1297,12 @@ func TestGarbageCollector_recycleUnusedSegIndexesInBatches(t *testing.T) {
 		setSegmentIndexFileBatchSize(t, 100)
 
 		catalog := catalogmocks.NewDataCoordCatalog(t)
-		catalog.EXPECT().DropSegmentIndex(mock.Anything, int64(100), int64(200), int64(501), int64(601)).Return(nil)
+		var removed []*model.SegmentIndex
+		catalog.EXPECT().DropSegmentIndexes(mock.Anything, mock.Anything).RunAndReturn(
+			func(_ context.Context, indexes []*model.SegmentIndex) error {
+				removed = append(removed, indexes...)
+				return nil
+			}).Once()
 		meta := createMetaForRecycleUnusedSegIndexes(catalog)
 		cm := &batchRemoveChunkManager{
 			rootPath: "root",
@@ -1349,14 +1332,15 @@ func TestGarbageCollector_recycleUnusedSegIndexesInBatches(t *testing.T) {
 		assert.True(t, ok, "metadata must remain when any file delete is throttled")
 		_, ok = meta.indexMeta.segmentBuildInfo.Get(601)
 		assert.False(t, ok, "not-found files are idempotent successes")
-		catalog.AssertNotCalled(t, "DropSegmentIndex", mock.Anything, int64(100), int64(200), int64(500), int64(600))
+		require.Len(t, removed, 1)
+		assert.Equal(t, int64(601), removed[0].BuildID)
 	})
 
 	t.Run("missing per-file result fails closed", func(t *testing.T) {
 		setSegmentIndexFileBatchSize(t, 100)
 
 		catalog := catalogmocks.NewDataCoordCatalog(t)
-		catalog.EXPECT().DropSegmentIndex(mock.Anything, int64(100), int64(200), int64(501), int64(601)).Return(nil)
+		catalog.EXPECT().DropSegmentIndexes(mock.Anything, mock.Anything).Return(nil).Once()
 		meta := createMetaForRecycleUnusedSegIndexes(catalog)
 		cm := &batchRemoveChunkManager{
 			rootPath: "root",
@@ -1387,7 +1371,7 @@ func TestGarbageCollector_recycleUnusedSegIndexesInBatches(t *testing.T) {
 		setSegmentIndexFileBatchSize(t, 100)
 
 		catalog := catalogmocks.NewDataCoordCatalog(t)
-		catalog.EXPECT().DropSegmentIndex(mock.Anything, int64(100), int64(200), int64(500), int64(600)).Return(nil)
+		catalog.EXPECT().DropSegmentIndexes(mock.Anything, mock.Anything).Return(nil).Once()
 		meta := createMetaForRecycleUnusedSegIndexes(catalog)
 		empty, ok := meta.indexMeta.segmentBuildInfo.Get(600)
 		require.True(t, ok)
@@ -1440,7 +1424,7 @@ func TestGarbageCollector_recycleUnusedSegIndexesInBatches(t *testing.T) {
 		assert.True(t, ok)
 		_, ok = meta.indexMeta.segmentBuildInfo.Get(601)
 		assert.True(t, ok)
-		catalog.AssertNotCalled(t, "DropSegmentIndex", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+		catalog.AssertNotCalled(t, "DropSegmentIndexes", mock.Anything, mock.Anything)
 	})
 
 	t.Run("paused collection is not submitted", func(t *testing.T) {
@@ -1462,7 +1446,7 @@ func TestGarbageCollector_recycleUnusedSegIndexesInBatches(t *testing.T) {
 		assert.True(t, ok)
 		_, ok = meta.indexMeta.segmentBuildInfo.Get(601)
 		assert.True(t, ok)
-		catalog.AssertNotCalled(t, "DropSegmentIndex", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+		catalog.AssertNotCalled(t, "DropSegmentIndexes", mock.Anything, mock.Anything)
 	})
 }
 
@@ -2091,10 +2075,7 @@ func TestGarbageCollector_clearETCD(t *testing.T) {
 		mock.Anything,
 		mock.Anything,
 	).Return(nil).Maybe()
-	catalog.On("DropSegmentIndex",
-		mock.Anything,
-		mock.Anything,
-		mock.Anything,
+	catalog.On("DropSegmentIndexes",
 		mock.Anything,
 		mock.Anything,
 	).Return(nil).Maybe()
@@ -4035,8 +4016,12 @@ func TestGarbageCollector_DroppedSegmentIndexHelpers(t *testing.T) {
 	assert.Contains(t, indexFiles, expectedIndexFile)
 
 	assert.Nil(t, (&garbageCollector{}).getAllSegmentIndexesForDroppedSegment(segment.ID))
-	assert.NoError(t, gc.removeDroppedSegmentIndexMeta(ctx, nil))
-	require.NoError(t, gc.removeDroppedSegmentIndexMeta(ctx, segIndexes))
+	removed, err := gc.meta.indexMeta.RemoveSegmentIndexes(ctx, nil)
+	require.NoError(t, err)
+	assert.Zero(t, removed)
+	removed, err = gc.meta.indexMeta.RemoveSegmentIndexes(ctx, segIndexes)
+	require.NoError(t, err)
+	assert.Equal(t, 1, removed)
 	assert.Empty(t, m.indexMeta.GetAllSegmentIndexes(segment.ID))
 }
 
