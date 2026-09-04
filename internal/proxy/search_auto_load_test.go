@@ -99,7 +99,7 @@ func TestEnsureCollectionReadyWaitsForAssignment(t *testing.T) {
 					require.Equal(t, "collection", request.GetCollectionName())
 					return &milvuspb.GetLoadStateResponse{Status: merr.Success(), State: test.loadState}, nil
 				}).Build()
-			loadCollectionMock := mockey.Mock((*Proxy).LoadCollection).To(
+			loadCollectionMock := mockey.Mock((*Proxy).loadCollectionForDQL).To(
 				func(_ *Proxy, _ context.Context, request *milvuspb.LoadCollectionRequest) (*commonpb.Status, error) {
 					loadCalls++
 					require.Equal(t, "db", request.GetDbName())
@@ -137,7 +137,7 @@ func TestEnsureCollectionReadyRequiresLoadPrivilege(t *testing.T) {
 			return ctx, status.Error(codes.PermissionDenied, "PrivilegeLoad: permission denied")
 		}).Build()
 	loadCalls := 0
-	loadCollectionMock := mockey.Mock((*Proxy).LoadCollection).To(
+	loadCollectionMock := mockey.Mock((*Proxy).loadCollectionForDQL).To(
 		func(_ *Proxy, _ context.Context, _ *milvuspb.LoadCollectionRequest) (*commonpb.Status, error) {
 			loadCalls++
 			return merr.Success(), nil
@@ -184,7 +184,7 @@ func TestEnsureCollectionReadyCoalescesConcurrentLoad(t *testing.T) {
 		func(ctx context.Context, _ interface{}) (context.Context, error) {
 			return ctx, nil
 		}).Build()
-	loadCollectionMock := mockey.Mock((*Proxy).LoadCollection).To(
+	loadCollectionMock := mockey.Mock((*Proxy).loadCollectionForDQL).To(
 		func(_ *Proxy, ctx context.Context, _ *milvuspb.LoadCollectionRequest) (*commonpb.Status, error) {
 			loadCalls.Add(1)
 			select {
@@ -242,7 +242,7 @@ func TestEnsureCollectionReadyCallerCancellationDoesNotCancelLoad(t *testing.T) 
 	loadContextCanceled := make(chan struct{})
 	releaseLoad := make(chan struct{})
 	var releaseOnce sync.Once
-	loadCollectionMock := mockey.Mock((*Proxy).LoadCollection).To(
+	loadCollectionMock := mockey.Mock((*Proxy).loadCollectionForDQL).To(
 		func(_ *Proxy, ctx context.Context, _ *milvuspb.LoadCollectionRequest) (*commonpb.Status, error) {
 			close(loadStarted)
 			defer close(loadFinished)
@@ -329,7 +329,7 @@ func TestEnsureCollectionReadyWaiterCanCancelIndependently(t *testing.T) {
 	var loadStartOnce sync.Once
 	var loadFinishOnce sync.Once
 	var loadCalls atomic.Int32
-	loadCollectionMock := mockey.Mock((*Proxy).LoadCollection).To(
+	loadCollectionMock := mockey.Mock((*Proxy).loadCollectionForDQL).To(
 		func(_ *Proxy, ctx context.Context, _ *milvuspb.LoadCollectionRequest) (*commonpb.Status, error) {
 			loadCalls.Add(1)
 			loadStartOnce.Do(func() { close(loadStarted) })
@@ -410,7 +410,7 @@ func TestEnsureCollectionReadyProxyCancellationStopsLoad(t *testing.T) {
 		}).Build()
 	loadStarted := make(chan struct{})
 	loadContextCanceled := make(chan struct{})
-	loadCollectionMock := mockey.Mock((*Proxy).LoadCollection).To(
+	loadCollectionMock := mockey.Mock((*Proxy).loadCollectionForDQL).To(
 		func(_ *Proxy, ctx context.Context, _ *milvuspb.LoadCollectionRequest) (*commonpb.Status, error) {
 			close(loadStarted)
 			<-ctx.Done()
@@ -466,7 +466,7 @@ func TestEnsureCollectionReadyRechecksLoadState(t *testing.T) {
 			return ctx, nil
 		}).Build()
 	loadCalls := 0
-	loadCollectionMock := mockey.Mock((*Proxy).LoadCollection).To(
+	loadCollectionMock := mockey.Mock((*Proxy).loadCollectionForDQL).To(
 		func(_ *Proxy, _ context.Context, _ *milvuspb.LoadCollectionRequest) (*commonpb.Status, error) {
 			loadCalls++
 			return merr.Success(), nil
