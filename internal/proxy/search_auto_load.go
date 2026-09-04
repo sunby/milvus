@@ -109,7 +109,7 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 					mlog.FieldDbName(dbName),
 					mlog.FieldCollectionName(collectionName),
 					mlog.FieldCollectionID(collectionID))
-				status, err := node.LoadCollection(loadCtx, loadRequest)
+				status, err := node.loadCollectionForDQL(loadCtx, loadRequest)
 				if err := merr.CheckRPCCall(status, err); err != nil {
 					return struct{}{}, merr.Wrap(err, "load collection before DQL request")
 				}

@@ -774,6 +774,21 @@ func (node *Proxy) LoadCollection(ctx context.Context, request *milvuspb.LoadCol
 		return merr.Status(err), nil
 	}
 
+	return node.loadCollection(ctx, request, node.sched.ddQueue)
+}
+
+// loadCollectionForDQL schedules the load-submission task on the main DQL
+// pool, using the shared load's context rather than a DQL caller's context.
+// Waiting for collection readiness remains outside this task.
+func (node *Proxy) loadCollectionForDQL(ctx context.Context, request *milvuspb.LoadCollectionRequest) (*commonpb.Status, error) {
+	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
+		return merr.Status(err), nil
+	}
+
+	return node.loadCollection(ctx, request, node.sched.dqQueue)
+}
+
+func (node *Proxy) loadCollection(ctx context.Context, request *milvuspb.LoadCollectionRequest, queue taskQueue) (*commonpb.Status, error) {
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-LoadCollection")
 	defer sp.End()
 	method := "LoadCollection"
@@ -787,29 +802,29 @@ func (node *Proxy) LoadCollection(ctx context.Context, request *milvuspb.LoadCol
 		mixCoord:              node.mixCoord,
 	}
 
-	mlog.Info(context.TODO(), "LoadCollection received")
+	mlog.Info(ctx, "LoadCollection received")
 
-	if err := node.sched.ddQueue.Enqueue(lct); err != nil {
-		mlog.Warn(context.TODO(), "LoadCollection failed to enqueue",
+	if err := queue.Enqueue(lct); err != nil {
+		mlog.Warn(ctx, "LoadCollection failed to enqueue",
 			mlog.Err(err))
 
 		return merr.Status(err), nil
 	}
 
-	mlog.Debug(context.TODO(), "LoadCollection enqueued",
+	mlog.Debug(ctx, "LoadCollection enqueued",
 		mlog.Uint64("BeginTS", lct.BeginTs()),
 		mlog.Uint64("EndTS", lct.EndTs()),
 	)
 
 	if err := lct.WaitToFinish(); err != nil {
-		mlog.Warn(context.TODO(), "LoadCollection failed to WaitToFinish",
+		mlog.Warn(ctx, "LoadCollection failed to WaitToFinish",
 			mlog.Err(err),
 			mlog.Uint64("BeginTS", lct.BeginTs()),
 			mlog.Uint64("EndTS", lct.EndTs()))
 		return merr.Status(err), nil
 	}
 
-	mlog.Debug(context.TODO(), "LoadCollection done",
+	mlog.Debug(ctx, "LoadCollection done",
 		mlog.Uint64("BeginTS", lct.BeginTs()),
 		mlog.Uint64("EndTS", lct.EndTs()),
 	)
