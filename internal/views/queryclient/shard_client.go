@@ -9,7 +9,6 @@ import (
 
 	commonpb "github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus/internal/views/queryclient/reducer"
-	"github.com/milvus-io/milvus/internal/views/queryclient/resolver"
 	"github.com/milvus-io/milvus/internal/views/qviews"
 	"github.com/milvus-io/milvus/internal/views/viewerror"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
@@ -20,9 +19,8 @@ import (
 )
 
 // shardViewQueryClient executes two-phase queries at the shard granularity.
-// It owns replica resolution, replica selection, consistency routing,
-// Phase 1 (GetQueryPlan), Phase 2 (SearchOnView/QueryOnView) dispatch,
-// and shard-level retry.
+// It owns replica resolution, consistency routing, Phase 1 (GetQueryPlan),
+// Phase 2 (SearchOnView/QueryOnView) dispatch, and shard-level retry.
 //
 // Both Search and Query share the same executeShard framework, differing only
 // in what request goes into the GetQueryPlanRequest and which Phase 2 RPC is called.
@@ -30,23 +28,17 @@ type shardViewQueryClient struct {
 	maxRetries         int
 	queryPlanClient    QueryPlanClient
 	queryServiceClient ViewQueryServiceClient
-	shardResolver      resolver.ShardResolver
-	replicaPicker      ReplicaPicker
 }
 
 func newShardViewQueryClient(
 	maxRetries int,
 	queryPlanClient QueryPlanClient,
 	queryServiceClient ViewQueryServiceClient,
-	shardResolver resolver.ShardResolver,
-	replicaPicker ReplicaPicker,
 ) *shardViewQueryClient {
 	return &shardViewQueryClient{
 		maxRetries:         maxRetries,
 		queryPlanClient:    queryPlanClient,
 		queryServiceClient: queryServiceClient,
-		shardResolver:      shardResolver,
-		replicaPicker:      replicaPicker,
 	}
 }
 
@@ -68,7 +60,7 @@ type ShardQueryRequest struct {
 // Replica resolution is handled internally. Results are fed into the provided reducer.
 // Returns the ShardPlan for potential requery.
 func (s *shardViewQueryClient) Search(ctx context.Context, req *ShardSearchRequest) (*ShardPlan, error) {
-	return s.executeShard(ctx, req.Req.CollectionID, req.VChannel, &shardExecParams{
+	return s.executeShard(ctx, req.VChannel, &shardExecParams{
 		consistencyLevel: req.Req.ConsistencyLevel,
 		buildPlanReq: func(targetShardID qviews.ShardID) *viewpb.GetQueryPlanRequest {
 			return &viewpb.GetQueryPlanRequest{
@@ -100,7 +92,7 @@ func (s *shardViewQueryClient) Search(ctx context.Context, req *ShardSearchReque
 // Replica resolution is handled internally. Results are fed into the provided reducer.
 // Returns the ShardPlan for potential requery.
 func (s *shardViewQueryClient) Query(ctx context.Context, req *ShardQueryRequest) (*ShardPlan, error) {
-	return s.executeShard(ctx, req.Req.CollectionID, req.VChannel, &shardExecParams{
+	return s.executeShard(ctx, req.VChannel, &shardExecParams{
 		consistencyLevel: req.Req.ConsistencyLevel,
 		buildPlanReq: func(targetShardID qviews.ShardID) *viewpb.GetQueryPlanRequest {
 			return &viewpb.GetQueryPlanRequest{
@@ -150,14 +142,13 @@ type shardExecParams struct {
 }
 
 // executeShard runs Phase 1 + Phase 2 for a single shard with retry.
-// Replica resolution is performed at the beginning of each attempt (including the first),
-// so stale primary mappings are automatically refreshed on retry.
+// The client always targets the primary replica; the real replica ID is
+// learned from the Phase 1 plan and used for Phase 2.
 //
 // Shard-level retry handles ViewErrors (view invalidated, not found, etc.).
 // Per-node retry within fanOutToWorkNodes handles transient non-view errors.
 func (s *shardViewQueryClient) executeShard(
 	ctx context.Context,
-	collectionID int64,
 	vchannel string,
 	params *shardExecParams,
 ) (*ShardPlan, error) {
@@ -168,35 +159,19 @@ func (s *shardViewQueryClient) executeShard(
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		mlog.Info(ctx, "[load on search] shard query start",
-			mlog.FieldCollectionID(collectionID),
-			mlog.FieldVChannel(vchannel),
-			mlog.Int("attempt", attempt+1))
-
-		// Resolve shard replicas (every attempt, including first).
-		// ShardResolver uses a local cache, so this is a zero-overhead lookup.
-		resolveStart := time.Now()
-		shardReplicas, err := s.shardResolver.ResolveShard(ctx, collectionID, vchannel)
-		if err != nil {
-			return nil, err
-		}
-		resolveDuration := time.Since(resolveStart)
-
-		// Select target replica via picker.
-		pickResult, err := s.replicaPicker.Pick(ctx, ReplicaPickInfo{ShardReplicas: shardReplicas})
-		if err != nil {
-			return nil, err
-		}
-		targetShardID := pickResult.ShardID
+		// Before Phase 1 the client only knows the vchannel; the replica ID is
+		// unknown and is echoed back by the plan for Phase 2.
+		targetShardID := qviews.ShardID{ReplicaID: qviews.UnknownReplicaID, VChannel: vchannel}
 
 		// Phase 1: GetQueryPlan with consistency routing.
 		planReq := params.buildPlanReq(targetShardID)
+		mlog.Info(ctx, "[load on search] shard query start",
+			mlog.FieldCollectionID(planReq.GetCollectionId()),
+			mlog.FieldVChannel(vchannel),
+			mlog.Int("attempt", attempt+1))
 		planStart := time.Now()
-		plan, err := s.executeGetQueryPlan(ctx, targetShardID, shardReplicas, planReq, params)
+		plan, err := s.executeGetQueryPlan(ctx, targetShardID, planReq, params)
 		if err != nil {
-			if pickResult.Done != nil {
-				pickResult.Done(ReplicaDoneInfo{Err: err})
-			}
 			if ve := viewerror.AsViewError(err); ve != nil && ve.IsRetryable() {
 				lastErr = err
 				continue
@@ -212,9 +187,6 @@ func (s *shardViewQueryClient) executeShard(
 		fanoutStart := time.Now()
 		err = s.fanOutToWorkNodes(ctx, workNodes, plan, shardID, params.dispatchNode)
 		fanoutDuration := time.Since(fanoutStart)
-		if pickResult.Done != nil {
-			pickResult.Done(ReplicaDoneInfo{Err: err})
-		}
 		if err != nil {
 			if ve := viewerror.AsViewError(err); ve != nil && ve.IsRetryable() {
 				lastErr = err
@@ -225,11 +197,10 @@ func (s *shardViewQueryClient) executeShard(
 		}
 
 		mlog.Info(ctx, "[load on search] shard query timing",
-			mlog.FieldCollectionID(collectionID),
+			mlog.FieldCollectionID(planReq.GetCollectionId()),
 			mlog.FieldVChannel(vchannel),
 			mlog.Int("attempt", attempt+1),
 			mlog.Int("workNodeCount", len(workNodes)),
-			mlog.Duration("resolveShard", resolveDuration),
 			mlog.Duration("getQueryPlan", planDuration),
 			mlog.Duration("workNodeFanout", fanoutDuration),
 			mlog.Duration("total", time.Since(attemptStart)))
@@ -246,35 +217,20 @@ func (s *shardViewQueryClient) executeShard(
 
 // executeGetQueryPlan handles consistency-level routing and dispatches Phase 1.
 //
-// Routing logic per consistency level:
-//   - Strong on primary: GetQueryPlan(consistency_level=Strong)
-//   - Strong cross-replica: GetMVCCTimestamp from primary → GetQueryPlan(query_plan_mvcc=mvcc)
-//   - Session: same routing as Strong; SN sees consistency_level=Strong for primary planning
+// The client always targets the primary replica, so strong consistency is
+// satisfied directly by the primary's WAL:
+//   - Strong/Session: GetQueryPlan(consistency_level=Strong)
 //   - Bounded/Eventually: GetQueryPlan(consistency_level=...) — SN generates MVCC from WAL
 func (s *shardViewQueryClient) executeGetQueryPlan(
 	ctx context.Context,
 	targetShardID qviews.ShardID,
-	shardReplicas *resolver.ShardReplicas,
 	planReq *viewpb.GetQueryPlanRequest,
 	params *shardExecParams,
 ) (*viewpb.QueryPlan, error) {
 	switch params.consistencyLevel {
 	case commonpb.ConsistencyLevel_Strong, commonpb.ConsistencyLevel_Session:
-		if targetShardID != shardReplicas.PrimaryShardID {
-			mvccResp, err := s.queryPlanClient.GetMVCCTimestamp(ctx, shardReplicas.PrimaryShardID,
-				&viewpb.GetMVCCTimestampRequest{
-					Vchannel: targetShardID.VChannel,
-				})
-			if err != nil {
-				return nil, err
-			}
-			planReq.Mvcc = &viewpb.GetQueryPlanRequest_QueryPlanMvcc{
-				QueryPlanMvcc: mvccResp.GetMvcc(),
-			}
-		} else {
-			planReq.Mvcc = &viewpb.GetQueryPlanRequest_ConsistencyLevel{
-				ConsistencyLevel: commonpb.ConsistencyLevel_Strong,
-			}
+		planReq.Mvcc = &viewpb.GetQueryPlanRequest_ConsistencyLevel{
+			ConsistencyLevel: commonpb.ConsistencyLevel_Strong,
 		}
 	default:
 		planReq.Mvcc = &viewpb.GetQueryPlanRequest_ConsistencyLevel{

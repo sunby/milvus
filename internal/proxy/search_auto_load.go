@@ -130,8 +130,8 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 			return context.Cause(ctx)
 		}
 	case commonpb.LoadState_LoadStateLoading, commonpb.LoadState_LoadStateLoaded:
-		// The QueryCoord state may precede assignment propagation to this Proxy.
-		// The resolver barrier below is the final DQL-readiness signal.
+		// Recheck QueryCoord readiness below after load submission or while
+		// the collection's query views are still becoming available.
 	case commonpb.LoadState_LoadStateNotExist:
 		return merr.WrapErrCollectionNotFoundWithDB(dbName, collectionName)
 	default:
