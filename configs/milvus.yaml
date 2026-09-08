@@ -762,6 +762,9 @@ indexNode:
 
 dataCoord:
   taskCheckInterval: 1
+  statsInspector:
+    discoveryMode: poll # poll: legacy discovery; shadow: read-only event checks; event: event-driven discovery. Restart required.
+    reconcileInterval: 600 # Seconds. Startup and lost-notification reconciliation use the same budget.
   channel:
     watchTimeoutInterval: 300 # Timeout on watching channels (in seconds). Datanode tickler update watch progress will reset timeout timer.
     legacyVersionWithoutRPCWatch: 2.4.1 # Datanodes <= this version are considered as legacy nodes, which doesn't have rpc based watch(). This is only used during rolling upgrade where legacy nodes won't get new channels
