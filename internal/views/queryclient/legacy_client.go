@@ -18,7 +18,7 @@ type Client interface {
 	Legacy() LegacyClient
 }
 
-// CollectionReadiness exposes local assignment readiness for collection-level queries.
+// CollectionReadiness exposes collection load readiness to automatic loading.
 type CollectionReadiness interface {
 	CheckCollectionReady(ctx context.Context, collectionID int64, expectedVChannels []string) error
 	WaitForCollectionReady(ctx context.Context, collectionID int64, expectedVChannels []string) error
@@ -49,20 +49,11 @@ type LegacyQueryResult struct {
 }
 
 type legacyOnlyClient struct {
-	legacy        LegacyClient
-	shardResolver resolver.ShardResolver
+	legacy LegacyClient
 }
 
 func (c *legacyOnlyClient) Legacy() LegacyClient {
 	return c.legacy
-}
-
-func (c *legacyOnlyClient) CheckCollectionReady(ctx context.Context, collectionID int64, expectedVChannels []string) error {
-	return c.shardResolver.CheckCollectionReady(ctx, collectionID, expectedVChannels)
-}
-
-func (c *legacyOnlyClient) WaitForCollectionReady(ctx context.Context, collectionID int64, expectedVChannels []string) error {
-	return c.shardResolver.WaitForCollectionReady(ctx, collectionID, expectedVChannels)
 }
 
 type legacyClient struct {
@@ -75,11 +66,9 @@ func NewLegacyViewQueryClient(
 	queryPlanClient QueryPlanClient,
 	queryServiceClient ViewQueryServiceClient,
 	shardResolver resolver.ShardResolver,
-	replicaPicker ReplicaPicker,
 ) Client {
 	return &legacyOnlyClient{
-		legacy:        newLegacyClient(cfg, queryPlanClient, queryServiceClient, shardResolver, replicaPicker),
-		shardResolver: shardResolver,
+		legacy: newLegacyClient(cfg, queryPlanClient, queryServiceClient, shardResolver),
 	}
 }
 
@@ -88,13 +77,12 @@ func newLegacyClient(
 	queryPlanClient QueryPlanClient,
 	queryServiceClient ViewQueryServiceClient,
 	shardResolver resolver.ShardResolver,
-	replicaPicker ReplicaPicker,
 ) *legacyClient {
 	if cfg.MaxRetries <= 0 {
 		cfg.MaxRetries = defaultMaxRetries
 	}
 	return &legacyClient{
-		shardClient:   newShardViewQueryClient(cfg.MaxRetries, queryPlanClient, queryServiceClient, shardResolver, replicaPicker),
+		shardClient:   newShardViewQueryClient(cfg.MaxRetries, queryPlanClient, queryServiceClient),
 		shardResolver: shardResolver,
 	}
 }

@@ -36,8 +36,10 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
-var _ wal.WAL = (*walAdaptorImpl)(nil)
-var _ queryplanprovider.QueryPlanProvider = (*walAdaptorImpl)(nil)
+var (
+	_ wal.WAL                             = (*walAdaptorImpl)(nil)
+	_ queryplanprovider.QueryPlanProvider = (*walAdaptorImpl)(nil)
+)
 
 type gracefulCloseFunc func()
 
@@ -187,6 +189,11 @@ func (w *walAdaptorImpl) GetQueryPlan(ctx context.Context, req *viewpb.GetQueryP
 		return nil, viewerror.NewViewNotFound("query view collection mismatch, expected %d, got %d", req.GetCollectionId(), lease.Meta.GetCollectionId())
 	}
 
+	// The request may carry an unknown replica ID (resolved by vchannel only);
+	// the plan always echoes the actual view's shard ID so Phase 2 targets the
+	// real replica.
+	viewShardID := qviews.NewShardIDFromQVMeta(lease.Meta)
+
 	mvcc, err := w.resolveQueryPlanMVCC(ctx, req, shardID.VChannel)
 	if err != nil {
 		return nil, err
@@ -195,14 +202,14 @@ func (w *walAdaptorImpl) GetQueryPlan(ctx context.Context, req *viewpb.GetQueryP
 	var runtime *queryresource.QueryRuntime
 	if w.viewResourceManager != nil {
 		runtime, _ = w.viewResourceManager.GetQueryRuntime(qviews.QueryViewKey{
-			ShardID:          shardID,
+			ShardID:          viewShardID,
 			QueryViewVersion: lease.Version,
 		})
 	}
 	optimizer := queryresource.NewGlobalOptimizer(runtime, lease.Version.DataVersion, shard.WALFunctionRunnerKey(shardID.VChannel))
 	plan := &viewpb.QueryPlan{
 		Version: lease.Version.IntoProto(),
-		ShardId: shardID.IntoProto(),
+		ShardId: viewShardID.IntoProto(),
 		Mvcc:    mvcc,
 	}
 	switch request := req.GetRequest().(type) {
