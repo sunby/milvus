@@ -5909,10 +5909,12 @@ type dataCoordConfig struct {
 	StatsTaskSlotUsage                   ParamItem `refreshable:"true"`
 	AnalyzeTaskSlotUsage                 ParamItem `refreshable:"true"`
 
-	EnableSortCompaction       ParamItem `refreshable:"true"`
-	TaskCheckInterval          ParamItem `refreshable:"true"`
-	SortCompactionTriggerCount ParamItem `refreshable:"true"`
-	StatsTaskPendingLimit      ParamItem `refreshable:"true"`
+	EnableSortCompaction            ParamItem `refreshable:"true"`
+	TaskCheckInterval               ParamItem `refreshable:"true"`
+	SortCompactionTriggerCount      ParamItem `refreshable:"true"`
+	StatsTaskPendingLimit           ParamItem `refreshable:"true"`
+	StatsDiscoveryMode              ParamItem `refreshable:"false"`
+	StatsDiscoveryReconcileInterval ParamItem `refreshable:"false"`
 	// Deprecated: JSON stats tasks are throttled by StatsTaskPendingLimit.
 	JSONStatsTriggerCount ParamItem `refreshable:"true"`
 	// Deprecated: JSON stats tasks now run on TaskCheckInterval.
@@ -5925,6 +5927,7 @@ type dataCoordConfig struct {
 }
 
 func (p *dataCoordConfig) init(base *BaseTable) {
+	p.initStatsDiscovery(base)
 	p.WatchTimeoutInterval = ParamItem{
 		Key:          "dataCoord.channel.watchTimeoutInterval",
 		Version:      "2.2.3",
