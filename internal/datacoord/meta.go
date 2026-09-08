@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/errors"
@@ -95,6 +96,7 @@ var _ CompactionMeta = (*meta)(nil)
 
 type meta struct {
 	queryViewLoadInfoNotifier QueryViewLoadInfoNotifier
+	statsDiscovery            atomic.Pointer[statsReconcileQueue]
 	ctx                       context.Context
 	catalog                   metastore.DataCoordCatalog
 
@@ -761,7 +763,11 @@ func (m *meta) addCollectionToCache(collection *collectionInfo) {
 // Note that collection info is just for caching and will not be set into etcd from datacoord
 func (m *meta) AddCollection(collection *collectionInfo) {
 	mlog.Info(m.ctx, "meta update: add collection", mlog.Int64("collectionID", collection.ID))
+	old := m.GetCollection(collection.ID)
 	m.addCollectionToCache(collection)
+	if q := m.statsDiscovery.Load(); q != nil && (old == nil || !proto.Equal(old.Schema, collection.Schema)) {
+		q.requestScan(collection.ID, true)
+	}
 	metrics.DataCoordNumCollections.WithLabelValues().Set(float64(m.collections.Len()))
 	mlog.Info(m.ctx, "meta update: add collection - complete", mlog.Int64("collectionID", collection.ID))
 }
@@ -770,6 +776,9 @@ func (m *meta) AddCollection(collection *collectionInfo) {
 func (m *meta) DropCollection(collectionID int64) {
 	mlog.Info(m.ctx, "meta update: drop collection", mlog.Int64("collectionID", collectionID))
 	if _, ok := m.collections.GetAndRemove(collectionID); ok {
+		if q := m.statsDiscovery.Load(); q != nil {
+			q.requestScan(collectionID, true)
+		}
 		metrics.CleanupDataCoordWithCollectionID(collectionID)
 		metrics.DataCoordNumCollections.WithLabelValues().Set(float64(m.collections.Len()))
 		mlog.Info(m.ctx, "meta update: drop collection - complete", mlog.Int64("collectionID", collectionID))
@@ -1073,6 +1082,7 @@ func (m *meta) DropSegment(ctx context.Context, segmentID UniqueID) error {
 	metrics.DataCoordNumSegments.WithLabelValues(segmentMetricLabelValues(segment)...).Dec()
 
 	m.segments.DropSegment(segmentID)
+	m.notifyStatsChange(segment, nil)
 	mlog.Info(ctx, "meta update: dropping segment - complete",
 		mlog.Int64("segmentID", segmentID))
 	return nil
@@ -1145,6 +1155,7 @@ func (m *meta) DropSegments(ctx context.Context, candidates []*SegmentInfo) (int
 		case nil:
 			// The refresh found the record already gone.
 			metrics.DataCoordNumSegments.WithLabelValues(segmentMetricLabelValues(segment)...).Dec()
+			m.notifyStatsChange(segment, nil)
 			removed++
 		case segment:
 			if err := m.store().DropSegment(ctx, segment.SegmentInfo); err != nil {
@@ -1161,6 +1172,7 @@ func (m *meta) DropSegments(ctx context.Context, candidates []*SegmentInfo) (int
 func (m *meta) evictDroppedSegment(segment *SegmentInfo) {
 	metrics.DataCoordNumSegments.WithLabelValues(segmentMetricLabelValues(segment)...).Dec()
 	m.segments.DropSegment(segment.GetID())
+	m.notifyStatsChange(segment, nil)
 }
 
 // GetHealthySegment returns segment info with provided id

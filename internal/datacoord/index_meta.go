@@ -1379,6 +1379,7 @@ func (m *indexMeta) RemoveSegmentIndexes(ctx context.Context, candidates []*mode
 		}
 		candidateByBuildID[candidate.BuildID] = candidate
 	}
+	slices.Sort(buildIDs)
 	lock.LockManyOrdered(m.keyLock, buildIDs)
 	defer m.keyLock.UnlockMany(buildIDs)
 
