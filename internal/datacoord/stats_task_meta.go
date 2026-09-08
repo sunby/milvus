@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"golang.org/x/time/rate"
 	"google.golang.org/protobuf/proto"
@@ -46,6 +48,7 @@ type statsTaskMeta struct {
 
 	// segmentID + SubJobType -> statsTask
 	segmentID2Tasks *typeutil.ConcurrentMap[string, *indexpb.StatsTask]
+	statsDiscovery  atomic.Pointer[statsReconcileQueue]
 
 	deprecatedSortTaskIDs []int64
 }
@@ -215,6 +218,9 @@ func (stm *statsTaskMeta) DropStatsTask(ctx context.Context, taskID int64) error
 	stm.tasks.Remove(taskID)
 	secondaryKey := createSecondaryIndexKey(t.GetSegmentID(), t.GetSubJobType().String())
 	stm.segmentID2Tasks.Remove(secondaryKey)
+	if q := stm.statsDiscovery.Load(); q != nil {
+		q.enqueue(t.GetCollectionID(), statsReconcileKey{t.GetSegmentID(), t.GetSubJobType()}, time.Now(), true)
+	}
 
 	mlog.Info(ctx, "remove stats task success", mlog.FieldTaskID(taskID))
 	return nil
