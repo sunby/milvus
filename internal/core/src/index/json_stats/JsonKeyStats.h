@@ -95,11 +95,6 @@ class JsonKeyStats : public ScalarIndex<std::string> {
     Load(milvus::tracer::TraceContext ctx, const Config& config = {}) override;
 
     void
-    LoadWithContext(milvus::tracer::TraceContext ctx,
-                    const Config& config,
-                    milvus::OpContext* op_ctx);
-
-    void
     Load(const BinarySet& binary_set, const Config& config) override {
         ThrowInfo(ErrorCode::NotImplemented,
                   "Load not supported for JsonKeyStats");
@@ -580,8 +575,7 @@ class JsonKeyStats : public ScalarIndex<std::string> {
 
     void
     LoadShreddingData(const std::vector<std::string>& index_files,
-                      const std::string& warmup_policy = "",
-                      milvus::OpContext* op_ctx = nullptr);
+                      const std::string& warmup_policy = "");
 
     void
     GetColumnSchemaFromParquet(int64_t column_group_id,
@@ -594,8 +588,7 @@ class JsonKeyStats : public ScalarIndex<std::string> {
     LoadColumnGroup(int64_t column_group_id,
                     const std::vector<int64_t>& file_ids,
                     const std::string& warmup_policy = "",
-                    const std::string& override_prefix = "",
-                    milvus::OpContext* op_ctx = nullptr);
+                    const std::string& override_prefix = "");
 
     void
     LoadShreddingMeta(
@@ -609,8 +602,7 @@ class JsonKeyStats : public ScalarIndex<std::string> {
     LoadSharedKeyIndex(const std::vector<std::string>& shared_key_index_files,
                        bool enable_mmap,
                        int64_t index_size,
-                       const std::string& warmup_policy = "",
-                       milvus::OpContext* op_ctx = nullptr);
+                       const std::string& warmup_policy = "");
 
  private:
     proto::schema::FieldSchema schema_;

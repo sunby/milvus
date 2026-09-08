@@ -1,6 +1,6 @@
 # LoadCollection 请求级强制同步预热设计
 
-状态：实施中。首轮代码已落地到本地工作区，尚未完成 native / E2E 验收，功能门禁默认关闭。实施和验证结果见附录 B；不能将本文的目标契约等同于已经验证的保证。
+状态：实施中。代码已提交为 Draft PR，尚未完成 native / E2E 验收，功能门禁默认关闭。实施和验证结果见附录 B；不能将本文的目标契约等同于已经验证的保证。
 
 日期：2026-09-07。源码基线：`19c753b4d180bb3f2581c2f7a58d4c4ac06a8202`。
 
@@ -19,6 +19,7 @@
 - 配置持续到 `ReleaseCollection`，后续新增 segment、节点迁移、恢复、索引更新均继承这一要求。
 - 只有实际需要的资源完成同步预热后，才能发布相应的 loaded / Ready 状态。
 - 不修改全局 warmup、lazy、mmap 配置，不修改持久化 schema / index properties。
+- 沿用已有 sync warmup 的执行与 context 传递方式；本次不新增 OpContext 透传，不补齐底层取消链。
 - 第一版不支持对已按普通模式加载的 collection 原地开启；需要 Release 后重新 Load。
 - 为防止 Release / Reload 和旧 segment 复用绕过完成条件，增加持久化的 `sync_warmup_epoch`，并检查资源的实际完成资格。
 
@@ -440,7 +441,7 @@ effective_force = watch.force_sync_warmup OR view.sync_warmup
 - `ConvertFieldIndexInfo()`：同时覆盖专用 `warmup_policy` 和 index load config 中的 warmup；不能只改其中一份。
 - text index / JSON stats 的 load-info 转换：将 force 传入，不重新从 schema 得到 disable。
 - `BuildJsonKeyStatsIndex()` 及 JsonKeyStats 下游资源：跳过 defer 判断，并把 sync 继续传入其所有需要的 slot。
-- `load_field_data_common()`、PK / timestamp 派生 slot 构造：审查显式空 warmup、固定 disable、缺少 OpContext 的调用。
+- `load_field_data_common()`、PK / timestamp 派生 slot 构造：审查显式空 warmup、固定 disable 的策略入口，保持原有 OpContext 传递方式。
 
 特别注意：Knowhere lazy-load 索引的外层 translator 本来就可能使用 sync 来加载元数据。这不能替代内部索引资源的同步预热。验收必须观测内层读取，而不是只断言外层 `warmup_policy == sync`。
 
@@ -462,9 +463,11 @@ Reopen 失败不能发布半完成 generation，也不能提前把 applied revis
 
 ### 11.5 OpContext 与取消
 
-每个可能阻塞的 sync warmup 都需要可用的操作上下文 / 超时。当前部分 PK、JSON stats 和 slot 创建调用没有向下传递 OpContext，需要逐个补齐，而不是只在最外层检查一次 `ctx.Err()`。
+本次只覆盖有效 warmup 策略，复用已有 sync 执行机制。`CreateCacheSlot()` 的同步预热分支本来就支持空 context；`OpContext` 不是选择或执行 sync 的前提。请求级 force 不要求新增函数参数，也不把原有 `nullptr` 调用改为向下透传 context。
 
-审查范围包括 reader 创建、manifest 读取、远程文件下载、cache cell load、嵌套索引 materialization 和等待并发任务的 join。实现必须确认实际链接的 cachinglayer / knowhere 版本具备所需取消能力；仓库安装头文件不是 native E2E 的替代品。
+保留基线已有的 OpContext 传递、取消检查与超时行为；保留 Go Load / Update 在操作返回后检查任务是否已取消的完成保护，避免取消后继续报告成功。后者检查的是已有 context 的状态，不扩展 context 传递链。
+
+reader / manifest 读取、远程下载、cache cell load、嵌套索引 materialization 和并发任务等待能否及时中断，属于独立的取消链治理。本次不新增这项保证，也不把补齐这些链路作为功能验收前提。实际资源预热完成才发布 Ready 的 native / E2E 验收要求保持不变；仓库安装头文件不是这些行为的验收证据。
 
 ## 12. 超时、资源与执行并发
 
@@ -473,10 +476,10 @@ Reopen 失败不能发布半完成 generation，也不能提前把 applied revis
 客户端等待超时、QN 加载任务取消、底层单次预热超时是三种不同事件。
 
 - 客户端停止等待不等于已持久化的 load config 被删除。
-- view 被释放、任务被替换或节点关闭时，QN 取消执行；不得继续发送成功回调。
+- view 被释放、任务被替换或节点关闭时，QN 沿用已有任务取消机制；即使底层操作稍后才返回，也不得继续发送成功回调。
 - 底层超时应通过原错误链返回，不降级为 async / disable 后继续报告 loaded。
 
-现有 `loadingTimeoutMs` 与 `warmupLoadingTimeoutMs` 可作为执行预算入口；具体是否覆盖所有新路径需要验证。第一版不承诺仅延长 SDK timeout 就能覆盖底层预算。
+保持现有 `loadingTimeoutMs` 与 `warmupLoadingTimeoutMs` 的作用范围，不将其解释为覆盖所有 I/O 的统一截止时间。本次不承诺所有 native I/O 能在取消时立即中断，也不承诺仅延长 SDK timeout 就能覆盖底层预算。
 
 ### 12.2 内存、磁盘与并发
 
@@ -573,7 +576,7 @@ epoch、collection ID、segment ID、view key 适合日志 / trace，不作为�
 - segment watch 注入 force 后再 hash。
 - Go 到 segcore 转换、两侧 runtime compact、Load / Reopen。
 - 字段、索引、JSON stats、text、系统派生 slot 的 force 解析。
-- OpContext、资源估算、同步错误返回、staged runtime 发布。
+- 资源估算、同步错误返回、staged runtime 发布；OpContext 传递保持基线不变。
 
 ### P0-D：失败路径与发布门禁
 
@@ -584,6 +587,8 @@ epoch、collection ID、segment ID、view key 适合日志 / trace，不作为�
 ### 后续可独立讨论
 
 原地升级普通 loaded collection、按字段选择预热、重新预热已被 eviction 的资源、预热进度 API、external collection 支持。它们都需要新的语义，不能靠当前 `warmup="sync"` 隐式扩展。
+
+OpContext 透传和底层取消链补齐另行评估，不与请求级 warmup 策略覆盖绑定实施。
 
 ## 17. 测试设计与验收标准
 
@@ -620,7 +625,7 @@ epoch、collection ID、segment ID、view key 适合日志 / trace，不作为�
 | 目标 shard 尚未全部创建 | registry 已有 shard 全部 Up 也不能提前返回 100% |
 | Up view 属于旧 epoch / 目标尚未恢复 | 不计为当前加载完成 |
 | 空数据、多 shard、多 replica | 按完整目标统计；所有必要空 view 准备完成后才为 100% |
-| 开始等待后 Release | 取消等待 / 加载，回调恰当收敛，无泄漏、死锁 |
+| 开始等待后 Release | 沿用已有取消路径，隔离底层迟到结果，资源与回调收敛；不新增所有 native I/O 立即中断的要求 |
 
 这些测试需要明确控制线程 / 回调交错，不能只依赖重复跑成功路径碰概率。
 
@@ -637,7 +642,7 @@ epoch、collection ID、segment ID、view key 适合日志 / trace，不作为�
 | 向量索引含内部 lazy load | 内层资源完成，而不是只完成外层 metadata |
 | 标量索引 / text-match | 独立 translator 同步加载完整 |
 | JSON stats | materialize 及其下游共享键、shredding、column group 完成 |
-| PK / timestamp 派生 slot | 实际需要的派生结构接受 force 和取消 |
+| PK / timestamp 派生 slot | 实际需要的派生结构接受 force，所需预热完成后才能发布 |
 | 未选字段 / 冗余 raw data | 不因 force 被额外加载 |
 | mmap 开启 / 关闭 | 两种模式契约成立；不额外断言 OS 全页驻留 |
 | index / manifest 更新 Reopen | 新资源完成后 Publish；失败保留旧 generation |
@@ -656,7 +661,7 @@ epoch、collection ID、segment ID、view key 适合日志 / trace，不作为�
 3. 允许 LoadCollection 提交 RPC 返回，但断言相应加载进度不能完成、SDK 同步等待不能成功。
 4. 放开资源读取；确认同步预热完成，再观察 physical loaded、Ready 和等待成功。
 5. 在新 segment、迁移、新 QN、QC 恢复和索引更新后重复这个 barrier 验证。
-6. 故障时断言不出现假 100%；取消后断言资源和回调收敛。
+6. 故障时断言不出现假 100%；沿已有路径取消任务后，断言底层迟到结果不会报告成功，操作返回后资源和回调收敛，不额外要求 I/O 立即中断。
 7. Release 后保留旧查询引用并立即 Reload，验证新 epoch 不复用旧 Ready；旧引用释放后新加载可继续。
 8. 开启 eviction 验证其行为保持不变；不把后续远程读取视作已违反“本轮预热完成”的契约。
 
@@ -733,19 +738,19 @@ proto 使用生成流程更新；segcore 的 C++ 生成产物亦通过相应构�
 | JSON stats | [JsonKeyStats.cpp](/Users/sunbingyi-zilliz/milvus/internal/core/src/index/json_stats/JsonKeyStats.cpp) |
 | 本地安装的缓存依赖头文件 | [Manager.h](/Users/sunbingyi-zilliz/milvus/internal/core/output/include/cachinglayer/Manager.h)、[CacheSlot.h](/Users/sunbingyi-zilliz/milvus/internal/core/output/include/cachinglayer/CacheSlot.h) |
 
-## 附录 B：实施与验证记录（2026-09-07）
+## 附录 B：实施与验证记录
 
-### B.1 已写入工作区的首轮代码
+### B.1 当前实施范围
 
 - 入口：Go SDK `WithSyncWarmup()`、PyMilvus `warmup="sync"`、REST V2 load 参数透传；Proxy / QC 拒绝不支持的值、显式 sync + refresh 和 external collection。REST refresh 也透传显式参数供 Proxy 拒绝，不静默丢弃。
 - 持久化：公开 map → 内部请求 → WAL header → LoadConfig / CollectionLoadInfo，增加独立 `SyncWarmup` 和持久 epoch。其他 DDL 省略字段时保留策略；普通已加载 collection 不能原地开启；Release 才结束该生命周期。恢复时拒绝不完整 epoch。
 - 生命周期：LoadConfigStore 的 per-collection checked-apply、旧 view durable removal 检查、QN physical / transform-loaded 两级资格校验。只等待残留旧 query ref；不兼容资源仍属于有效旧 view 时明确失败。迟到 Load 校验 state / attempt；catch-up、失败和 reset 按原 view / segment 实例校验，不能仅凭 segment ID 影响替代对象。资格使用 immutable segment decorator，不表示 cache residency lease；decorator 保留原 segment 的查询接口与 transform 起点。
 - 进度：[sync_warmup_progress.go](/Users/sunbingyi-zilliz/milvus/internal/querycoordv2/sync_warmup_progress.go) 从 collection metadata 确定完整 vchannel 集合，按 vchannel × replica 计数，只统计匹配 epoch 的 sync Up。metadata 缓存写入与 Release / reload 用配置版本隔离。
-- 执行：[sync_warmup.go](/Users/sunbingyi-zilliz/milvus/internal/querynodev2/qnview/sync_warmup.go) 生成私有 force load-info；watch 注入 force 后计算 revision。Go → segcore 及两侧 compact 保留 force；C++ 字段、索引双策略、text / JSON stats、PK / timestamp 派生 slot 覆盖为 sync。为新增同步 slot 路径传递 OpContext；Load / Update 取消后不发送成功回调。
+- 执行：[sync_warmup.go](/Users/sunbingyi-zilliz/milvus/internal/querynodev2/qnview/sync_warmup.go) 生成私有 force load-info；watch 注入 force 后计算 revision。Go → segcore 及两侧 compact 保留 force；C++ 字段、索引双策略、text / JSON stats、PK / timestamp 派生 slot 覆盖为 sync。OpContext 传递保持基线不变；Go Load / Update 保留取消后的完成检查，不发送成功回调。
 - 发布：增加默认关闭的 QC 门禁和 QN/native 能力声明，调度器检查节点能力和 Up epoch。没有修改全局 warmup / lazy / mmap，也没有实现原地开启。
 - 协议生成：通过 `make -o download-milvus-proto generated-proto-without-cpp` 更新。仅跳过已经核对 revision 的第三方 proto 下载步骤，避免下载脚本重置依赖 checkout；生成文件未手工编辑。
 
-### B.2 已执行并通过
+### B.2 首轮验证通过项（2026-09-07 历史记录）
 
 - `internal/views/coord/loadmgr`、`internal/views/coord/balancer`、`internal/views/coord/coordview`、`internal/views/qviews/...` 的完整包单测，使用 `-tags dynamic,test -gcflags="all=-N -l" -count=1`。包括持久化 / 恢复校验、禁止原地开启、sticky / Release、配置版本 fence、能力与 epoch 分类、durable removal 检查。
 - Go SDK `TestLoadCollectionSyncWarmupOption`；PyMilvus `tests/unit/test_load_warmup.py` 的 10 个用例。
@@ -754,7 +759,7 @@ proto 使用生成流程更新；segcore 的 C++ 生成产物亦通过相应构�
 - 相关 Go proto 包构建（这些包本身没有测试用例）。
 - C++ `SegmentLoadInfo.cpp`、`JsonKeyStats.cpp`、`segment_c.cpp` 对象编译；`ChunkedSegmentSealedImpl.cpp` 与包含新增 converter / compact 用例的 `test_loading.cpp` 在关闭 OpenMP / PCH 的诊断命令下通过 syntax-only 检查。后两项不是正式构建或 native 单测通过。
 - 所有本次涉及的 root Go 包、`client/milvusclient` 和 `pkg/util/paramtable` 按 `golangci-lint --new-from-rev=HEAD` 检查均为 0 issues；不是全仓存量问题清零。PyMilvus 修改的源文件通过 Ruff 检查，源文件和新测试通过格式检查。
-- Go 改动格式化、改动行 clang-format 检查及 `git diff --check`。没有运行提交远端前的全仓格式化流程，也没有提交 / 推送。
+- Go 改动格式化、改动行 clang-format 检查及 `git diff --check`。该轮验证时尚未运行提交远端前的全仓格式化流程，也未提交 / 推送；后续范围调整与验证单独记录，不将历史结果记为重新验证。
 
 其中依赖 native 的 Go 纯逻辑单测使用当前源码 C 头文件及本地库 rpath。它们验证了调度 / 元数据逻辑，不代表旧安装库具备新的实际预热能力。
 
@@ -762,10 +767,20 @@ proto 使用生成流程更新；segcore 的 C++ 生成产物亦通过相应构�
 
 - QN / Proxy / REST 的新增测试已编写；执行仍受安装库版本阻塞。默认 include 下出现缺少声明和 FFI 参数数不一致；改用当前源码头文件后，相关测试在链接阶段缺少当前源码所需 native 符号，包括新能力接口，不能执行。不能将“已编写用例”记为“测试通过”。
 - QueryCoord 全包执行失败于 `TestServer/TestStop` 和 `TestServer/TestUpdateAutoBalanceConfigLoop`。独立复跑分别定位到：重复 `Server.Stop → streaming manager.Close` 产生 `close of closed channel`；`ServerSuite.SetupTest → MockQueryNode.Start → Session.Register` 发生 etcd session CAS 冲突。这些失败不在新增 warmup 路径内；不能把新增定向用例通过等同于全包回归通过。未修改无关的 Stop / session 注册逻辑来绕过失败。
-- 正式 `milvus_core` 构建遇到当前 Knowhere 与本地 LLVM 18 / libc++ 的 `std::atomic_ref` 兼容问题；单独编译 ChunkedSegmentSealedImpl 还遇到既有 structured-binding lambda capture 与 OpenMP 的编译器限制。未为本功能修改第三方依赖或全局工具链来绕过它们。
+- 首轮正式 `milvus_core` 构建遇到当时 Knowhere 与本地 LLVM 18 / libc++ 的 `std::atomic_ref` 兼容问题；单独编译 ChunkedSegmentSealedImpl 还遇到既有 structured-binding lambda capture 与 OpenMP 的编译器限制。未为本功能修改第三方依赖或全局工具链来绕过它们；这是首轮环境记录，不表示后续工具链没有变化。
 - `pkg/util/paramtable` 全包测试受本地配置覆盖影响存在默认值断言失败；独立的新门禁用例通过，不宣称全包通过。
 - 未运行第 17 节要求的真实 Storage V1 / V2 / V3、内层 Knowhere、text / JSON stats I/O barrier、S3 限流 / 损坏文件 / OOM / cancel 故障注入，以及恢复、迁移、并发 Release/reload 的 E2E。
-- cache slot 已传递 OpContext；manifest / JSON metadata 和底层文件读取能否及时中断，仍需以真实依赖实测。初始 Load 错误进入既有失败回调、Update 错误继续既有延迟重试，不额外承诺 SDK 立即收到所有异步错误。
+- context 传递保持基线不变，补齐 native 取消链不属于本次发布验收范围；取消后的迟到结果隔离仍需验证。初始 Load 错误进入既有失败回调、Update 错误继续既有延迟重试，不额外承诺 SDK 立即收到所有异步错误。
 - 资源估算保留现有分层：tiered eviction 下缓存资源由 caching layer 预留，Go 估算非缓存部分；关闭 eviction 时估算缓存与非缓存部分。私有 force 输入在 reservation 前生成，但峰值、超时和嵌套线程池行为尚未完成压力验收，不新增“全量驻留”保证。
 
 在上述 native / E2E 项目完成前，维持门禁关闭，当前补丁按“实施中、待验收”交付。
+
+### B.4 2026-09-08 范围收缩
+
+- 撤销本功能新增的 `JsonKeyStats::LoadWithContext()`、`ChunkedColumnGroup` 构造参数，以及 PK / timestamp / default-field slot 的 context 透传；这些位置恢复到功能补丁前的传递方式，保留原本就存在的 context 和取消检查。
+- 保留请求级 force 的策略覆盖、持久化与生命周期隔离，以及 Go 任务取消后的完成保护。此次不修改 Go 或 SDK 代码。
+- 源码差分检查通过：`JsonKeyStats.cpp/.h`、`ChunkedColumnGroup.h`、`ChunkedSegmentSealedImpl.h` 与 PR base `7e32a5ca9b7e472f1563668e497595a1f57b0d7d` 完全一致；`ChunkedSegmentSealedImpl.cpp` 相对该 base 只保留字段、PK、timestamp 的三处 force 策略改动。其余 force 转换和 runtime compact 保持不变。
+- 当前 `compile_commands.json` 使用 LLVM 21；`ChunkedSegmentSealedImpl.cpp` 和 `JsonKeyStats.cpp` 均通过关闭 PCH、保留 OpenMP 的 `-fsyntax-only` 检查。这验证调用签名与语法，不代表完整构建或 native 单测通过。
+- 在隔离工作区执行 `run_clang_format.sh` 通过；相对 PR base 的改动行格式检查无需修改，`git diff --check` 通过。全仓格式化产生的无关基线调整不纳入本次提交。
+- 隔离工作区的 `make lint-fix` 完成 gofumpt / gci 后，在 root module typecheck 失败：`internal/metastore/kv/querycoord/kv_catalog_test.go:372:15: undefined: mocks`。该文件与 PR base 一致；未修复无关基线错误，目标未执行到 pkg / client lint 阶段，不能报告全仓 lint 通过。
+- 本节验证结果仅针对上述范围收缩，不替代第 17 节的完整 native / E2E 发布验收。

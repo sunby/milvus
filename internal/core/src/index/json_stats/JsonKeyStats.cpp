@@ -1035,8 +1035,7 @@ void
 JsonKeyStats::LoadColumnGroup(int64_t column_group_id,
                               const std::vector<int64_t>& file_ids,
                               const std::string& warmup_policy,
-                              const std::string& override_prefix,
-                              milvus::OpContext* op_ctx) {
+                              const std::string& override_prefix) {
     if (file_ids.empty()) {
         return;
     }
@@ -1186,7 +1185,7 @@ JsonKeyStats::LoadColumnGroup(int64_t column_group_id,
             shard_);
 
         auto chunked_column_group =
-            std::make_shared<ChunkedColumnGroup>(std::move(translator), op_ctx);
+            std::make_shared<ChunkedColumnGroup>(std::move(translator));
 
         for (const auto& inner_field_id : milvus_field_ids) {
             auto field_meta = field_meta_map.at(inner_field_id);
@@ -1287,8 +1286,7 @@ JsonKeyStats::LoadColumnGroup(int64_t column_group_id,
 
 void
 JsonKeyStats::LoadShreddingData(const std::vector<std::string>& index_files,
-                                const std::string& warmup_policy,
-                                milvus::OpContext* op_ctx) {
+                                const std::string& warmup_policy) {
     // sort files by column group id and file id
     auto sorted_files = SortByParquetPath(index_files);
 
@@ -1310,7 +1308,7 @@ JsonKeyStats::LoadShreddingData(const std::vector<std::string>& index_files,
     // load shredding data
     for (const auto& [column_group_id, file_ids] : sorted_files) {
         LoadColumnGroup(
-            column_group_id, file_ids, warmup_policy, shredding_prefix, op_ctx);
+            column_group_id, file_ids, warmup_policy, shredding_prefix);
     }
 }
 
@@ -1319,8 +1317,7 @@ JsonKeyStats::LoadSharedKeyIndex(
     const std::vector<std::string>& shared_key_index_files,
     bool enable_mmap,
     int64_t index_size,
-    const std::string& warmup_policy,
-    milvus::OpContext* op_ctx) {
+    const std::string& warmup_policy) {
     // shared_key_index_files are absolute remote paths (basePath already prepended)
     segcore::storagev1translator::BsonInvertedIndexLoadInfo load_info;
     load_info.enable_mmap = enable_mmap;
@@ -1338,7 +1335,7 @@ JsonKeyStats::LoadSharedKeyIndex(
 
     bson_index_cache_slot_ =
         cachinglayer::Manager::GetInstance().CreateCacheSlot(
-            std::move(translator), op_ctx);
+            std::move(translator));
 
     LOG_INFO(
         "loaded bson inverted index using translator for field:{} of "
@@ -1350,13 +1347,6 @@ JsonKeyStats::LoadSharedKeyIndex(
 
 void
 JsonKeyStats::Load(milvus::tracer::TraceContext ctx, const Config& config) {
-    LoadWithContext(ctx, config, nullptr);
-}
-
-void
-JsonKeyStats::LoadWithContext(milvus::tracer::TraceContext ctx,
-                              const Config& config,
-                              milvus::OpContext* op_ctx) {
     auto enable_mmap =
         GetValueFromConfig<bool>(config, ENABLE_MMAP).value_or(false);
     if (enable_mmap) {
@@ -1428,14 +1418,14 @@ JsonKeyStats::LoadWithContext(milvus::tracer::TraceContext ctx,
     }
 
     // load shredding data (files are already absolute paths)
-    LoadShreddingData(shredding_data_files, warmup_policy, op_ctx);
+    LoadShreddingData(shredding_data_files, warmup_policy);
 
     auto index_size =
         GetValueFromConfig<int64_t>(config, milvus::index::INDEX_SIZE)
             .value_or(0);
     // load shared key index (files are already absolute paths)
     LoadSharedKeyIndex(
-        shared_key_index_files, enable_mmap, index_size, warmup_policy, op_ctx);
+        shared_key_index_files, enable_mmap, index_size, warmup_policy);
 }
 
 IndexStatsPtr

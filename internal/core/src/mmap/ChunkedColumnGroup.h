@@ -51,10 +51,8 @@ using namespace milvus::cachinglayer;
 class ChunkedColumnGroup {
  public:
     explicit ChunkedColumnGroup(
-        std::unique_ptr<Translator<GroupChunk>> translator,
-        milvus::OpContext* op_ctx = nullptr)
-        : slot_(Manager::GetInstance().CreateCacheSlot(std::move(translator),
-                                                       op_ctx)) {
+        std::unique_ptr<Translator<GroupChunk>> translator)
+        : slot_(Manager::GetInstance().CreateCacheSlot(std::move(translator))) {
         num_chunks_ = slot_->num_cells();
         num_rows_ = GetNumRowsUntilChunk().back();
     }
