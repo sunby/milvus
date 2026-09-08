@@ -41,15 +41,12 @@ jobs:
     strategy:
       fail-fast: false
     steps:
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@master
-        if: ${{ ! startsWith(runner.name, 'self') }} # skip this step if it is self-hosted runner
-        with:
-          root-reserve-mb: 20480
-          swap-size-mb: 1024
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
+      - name: Free build space
+        if: ${{ runner.environment == 'github-hosted' }}
+        run: |
+          # Keep freed space available to both Docker and the workspace.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          df -h
       - name: Checkout
         uses: actions/checkout@v2
       - name: Download Caches
@@ -74,15 +71,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@master
-        if: ${{ ! startsWith(runner.name, 'self') }} # skip this step if it is self-hosted runner
-        with:
-          root-reserve-mb: 20480
-          swap-size-mb: 1024
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
+      - name: Free build space
+        if: ${{ runner.environment == 'github-hosted' }}
+        run: |
+          # Keep freed space available to both Docker and the workspace.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          df -h
       - name: Checkout
         uses: actions/checkout@v2
       - name: Download Caches
@@ -106,15 +100,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@master
-        if: ${{ ! startsWith(runner.name, 'self') }} # skip this step if it is self-hosted runner
-        with:
-          root-reserve-mb: 20480
-          swap-size-mb: 1024
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
+      - name: Free build space
+        if: ${{ runner.environment == 'github-hosted' }}
+        run: |
+          # Keep freed space available to both Docker and the workspace.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          df -h
       - name: Checkout
         uses: actions/checkout@v2
       - name: Download Caches
