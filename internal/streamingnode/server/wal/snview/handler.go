@@ -66,15 +66,19 @@ var _ handler.QueryViewHandler = (*SNQueryViewHandler)(nil)
 //     Repeated Down pushes update the callback without renewing the lease.
 //   - Other states: SM handles coord push and responds accordingly.
 type SNQueryViewHandler struct {
-	mu             sync.Mutex
-	closed         bool
-	ctx            context.Context
-	pchannel       string
-	shards         map[qviews.ShardID]*snShardView
-	catalog        metastore.StreamingNodeCataLog
-	resMgr         StreamingNodeResourceManager
-	localOptimizer optimizer.LocalOptimizer
-	leaseDuration  time.Duration
+	mu       sync.Mutex
+	closed   bool
+	ctx      context.Context
+	pchannel string
+	shards   map[qviews.ShardID]*snShardView
+	// shardsByVChannel indexes shards by vchannel, one shard per replica of
+	// the vchannel. It serves the UnknownReplicaID lookup without scanning
+	// every shard of the pchannel.
+	shardsByVChannel map[string]map[qviews.ShardID]struct{}
+	catalog          metastore.StreamingNodeCataLog
+	resMgr           StreamingNodeResourceManager
+	localOptimizer   optimizer.LocalOptimizer
+	leaseDuration    time.Duration
 }
 
 // recoverSNQueryViewHandler reconstructs the handler from persisted views
@@ -87,13 +91,14 @@ func recoverSNQueryViewHandler(
 	views []*viewpb.QueryViewOfShard,
 ) *SNQueryViewHandler {
 	h := &SNQueryViewHandler{
-		ctx:            ctx,
-		pchannel:       pchannel,
-		shards:         make(map[qviews.ShardID]*snShardView),
-		catalog:        catalog,
-		resMgr:         resMgr,
-		localOptimizer: optimizer.NewNoopLocalOptimizer(),
-		leaseDuration:  max(0, paramtable.Get().QueryViewCfg.LeaseDuration.GetAsDurationByParse()),
+		ctx:              ctx,
+		pchannel:         pchannel,
+		shards:           make(map[qviews.ShardID]*snShardView),
+		shardsByVChannel: make(map[string]map[qviews.ShardID]struct{}),
+		catalog:          catalog,
+		resMgr:           resMgr,
+		localOptimizer:   optimizer.NewNoopLocalOptimizer(),
+		leaseDuration:    max(0, paramtable.Get().QueryViewCfg.LeaseDuration.GetAsDurationByParse()),
 	}
 
 	grouped := make(map[qviews.ShardID]map[qviews.QueryViewVersion]*snQueryViewStateMachine)
@@ -116,7 +121,7 @@ func recoverSNQueryViewHandler(
 		shard := recoverSnShardView(ctx, pchannel, shardID, shardViews, catalog, resMgr)
 		shard.leaseDuration = h.leaseDuration
 		shard.onEmpty = h.makeOnEmpty(shardID)
-		h.shards[shardID] = shard
+		h.addShardLocked(shardID, shard)
 	}
 	views = slices.Clone(views)
 	// A vchannel runtime is shared by replicas. Register the oldest recovered
@@ -196,6 +201,7 @@ func (h *SNQueryViewHandler) CloseForHandoff() {
 		shards = append(shards, shard)
 	}
 	h.shards = make(map[qviews.ShardID]*snShardView)
+	h.shardsByVChannel = make(map[string]map[qviews.ShardID]struct{})
 	h.mu.Unlock()
 
 	for _, shard := range shards {
@@ -221,9 +227,21 @@ func (h *SNQueryViewHandler) getOrCreateShard(shardID qviews.ShardID) *snShardVi
 			onEmpty:       h.makeOnEmpty(shardID),
 			leaseDuration: h.leaseDuration,
 		}
-		h.shards[shardID] = shard
+		h.addShardLocked(shardID, shard)
 	}
 	return shard
+}
+
+// addShardLocked registers a shard and indexes it by vchannel. The caller holds
+// h.mu.
+func (h *SNQueryViewHandler) addShardLocked(shardID qviews.ShardID, shard *snShardView) {
+	h.shards[shardID] = shard
+	shardIDs, ok := h.shardsByVChannel[shardID.VChannel]
+	if !ok {
+		shardIDs = make(map[qviews.ShardID]struct{})
+		h.shardsByVChannel[shardID.VChannel] = shardIDs
+	}
+	shardIDs[shardID] = struct{}{}
 }
 
 func (h *SNQueryViewHandler) makeOnEmpty(shardID qviews.ShardID) func(*snShardView) {
@@ -232,6 +250,12 @@ func (h *SNQueryViewHandler) makeOnEmpty(shardID qviews.ShardID) func(*snShardVi
 		defer h.mu.Unlock()
 		if h.shards[shardID] == emptyShard {
 			delete(h.shards, shardID)
+			if shardIDs, ok := h.shardsByVChannel[shardID.VChannel]; ok {
+				delete(shardIDs, shardID)
+				if len(shardIDs) == 0 {
+					delete(h.shardsByVChannel, shardID.VChannel)
+				}
+			}
 		}
 	}
 }
@@ -265,8 +289,8 @@ func (h *SNQueryViewHandler) acquireUpViewForSchema(ctx context.Context, shardID
 		if shard := h.shards[shardID]; shard != nil {
 			candidates = append(candidates, shard)
 		} else if shardID.ReplicaID == qviews.UnknownReplicaID {
-			for id, candidate := range h.shards {
-				if id.VChannel == shardID.VChannel {
+			for id := range h.shardsByVChannel[shardID.VChannel] {
+				if candidate := h.shards[id]; candidate != nil {
 					candidates = append(candidates, candidate)
 				}
 			}
