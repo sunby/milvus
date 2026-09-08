@@ -72,6 +72,7 @@ func (b *listDeleteBuffer[T]) RegisterL0(segmentList ...segments.Segment) {
 	for _, seg := range segmentList {
 		if seg != nil {
 			b.l0Segments = append(b.l0Segments, seg)
+			l0SegmentCount(seg).Inc()
 			mlog.Info(context.TODO(), "register l0 from delete buffer",
 				mlog.FieldSegmentID(seg.ID()),
 				mlog.Time("startPosition", tsoutil.PhysicalTime(seg.StartPosition().GetTimestamp())),
@@ -100,6 +101,7 @@ func (b *listDeleteBuffer[T]) UnRegister(ts uint64) {
 			newSegments = append(newSegments, s)
 		} else {
 			s.Release(context.TODO())
+			l0SegmentCount(s).Dec()
 			mlog.Info(context.TODO(), "unregister l0 from delete buffer",
 				mlog.FieldSegmentID(s.ID()),
 				mlog.Time("startPosition", tsoutil.PhysicalTime(s.StartPosition().GetTimestamp())),
@@ -119,6 +121,7 @@ func (b *listDeleteBuffer[T]) Clear() {
 	// clean l0 segments
 	for _, s := range b.l0Segments {
 		s.Release(context.TODO())
+		l0SegmentCount(s).Dec()
 	}
 	b.l0Segments = nil
 
