@@ -36,8 +36,10 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
-var _ wal.WAL = (*walAdaptorImpl)(nil)
-var _ queryplanprovider.QueryPlanProvider = (*walAdaptorImpl)(nil)
+var (
+	_ wal.WAL                             = (*walAdaptorImpl)(nil)
+	_ queryplanprovider.QueryPlanProvider = (*walAdaptorImpl)(nil)
+)
 
 type gracefulCloseFunc func()
 
