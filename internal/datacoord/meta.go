@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/errors"
@@ -95,6 +96,7 @@ type CompactionMeta interface {
 var _ CompactionMeta = (*meta)(nil)
 
 type meta struct {
+	statsDiscovery            atomic.Pointer[statsReconcileQueue]
 	queryViewLoadInfoNotifier QueryViewLoadInfoNotifier
 	ctx                       context.Context
 	catalog                   metastore.DataCoordCatalog
@@ -487,7 +489,7 @@ func (m *meta) reloadFromKV(ctx context.Context, collectionIDs []int64) error {
 				}
 			}
 			// segments from catalog.ListSegments will not have logPath
-			m.segments.SetSegment(segment.ID, NewSegmentInfo(segment))
+			m.setSegmentAndNotifyStats(segment.ID, NewSegmentInfo(segment))
 			metrics.DataCoordNumSegments.WithLabelValues(segmentMetricLabelValues(NewSegmentInfo(segment))...).Inc()
 			if segment.State == commonpb.SegmentState_Flushed {
 				numStoredRows += segment.NumOfRows
@@ -566,7 +568,11 @@ func (m *meta) reloadCollectionsFromRootcoord(ctx context.Context, broker broker
 // Note that collection info is just for caching and will not be set into etcd from datacoord
 func (m *meta) AddCollection(collection *collectionInfo) {
 	mlog.Info(m.ctx, "meta update: add collection", mlog.Int64("collectionID", collection.ID))
+	old := m.GetCollection(collection.ID)
 	m.collections.Insert(collection.ID, collection)
+	if q := m.statsDiscovery.Load(); q != nil && (old == nil || !proto.Equal(old.Schema, collection.Schema)) {
+		q.requestScan(collection.ID, true)
+	}
 	metrics.DataCoordNumCollections.WithLabelValues().Set(float64(m.collections.Len()))
 	mlog.Info(m.ctx, "meta update: add collection - complete", mlog.Int64("collectionID", collection.ID))
 }
@@ -575,6 +581,9 @@ func (m *meta) AddCollection(collection *collectionInfo) {
 func (m *meta) DropCollection(collectionID int64) {
 	mlog.Info(m.ctx, "meta update: drop collection", mlog.Int64("collectionID", collectionID))
 	if _, ok := m.collections.GetAndRemove(collectionID); ok {
+		if q := m.statsDiscovery.Load(); q != nil {
+			q.requestScan(collectionID, true)
+		}
 		metrics.CleanupDataCoordWithCollectionID(collectionID)
 		metrics.DataCoordNumCollections.WithLabelValues().Set(float64(m.collections.Len()))
 		mlog.Info(m.ctx, "meta update: drop collection - complete", mlog.Int64("collectionID", collectionID))
@@ -856,7 +865,7 @@ func (m *meta) AddSegment(ctx context.Context, segment *SegmentInfo) error {
 			mlog.Err(err))
 		return err
 	}
-	m.segments.SetSegment(segment.GetID(), segment)
+	m.setSegmentAndNotifyStats(segment.GetID(), segment)
 
 	metrics.DataCoordNumSegments.WithLabelValues(segmentMetricLabelValues(segment)...).Inc()
 	mlog.Info(ctx, "meta update: adding segment - complete", mlog.Int64("segmentID", segment.GetID()))
@@ -882,7 +891,7 @@ func (m *meta) DropSegment(ctx context.Context, segmentID UniqueID) error {
 	}
 	metrics.DataCoordNumSegments.WithLabelValues(segmentMetricLabelValues(segment)...).Dec()
 
-	m.segments.DropSegment(segmentID)
+	m.dropSegmentAndNotifyStats(segmentID)
 	mlog.Info(ctx, "meta update: dropping segment - complete",
 		mlog.Int64("segmentID", segmentID))
 	return nil
@@ -1008,7 +1017,7 @@ func (m *meta) SetState(ctx context.Context, segmentID UniqueID, targetState com
 		// Apply segment metric update after successful meta update.
 		metricMutation.commit()
 		// Update in-memory meta.
-		m.segments.SetSegment(segmentID, clonedSegment)
+		m.setSegmentAndNotifyStats(segmentID, clonedSegment)
 	}
 	mlog.Info(ctx, "meta update: setting segment state - complete",
 		mlog.Int64("segmentID", segmentID),
@@ -1050,7 +1059,7 @@ func (m *meta) UpdateSegment(segmentID int64, operators ...SegmentOperator) erro
 		return err
 	}
 	// Update in-memory meta.
-	m.segments.SetSegment(segmentID, cloned)
+	m.setSegmentAndNotifyStats(segmentID, cloned)
 
 	mlog.Info(m.ctx, "meta update: update segment - complete",
 		mlog.Int64("segmentID", segmentID))
@@ -2265,7 +2274,7 @@ func (m *meta) UpdateSegmentsInfo(ctx context.Context, operators ...UpdateOperat
 	updatePack.metricMutation.commit()
 	// update memory status
 	for id, s := range updatePack.segments {
-		m.segments.SetSegment(id, s)
+		m.setSegmentAndNotifyStats(id, s)
 	}
 	mlog.Info(ctx, "meta update: update flush segments info - update flush segments info successfully")
 	return nil
@@ -2330,7 +2339,7 @@ func (m *meta) UpdateSegmentsInfoAndDataView(ctx context.Context, dataView *view
 		updatePack.metricMutation.commit()
 		// update memory status
 		for id, s := range updatePack.segments {
-			m.segments.SetSegment(id, s)
+			m.setSegmentAndNotifyStats(id, s)
 		}
 	}
 	mlog.Info(ctx, "meta update: update flush segments info and DataView successfully")
@@ -2528,7 +2537,7 @@ func (m *meta) batchSaveDropSegments(ctx context.Context, channel string, modSeg
 
 	// update memory info
 	for id, segment := range modSegments {
-		m.segments.SetSegment(id, segment)
+		m.setSegmentAndNotifyStats(id, segment)
 	}
 
 	return nil
@@ -2696,7 +2705,7 @@ func (m *meta) SetLastExpire(segmentID UniqueID, lastExpire uint64) {
 	defer m.segMu.Unlock()
 	clonedSegment := m.segments.GetSegment(segmentID).Clone()
 	clonedSegment.LastExpireTime = lastExpire
-	m.segments.SetSegment(segmentID, clonedSegment)
+	m.setSegmentAndNotifyStats(segmentID, clonedSegment)
 }
 
 // SetLastFlushTime set LastFlushTime for segment with provided `segmentID`
@@ -2962,7 +2971,7 @@ func (m *meta) completeClusterCompactionMutation(t *datapb.CompactionTask, resul
 		return nil, nil, err
 	}
 	lo.ForEach(compactToSegInfos, func(info *SegmentInfo, _ int) {
-		m.segments.SetSegment(info.GetID(), info)
+		m.setSegmentAndNotifyStats(info.GetID(), info)
 	})
 	mlog.Info(m.ctx, "meta update: alter in memory meta after compaction - complete")
 	return compactToSegInfos, metricMutation, nil
@@ -3104,10 +3113,10 @@ func (m *meta) completeMixCompactionMutation(
 		return nil, nil, err
 	}
 	lo.ForEach(compactFromSegInfos, func(info *SegmentInfo, _ int) {
-		m.segments.SetSegment(info.GetID(), info)
+		m.setSegmentAndNotifyStats(info.GetID(), info)
 	})
 	lo.ForEach(compactToSegments, func(info *SegmentInfo, _ int) {
-		m.segments.SetSegment(info.GetID(), info)
+		m.setSegmentAndNotifyStats(info.GetID(), info)
 	})
 
 	mlog.Info(m.ctx, "meta update: alter in memory meta after compaction - complete")
@@ -4031,8 +4040,8 @@ func (m *meta) completeSortCompactionMutation(
 		return nil, nil, err
 	}
 
-	m.segments.SetSegment(oldSegment.GetID(), cloned)
-	m.segments.SetSegment(segment.GetID(), segment)
+	m.setSegmentAndNotifyStats(oldSegment.GetID(), cloned)
+	m.setSegmentAndNotifyStats(segment.GetID(), segment)
 	mlog.Info(m.ctx, "meta update: alter in memory meta after compaction - complete")
 	return []*SegmentInfo{segment}, metricMutation, nil
 }
@@ -4209,7 +4218,7 @@ func (m *meta) completeBumpSchemaVersionCompactionMutation(
 	}
 
 	// Update in-memory meta
-	m.segments.SetSegment(segmentID, cloned)
+	m.setSegmentAndNotifyStats(segmentID, cloned)
 	mlog.Info(m.ctx, "meta update: alter in memory meta after schema bump compaction - complete")
 
 	return []*SegmentInfo{cloned}, metricMutation, nil
@@ -4283,8 +4292,8 @@ func (m *meta) completeBumpSchemaVersionReplacementMutation(
 		return nil, nil, err
 	}
 
-	m.segments.SetSegment(dropped.GetID(), dropped)
-	m.segments.SetSegment(newSegment.GetID(), newSegment)
+	m.setSegmentAndNotifyStats(dropped.GetID(), dropped)
+	m.setSegmentAndNotifyStats(newSegment.GetID(), newSegment)
 	mlog.Info(m.ctx, "meta update: alter in memory meta after schema bump full rewrite replacement - complete")
 	return []*SegmentInfo{newSegment}, metricMutation, nil
 }
@@ -4343,7 +4352,7 @@ func (m *meta) DropSegmentsOfPartition(ctx context.Context, partitionIDs []int64
 	}
 	// update memory info
 	for _, segment := range modSegments {
-		m.segments.SetSegment(segment.GetID(), segment)
+		m.setSegmentAndNotifyStats(segment.GetID(), segment)
 	}
 	metricMutation.commit()
 	return nil
@@ -4402,7 +4411,7 @@ func (m *meta) TruncateChannelByTime(ctx context.Context, vChannel string, flush
 
 	// Update memory
 	for _, seg := range segmentsToDrop {
-		m.segments.SetSegment(seg.GetID(), seg)
+		m.setSegmentAndNotifyStats(seg.GetID(), seg)
 	}
 
 	return nil
