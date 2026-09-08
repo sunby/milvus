@@ -30,6 +30,9 @@ typedef void* CSearchResult;
 typedef CProto CRetrieveResult;
 
 //////////////////////////////    common interfaces    //////////////////////////////
+bool
+SupportsSyncLoadWarmup();
+
 CStatus
 NewSegment(CCollection collection,
            SegmentType seg_type,

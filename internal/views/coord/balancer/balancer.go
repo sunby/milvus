@@ -8,8 +8,11 @@ import (
 	"github.com/cockroachdb/errors"
 
 	"github.com/milvus-io/milvus/internal/views/coord/coordview"
+	"github.com/milvus-io/milvus/internal/views/coord/loadmgr"
 	"github.com/milvus-io/milvus/internal/views/qviews"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
 )
 
 // Balancer is the scheduling controller that reconciles dirty shards into
@@ -30,6 +33,7 @@ type snapshotSource interface {
 type DefaultBalancer struct {
 	snapshotBuilder snapshotSource
 	viewRegistry    *coordview.ShardViewRegistry
+	configStore     *loadmgr.LoadConfigStore
 	policy          BalancePolicy
 	queue           *triggerQueue
 	tickerInterval  time.Duration
@@ -64,6 +68,7 @@ func NewDefaultBalancer(
 		tickerInterval:  interval,
 	}
 	if builder != nil {
+		balancer.configStore = builder.configStore
 		balancer.registerNodeChangedNotifier(builder.nodeProvider)
 	}
 	return balancer
@@ -172,6 +177,9 @@ func (b *DefaultBalancer) Reconcile(ctx context.Context) error {
 	}
 	planStartedAt := time.Now()
 	plan := b.policy.Plan(snap, dirty)
+	if plan != nil {
+		plan.loadConfigSnapshot = snap.LoadConfigSnapshot
+	}
 	planDuration := time.Since(planStartedAt)
 	applyStartedAt := time.Now()
 	err := b.apply(ctx, plan)
@@ -243,7 +251,7 @@ func (b *DefaultBalancer) apply(ctx context.Context, plan *BalancePlan) error {
 		if mgr == nil {
 			continue
 		}
-		if err := mgr.RequestRelease(ctx); err != nil {
+		if err := b.applyCurrentConfig(plan, shardID, func() error { return mgr.RequestRelease(ctx) }); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -251,14 +259,43 @@ func (b *DefaultBalancer) apply(ctx context.Context, plan *BalancePlan) error {
 		if builder == nil {
 			continue
 		}
-		mgr := b.viewRegistry.Ensure(shardID)
-		if err := mgr.AddPreparing(ctx, builder); err != nil {
+		if err := b.applyCurrentConfig(plan, shardID, func() error {
+			return b.viewRegistry.Ensure(shardID).AddPreparing(ctx, builder)
+		}); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	var err error
 	for _, e := range errs {
 		err = errors.CombineErrors(err, e)
+	}
+	return err
+}
+
+func (b *DefaultBalancer) applyCurrentConfig(plan *BalancePlan, shardID qviews.ShardID, apply func() error) error {
+	if b.configStore == nil {
+		return apply()
+	}
+	if plan.loadConfigSnapshot == nil {
+		return merr.WrapErrServiceInternalMsg("query view plan has no load-config snapshot")
+	}
+	var collectionID int64
+	if cfg := plan.loadConfigSnapshot.ReplicaToConfigMap()[shardID.ReplicaID]; cfg != nil {
+		collectionID = cfg.CollectionID
+	} else {
+		// A release plan has no desired replica left. Recover its owning
+		// collection from the channel so a concurrent reload still fences it.
+		channel, err := metautil.ParseChannel(shardID.VChannel, metautil.NewDynChannelMapper())
+		if err != nil {
+			return merr.Wrap(err, "resolve query view plan collection")
+		}
+		collectionID = channel.CollectionID()
+	}
+	checked, err := b.configStore.WithConfigVersion(collectionID, plan.loadConfigSnapshot.ConfigVersion(collectionID), func(*loadmgr.LoadConfig) error {
+		return apply()
+	})
+	if !checked {
+		b.Trigger(TriggerScope{DirtyCollections: []int64{collectionID}})
 	}
 	return err
 }

@@ -219,8 +219,8 @@ func (h *HandlersV2) RegisterRoutesToV2(router gin.IRouter) {
 	router.POST(CollectionCategory+DropAction, timeoutMiddleware(wrapperPost(func() any { return &CollectionNameReq{} }, wrapperTraceLog(h.dropCollection))))
 	router.POST(CollectionCategory+TruncateAction, timeoutMiddleware(wrapperPost(func() any { return &CollectionNameReq{} }, wrapperTraceLog(h.truncateCollection))))
 	router.POST(CollectionCategory+RenameAction, timeoutMiddleware(wrapperPost(func() any { return &RenameCollectionReq{} }, wrapperTraceLog(h.renameCollection))))
-	router.POST(CollectionCategory+LoadAction, timeoutMiddleware(wrapperPost(func() any { return &CollectionNameReq{} }, wrapperTraceLog(h.loadCollection))))
-	router.POST(CollectionCategory+RefreshLoadAction, timeoutMiddleware(wrapperPost(func() any { return &CollectionNameReq{} }, wrapperTraceLog(h.refreshLoadCollection))))
+	router.POST(CollectionCategory+LoadAction, timeoutMiddleware(wrapperPost(func() any { return &CollectionLoadReq{} }, wrapperTraceLog(h.loadCollection))))
+	router.POST(CollectionCategory+RefreshLoadAction, timeoutMiddleware(wrapperPost(func() any { return &CollectionLoadReq{} }, wrapperTraceLog(h.refreshLoadCollection))))
 	router.POST(CollectionCategory+ReleaseAction, timeoutMiddleware(wrapperPost(func() any { return &CollectionNameReq{} }, wrapperTraceLog(h.releaseCollection))))
 	router.POST(CollectionCategory+AlterPropertiesAction, timeoutMiddleware(wrapperPost(func() any { return &CollectionReqWithProperties{} }, wrapperTraceLog(h.alterCollectionProperties))))
 	router.POST(CollectionCategory+AddFunctionAction, timeoutMiddleware(wrapperPost(func() any { return &CollectionAddFunction{} }, wrapperTraceLog(h.addCollectionFunction))))
@@ -1006,6 +1006,9 @@ func (h *HandlersV2) refreshLoadCollection(ctx context.Context, c *gin.Context, 
 		CollectionName: getter.GetCollectionName(),
 		Refresh:        true,
 	}
+	if load, ok := anyReq.(*CollectionLoadReq); ok && load.Warmup != nil {
+		req.LoadParams = map[string]string{"warmup": *load.Warmup}
+	}
 	return h.loadCollectionInternal(ctx, c, req, dbName)
 }
 
@@ -1014,6 +1017,9 @@ func (h *HandlersV2) loadCollection(ctx context.Context, c *gin.Context, anyReq 
 	req := &milvuspb.LoadCollectionRequest{
 		DbName:         dbName,
 		CollectionName: getter.GetCollectionName(),
+	}
+	if load, ok := anyReq.(*CollectionLoadReq); ok && load.Warmup != nil {
+		req.LoadParams = map[string]string{"warmup": *load.Warmup}
 	}
 	return h.loadCollectionInternal(ctx, c, req, dbName)
 }

@@ -1,6 +1,7 @@
 package balancer
 
 import (
+	"github.com/milvus-io/milvus/internal/views/coord/loadmgr"
 	"github.com/milvus-io/milvus/internal/views/qviews"
 )
 
@@ -25,6 +26,8 @@ type BalancePolicy interface {
 // A shard listed in neither Prepares nor Releases is implicitly a no-op for
 // this batch.
 type BalancePlan struct {
+	// Captured by the controller, and checked again when applying each action.
+	loadConfigSnapshot *loadmgr.LoadConfigSnapshot
 	// Prepares lists shards that should receive a new Preparing view.
 	// The value is the builder the Balancer passes to AddPreparing.
 	Prepares map[qviews.ShardID]*qviews.QueryViewAtCoordBuilder

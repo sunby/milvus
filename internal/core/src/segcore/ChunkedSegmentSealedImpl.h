@@ -811,7 +811,8 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
         const std::shared_ptr<ChunkedColumnInterface>& column,
         size_t num_rows,
         const std::string& warmup_policy,
-        RuntimeResourceState* runtime);
+        RuntimeResourceState* runtime,
+        milvus::OpContext* op_ctx = nullptr);
 
     static TimestampIndex
     build_timestamp_index(const Timestamp* data, size_t num_rows);
@@ -1467,7 +1468,8 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
     fill_empty_field(const FieldMeta& field_meta,
                      const SchemaPtr& schema_snapshot,
                      const SegmentLoadInfo& segment_load_info,
-                     RuntimeResourceState& runtime);
+                     RuntimeResourceState& runtime,
+                     milvus::OpContext* op_ctx);
 
     std::string
     resolve_field_data_warmup_policy(
@@ -1915,13 +1917,15 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
                            const SegmentLoadInfo& segment_load_info,
                            const SchemaPtr& schema_snapshot,
                            RuntimeResourceState* runtime = nullptr,
-                           PublishedSegmentState* staged_state = nullptr);
+                           PublishedSegmentState* staged_state = nullptr,
+                           milvus::OpContext* op_ctx = nullptr);
 
     void
     FillDefaultValueFields(const std::vector<FieldId>& field_ids,
                            const SegmentLoadInfo& segment_load_info,
                            const SchemaPtr& schema_snapshot,
-                           StagedStateCommitter& committer);
+                           StagedStateCommitter& committer,
+                           milvus::OpContext* op_ctx);
 
     void
     FillDefaultValueFields(const std::vector<FieldId>& field_ids);
@@ -2268,7 +2272,8 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
     BuildTimestampIndexSlot(
         const std::shared_ptr<ChunkedColumnInterface>& column,
         size_t num_rows,
-        const std::string& warmup_policy) const;
+        const std::string& warmup_policy,
+        milvus::OpContext* op_ctx = nullptr) const;
 
     std::shared_ptr<CacheSlot<storagev2translator::PkIndexCell>>
     BuildPkIndexSlot(const std::shared_ptr<ChunkedColumnInterface>& column,

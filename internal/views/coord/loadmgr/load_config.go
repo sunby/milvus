@@ -17,6 +17,8 @@ type LoadConfig struct {
 	PartitionIDs             []int64
 	LoadFields               []*messagespb.LoadFieldConfig
 	UserSpecifiedReplicaMode bool
+	SyncWarmup               bool
+	SyncWarmupEpoch          int64
 	Replicas                 []*ReplicaAssignment
 }
 
@@ -37,6 +39,8 @@ func (c *LoadConfig) Clone() *LoadConfig {
 		DbID:                     c.DbID,
 		CollectionID:             c.CollectionID,
 		UserSpecifiedReplicaMode: c.UserSpecifiedReplicaMode,
+		SyncWarmup:               c.SyncWarmup,
+		SyncWarmupEpoch:          c.SyncWarmupEpoch,
 	}
 	if len(c.PartitionIDs) > 0 {
 		out.PartitionIDs = append([]int64{}, c.PartitionIDs...)
@@ -76,6 +80,8 @@ func FromAlterLoadConfigMessage(msg *messagespb.AlterLoadConfigMessageHeader) *L
 		CollectionID:             msg.GetCollectionId(),
 		PartitionIDs:             append([]int64{}, msg.GetPartitionIds()...),
 		UserSpecifiedReplicaMode: msg.GetUserSpecifiedReplicaMode(),
+		SyncWarmup:               msg.GetSyncWarmup(),
+		SyncWarmupEpoch:          msg.GetSyncWarmupEpoch(),
 	}
 	for _, f := range msg.GetLoadFields() {
 		cfg.LoadFields = append(cfg.LoadFields, &messagespb.LoadFieldConfig{
@@ -106,6 +112,8 @@ func buildFromPersisted(
 		DbID:                     info.GetDbID(),
 		CollectionID:             info.GetCollectionID(),
 		UserSpecifiedReplicaMode: info.GetUserSpecifiedReplicaMode(),
+		SyncWarmup:               info.GetSyncWarmup(),
+		SyncWarmupEpoch:          info.GetSyncWarmupEpoch(),
 	}
 
 	// PartitionIDs: derived from PartitionLoadInfo list.
@@ -149,6 +157,8 @@ func (c *LoadConfig) toCollectionLoadInfoProto() *querypb.CollectionLoadInfo {
 		ReplicaNumber:            int32(len(c.Replicas)),
 		Status:                   querypb.LoadStatus_Loaded,
 		UserSpecifiedReplicaMode: c.UserSpecifiedReplicaMode,
+		SyncWarmup:               c.SyncWarmup,
+		SyncWarmupEpoch:          c.SyncWarmupEpoch,
 	}
 	if len(c.LoadFields) > 0 {
 		info.LoadFields = make([]int64, 0, len(c.LoadFields))

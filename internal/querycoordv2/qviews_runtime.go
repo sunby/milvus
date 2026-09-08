@@ -57,6 +57,7 @@ type qviewsRuntime struct {
 	streamingCoordClient streamingcoordclient.Client
 	streamingNodeHandler snhandler.HandlerClient
 	stopOnce             sync.Once
+	syncWarmupTargets    sync.Map // collection ID -> syncWarmupTarget
 }
 
 type qviewsRuntimeDependencies struct {

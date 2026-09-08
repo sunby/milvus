@@ -140,6 +140,11 @@ SegmentLoadInfo::ConvertFieldIndexInfoToLoadIndexInfo(
         load_index_info.index_params[kv_pair.key()] = kv_pair.value();
     }
 
+    if (GetForceSyncWarmup()) {
+        load_index_info.warmup_policy = "sync";
+        load_index_info.index_params["warmup"] = "sync";
+    }
+
     // Inject scalar index version into index_params for scalar indexes
     auto scalar_version = field_index_info->current_scalar_index_version();
     if (scalar_version > 0) {
@@ -201,6 +206,10 @@ SegmentLoadInfo::ConvertTextIndexStatsToLoadTextIndexInfo(
         info->set_warmup_policy(field_warmup_policy);
     }
 
+    if (GetForceSyncWarmup()) {
+        info->set_warmup_policy("sync");
+    }
+
     // Propagate base_path for unified (basePath + relativeFiles) model
     if (!text_index_stats.base_path().empty()) {
         info->set_base_path(text_index_stats.base_path());
@@ -242,6 +251,10 @@ SegmentLoadInfo::ConvertJsonKeyStatsToLoadJsonKeyIndexInfo(
 
     if (!json_key_stats.base_path().empty()) {
         info->set_base_path(json_key_stats.base_path());
+    }
+
+    if (GetForceSyncWarmup()) {
+        info->set_warmup_policy("sync");
     }
 
     return info;

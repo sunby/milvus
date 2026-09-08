@@ -17,6 +17,8 @@ type QueryViewAtCoordBuilder struct {
 	queryVersion                int64
 	transformStartAfterTimetick uint64
 	loadInfoVersion             uint64
+	syncWarmup                  bool
+	syncWarmupEpoch             int64
 	// nodeID -> partitionID -> []segmentID
 	assignments map[int64]map[int64][]int64
 }
@@ -68,6 +70,13 @@ func (b *QueryViewAtCoordBuilder) SetLoadInfoVersion(version uint64) *QueryViewA
 	return b
 }
 
+// SetSyncWarmup binds the immutable requirement for this load lifecycle.
+func (b *QueryViewAtCoordBuilder) SetSyncWarmup(enabled bool, epoch int64) *QueryViewAtCoordBuilder {
+	b.syncWarmup = enabled
+	b.syncWarmupEpoch = epoch
+	return b
+}
+
 // SetAssignments sets the segment-to-node assignments.
 // The map is keyed by nodeID → partitionID → []segmentID.
 func (b *QueryViewAtCoordBuilder) SetAssignments(assignments map[int64]map[int64][]int64) *QueryViewAtCoordBuilder {
@@ -88,6 +97,8 @@ func (b *QueryViewAtCoordBuilder) Build() *viewpb.QueryViewOfShard {
 		State:                       viewpb.QueryViewState_QueryViewStatePreparing,
 		TransformStartAfterTimetick: b.transformStartAfterTimetick,
 		LoadInfoVersion:             b.loadInfoVersion,
+		SyncWarmup:                  b.syncWarmup,
+		SyncWarmupEpoch:             b.syncWarmupEpoch,
 	}
 
 	// Build sorted query node list for deterministic output.

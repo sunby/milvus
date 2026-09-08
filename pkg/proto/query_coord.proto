@@ -259,6 +259,8 @@ message LoadCollectionRequest {
     repeated string resource_groups = 8;
     repeated int64 load_fields = 9;
     common.LoadPriority priority = 10;
+    // Persistent synchronous warmup for this load lifecycle (until release).
+    bool sync_warmup = 11;
 }
 
 message ReleaseCollectionRequest {
@@ -868,6 +870,9 @@ message CollectionLoadInfo {
     int64 dbID= 9;
     bool user_specified_replica_mode = 10;
     bool force_sync_warmup = 11;
+    // Independent of the temporary namespace Prewarm flag above.
+    bool sync_warmup = 12;
+    int64 sync_warmup_epoch = 13;
 }
 
 message PartitionLoadInfo {

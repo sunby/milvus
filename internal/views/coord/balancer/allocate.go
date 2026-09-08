@@ -68,7 +68,16 @@ func allocate(
 
 	// Current per-node segment states for stickiness / avoidance lookup.
 	current := currentSegmentStates(snap, shardID)
-	ctx := newAllocationContext(snap.Nodes, replica.ResourceGroup, baseRows, shardTotalLoad(snap, shardID), len(entries), snap.Config)
+	nodes := snap.Nodes
+	if desired.SyncWarmup {
+		nodes = make(map[int64]*BalanceNode)
+		for id, node := range snap.Nodes {
+			if node != nil && node.SyncLoadWarmup {
+				nodes[id] = node
+			}
+		}
+	}
+	ctx := newAllocationContext(nodes, replica.ResourceGroup, baseRows, shardTotalLoad(snap, shardID), len(entries), snap.Config)
 	if len(ctx.eligible) == 0 && len(entries) > 0 {
 		return nil
 	}
@@ -99,6 +108,7 @@ func allocate(
 	)
 	builder.SetAssignments(assignments)
 	builder.SetLoadInfoVersion(snap.LoadConfigSnapshot.ConfigVersion(desired.CollectionID))
+	builder.SetSyncWarmup(desired.SyncWarmup, desired.SyncWarmupEpoch)
 	return &allocationResult{
 		builder:     builder,
 		assignments: flatAssignments,

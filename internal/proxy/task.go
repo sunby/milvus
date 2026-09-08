@@ -3174,6 +3174,14 @@ func (t *loadCollectionTask) PreExecute(ctx context.Context) error {
 	if err := validateCollectionName(collName); err != nil {
 		return err
 	}
+	if warmup, present := t.GetLoadParams()[common.WarmupKey]; present {
+		if warmup != common.WarmupSync {
+			return merr.WrapErrParameterInvalidMsg("load parameter warmup only supports sync, got %q", warmup)
+		}
+		if t.GetRefresh() {
+			return merr.WrapErrParameterInvalidMsg("load parameter warmup cannot be used with refresh")
+		}
+	}
 
 	return nil
 }
@@ -3264,6 +3272,10 @@ func (t *loadCollectionTask) Execute(ctx context.Context) (err error) {
 		ResourceGroups: t.ResourceGroups,
 		LoadFields:     loadFields,
 		Priority:       t.GetLoadPriority(),
+		SyncWarmup:     t.GetLoadParams()[common.WarmupKey] == common.WarmupSync,
+	}
+	if request.GetSyncWarmup() && typeutil.IsExternalCollection(request.GetSchema()) {
+		return merr.Wrap(merr.ErrServiceUnimplemented, "synchronous load warmup is not supported for external collections")
 	}
 	log.Info(ctx, "send LoadCollectionRequest to query coordinator",
 		mlog.FieldSchema(request.Schema),

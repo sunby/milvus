@@ -342,7 +342,7 @@ CreateJsonKeyStats(const JsonStatsBuildContext& context,
                     us / 1000.0);
             },
             milvus::ScopedTimer::LogLevel::Info);
-        index->Load(trace_ctx, context.config);
+        index->LoadWithContext(trace_ctx, context.config, op_ctx);
         CheckCancellation(op_ctx,
                           context.segment_id,
                           context.field_id.get(),
@@ -424,7 +424,7 @@ CreateManifestColumnGroup(const ManifestColumnGroupBuildContext& context,
             context.insert_channel,
             std::nullopt,
             /*include_row_id=*/true);
-    return std::make_shared<ChunkedColumnGroup>(std::move(translator));
+    return std::make_shared<ChunkedColumnGroup>(std::move(translator), op_ctx);
 }
 
 class LazyManifestColumnGroup {
@@ -1207,15 +1207,17 @@ ChunkedSegmentSealedImpl::init_storage_v2_timestamp_index(
     const std::shared_ptr<ChunkedColumnInterface>& column,
     size_t num_rows,
     const std::string& warmup_policy,
-    RuntimeResourceState* runtime) {
-    auto slot = BuildTimestampIndexSlot(column, num_rows, warmup_policy);
-    auto cell_holder = SemiInlineGet(slot->PinCells(nullptr, {0}));
+    RuntimeResourceState* runtime,
+    milvus::OpContext* op_ctx) {
+    auto slot =
+        BuildTimestampIndexSlot(column, num_rows, warmup_policy, op_ctx);
+    auto cell_holder = SemiInlineGet(slot->PinCells(op_ctx, {0}));
     auto* cell = cell_holder->get_cell_of(0);
     AssertInfo(
         cell != nullptr, "timestamp index cache is corrupted, segment {}", id_);
 
     auto timestamps = std::make_shared<TimestampData>();
-    auto pins = column->GetAllChunks(nullptr);
+    auto pins = column->GetAllChunks(op_ctx);
     timestamps->InitFromPinnedChunks(column, std::move(pins));
 
     auto target_runtime = runtime;
@@ -1242,12 +1244,14 @@ std::shared_ptr<CacheSlot<storagev2translator::TimestampIndexCell>>
 ChunkedSegmentSealedImpl::BuildTimestampIndexSlot(
     const std::shared_ptr<ChunkedColumnInterface>& column,
     size_t num_rows,
-    const std::string& warmup_policy) const {
+    const std::string& warmup_policy,
+    milvus::OpContext* op_ctx) const {
     std::unique_ptr<Translator<storagev2translator::TimestampIndexCell>>
         translator =
             std::make_unique<storagev2translator::TimestampIndexTranslator>(
                 id_, column, num_rows, warmup_policy);
-    return Manager::GetInstance().CreateCacheSlot(std::move(translator));
+    return Manager::GetInstance().CreateCacheSlot(std::move(translator),
+                                                  op_ctx);
 }
 
 void
@@ -1296,7 +1300,8 @@ ChunkedSegmentSealedImpl::BuildPkIndexSlot(
     std::unique_ptr<Translator<storagev2translator::PkIndexCell>> translator =
         std::make_unique<storagev2translator::PkIndexTranslator>(
             id_, column, data_type, is_sorted_by_pk_, warmup_policy);
-    auto slot = Manager::GetInstance().CreateCacheSlot(std::move(translator));
+    auto slot =
+        Manager::GetInstance().CreateCacheSlot(std::move(translator), op_ctx);
     if (eager) {
         auto cell_holder = SemiInlineGet(slot->PinCells(op_ctx, {0}));
         AssertInfo(cell_holder->get_cell_of(0) != nullptr,
@@ -3507,7 +3512,7 @@ ChunkedSegmentSealedImpl::load_column_group_data_internal(
 
         auto t_chunked_group_start = std::chrono::steady_clock::now();
         auto chunked_column_group =
-            std::make_shared<ChunkedColumnGroup>(std::move(translator));
+            std::make_shared<ChunkedColumnGroup>(std::move(translator), op_ctx);
         auto t_chunked_group_done = std::chrono::steady_clock::now();
         LOG_INFO(
             "[xxx] segment {} column_group {} translator detail "
@@ -3561,7 +3566,7 @@ ChunkedSegmentSealedImpl::load_column_group_data_internal(
                         std::move(ts), num_rows, runtime);
                 } else {
                     init_storage_v2_timestamp_index(
-                        column, num_rows, warmup_policy, runtime);
+                        column, num_rows, warmup_policy, runtime, op_ctx);
                 }
                 if (runtime == nullptr) {
                     PublishSystemFieldStateLocked();
@@ -3755,7 +3760,7 @@ ChunkedSegmentSealedImpl::load_column_group_data_internal(
                 load_info.load_priority,
                 warmup_policy);
         auto chunked_column_group =
-            std::make_shared<ChunkedColumnGroup>(std::move(translator));
+            std::make_shared<ChunkedColumnGroup>(std::move(translator), op_ctx);
 
         for (const auto& field_id : milvus_field_ids) {
             const auto& field_meta = field_metas.at(field_id);
@@ -7707,6 +7712,9 @@ ChunkedSegmentSealedImpl::resolve_field_data_warmup_policy(
     const SegmentLoadInfo& segment_load_info,
     const SchemaPtr& schema_snapshot,
     const std::string& explicit_warmup_policy) const {
+    if (segment_load_info.GetForceSyncWarmup()) {
+        return "sync";
+    }
     // System fields do not carry user-field warmup settings and are not
     // represented in user-field bitsets. They should not affect group warmup
     // aggregation.
@@ -8102,12 +8110,12 @@ ChunkedSegmentSealedImpl::load_field_data_common(
         schema_snapshot->get_primary_field_id().value_or(FieldId(-1)) ==
         field_id;
     if (is_primary_field) {
-        pk_index_slot =
-            BuildPkIndexSlot(column,
-                             data_type,
-                             segment_load_info.GetStorageVersion() < STORAGE_V2,
-                             op_ctx,
-                             "");
+        pk_index_slot = BuildPkIndexSlot(
+            column,
+            data_type,
+            segment_load_info.GetStorageVersion() < STORAGE_V2,
+            op_ctx,
+            segment_load_info.GetForceSyncWarmup() ? "sync" : "");
     }
 
     const auto prepare_done = std::chrono::steady_clock::now();
@@ -8518,7 +8526,8 @@ ChunkedSegmentSealedImpl::PrepareLoadDiffForReopen(
         FillDefaultValueFields(diff.fields_to_fill_default,
                                segment_load_info,
                                schema_snapshot,
-                               committer);
+                               committer,
+                               op_ctx);
     }
 
     CheckCancellation(op_ctx, id_, "ChunkedSegmentSealedImpl::ApplyLoadDiff()");
@@ -8824,7 +8833,8 @@ ChunkedSegmentSealedImpl::fill_empty_field(
     const FieldMeta& field_meta,
     const SchemaPtr& schema_snapshot,
     const SegmentLoadInfo& segment_load_info,
-    RuntimeResourceState& runtime) {
+    RuntimeResourceState& runtime,
+    milvus::OpContext* op_ctx) {
     auto field_id = field_meta.get_id();
     auto data_type = field_meta.get_data_type();
     LOG_INFO(
@@ -8863,7 +8873,7 @@ ChunkedSegmentSealedImpl::fill_empty_field(
             mmap_config.GetMmapPopulate(),
             warmup_policy);
     auto slot = cachinglayer::Manager::GetInstance().CreateCacheSlot(
-        std::move(translator), nullptr);
+        std::move(translator), op_ctx);
     auto column = MakeChunkedColumnBase(data_type, std::move(slot), field_meta);
 
     runtime.fields.emplace(field_id, column);
@@ -8907,7 +8917,8 @@ ChunkedSegmentSealedImpl::FillDefaultValueFields(
     const SegmentLoadInfo& segment_load_info,
     const SchemaPtr& schema_snapshot,
     RuntimeResourceState* runtime,
-    PublishedSegmentState* staged_state) {
+    PublishedSegmentState* staged_state,
+    milvus::OpContext* op_ctx) {
     auto snapshot = CapturePublishedState();
     const auto& visible_state =
         staged_state != nullptr ? *staged_state : *snapshot;
@@ -8932,8 +8943,11 @@ ChunkedSegmentSealedImpl::FillDefaultValueFields(
             continue;
         }
         const auto& field_meta = schema_snapshot->operator[](field_id);
-        fill_empty_field(
-            field_meta, schema_snapshot, segment_load_info, *target_runtime);
+        fill_empty_field(field_meta,
+                         schema_snapshot,
+                         segment_load_info,
+                         *target_runtime,
+                         op_ctx);
         EnsureArrayOffsetsForStructField(
             field_meta, target_runtime->row_count, *target_runtime);
         filled_fields.push_back(field_id);
@@ -8968,7 +8982,8 @@ ChunkedSegmentSealedImpl::FillDefaultValueFields(
     const std::vector<FieldId>& field_ids,
     const SegmentLoadInfo& segment_load_info,
     const SchemaPtr& schema_snapshot,
-    StagedStateCommitter& committer) {
+    StagedStateCommitter& committer,
+    milvus::OpContext* op_ctx) {
     const auto* staged_state = committer.staged_state();
     const auto row_count = committer.runtime()->row_count;
 
@@ -9028,7 +9043,7 @@ ChunkedSegmentSealedImpl::FillDefaultValueFields(
                 mmap_config.GetMmapPopulate(),
                 warmup_policy);
         auto slot = cachinglayer::Manager::GetInstance().CreateCacheSlot(
-            std::move(translator), nullptr);
+            std::move(translator), op_ctx);
         auto column =
             MakeChunkedColumnBase(data_type, std::move(slot), field_meta);
         fields_to_commit.emplace_back(field_meta, std::move(column));
@@ -9506,7 +9521,7 @@ ChunkedSegmentSealedImpl::LoadColumnGroup(
             segment_load_info.GetEstimatedBytesPerRow(),
             segment_load_info.GetInsertChannel());
     auto chunked_column_group =
-        std::make_shared<ChunkedColumnGroup>(std::move(translator));
+        std::make_shared<ChunkedColumnGroup>(std::move(translator), op_ctx);
 
     // Create ProxyChunkColumn for each field
     for (const auto& field_id : milvus_field_ids) {
@@ -9536,7 +9551,12 @@ ChunkedSegmentSealedImpl::LoadColumnGroup(
                 init_storage_v1_timestamp_index(
                     std::move(ts), num_rows, runtime);
             } else {
-                init_storage_v2_timestamp_index(column, num_rows, "", runtime);
+                init_storage_v2_timestamp_index(
+                    column,
+                    num_rows,
+                    segment_load_info.GetForceSyncWarmup() ? "sync" : "",
+                    runtime,
+                    op_ctx);
             }
             if (runtime == nullptr) {
                 PublishSystemFieldStateLocked();
@@ -9677,7 +9697,7 @@ ChunkedSegmentSealedImpl::LoadColumnGroup(
             segment_load_info.GetInsertChannel(),
             std::move(column_size_estimate));
     auto chunked_column_group =
-        std::make_shared<ChunkedColumnGroup>(std::move(translator));
+        std::make_shared<ChunkedColumnGroup>(std::move(translator), op_ctx);
 
     for (const auto& field_id : milvus_field_ids) {
         const auto& field_meta = field_metas.at(field_id);

@@ -113,7 +113,10 @@ func (s *Server) ShowLoadCollections(ctx context.Context, req *querypb.ShowColle
 		}
 
 		resp.CollectionIDs = append(resp.CollectionIDs, collectionID)
-		percentage := s.qviewsLoadPercentage(cfg)
+		percentage, err := s.qviewsLoadPercentageWithWarmup(ctx, cfg)
+		if err != nil {
+			return &querypb.ShowCollectionsResponse{Status: merr.Status(err)}, nil
+		}
 		resp.InMemoryPercentages = append(resp.InMemoryPercentages, percentage)
 		resp.QueryServiceAvailable = append(resp.QueryServiceAvailable, percentage == 100)
 		resp.RefreshProgress = append(resp.RefreshProgress, 0)
@@ -161,7 +164,10 @@ func (s *Server) ShowLoadPartitions(ctx context.Context, req *querypb.ShowPartit
 	}
 
 	loadedPartitions := typeutil.NewUniqueSet(cfg.PartitionIDs...)
-	loadPercentage := s.qviewsLoadPercentage(cfg)
+	loadPercentage, err := s.qviewsLoadPercentageWithWarmup(ctx, cfg)
+	if err != nil {
+		return &querypb.ShowPartitionsResponse{Status: merr.Status(err)}, nil
+	}
 	for _, partitionID := range partitions {
 		if !loadedPartitions.Contain(partitionID) {
 			err := meta.GlobalFailedLoadCache.Get(req.GetCollectionID())
@@ -289,6 +295,9 @@ func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollection
 	}
 	// If refresh mode is ON.
 	if req.GetRefresh() {
+		if req.GetSyncWarmup() {
+			return merr.Status(merr.WrapErrParameterInvalidMsg("load parameter warmup cannot be used with refresh")), nil
+		}
 		err := s.refreshCollection(ctx, req.GetCollectionID())
 		if err != nil {
 			logger.Warn(ctx, "failed to refresh collection", mlog.Err(err))

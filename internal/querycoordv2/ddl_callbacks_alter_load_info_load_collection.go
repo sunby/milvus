@@ -35,7 +35,9 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/messagespb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
 // broadcastAlterLoadConfigCollectionV2ForLoadCollection is called when the load collection request is received.
@@ -67,6 +69,38 @@ func (s *Server) broadcastAlterLoadConfigCollectionV2ForLoadCollection(ctx conte
 	}
 
 	currentLoadConfig := s.qviewsRuntime.loadConfigStore.Snapshot().ConfigsMap()[req.GetCollectionID()]
+	syncWarmup, epoch, err := resolveLoadCollectionSyncWarmup(req.GetCollectionID(), req.GetSyncWarmup(), currentLoadConfig)
+	if err != nil {
+		return err
+	}
+	if syncWarmup && typeutil.IsExternalCollection(coll.GetSchema()) {
+		return merr.Wrap(merr.ErrServiceUnimplemented, "synchronous load warmup is not supported for external collections")
+	}
+	if syncWarmup {
+		if err := s.checkSyncLoadWarmupCapability(ctx); err != nil {
+			return err
+		}
+	}
+	if syncWarmup && currentLoadConfig == nil {
+		// The DDL lock serializes requests; this guard also excludes stale plans.
+		checked, err := s.qviewsRuntime.loadConfigStore.WithConfigVersion(req.GetCollectionID(), 0, func(*loadmgr.LoadConfig) error {
+			if s.qviewsRuntime.shardViewRegistry.HasUndrainedViews(req.GetCollectionID()) {
+				return merr.WrapErrServiceUnavailableMsg("collection %d is still releasing its previous query views", req.GetCollectionID())
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if !checked {
+			return merr.WrapErrServiceUnavailableMsg("collection %d load configuration changed during warmup admission", req.GetCollectionID())
+		}
+		epoch, err = s.idAllocator()
+		if err != nil {
+			return merr.Wrap(err, "allocate synchronous warmup epoch")
+		}
+		mlog.Info(ctx, "create synchronous load warmup lifecycle", mlog.FieldCollectionID(req.GetCollectionID()), mlog.Int64("warmupEpoch", epoch))
+	}
 	// only check node number when the collection is not loaded
 	expectedReplicasNumber, err := utils.AssignReplica(ctx, s.meta, resourceGroups, replicaNumber, currentLoadConfig == nil)
 	if err != nil {
@@ -80,6 +114,8 @@ func (s *Server) broadcastAlterLoadConfigCollectionV2ForLoadCollection(ctx conte
 		Priority:                 req.GetPriority(),
 		UserSpecifiedReplicaMode: userSpecifiedReplicaMode,
 		ForceSyncWarmup:          false,
+		SyncWarmup:               syncWarmup,
+		SyncWarmupEpoch:          epoch,
 	})
 	if err != nil {
 		return err
@@ -92,6 +128,46 @@ func (s *Server) broadcastAlterLoadConfigCollectionV2ForLoadCollection(ctx conte
 	}
 	_, err = broadcaster.Broadcast(ctx, msg)
 	return err
+}
+
+func resolveLoadCollectionSyncWarmup(collectionID int64, requested bool, current *loadmgr.LoadConfig) (bool, int64, error) {
+	if current == nil {
+		return requested, 0, nil
+	}
+	if requested && !current.SyncWarmup {
+		return false, 0, merr.WrapErrParameterInvalidMsg("cannot enable synchronous warmup for loaded collection %d; release the collection before loading it with warmup=sync", collectionID)
+	}
+	return current.SyncWarmup, current.SyncWarmupEpoch, nil
+}
+
+func (s *Server) checkSyncLoadWarmupCapability(ctx context.Context) error {
+	if !paramtable.Get().QueryCoordCfg.EnableLoadCollectionSyncWarmup.GetAsBool() {
+		return merr.Wrap(merr.ErrServiceUnimplemented, "LoadCollection warmup=sync requires queryCoord.enableLoadCollectionSyncWarmup after a full-cluster upgrade")
+	}
+	if s.qviewsRuntime.queryNodeManager == nil {
+		return merr.WrapErrServiceUnavailableMsg("querynode capability discovery is not ready")
+	}
+	nodes, err := s.qviewsRuntime.queryNodeManager.GetAllQueryNodes(ctx)
+	if err != nil {
+		return merr.Wrap(err, "discover synchronous load warmup capabilities")
+	}
+	available := false
+	for id, node := range nodes {
+		if node == nil {
+			return merr.Wrapf(merr.ErrServiceUnimplemented, "querynode %d has no synchronous load warmup capability information", id)
+		}
+		if node.Stopping {
+			continue
+		}
+		if !node.SyncLoadWarmup {
+			return merr.Wrapf(merr.ErrServiceUnimplemented, "querynode %d does not support synchronous load warmup", id)
+		}
+		available = true
+	}
+	if !available {
+		return merr.WrapErrServiceUnavailableMsg("no querynode supports synchronous load warmup")
+	}
+	return nil
 }
 
 func (s *Server) getLoadReplicaConfigForRequest(ctx context.Context, replicaNumber int32, resourceGroups []string, collectionID int64) (int32, []string, bool, error) {
@@ -139,6 +215,8 @@ type qviewsExpectedLoadConfig struct {
 	Priority                 commonpb.LoadPriority
 	UserSpecifiedReplicaMode bool
 	ForceSyncWarmup          bool
+	SyncWarmup               bool
+	SyncWarmupEpoch          int64
 }
 
 func (s *Server) generateAlterLoadConfigMessageForLoadCollection(
@@ -159,6 +237,8 @@ func (s *Server) generateAlterLoadConfigMessageForLoadCollection(
 		Replicas:                 replicas,
 		UserSpecifiedReplicaMode: expected.UserSpecifiedReplicaMode,
 		ForceSyncWarmup:          expected.ForceSyncWarmup,
+		SyncWarmup:               expected.SyncWarmup,
+		SyncWarmupEpoch:          expected.SyncWarmupEpoch,
 	}
 	if proto.Equal(loadConfigIntoAlterLoadConfigHeader(current), header) {
 		return nil, nil
@@ -238,6 +318,8 @@ func loadConfigIntoAlterLoadConfigHeader(cfg *loadmgr.LoadConfig) *messagespb.Al
 		LoadFields:               cloneAndSortLoadFields(cfg.LoadFields),
 		Replicas:                 replicas,
 		UserSpecifiedReplicaMode: cfg.UserSpecifiedReplicaMode,
+		SyncWarmup:               cfg.SyncWarmup,
+		SyncWarmupEpoch:          cfg.SyncWarmupEpoch,
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v3/util/lock"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
 // LoadConfigStore persists and serves the per-collection desired load state.
@@ -76,6 +77,9 @@ func RecoverLoadConfigStore(ctx context.Context, catalog metastore.QueryCoordCat
 	for _, info := range collections {
 		collID := info.GetCollectionID()
 		cfg := buildFromPersisted(info, partitions[collID], replicasByColl[collID])
+		if err := validateSyncWarmupConfig(cfg); err != nil {
+			return nil, err
+		}
 		configs[collID] = cfg
 		versions[collID] = 1
 	}
@@ -104,6 +108,21 @@ func (s *LoadConfigStore) Put(ctx context.Context, cfg *LoadConfig) error {
 	s.mu.RLock()
 	existing := s.configs[collectionID]
 	s.mu.RUnlock()
+	// Other DDL messages may omit this policy. Only Remove ends the lifecycle.
+	cfg = cfg.Clone()
+	if existing != nil && !existing.SyncWarmup && cfg.SyncWarmup {
+		return merr.WrapErrServiceInternalMsg("cannot enable synchronous warmup without releasing collection %d", collectionID)
+	}
+	if existing != nil && existing.SyncWarmup {
+		if cfg.SyncWarmupEpoch != 0 && cfg.SyncWarmupEpoch != existing.SyncWarmupEpoch {
+			return merr.WrapErrServiceInternalMsg("cannot replace sync warmup epoch without releasing collection %d", collectionID)
+		}
+		cfg.SyncWarmup = true
+		cfg.SyncWarmupEpoch = existing.SyncWarmupEpoch
+	}
+	if err := validateSyncWarmupConfig(cfg); err != nil {
+		return err
+	}
 
 	// Delete orphans (items present in existing but absent from cfg) first,
 	// so stale ETCD keys do not linger after partition / replica removal.
@@ -144,6 +163,29 @@ func (s *LoadConfigStore) Put(ctx context.Context, cfg *LoadConfig) error {
 	s.versions[collectionID] = s.version
 	s.mu.Unlock()
 	return nil
+}
+
+func validateSyncWarmupConfig(cfg *LoadConfig) error {
+	if cfg.SyncWarmup != (cfg.SyncWarmupEpoch > 0) || cfg.SyncWarmupEpoch < 0 {
+		return merr.WrapErrServiceInternalMsg("invalid sync warmup policy for collection %d", cfg.CollectionID)
+	}
+	return nil
+}
+
+// WithConfigVersion applies a non-persisting operation only while the captured
+// collection version is current. The callback must not call Put/Remove or do
+// network I/O; the per-collection guard serializes it with both operations.
+// Version zero denotes an absent desired config.
+func (s *LoadConfigStore) WithConfigVersion(collectionID int64, version uint64, apply func(*LoadConfig) error) (bool, error) {
+	s.collectionLocks.Lock(collectionID)
+	defer s.collectionLocks.Unlock(collectionID)
+	s.mu.RLock()
+	current, currentVersion := s.configs[collectionID], s.versions[collectionID]
+	s.mu.RUnlock()
+	if currentVersion != version {
+		return false, nil
+	}
+	return true, apply(current)
 }
 
 // Remove deletes all persisted state for a collection
