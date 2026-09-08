@@ -992,12 +992,14 @@ func (sd *shardDelegator) RefreshLevel0DeletionStats() {
 		totalSize += lo.SumBy(pks, func(pk storage.PrimaryKey) int64 { return pk.Size() }) + int64(len(tss)*8)
 	}
 
+	// Initialize an empty buffer's series without overwriting other channels.
+	// RegisterL0, UnRegister and Clear maintain the count under the buffer lock.
 	metrics.QueryNodeNumSegments.WithLabelValues(
 		paramtable.GetStringNodeID(),
 		fmt.Sprint(sd.Collection()),
 		commonpb.SegmentState_Sealed.String(),
 		datapb.SegmentLevel_L0.String(),
-	).Set(float64(len(level0Segments)))
+	).Add(0)
 
 	metrics.QueryNodeLevelZeroSize.WithLabelValues(
 		paramtable.GetStringNodeID(),

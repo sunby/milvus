@@ -139,7 +139,7 @@ var (
 			collectionIDLabelName,
 			segmentStateLabelName,
 			segmentLevelLabelName,
-		}, collectionGaugeAggregateDisabled)
+		}, collectionGaugeAggregateSum)
 
 	QueryNodeGrowingSourceRetainedBytes = newVChannelGaugeVec(
 		prometheus.GaugeOpts{
