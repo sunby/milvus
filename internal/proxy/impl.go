@@ -774,21 +774,6 @@ func (node *Proxy) LoadCollection(ctx context.Context, request *milvuspb.LoadCol
 		return merr.Status(err), nil
 	}
 
-	return node.loadCollection(ctx, request, node.sched.ddQueue)
-}
-
-// loadCollectionForDQL schedules the load-submission task on the main DQL
-// pool, using the shared load's context rather than a DQL caller's context.
-// Waiting for collection readiness remains outside this task.
-func (node *Proxy) loadCollectionForDQL(ctx context.Context, request *milvuspb.LoadCollectionRequest) (*commonpb.Status, error) {
-	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
-		return merr.Status(err), nil
-	}
-
-	return node.loadCollection(ctx, request, node.sched.dqQueue)
-}
-
-func (node *Proxy) loadCollection(ctx context.Context, request *milvuspb.LoadCollectionRequest, queue taskQueue) (*commonpb.Status, error) {
 	ctx, sp := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-LoadCollection")
 	defer sp.End()
 	method := "LoadCollection"
@@ -804,7 +789,7 @@ func (node *Proxy) loadCollection(ctx context.Context, request *milvuspb.LoadCol
 
 	mlog.Info(ctx, "LoadCollection received")
 
-	if err := queue.Enqueue(lct); err != nil {
+	if err := node.sched.ddQueue.Enqueue(lct); err != nil {
 		mlog.Warn(ctx, "LoadCollection failed to enqueue",
 			mlog.Err(err))
 

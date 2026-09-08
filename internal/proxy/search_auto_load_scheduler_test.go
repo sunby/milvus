@@ -80,14 +80,16 @@ func newAutoLoadSchedulingProxy(t *testing.T) (*Proxy, *mocks.MockMixCoordClient
 	coordinator.EXPECT().DescribeIndex(mock.Anything, mock.Anything).Return(indexes, nil).Maybe()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	scheduler, err := newTaskScheduler(ctx, newMockTsoAllocator())
+	allocator, err := newTimestampAllocator(newMockTimestampAllocatorInterface(), 0)
+	require.NoError(t, err)
+	scheduler, err := newTaskScheduler(ctx, allocator)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		cancel()
 		scheduler.Close()
 	})
 	node := &Proxy{
-		ctx: ctx, sched: scheduler, metaCache: cache, mixCoord: coordinator,
+		ctx: ctx, sched: scheduler, metaCache: cache, mixCoord: coordinator, tsoAllocator: allocator,
 		viewQueryClient: &autoLoadViewQueryClient{checkErr: merr.ErrCollectionNotLoaded},
 	}
 	node.UpdateStateCode(commonpb.StateCode_Healthy)
@@ -96,11 +98,16 @@ func newAutoLoadSchedulingProxy(t *testing.T) (*Proxy, *mocks.MockMixCoordClient
 
 type autoLoadSchedulerTask struct {
 	*mockTask
-	execute func(context.Context) error
+	execute   func(context.Context) error
+	isSubTask bool
 }
 
 func (t *autoLoadSchedulerTask) Execute(ctx context.Context) error {
 	return t.execute(ctx)
+}
+
+func (t *autoLoadSchedulerTask) IsSubTask() bool {
+	return t.isSubTask
 }
 
 func awaitAutoLoadSchedulerResult[T any](t *testing.T, ch <-chan T) T {
@@ -115,7 +122,7 @@ func awaitAutoLoadSchedulerResult[T any](t *testing.T, ch <-chan T) T {
 	}
 }
 
-func TestAutoLoadUsesDQLWhenDDLIsBusy(t *testing.T) {
+func TestAutoLoadBypassesSaturatedTaskQueues(t *testing.T) {
 	node, coordinator, _ := newAutoLoadSchedulingProxy(t)
 	loaded := make(chan *querypb.LoadCollectionRequest, 1)
 	coordinator.EXPECT().LoadCollection(mock.Anything, mock.Anything).RunAndReturn(
@@ -125,28 +132,29 @@ func TestAutoLoadUsesDQLWhenDDLIsBusy(t *testing.T) {
 		}).Once()
 	require.NoError(t, node.sched.Start())
 
-	ddlStarted := make(chan struct{})
-	releaseDDL := make(chan struct{})
-	t.Cleanup(func() { close(releaseDDL) })
-	blocker := &autoLoadSchedulerTask{
-		mockTask: newMockTask(node.ctx),
-		execute: func(ctx context.Context) error {
-			close(ddlStarted)
-			select {
-			case <-releaseDDL:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		},
+	for _, queue := range []taskQueue{node.sched.ddQueue, node.sched.dqQueue} {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		blocker := &autoLoadSchedulerTask{
+			mockTask: newMockTask(node.ctx),
+			execute: func(ctx context.Context) error {
+				close(started)
+				select {
+				case <-release:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			},
+		}
+		require.NoError(t, queue.Enqueue(blocker))
+		awaitAutoLoadSchedulerResult(t, started)
+		// Occupy the dispatcher in Submit, then fill the pending queue too.
+		require.NoError(t, queue.Enqueue(newMockTask(node.ctx)))
+		require.Eventually(t, queue.utEmpty, time.Second, time.Millisecond)
+		require.NoError(t, queue.Enqueue(newMockTask(node.ctx)))
 	}
-	require.NoError(t, node.sched.ddQueue.Enqueue(blocker))
-	awaitAutoLoadSchedulerResult(t, ddlStarted)
-	// The dispatcher pops one task before blocking on the occupied DDL worker.
-	require.NoError(t, node.sched.ddQueue.Enqueue(newMockTask(node.ctx)))
-	require.Eventually(t, node.sched.ddQueue.utEmpty, time.Second, time.Millisecond)
-	// Fill the actual pending queue too, without releasing the worker.
-	require.NoError(t, node.sched.ddQueue.Enqueue(newMockTask(node.ctx)))
 
 	require.NoError(t, node.ensureCollectionReady(node.ctx, "db", "collection"))
 	request := awaitAutoLoadSchedulerResult(t, loaded)
@@ -163,19 +171,60 @@ func TestAutoLoadUsesDQLWhenDDLIsBusy(t *testing.T) {
 	require.ErrorIs(t, merr.Error(status), merr.ErrServiceTooManyRequests)
 }
 
-func TestAutoLoadRejectedWhenDQLQueueIsFull(t *testing.T) {
+func TestAutoLoadDoesNotRequireScheduler(t *testing.T) {
 	node, coordinator, _ := newAutoLoadSchedulingProxy(t)
-	// Do not start dispatching: the sole DQL queue slot remains occupied.
-	require.NoError(t, node.sched.dqQueue.Enqueue(newMockTask(node.ctx)))
-	err := node.ensureCollectionReady(node.ctx, "db", "collection")
-	require.ErrorIs(t, err, merr.ErrServiceTooManyRequests)
-	require.Equal(t, merr.Code(merr.ErrServiceTooManyRequests), merr.Status(err).GetCode())
-	require.True(t, merr.Status(err).GetRetriable())
-	coordinator.AssertNotCalled(t, "LoadCollection", mock.Anything, mock.Anything)
-	coordinator.AssertNotCalled(t, "DescribeIndex", mock.Anything, mock.Anything)
+	node.sched = nil
+	coordinator.EXPECT().LoadCollection(mock.Anything, mock.Anything).Return(merr.Success(), nil).Once()
+	require.NoError(t, node.ensureCollectionReady(node.ctx, "db", "collection"))
 }
 
-func TestAutoLoadKeepsDQLWorkerAfterCallerCancellation(t *testing.T) {
+func TestAutoLoadAllowsRequeryWhileDQLPoolIsFull(t *testing.T) {
+	node, coordinator, _ := newAutoLoadSchedulingProxy(t)
+	coordinator.EXPECT().LoadCollection(mock.Anything, mock.Anything).Return(merr.Success(), nil).Once()
+	require.NoError(t, node.sched.Start())
+	parentCtx, cancelParent := context.WithCancel(node.ctx)
+	defer cancelParent()
+	parentStarted := make(chan struct{})
+	startRequery := make(chan struct{})
+	requeryStarted := make(chan struct{})
+	parent := &autoLoadSchedulerTask{
+		mockTask: newMockTask(parentCtx),
+		execute: func(ctx context.Context) error {
+			close(parentStarted)
+			select {
+			case <-startRequery:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			requery := &autoLoadSchedulerTask{
+				mockTask:  newMockTask(ctx),
+				isSubTask: true,
+				execute: func(context.Context) error {
+					close(requeryStarted)
+					return nil
+				},
+			}
+			if err := node.sched.dqQueue.Enqueue(requery); err != nil {
+				return err
+			}
+			return requery.WaitToFinish()
+		},
+	}
+	parent.name, parent.tType = SearchTaskName, commonpb.MsgType_Search
+	require.NoError(t, node.sched.dqQueue.Enqueue(parent))
+	awaitAutoLoadSchedulerResult(t, parentStarted)
+
+	// A cold collection can load while a search on another collection holds
+	// the sole main worker. Its subsequent requery can still be dispatched.
+	loadCtx, cancelLoad := context.WithTimeout(node.ctx, time.Second)
+	defer cancelLoad()
+	require.NoError(t, node.ensureCollectionReady(loadCtx, "db", "collection"))
+	close(startRequery)
+	awaitAutoLoadSchedulerResult(t, requeryStarted)
+	require.NoError(t, parent.WaitToFinish())
+}
+
+func TestAutoLoadDoesNotOccupyDQLWorkerAfterCallerCancellation(t *testing.T) {
 	node, coordinator, _ := newAutoLoadSchedulingProxy(t)
 	loadStarted := make(chan context.Context, 1)
 	releaseLoad := make(chan struct{}, 1)
@@ -202,8 +251,8 @@ func TestAutoLoadKeepsDQLWorkerAfterCallerCancellation(t *testing.T) {
 	require.ErrorIs(t, awaitAutoLoadSchedulerResult(t, result), context.Canceled)
 	require.NoError(t, loadCtx.Err())
 
-	// A regular query shares the same single worker. It must not start merely
-	// because the search caller stopped waiting for its shared background load.
+	// A slow shared load must leave the main DQL worker available, even after
+	// its caller has canceled. The load still uses its own lifecycle context.
 	probeStarted := make(chan bool, 1)
 	probe := &autoLoadSchedulerTask{
 		mockTask: newMockTask(node.ctx),
@@ -214,50 +263,23 @@ func TestAutoLoadKeepsDQLWorkerAfterCallerCancellation(t *testing.T) {
 	}
 	probe.name, probe.tType = SearchTaskName, commonpb.MsgType_Search
 	require.NoError(t, node.sched.dqQueue.Enqueue(probe))
-	require.Eventually(t, node.sched.dqQueue.utEmpty, time.Second, time.Millisecond)
-	require.Never(t, func() bool {
-		select {
-		case <-probeStarted:
-			return true
-		default:
-			return false
-		}
-	}, 100*time.Millisecond, time.Millisecond, "DQL worker was released before the shared load finished")
-	releaseLoad <- struct{}{}
-	require.True(t, awaitAutoLoadSchedulerResult(t, probeStarted))
+	require.False(t, awaitAutoLoadSchedulerResult(t, probeStarted))
 	require.NoError(t, probe.WaitToFinish())
+	releaseLoad <- struct{}{}
+	awaitAutoLoadSchedulerResult(t, loadCtx.Done())
 }
 
-func TestAutoLoadKeepsDQLQueueSlotAfterCallerCancellation(t *testing.T) {
+func TestAutoLoadPreservesTimestampAllocationError(t *testing.T) {
 	node, coordinator, _ := newAutoLoadSchedulingProxy(t)
-	loaded := make(chan struct{}, 1)
-	coordinator.EXPECT().LoadCollection(mock.Anything, mock.Anything).RunAndReturn(
-		func(context.Context, *querypb.LoadCollectionRequest, ...grpc.CallOption) (*commonpb.Status, error) {
-			loaded <- struct{}{}
-			return merr.Success(), nil
-		}).Once()
+	node.tsoAllocator.tso = coordinator
+	coordinator.EXPECT().AllocTimestamp(mock.Anything, mock.Anything).Return(nil, merr.ErrServiceUnavailable).Once()
 
-	callerCtx, cancelCaller := context.WithCancel(node.ctx)
-	defer cancelCaller()
-	result := make(chan error, 1)
-	go func() { result <- node.ensureCollectionReady(callerCtx, "db", "collection") }()
-	// Keep dispatch stopped until the calling search has canceled.
-	require.Eventually(t, func() bool { return !node.sched.dqQueue.utEmpty() }, time.Second, time.Millisecond)
-	queued := node.sched.dqQueue.FrontUnissuedTask()
-	require.NotNil(t, queued)
-	cancelCaller()
-	require.ErrorIs(t, awaitAutoLoadSchedulerResult(t, result), context.Canceled)
-	require.NoError(t, queued.TraceCtx().Err())
-
-	status, err := node.loadCollectionForDQL(node.ctx, &milvuspb.LoadCollectionRequest{
-		DbName: "db", CollectionName: "collection",
-	})
-	require.NoError(t, err)
-	require.ErrorIs(t, merr.Error(status), merr.ErrServiceTooManyRequests)
-	require.NoError(t, node.sched.Start())
-	awaitAutoLoadSchedulerResult(t, loaded)
-	// The shared load's deferred cancel signals that its task wait completed.
-	awaitAutoLoadSchedulerResult(t, queued.TraceCtx().Done())
+	err := node.ensureCollectionReady(node.ctx, "db", "collection")
+	require.ErrorIs(t, err, merr.ErrServiceUnavailable)
+	require.Equal(t, merr.Code(merr.ErrServiceUnavailable), merr.Status(err).GetCode())
+	require.True(t, merr.Status(err).GetRetriable())
+	coordinator.AssertNotCalled(t, "DescribeIndex", mock.Anything, mock.Anything)
+	coordinator.AssertNotCalled(t, "LoadCollection", mock.Anything, mock.Anything)
 }
 
 func TestAutoLoadPreservesLoadValidationAndErrors(t *testing.T) {
