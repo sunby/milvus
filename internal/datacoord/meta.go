@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/errors"
@@ -93,6 +94,7 @@ var _ CompactionMeta = (*meta)(nil)
 
 type meta struct {
 	queryViewLoadInfoNotifier QueryViewLoadInfoNotifier
+	statsDiscovery            atomic.Pointer[statsReconcileQueue]
 	ctx                       context.Context
 	catalog                   metastore.DataCoordCatalog
 
@@ -737,16 +739,24 @@ func (m *meta) reloadCollectionsFromRootcoord(ctx context.Context, broker broker
 // AddCollection adds a collection into MetaStore.
 func (m *meta) AddCollection(collection *collectionInfo) {
 	mlog.Info(m.ctx, "meta update: add collection", mlog.Int64("collectionID", collection.ID))
+	old := m.GetCollection(collection.ID)
 	// PutCollection emits the collection-count metric itself.
 	m.metaStore.PutCollection(collection)
+	if q := m.statsDiscovery.Load(); q != nil && (old == nil || !proto.Equal(old.Schema, collection.Schema)) {
+		q.requestScan(collection.ID, true)
+	}
 	mlog.Info(m.ctx, "meta update: add collection - complete", mlog.Int64("collectionID", collection.ID))
 }
 
 // DropCollection removes a collection from MetaStore.
 func (m *meta) DropCollection(collectionID int64) {
 	mlog.Info(m.ctx, "meta update: drop collection", mlog.Int64("collectionID", collectionID))
+	existed := m.GetCollection(collectionID) != nil
 	// RemoveCollection emits the collection metric cleanup itself.
 	m.metaStore.RemoveCollection(collectionID)
+	if q := m.statsDiscovery.Load(); existed && q != nil {
+		q.requestScan(collectionID, true)
+	}
 	mlog.Info(m.ctx, "meta update: drop collection - complete", mlog.Int64("collectionID", collectionID))
 }
 
@@ -1021,6 +1031,7 @@ func (m *meta) DropSegment(ctx context.Context, segmentID UniqueID) error {
 		return err
 	}
 	m.segments.DropSegment(segmentID)
+	m.notifyStatsChange(segment, nil)
 	mlog.Info(ctx, "meta update: dropping segment - complete",
 		mlog.Int64("segmentID", segmentID))
 	return nil
@@ -1093,6 +1104,7 @@ func (m *meta) DropSegments(ctx context.Context, candidates []*SegmentInfo) (int
 		case nil:
 			// The refresh found the record already gone and dropped it from
 			// the cache, which counted the drop.
+			m.notifyStatsChange(segment, nil)
 			removed++
 		case segment:
 			if err := m.store().DropSegment(ctx, segment.SegmentInfo); err != nil {
@@ -1110,6 +1122,7 @@ func (m *meta) DropSegments(ctx context.Context, candidates []*SegmentInfo) (int
 // which counts the drop.
 func (m *meta) evictDroppedSegment(segment *SegmentInfo) {
 	m.segments.DropSegment(segment.GetID())
+	m.notifyStatsChange(segment, nil)
 }
 
 // GetHealthySegment returns segment info with provided id

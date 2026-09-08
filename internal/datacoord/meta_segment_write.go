@@ -63,6 +63,7 @@ func (m *meta) lockSegments(segmentIDs ...int64) func() {
 // publishSegment installs the persisted value of one segment.
 func (m *meta) publishSegment(segment *SegmentInfo, version int64) *SegmentInfo {
 	previous, _ := m.segments.PublishSegment(segment.GetID(), segment, version)
+	m.notifyStatsChange(previous, segment)
 	return previous
 }
 
@@ -70,6 +71,15 @@ func (m *meta) publishSegment(segment *SegmentInfo, version int64) *SegmentInfo 
 // values they replaced. A multi-segment mutation is installed under pubMu so a
 // consistent reader observes all of it or none of it.
 func (m *meta) publishSegments(segments []*SegmentInfo, versions map[int64]int64) map[int64]*SegmentInfo {
+	previous := m.installSegments(segments, versions)
+	// Stats discovery hints go out once the whole mutation is visible.
+	for _, segment := range segments {
+		m.notifyStatsChange(previous[segment.GetID()], segment)
+	}
+	return previous
+}
+
+func (m *meta) installSegments(segments []*SegmentInfo, versions map[int64]int64) map[int64]*SegmentInfo {
 	previous := make(map[int64]*SegmentInfo, len(segments))
 	if len(segments) > 1 {
 		m.pubMu.Lock()
