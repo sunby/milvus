@@ -17,7 +17,7 @@ import (
 //
 // # Copy-On-Write semantics
 //
-// Snapshot returns pointers into the store's copy-on-write state for zero-copy
+// Reads return pointers into the store's copy-on-write state for zero-copy
 // efficiency in this read-heavy path. Callers MUST treat the returned
 // LoadConfig / ReplicaAssignment values as read-only.
 //
@@ -39,6 +39,14 @@ type LoadConfigStore struct {
 
 	// snapshot is the resident immutable view returned to Balancer.
 	snapshot *LoadConfigSnapshot
+}
+
+// LoadConfigEntry captures one immutable config and its versions in one read.
+// Config is nil and ConfigVersion is zero when the collection is absent.
+type LoadConfigEntry struct {
+	Config        *LoadConfig
+	ConfigVersion uint64
+	StoreVersion  uint64
 }
 
 // RecoverLoadConfigStore constructs a LoadConfigStore and rebuilds its
@@ -182,6 +190,43 @@ func (s *LoadConfigStore) Contains(collectionID int64) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.configs[collectionID] != nil
+}
+
+// Get reads one collection without materializing the full snapshot.
+func (s *LoadConfigStore) Get(collectionID int64) LoadConfigEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return LoadConfigEntry{
+		Config:        s.configs[collectionID],
+		ConfigVersion: s.versions[collectionID],
+		StoreVersion:  s.version,
+	}
+}
+
+// SnapshotForCollections captures only the requested collections. An empty list
+// selects none. It does not refresh the cached full snapshot.
+func (s *LoadConfigStore) SnapshotForCollections(collectionIDs []int64) *LoadConfigSnapshot {
+	snapshot := &LoadConfigSnapshot{
+		configs:         make(map[int64]*LoadConfig, len(collectionIDs)),
+		configVersions:  make(map[int64]uint64, len(collectionIDs)),
+		replicaToConfig: make(map[int64]*LoadConfig),
+	}
+	s.mu.RLock()
+	snapshot.version = s.version
+	for _, collectionID := range collectionIDs {
+		if cfg := s.configs[collectionID]; cfg != nil {
+			snapshot.configs[collectionID] = cfg
+			snapshot.configVersions[collectionID] = s.versions[collectionID]
+		}
+	}
+	s.mu.RUnlock()
+	// Configs are immutable; build the replica index outside the store lock.
+	for _, cfg := range snapshot.configs {
+		for _, replica := range cfg.Replicas {
+			snapshot.replicaToConfig[replica.ReplicaID] = cfg
+		}
+	}
+	return snapshot
 }
 
 // Snapshot returns the current immutable load-config view. It refreshes the

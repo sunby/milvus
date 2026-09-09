@@ -158,6 +158,13 @@ a scoped trigger cannot be narrowed safely, it uses the same full planning
 scope; only an explicit or periodic full trigger also rebuilds the row-count
 ledger.
 
+Scope selection precedes load-config reads too. Scoped cycles capture only
+`collectionIDs` via `LoadConfigStore.SnapshotForCollections`; full cycles and
+conservative full-scope fallbacks use `Snapshot()`. The scoped config snapshot
+retains each selected collection's version, including version zero for absent
+configs. Node row totals remain cluster-wide through the existing incremental
+ledger.
+
 The DataView provider exposes both full and collection-scoped reads:
 
 ```go
@@ -261,6 +268,14 @@ func (s *LoadConfigStore) Put(ctx context.Context, cfg *LoadConfig) error
 func (s *LoadConfigStore) Remove(ctx context.Context, collectionID int64) error
 
 func (s *LoadConfigStore) Snapshot() *LoadConfigSnapshot
+func (s *LoadConfigStore) SnapshotForCollections(collectionIDs []int64) *LoadConfigSnapshot
+func (s *LoadConfigStore) Get(collectionID int64) LoadConfigEntry
+
+type LoadConfigEntry struct {
+    Config        *LoadConfig
+    ConfigVersion uint64
+    StoreVersion  uint64
+}
 
 // LoadConfig is the complete load configuration for a collection.
 type LoadConfig struct {
@@ -297,6 +312,14 @@ Legacy proto fields are kept for wire compatibility but ignored by the new desig
 
 **Copy-On-Write semantics**: Put clones its input before storing, so callers may reuse/mutate their input freely. Snapshot returns pointers into the store's immutable view — callers must call `.Clone()` before any mutation. The store never modifies published snapshots in place; updates advance the live version and the next Snapshot call lazily publishes a new immutable view.
 
+Point reads and scoped snapshots capture config pointers and their versions
+under one read lock, without rebuilding the resident full snapshot. An empty
+collection list selects none. The scoped replica index is built after releasing
+the lock, using the captured immutable configs. Single-collection metadata reads
+use `Get`; explicit collection lists use `SnapshotForCollections`.
+`GetQueryViewLoadInfo` preserves its existing global `StoreVersion`
+response; the collection-specific load-info version remains `ConfigVersion`.
+
 **Write amplification**: Put always writes the full config (no diff). Orphan partitions / replicas (present in previous state but absent from new config) are deleted. This is intentionally simple — dedup / diff optimization can be added later if write volume becomes a concern.
 
 #### ShardViewRegistry
@@ -316,6 +339,7 @@ func (r *ShardViewRegistry) Ensure(shardID qviews.ShardID) *ShardViewManager
 func (r *ShardViewRegistry) Get(shardID qviews.ShardID) *ShardViewManager
 func (r *ShardViewRegistry) Snapshot() *ShardViewSnapshot
 func (r *ShardViewRegistry) SnapshotForShards(shardIDs []qviews.ShardID) *ShardViewSnapshot
+func (r *ShardViewRegistry) SnapshotForCollection(collectionID int64) *ShardViewSnapshot
 func (r *ShardViewRegistry) CollectionShards(collectionID int64) []qviews.ShardID
 func (r *ShardViewRegistry) NodeShards(nodeID int64) []qviews.ShardID
 func (r *ShardViewRegistry) ShardIDs() []qviews.ShardID
@@ -328,11 +352,15 @@ Maintains live per-shard stats via callbacks from each `ShardViewManager`.
 publishes the resident full snapshot lazily; `SnapshotForShards()` copies only
 the requested `ShardID -> *ShardStats` entries.
 
-Shard managers remain resident for the lifetime of the Registry. A QueryView
-reaching Dropped removes that state machine from its manager, but does not
-remove the manager. Collection index entries are maintained independently of
-view state transitions. Node index entries follow the latest stats and
-disappear when the shard no longer references that node.
+Load-progress reads use `SnapshotForCollection`, which captures the collection
+index and its stats under one read lock. Progress still filters the collection's
+current replica IDs and counts resident shards with an Up view.
+
+After the last QueryView completes durable removal, the Registry reclaims its
+manager and removes the shard's stats and collection/node index entries. The
+callback rechecks manager identity and emptiness before removal; a later
+`Ensure` can create a fresh manager. Node index entries also follow the latest
+stats and disappear when the shard no longer references that node.
 
 #### CollectionLoadManager (Facade)
 
