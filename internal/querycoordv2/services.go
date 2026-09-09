@@ -72,13 +72,16 @@ func (s *Server) ShowLoadCollections(ctx context.Context, req *querypb.ShowColle
 	defer meta.GlobalFailedLoadCache.TryExpire()
 
 	isGetAll := false
-	configs := s.qviewsRuntime.loadConfigStore.Snapshot().ConfigsMap()
+	var configs map[int64]*loadmgr.LoadConfig
 	collectionSet := typeutil.NewUniqueSet(req.GetCollectionIDs()...)
 	if len(req.GetCollectionIDs()) == 0 {
+		configs = s.qviewsRuntime.loadConfigStore.Snapshot().ConfigsMap()
 		for collectionID := range configs {
 			collectionSet.Insert(collectionID)
 		}
 		isGetAll = true
+	} else {
+		configs = s.qviewsRuntime.loadConfigStore.SnapshotForCollections(req.GetCollectionIDs()).ConfigsMap()
 	}
 	collections := collectionSet.Collect()
 
@@ -137,7 +140,7 @@ func (s *Server) ShowLoadPartitions(ctx context.Context, req *querypb.ShowPartit
 	}
 	defer meta.GlobalFailedLoadCache.TryExpire()
 
-	cfg := s.qviewsRuntime.loadConfigStore.Snapshot().ConfigsMap()[req.GetCollectionID()]
+	cfg := s.qviewsRuntime.loadConfigStore.Get(req.GetCollectionID()).Config
 	if cfg == nil {
 		err := meta.GlobalFailedLoadCache.Get(req.GetCollectionID())
 		if err != nil {
@@ -204,7 +207,7 @@ func (s *Server) qviewsLoadPercentage(cfg *loadmgr.LoadConfig) int64 {
 	}
 	total := int64(0)
 	loaded := int64(0)
-	for shardID, stats := range s.qviewsRuntime.shardViewRegistry.Snapshot().StatsMap() {
+	for shardID, stats := range s.qviewsRuntime.shardViewRegistry.SnapshotForCollection(cfg.CollectionID).StatsMap() {
 		if !replicaIDs.Contain(shardID.ReplicaID) {
 			continue
 		}
@@ -255,13 +258,13 @@ func (s *Server) GetQueryViewLoadInfo(ctx context.Context, req *querypb.GetQuery
 		resp.Status = merr.Status(merr.WrapErrServiceInternalMsg("query view runtime is nil"))
 		return resp, nil
 	}
-	snapshot := s.qviewsRuntime.loadConfigStore.Snapshot()
-	cfg := snapshot.ConfigsMap()[req.GetCollectionID()]
+	entry := s.qviewsRuntime.loadConfigStore.Get(req.GetCollectionID())
+	cfg := entry.Config
 	if cfg == nil {
 		resp.Status = merr.Status(merr.WrapErrCollectionNotLoaded(req.GetCollectionID()))
 		return resp, nil
 	}
-	resp.Version = snapshot.Version()
+	resp.Version = entry.StoreVersion
 	resp.PartitionIDs = append([]int64(nil), cfg.PartitionIDs...)
 	resp.LoadFields = cloneLoadFields(cfg.LoadFields)
 	return resp, nil

@@ -231,6 +231,22 @@ func (r *ShardViewRegistry) SnapshotForShards(shardIDs []qviews.ShardID) *ShardV
 	}
 }
 
+// SnapshotForCollection captures the collection index and its current stats
+// under one lock, without refreshing the cached full snapshot.
+func (r *ShardViewRegistry) SnapshotForCollection(collectionID int64) *ShardViewSnapshot {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	shards := r.collectionShards[collectionID]
+	stats := make(map[qviews.ShardID]*ShardStats, len(shards))
+	for shardID := range shards {
+		if shardStats, ok := r.stats[shardID]; ok {
+			stats[shardID] = shardStats
+		}
+	}
+	return &ShardViewSnapshot{version: r.version, stats: stats}
+}
+
 // CollectionShards returns the resident shards belonging to collectionID.
 func (r *ShardViewRegistry) CollectionShards(collectionID int64) []qviews.ShardID {
 	r.mu.RLock()

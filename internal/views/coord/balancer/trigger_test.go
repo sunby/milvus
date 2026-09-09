@@ -21,7 +21,7 @@ func TestTriggerBatchResolveDirtyCollection(t *testing.T) {
 	registry.Ensure(shardB)
 	registry.Ensure(unrelated)
 
-	scope := (triggerBatch{dirtyColls: setOf[int64](1)}).resolveScope(nil, registry)
+	scope := (triggerBatch{dirtyColls: setOf[int64](1)}).resolveScope(registry)
 
 	assert.Equal(t, setOf[int64](1), scope.collectionIDs)
 	assert.Equal(t, setOf(shardB, shardA), scope.targetShards)
@@ -29,7 +29,7 @@ func TestTriggerBatchResolveDirtyCollection(t *testing.T) {
 
 func TestTriggerBatchResolveDirtyShard(t *testing.T) {
 	shard := triggerShard(10, 2, 0)
-	scope := (triggerBatch{dirtyShards: setOf(shard)}).resolveScope(nil, nil)
+	scope := (triggerBatch{dirtyShards: setOf(shard)}).resolveScope(nil)
 
 	assert.Equal(t, setOf[int64](2), scope.collectionIDs)
 	assert.Equal(t, setOf(shard), scope.targetShards)
@@ -50,7 +50,7 @@ func TestTriggerBatchResolveDirtyNode(t *testing.T) {
 		200: {30: {301}},
 	})
 
-	scope := (triggerBatch{dirtyNodes: setOf[int64](100)}).resolveScope(nil, registry)
+	scope := (triggerBatch{dirtyNodes: setOf[int64](100)}).resolveScope(registry)
 
 	assert.Equal(t, setOf[int64](1, 2), scope.collectionIDs)
 	assert.Empty(t, scope.collectionWideIDs)
@@ -69,7 +69,9 @@ func TestTriggerBatchMalformedNodeShardFallsBackToFull(t *testing.T) {
 		100: {10: {101}},
 	})
 
-	scope := (triggerBatch{dirtyNodes: setOf[int64](100)}).resolveScope(loadSnapshot, registry)
+	scope := (triggerBatch{dirtyNodes: setOf[int64](100)}).resolveScope(registry)
+	assert.True(t, scope.full)
+	scope = fullReconcileScope(loadSnapshot, registry)
 
 	assert.Equal(t, setOf[int64](1, 2), scope.collectionIDs)
 	assert.Equal(t, setOf(registry.ShardIDs()...), scope.targetShards)
@@ -84,7 +86,7 @@ func TestTriggerBatchResolveMergesScopes(t *testing.T) {
 	scope := (triggerBatch{
 		dirtyColls:  setOf[int64](1),
 		dirtyShards: setOf(dirtyShard),
-	}).resolveScope(nil, registry)
+	}).resolveScope(registry)
 
 	assert.Equal(t, setOf[int64](1, 2), scope.collectionIDs)
 	assert.Equal(t, setOf(collectionShard, dirtyShard), scope.targetShards)
@@ -105,7 +107,9 @@ func TestTriggerBatchResolveFull(t *testing.T) {
 
 	queue := newTriggerQueue()
 	queue.add(TriggerScope{NodeChanged: true})
-	scope := queue.takePending().resolveScope(loadSnapshot, registry)
+	scope := queue.takePending().resolveScope(registry)
+	assert.True(t, scope.full)
+	scope = fullReconcileScope(loadSnapshot, registry)
 
 	assert.Equal(t, setOf[int64](1, 2, 3), scope.collectionIDs)
 	assert.Equal(t, setOf(malformedShard, shardA, residualShard), scope.targetShards)
@@ -120,7 +124,9 @@ func TestTriggerBatchMalformedDirtyShardFallsBackToFull(t *testing.T) {
 	registry.Ensure(validShard)
 	registry.Ensure(malformedShard)
 
-	scope := (triggerBatch{dirtyShards: setOf(malformedShard)}).resolveScope(loadSnapshot, registry)
+	scope := (triggerBatch{dirtyShards: setOf(malformedShard)}).resolveScope(registry)
+	assert.True(t, scope.full)
+	scope = fullReconcileScope(loadSnapshot, registry)
 
 	assert.Equal(t, setOf[int64](1, 2), scope.collectionIDs)
 	assert.Equal(t, setOf(registry.ShardIDs()...), scope.targetShards)
@@ -133,10 +139,7 @@ func TestTriggerBatchReleasedCollectionIncludesResidualShards(t *testing.T) {
 	registry.Ensure(residualShard)
 	registry.Ensure(unrelatedShard)
 
-	scope := (triggerBatch{dirtyColls: setOf[int64](1)}).resolveScope(
-		triggerLoadSnapshot(triggerLoadConfig(2, 20)),
-		registry,
-	)
+	scope := (triggerBatch{dirtyColls: setOf[int64](1)}).resolveScope(registry)
 
 	assert.Equal(t, setOf[int64](1), scope.collectionIDs)
 	assert.Equal(t, setOf(residualShard), scope.targetShards)
@@ -146,9 +149,7 @@ func TestTriggerBatchDirtyCollectionUsesCollectionIndexOnly(t *testing.T) {
 	registry := triggerTestRegistry(t)
 	malformedResidual := qviews.ShardID{ReplicaID: 20, VChannel: "malformed"}
 	registry.Ensure(malformedResidual)
-	loadSnapshot := triggerLoadSnapshot(triggerLoadConfig(1, 10))
-
-	scope := (triggerBatch{dirtyColls: setOf[int64](99)}).resolveScope(loadSnapshot, registry)
+	scope := (triggerBatch{dirtyColls: setOf[int64](99)}).resolveScope(registry)
 
 	assert.Equal(t, setOf[int64](99), scope.collectionIDs)
 	assert.Empty(t, scope.targetShards)
@@ -178,7 +179,7 @@ func TestReconcileScopeAddDataViewShards(t *testing.T) {
 			Shards:       []*viewpb.DataViewOfShard{{Vchannel: "by-dev-rootcoord-dml_0_2v0"}},
 		},
 	}, nil)
-	scope := (triggerBatch{dirtyColls: setOf[int64](1)}).resolveScope(loadSnapshot, nil)
+	scope := (triggerBatch{dirtyColls: setOf[int64](1)}).resolveScope(nil)
 
 	scope.AddDataViewShards(loadSnapshot, dataSnapshot)
 
@@ -210,7 +211,7 @@ func TestReconcileScopeDoesNotExpandDirtyShard(t *testing.T) {
 	}, nil)
 	dirtyShard := triggerShard(10, 1, 0)
 
-	scope := (triggerBatch{dirtyShards: setOf(dirtyShard)}).resolveScope(loadSnapshot, nil)
+	scope := (triggerBatch{dirtyShards: setOf(dirtyShard)}).resolveScope(nil)
 
 	scope.AddDataViewShards(loadSnapshot, dataSnapshot)
 
