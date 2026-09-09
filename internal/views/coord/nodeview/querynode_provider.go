@@ -79,10 +79,11 @@ func (p *QueryNodeProvider) Snapshot() *balancer.NodeSnapshot {
 			continue
 		}
 		infos[nodeID] = &balancer.NodeInfo{
-			NodeID:        nodeID,
-			Alive:         true,
-			Stopping:      node.Stopping,
-			ResourceGroup: rg,
+			NodeID:         nodeID,
+			Alive:          true,
+			Stopping:       node.Stopping,
+			ResourceGroup:  rg,
+			SyncLoadWarmup: node.SyncLoadWarmup,
 		}
 	}
 

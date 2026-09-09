@@ -7707,6 +7707,9 @@ ChunkedSegmentSealedImpl::resolve_field_data_warmup_policy(
     const SegmentLoadInfo& segment_load_info,
     const SchemaPtr& schema_snapshot,
     const std::string& explicit_warmup_policy) const {
+    if (segment_load_info.GetForceSyncWarmup()) {
+        return "sync";
+    }
     // System fields do not carry user-field warmup settings and are not
     // represented in user-field bitsets. They should not affect group warmup
     // aggregation.
@@ -8102,12 +8105,12 @@ ChunkedSegmentSealedImpl::load_field_data_common(
         schema_snapshot->get_primary_field_id().value_or(FieldId(-1)) ==
         field_id;
     if (is_primary_field) {
-        pk_index_slot =
-            BuildPkIndexSlot(column,
-                             data_type,
-                             segment_load_info.GetStorageVersion() < STORAGE_V2,
-                             op_ctx,
-                             "");
+        pk_index_slot = BuildPkIndexSlot(
+            column,
+            data_type,
+            segment_load_info.GetStorageVersion() < STORAGE_V2,
+            op_ctx,
+            segment_load_info.GetForceSyncWarmup() ? "sync" : "");
     }
 
     const auto prepare_done = std::chrono::steady_clock::now();
@@ -9536,7 +9539,11 @@ ChunkedSegmentSealedImpl::LoadColumnGroup(
                 init_storage_v1_timestamp_index(
                     std::move(ts), num_rows, runtime);
             } else {
-                init_storage_v2_timestamp_index(column, num_rows, "", runtime);
+                init_storage_v2_timestamp_index(
+                    column,
+                    num_rows,
+                    segment_load_info.GetForceSyncWarmup() ? "sync" : "",
+                    runtime);
             }
             if (runtime == nullptr) {
                 PublishSystemFieldStateLocked();

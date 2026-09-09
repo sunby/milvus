@@ -133,6 +133,7 @@ type SessionRaw struct {
 	IndexEngineVersion       IndexEngineVersion `json:"IndexEngineVersion,omitempty"`
 	ScalarIndexEngineVersion IndexEngineVersion `json:"ScalarIndexEngineVersion,omitempty"`
 	IndexNonEncoding         bool               `json:"IndexNonEncoding,omitempty"`
+	SyncLoadWarmup           bool               `json:"SyncLoadWarmup,omitempty"`
 	LeaseID                  *clientv3.LeaseID  `json:"LeaseID,omitempty"`
 
 	HostName     string            `json:"HostName,omitempty"`
@@ -209,6 +210,11 @@ func WithRetryTimes(n int64) SessionOption {
 
 func WithResueNodeID(b bool) SessionOption {
 	return func(session *Session) { session.reuseNodeID = b }
+}
+
+// WithSyncLoadWarmup advertises the native and Go loading contract together.
+func WithSyncLoadWarmup(supported bool) SessionOption {
+	return func(session *Session) { session.SyncLoadWarmup = supported }
 }
 
 // WithIndexEngineVersion should be only used by querynode.

@@ -140,6 +140,11 @@ CreateSegment(milvus::segcore::Collection* col,
     return segment;
 }
 
+bool
+SupportsSyncLoadWarmup() {
+    return true;
+}
+
 CStatus
 NewSegment(CCollection collection,
            SegmentType seg_type,

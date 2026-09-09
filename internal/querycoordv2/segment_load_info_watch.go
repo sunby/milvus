@@ -198,6 +198,12 @@ func (s *queryViewSegmentLoadInfoWatchSession) buildSnapshots(ctx context.Contex
 	}
 	snapshots := make([]*querypb.QueryViewSegmentLoadInfoSnapshot, 0, len(subscriptions))
 	for collectionID, collectionSubscriptions := range byCollection {
+		syncWarmup := false
+		if runtime := s.server.qviewsRuntime; runtime != nil && runtime.loadConfigStore != nil {
+			if cfg := runtime.loadConfigStore.Snapshot().ConfigsMap()[collectionID]; cfg != nil {
+				syncWarmup = cfg.SyncWarmup
+			}
+		}
 		segmentIDs := make([]int64, 0, len(collectionSubscriptions))
 		expected := make(map[int64]*querypb.QueryViewSegmentLoadInfoRevision, len(collectionSubscriptions))
 		for _, subscription := range collectionSubscriptions {
@@ -209,6 +215,10 @@ func (s *queryViewSegmentLoadInfoWatchSession) buildSnapshots(ctx context.Contex
 			return nil, err
 		}
 		for _, loadInfo := range infos {
+			if syncWarmup && loadInfo != nil && !loadInfo.GetForceSyncWarmup() {
+				loadInfo = proto.Clone(loadInfo).(*querypb.SegmentLoadInfo)
+				loadInfo.ForceSyncWarmup = true
+			}
 			revision := calculateQueryViewSegmentLoadInfoRevision(loadInfo, indexInfos)
 			if sameQueryViewSegmentLoadInfoRevision(expected[loadInfo.GetSegmentID()], revision) {
 				continue

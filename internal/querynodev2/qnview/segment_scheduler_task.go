@@ -35,6 +35,12 @@ func (t *SegmentLoadTask) Execute(schedulerCtx context.Context) error {
 		return nil
 	}
 	segment, err := t.load(ctx, &timing)
+	if err == nil && ctx.Err() != nil {
+		if segment != nil {
+			_ = segment.Release(context.Background())
+		}
+		err = ctx.Err()
+	}
 	if err != nil {
 		timing.failed = true
 		if t.OnUnrecoverable != nil {
@@ -83,18 +89,24 @@ func (t *SegmentLoadTask) load(ctx context.Context, timing *segmentLoadTimingSam
 	if err != nil {
 		return nil, err
 	}
+	if segment == nil {
+		return nil, merr.WrapErrServiceInternalMsg("segment loader returned a nil segment")
+	}
 	if t.TransformStartAfterTimeTick > 0 {
 		segment = &transformStartSegment{
 			TransformSegment: segment,
 			startAfter:       t.TransformStartAfterTimeTick,
 		}
 	}
+	if t.SyncWarmupEpoch > 0 {
+		segment = &syncWarmedSegment{TransformSegment: segment, epoch: t.SyncWarmupEpoch}
+	}
 	return segment, nil
 }
 
 func (t *SegmentLoadTask) loadInfo() (*querypb.SegmentLoadInfo, []*indexpb.IndexInfo, error) {
 	if t.Snapshot.LoadInfo != nil {
-		return t.Snapshot.LoadInfo, t.Snapshot.IndexInfos, nil
+		return forceSyncLoadInfo(t.Snapshot.LoadInfo, t.SyncWarmupEpoch > 0), t.Snapshot.IndexInfos, nil
 	}
 	return nil, nil, merr.WrapErrServiceInternalMsg("query view segment load requires watch snapshot, segmentID=%d", t.SegmentID)
 }
@@ -129,6 +141,7 @@ func (t *SegmentUpdateTask) Execute(schedulerCtx context.Context) error {
 }
 
 func (t *SegmentUpdateTask) update(ctx context.Context) error {
+	t.Snapshot.LoadInfo = forceSyncLoadInfo(t.Snapshot.LoadInfo, segmentWarmupEpoch(t.Segment) > 0)
 	action := classifySegmentUpdate(t.Current, t.Snapshot.Revision)
 	if action == SegmentUpdateNone {
 		if t.OnUpdated != nil {
@@ -140,6 +153,9 @@ func (t *SegmentUpdateTask) update(ctx context.Context) error {
 		return err
 	}
 	if err := t.loader.Update(ctx, t.Segment, t.Collection, t.Snapshot, action); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if t.OnUpdated != nil {

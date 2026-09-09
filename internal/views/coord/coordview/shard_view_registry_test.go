@@ -90,13 +90,16 @@ func TestRegistry_RemovesManagerAfterLastViewDropped(t *testing.T) {
 		VChannel:  "by-dev-rootcoord-dml_100v0",
 	}
 	mgr := reg.Ensure(shardID)
+	require.False(t, reg.HasUndrainedViews(100))
 	builder := testBuilderForShard(100, shardID)
 	builder.SetAssignments(nil)
 
 	require.NoError(t, mgr.AddPreparing(context.Background(), builder))
+	require.True(t, reg.HasUndrainedViews(100))
 	require.NoError(t, reg.flushScheduler.Flush(context.Background()))
 	require.NoError(t, mgr.RequestRelease(context.Background()))
 	require.NoError(t, reg.flushScheduler.Flush(context.Background()))
+	require.True(t, reg.HasUndrainedViews(100), "Dropping is not a durable release barrier")
 
 	version := testVersion(1, 1, 1)
 	sn := qviews.NewStreamingNodeFromVChannel(shardID.VChannel)
@@ -113,6 +116,7 @@ func TestRegistry_RemovesManagerAfterLastViewDropped(t *testing.T) {
 	require.NoError(t, reg.flushScheduler.Flush(context.Background()))
 
 	assert.Nil(t, reg.Get(shardID))
+	assert.False(t, reg.HasUndrainedViews(100))
 	assert.Empty(t, reg.CollectionShards(100))
 	assert.Empty(t, reg.ShardIDs())
 	assert.NotContains(t, reg.Snapshot().StatsMap(), shardID)

@@ -18,6 +18,8 @@ type ShardStats struct {
 	// UpLoadInfoVersion is the load-config snapshot version of the current Up view.
 	// Zero when no view is currently Up.
 	UpLoadInfoVersion uint64
+	UpSyncWarmup      bool
+	UpSyncWarmupEpoch int64
 
 	// PreparingVersion is the version of the current Preparing or Ready view,
 	// if any. Nil when there is no in-flight view.
