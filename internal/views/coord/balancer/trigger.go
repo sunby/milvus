@@ -43,6 +43,9 @@ type triggerBatch struct {
 // reconcileScope is the scoped DataView-read and Policy-planning boundary
 // resolved from one trigger batch.
 type reconcileScope struct {
+	// full requires expansion from all configured collections and resident shards.
+	full bool
+
 	// collectionIDs selects collections whose DataViews are fetched.
 	collectionIDs map[int64]struct{}
 
@@ -60,13 +63,13 @@ func (b triggerBatch) empty() bool {
 
 // resolveScope converts queued collection and shard events into scoped reads
 // and Policy targets. Collection events include resident residual shards;
-// malformed shard channels conservatively fall back to a full reconcile.
+// malformed shard channels request a full scope, expanded after load configs
+// have been captured by the snapshot builder.
 func (b triggerBatch) resolveScope(
-	loadSnapshot *loadmgr.LoadConfigSnapshot,
 	registry *coordview.ShardViewRegistry,
 ) reconcileScope {
 	if b.full {
-		return fullReconcileScope(loadSnapshot, registry)
+		return reconcileScope{full: true}
 	}
 
 	scope := newReconcileScope()
@@ -80,12 +83,12 @@ func (b triggerBatch) resolveScope(
 
 	for nodeID := range b.dirtyNodes {
 		if registry == nil {
-			return fullReconcileScope(loadSnapshot, registry)
+			return reconcileScope{full: true}
 		}
 		for _, shardID := range registry.NodeShards(nodeID) {
 			collectionID, ok := parseShardCollection(shardID)
 			if !ok {
-				return fullReconcileScope(loadSnapshot, registry)
+				return reconcileScope{full: true}
 			}
 			scope.collectionIDs[collectionID] = struct{}{}
 			scope.targetShards[shardID] = struct{}{}
@@ -95,7 +98,7 @@ func (b triggerBatch) resolveScope(
 	for shardID := range b.dirtyShards {
 		collectionID, ok := parseShardCollection(shardID)
 		if !ok {
-			return fullReconcileScope(loadSnapshot, registry)
+			return reconcileScope{full: true}
 		}
 		scope.collectionIDs[collectionID] = struct{}{}
 		scope.targetShards[shardID] = struct{}{}
@@ -148,6 +151,7 @@ func fullReconcileScope(
 	registry *coordview.ShardViewRegistry,
 ) reconcileScope {
 	scope := newReconcileScope()
+	scope.full = true
 	if loadSnapshot != nil {
 		for collectionID := range loadSnapshot.ConfigsMap() {
 			scope.collectionIDs[collectionID] = struct{}{}
