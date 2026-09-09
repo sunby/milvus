@@ -82,6 +82,7 @@ type indexMeta struct {
 	fieldIndexLock  sync.RWMutex
 	indexes         map[UniqueID]map[UniqueID]*model.Index
 	storedIndexSize storedIndexSizeTracker
+	taskCounts      indexTaskCounts
 	collectionOnce  sync.Once
 	collectionLock  *lock.KeyLock[UniqueID]
 
@@ -190,6 +191,7 @@ func (m *indexMeta) reloadFromKV(collectionIDs []int64) error {
 	// (launched after g.Wait) can access it when both indexes and segment indexes are loaded.
 	collectionSegIdxes := make([][]*model.SegmentIndex, len(collectionIDs))
 	recoveredIndexSizes := make(map[UniqueID]map[UniqueID]uint64)
+	var recoveredTaskCounts indexTaskCounts
 	g, _ := errgroup.WithContext(m.ctx)
 	g.Go(func() error {
 		fieldIndexes, err := m.catalog.ListIndexes(m.ctx)
@@ -256,6 +258,8 @@ func (m *indexMeta) reloadFromKV(collectionIDs []int64) error {
 					indexes.Insert(segIdx.IndexID, segIdx)
 					m.segmentIndexes.Insert(segIdx.SegmentID, indexes)
 				}
+				old, _ := m.segmentBuildInfo.Get(segIdx.BuildID)
+				recoveredTaskCounts.replaceTask(old, segIdx)
 				m.segmentBuildInfo.AddForRecovery(segIdx)
 			}
 		}
@@ -269,6 +273,18 @@ func (m *indexMeta) reloadFromKV(collectionIDs []int64) error {
 	// have completed. DropIndex then updates the gauge without scanning all
 	// segment indexes.
 	m.storedIndexSize.recover(m.indexes, recoveredIndexSizes)
+	// Both walkers have finished: activate counts only for surviving indexes.
+	// Recovery folds counts into the existing build pass, never a second List.
+	for _, indexes := range m.indexes {
+		for _, index := range indexes {
+			recoveredTaskCounts.replaceIndex(nil, index)
+		}
+	}
+	m.taskCounts.mu.Lock()
+	m.taskCounts.byIndex = recoveredTaskCounts.byIndex
+	m.taskCounts.active = recoveredTaskCounts.active
+	m.taskCounts.total = recoveredTaskCounts.total
+	m.taskCounts.mu.Unlock()
 
 	// Update the index file-count histogram asynchronously. The stored-size
 	// gauge is initialized synchronously above so DDL callbacks can safely use
@@ -286,6 +302,7 @@ func (m *indexMeta) reloadFromKV(collectionIDs []int64) error {
 }
 
 func (m *indexMeta) updateCollectionIndex(index *model.Index) {
+	m.taskCounts.replaceIndex(m.indexes[index.CollectionID][index.IndexID], index)
 	if _, ok := m.indexes[index.CollectionID]; !ok {
 		m.indexes[index.CollectionID] = make(map[UniqueID]*model.Index)
 	}
@@ -338,6 +355,8 @@ func (m *indexMeta) lockCollections(collectionIDs ...UniqueID) func() {
 }
 
 func (m *indexMeta) updateSegmentIndex(segIdx *model.SegmentIndex) {
+	old, _ := m.segmentBuildInfo.Get(segIdx.BuildID)
+	m.taskCounts.replaceTask(old, segIdx)
 	indexes, ok := m.segmentIndexes.Get(segIdx.SegmentID)
 	if ok {
 		indexes.Insert(segIdx.IndexID, segIdx)
@@ -432,39 +451,11 @@ func (m *indexMeta) recordFinishedTask(old, updated *model.SegmentIndex, oldSize
 }
 
 func (m *indexMeta) updateIndexTasksMetrics() {
-	taskMetrics := make(map[indexpb.JobState]int)
-	taskMetrics[indexpb.JobState_JobStateNone] = 0
-	taskMetrics[indexpb.JobState_JobStateInit] = 0
-	taskMetrics[indexpb.JobState_JobStateInProgress] = 0
-	taskMetrics[indexpb.JobState_JobStateFinished] = 0
-	taskMetrics[indexpb.JobState_JobStateFailed] = 0
-	taskMetrics[indexpb.JobState_JobStateRetry] = 0
-	for _, segIdx := range m.segmentBuildInfo.List() {
-		if segIdx.IsDeleted || !m.IsIndexExist(segIdx.CollectionID, segIdx.IndexID) {
-			continue
-		}
-
-		switch segIdx.IndexState {
-		case commonpb.IndexState_IndexStateNone:
-			taskMetrics[indexpb.JobState_JobStateNone]++
-		case commonpb.IndexState_Unissued:
-			taskMetrics[indexpb.JobState_JobStateInit]++
-		case commonpb.IndexState_InProgress:
-			taskMetrics[indexpb.JobState_JobStateInProgress]++
-		case commonpb.IndexState_Finished:
-			taskMetrics[indexpb.JobState_JobStateFinished]++
-		case commonpb.IndexState_Failed:
-			taskMetrics[indexpb.JobState_JobStateFailed]++
-		case commonpb.IndexState_Retry:
-			taskMetrics[indexpb.JobState_JobStateRetry]++
-		}
-	}
-
+	taskMetrics := m.indexTaskCountsSnapshot()
 	jobType := indexpb.JobType_JobTypeIndexJob.String()
-	for k, v := range taskMetrics {
-		metrics.IndexStatsTaskNum.WithLabelValues(jobType, k.String()).Set(float64(v))
+	for state, count := range taskMetrics {
+		metrics.IndexStatsTaskNum.WithLabelValues(jobType, indexTaskMetricStates[state].String()).Set(float64(count))
 	}
-	mlog.Info(m.ctx, "update index metric", mlog.Int("collectionNum", len(taskMetrics)))
 }
 
 func checkIdenticalJSON(index *model.Index, req *indexpb.CreateIndexRequest) bool {
@@ -970,7 +961,7 @@ func (m *indexMeta) MarkIndexAsDeleted(ctx context.Context, collID UniqueID, ind
 	deletedIndexIDs := make([]UniqueID, 0, len(indexes))
 	m.fieldIndexLock.Lock()
 	for _, index := range indexes {
-		m.indexes[index.CollectionID][index.IndexID] = index
+		m.updateCollectionIndex(index)
 		deletedIndexIDs = append(deletedIndexIDs, index.IndexID)
 	}
 	m.fieldIndexLock.Unlock()
@@ -1389,6 +1380,7 @@ func (m *indexMeta) removeSegmentIndexRecordInMemory(segIdx *model.SegmentIndex)
 		}
 	}
 
+	m.taskCounts.replaceTask(segIdx, nil)
 	m.segmentBuildInfo.Remove(segIdx.BuildID)
 }
 
@@ -1524,6 +1516,7 @@ func (m *indexMeta) RemoveIndex(ctx context.Context, collID, indexID UniqueID) e
 	}
 
 	m.fieldIndexLock.Lock()
+	m.taskCounts.replaceIndex(m.indexes[collID][indexID], nil)
 	delete(m.indexes[collID], indexID)
 	collectionRemoved := len(m.indexes[collID]) == 0
 	if collectionRemoved {
