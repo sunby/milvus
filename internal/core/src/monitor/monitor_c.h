@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -30,6 +31,11 @@ typedef struct CCacheShardDiskUsageStatsArray {
 
 char*
 GetCoreMetrics();
+
+// Configure before any attributed cache slot is created. Repeating the same
+// mode succeeds; changing an already configured mode returns false.
+bool
+InitCacheShardDiskUsageMetricsMode(bool aggregate);
 
 CCacheShardDiskUsageStatsArray
 GetCacheShardDiskUsageStats();

@@ -24,10 +24,41 @@ package metrics
 import "C"
 
 import (
+	"strings"
 	"unsafe"
 
 	_ "github.com/milvus-io/milvus/internal/util/cgo"
+	pkgmetrics "github.com/milvus-io/milvus/pkg/v3/metrics"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
+
+// InitCollectionLevelMetricsMode configures both Go and native metrics before
+// components create cache slots. The native mode is immutable once configured
+// or an attributed cache slot exists; repeated initialization must agree.
+func InitCollectionLevelMetricsMode(mode string) error {
+	normalized := strings.ToLower(strings.TrimSpace(mode))
+	switch normalized {
+	case pkgmetrics.CollectionLevelMetricsModeFull, pkgmetrics.CollectionLevelMetricsModeAggregate:
+	default:
+		return merr.WrapErrParameterInvalidMsg(
+			"common.metrics.collectionLevelMode must be %q or %q, got %q",
+			pkgmetrics.CollectionLevelMetricsModeFull,
+			pkgmetrics.CollectionLevelMetricsModeAggregate,
+			mode,
+		)
+	}
+
+	aggregate := normalized == pkgmetrics.CollectionLevelMetricsModeAggregate
+	if !bool(C.InitCacheShardDiskUsageMetricsMode(C.bool(aggregate))) {
+		return merr.WrapErrServiceInternalMsg(
+			"cannot initialize common.metrics.collectionLevelMode=%q: native cache metrics were already initialized with a different mode",
+			normalized,
+		)
+	}
+	// Do not change Go metric writers if native initialization was rejected.
+	pkgmetrics.SetCollectionLevelMetricsMode(normalized)
+	return nil
+}
 
 type CacheShardDiskUsageStats struct {
 	DataType  string
