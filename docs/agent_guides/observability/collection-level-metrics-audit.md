@@ -232,28 +232,39 @@ collection，对外暴露的基数仍然有界。
 
 `internal_cache_shard_disk_usage_bytes` 的完整链路是：
 
-1. milvus-common caching layer 按 `{data_type, shard}` 动态创建 Gauge；声明可从
-   构建依赖安装头 `internal/core/output/include/cachinglayer/Metrics.h` 核对。
+1. milvus-common caching layer 在 `full` 模式按 `{data_type, shard}` 动态创建
+   Gauge；在 `aggregate` 模式，创建时就把 `shard` 归一化为 `all`，同一
+   `data_type` 共享一个 Gauge。声明可从构建依赖安装头
+   `internal/core/output/include/cachinglayer/Metrics.h` 核对。
 2. [`CacheMetricAttribution.h`](../../../internal/core/src/segcore/CacheMetricAttribution.h)
    将 segcore 的 `shard` 直接作为 attribution；
    [`SegmentLoadInfo.cpp`](../../../internal/core/src/segcore/SegmentLoadInfo.cpp)
    将其设置为 `GetInsertChannel()`。
-3. CacheSlot 在 cell 加载/卸载时按 `file_bytes` 增减该 Gauge。最后一个 slot handle
-   消失后，过期 series 会在下一次收集时从 family 中移除。
+3. CacheSlot 在 cell 加载/卸载时按 `file_bytes` 增减 Gauge，同时在业务 Entry
+   中保存独立的逐 shard 字节数。`full` 模式最后一个 slot handle 消失后，过期
+   series 会在下一次收集时从 family 中移除。`aggregate` 模式释放 shard 只
+   扣减其贡献，不能删除或清零共享 Gauge；已创建的 `all` Gauge 在所有对应
+   slot 释放后仍保留为 0，未使用的 `data_type` 不预创建样本。
 4. [`monitor_c.cpp`](../../../internal/core/src/monitor/monitor_c.cpp) 的
-   `GetCoreMetrics()` 在序列化 registry 前触发收集和过期 series 清理。
+   `GetCoreMetrics()` 仅在 `full` 模式下触发逐 shard 收集和过期 series 清理。
+   `aggregate` 模式直接序列化共享 Gauge，不执行逐 shard stats 扫描；
+   `CRegistry` 解析后直接导出，不再做第二次聚合。
 
-同一份 shard stats 还通过
+独立维护的 shard stats 通过
 [`cache_shard_disk_usage.go`](../../../internal/util/metrics/cache_shard_disk_usage.go)
 进入 QueryNode distribution response，供 QueryCoord 的 shard disk balancer 使用；
-这是 protobuf 控制面数据，不是第二个 Prometheus 指标族。
+这是 protobuf 控制面数据，不是第二个 Prometheus 指标族。两种模式都保留真实
+shard，业务 stats 快照仍需遍历现存条目，不能把共享 Gauge 的总量当作单个
+shard 的用量。
 
-因此，这个指标可以按 VChannel/shard 定位缓存磁盘占用，但不能直接按
-`collection_id` 归因。`aggregate` 模式在 `CRegistry` 解析 C++ Prometheus 文本后，
-将该 family 的 `shard` 改为 `all` 并按 `data_type` 求和；供 QueryCoord shard disk
-balancer 使用的逐 shard protobuf stats 不变。若产品希望把它纳入严格 collection
-口径，应新增稳定的 `collection_id` attribution；不能仅把 `shard` 改名为
-`collection_id`。
+Go 和 C++ 模式在组件启动、创建缓存 slot 前由同一个配置初始化；直接初始化
+QueryNode/StreamingNode segcore 的路径也检查该模式。它是进程级启动配置，
+重复设置相同模式允许，已初始化或创建 attributed handle 后切换模式会失败。
+
+因此，`full` 模式可以按 VChannel/shard 定位缓存磁盘占用，`aggregate` 模式
+只能查看每种 `data_type` 的总量；两者都不能直接按 `collection_id` 归因。若
+产品希望把它纳入严格 collection 口径，应新增稳定的 `collection_id`
+attribution；不能仅把 `shard` 改名为 `collection_id`。
 
 Knowhere 的 `collection_id` config key、C++ protobuf 的
 `OperationMetrics.collection_metrics`，以及 storage/index metadata 中的

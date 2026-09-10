@@ -21,7 +21,8 @@ common:
 
 该配置是进程级、仅启动时生效的配置。所有 Milvus 进程必须使用相同值，混用
 两种模式会使 Prometheus 中同时出现真实 collection 值和 `all`。非法配置值会在
-组件启动时失败。
+组件启动时失败。Go 和 C++ 模式均在创建缓存 slot 前初始化；已初始化后
+重复设置相同值允许，设置不同值会失败，不能通过第一次 scrape 决定模式。
 
 以下不变量在两种模式下都成立：
 
@@ -126,7 +127,7 @@ Gauge 显式求和、1 个有界 pull Gauge 替换标签、21 个 Gauge 停止�
 | `milvus_datanode_fg_buffer_size` | 按 node、collection 通过 `Add/Sub` 维护 flowgraph buffer 大小。 | `collection_id="all"`，按 `node_id` 求和，继续使用 `Add/Sub`。 |
 | `milvus_querynode_entity_num` | 按 DB、collection ID/name、node、segment state 设置实体数。 | 两个 collection 标签均为 `all`，按 `db_name`, `node_id`, `segment_state` 求和。 |
 | `milvus_querynode_entity_size` | 按 node、collection、segment state 设置实体内存。 | `collection_id="all"`，按 `node_id`, `segment_state` 求和。 |
-| `internal_cache_shard_disk_usage_bytes` | C++ caching layer 按 `data_type`, `shard` 导出磁盘占用，其中 `shard` 是 insert VChannel。 | `CRegistry` 在 `/metrics` 输出边界将 `shard="all"`，并按 `data_type` 对各 VChannel 字节数求和。供 QueryCoord shard disk balancer 使用的内部逐 shard stats 保持不变。 |
+| `internal_cache_shard_disk_usage_bytes` | C++ caching layer 按 `data_type`, `shard` 导出磁盘占用，其中 `shard` 是 insert VChannel。 | C++ 创建时将 `shard="all"`，同一 `data_type` 的所有 shard 共享一个 Gauge，通过加载/卸载增减字节数；scrape 直接导出共享 Gauge，不扫描逐 shard stats。内部逐 shard 字节数独立保存，供 QueryCoord shard disk balancer 使用。 |
 
 ## Gauge：1 个有界 pull collector
 
@@ -197,6 +198,11 @@ collection / VChannel 共享，所以：
   共享时序。
 - 快照式聚合 Gauge 在下一轮采集时清空自身 scope 并重建，保证 drop 后数值收敛，
   且不会删除同进程内其他 node 的样本。
+- C++ cache shard Gauge 在 `aggregate` 模式下只随 cell 加载/卸载增减。释放一个
+  shard 不能删除或清零共享 Gauge；某种 `data_type` 首次使用后，其 `all` Gauge
+  保留到进程结束，所有对应 slot 释放后仍导出 0。尚未使用的类型不预创建样本。
+  `full` 模式仍在收集时删除过期逐 shard Gauge；业务 distribution stats 在两种
+  模式下都返回真实 shard，释放后不再返回该 shard 的条目。
 - Dashboard 若过滤具体 collection，将在 `aggregate` 模式得到空结果；应改为匹配
   `collection_id="all"` / `collection_name="all"`；过滤 VChannel 的查询同样应匹配
   `channel_name="all"` / `vchannel="all"` / `shard="all"`，或移除对应过滤条件。
