@@ -37,8 +37,8 @@ common:
   只有能预聚合或使用 `Add/Sub` 的 GaugeVec 才继续导出；有界 pull collector
   则可以在采集时直接替换 collection 标签。
 
-71 个指标族在 `aggregate` 模式下分为：39 个 Counter/Histogram 自动合并、10 个
-Gauge 显式求和、1 个有界 pull Gauge 替换标签、21 个 Gauge 停止导出。
+71 个指标族在 `aggregate` 模式下分为：39 个 Counter/Histogram 自动合并、11 个
+Gauge 显式求和、1 个有界 pull Gauge 替换标签、20 个 Gauge 停止导出。
 
 ## Counter 和 Histogram：39 个自动合并
 
@@ -109,7 +109,7 @@ Gauge 显式求和、1 个有界 pull Gauge 替换标签、21 个 Gauge 停止�
 | `milvus_querynode_two_stage_search_fallback_total` | Counter | 每个 collection 独立累计 fallback。 | 按 `node_id`, `reason` 合并累计。 |
 | `milvus_querynode_global_refine_total` | Counter | 每个 collection 独立累计 global refine。 | 按 `node_id` 合并累计。 |
 
-## Gauge：10 个显式求和
+## Gauge：11 个显式求和
 
 这些 Gauge 的 writer 已改成先按剩余维度求和再 `Set`，或原本就通过
 `Add/Sub` 维护可加值。每次快照型采集前会清空对应 component/node 的旧样本，
@@ -126,6 +126,7 @@ Gauge 显式求和、1 个有界 pull Gauge 替换标签、21 个 Gauge 停止�
 | `milvus_datanode_fg_buffer_size` | 按 node、collection 通过 `Add/Sub` 维护 flowgraph buffer 大小。 | `collection_id="all"`，按 `node_id` 求和，继续使用 `Add/Sub`。 |
 | `milvus_querynode_entity_num` | 按 DB、collection ID/name、node、segment state 设置实体数。 | 两个 collection 标签均为 `all`，按 `db_name`, `node_id`, `segment_state` 求和。 |
 | `milvus_querynode_entity_size` | 按 node、collection、segment state 设置实体内存。 | `collection_id="all"`，按 `node_id`, `segment_state` 求和。 |
+| `milvus_querynode_segment_num` | 按 node、collection、segment state/level 统计 segment 数；普通 segment 使用 `Inc/Dec`，L0 原先由各 VChannel 局部 `Set`，现改为随 delete buffer 注册和移除 `Inc/Dec`，累计同一 collection 的各 VChannel。 | `collection_id="all"`，按 `node_id`, `segment_state`, `segment_level` 求和；L0 和普通 segment 均保留。 |
 | `internal_cache_shard_disk_usage_bytes` | C++ caching layer 按 `data_type`, `shard` 导出磁盘占用，其中 `shard` 是 insert VChannel。 | `CRegistry` 在 `/metrics` 输出边界将 `shard="all"`，并按 `data_type` 对各 VChannel 字节数求和。供 QueryCoord shard disk balancer 使用的内部逐 shard stats 保持不变。 |
 
 ## Gauge：1 个有界 pull collector
@@ -137,7 +138,7 @@ Gauge 显式求和、1 个有界 pull Gauge 替换标签、21 个 Gauge 停止�
 |---|---|---|
 | `milvus_qv_view_state_max_age_seconds` | Top-N pull collector 输出真实 `collection_id` 和 `vchannel`，并带 component/state/rank/replica/version。 | collector 仍输出同一批 Top-N 值，但 `collection_id="all"`, `vchannel="all"`；其他标签及 age 不变。 |
 
-## Gauge：21 个在 `aggregate` 下停止导出
+## Gauge：20 个在 `aggregate` 下停止导出
 
 这些指标由多个 collection / VChannel 分别 `Set`，直接把受控标签改为 `all` 会使
 最后一次写入覆盖其他来源。求和对 ratio、lag、checkpoint 等指标也没有稳定含义，
@@ -157,7 +158,6 @@ Gauge 显式求和、1 个有界 pull Gauge 替换标签、21 个 Gauge 停止�
 | `milvus_querycoord_current_target_checkpoint_unix_seconds` | 按 node、VChannel 设置 current target checkpoint 时间。 | 不导出；checkpoint 需要定义 min/max 聚合，不能使用最后写入。 |
 | `milvus_querycoord_current_target_all_replicas_checkpoint_unix_seconds` | 按 node、VChannel 设置所有 replica ready 时的 checkpoint 时间。 | 不导出；原因同 current target checkpoint。 |
 | `milvus_querynode_consume_tt_lag_ms` | 按 node、message type、collection 设置 time-tick lag。 | 不导出；原因同 DataNode lag。 |
-| `milvus_querynode_segment_num` | 按 node、collection、segment state/level 设置 segment 数。 | 不导出；现有 writer 混用 `Inc/Dec` 和 collection 局部 `Set`，直接合并不可靠。 |
 | `milvus_querynode_growing_source_retained_bytes` | 按 node、VChannel 设置 release handoff 保留字节数。 | 不导出；当前 writer 是 VChannel 局部 `Set/Delete`，没有维护跨 VChannel 的增量生命周期。 |
 | `milvus_querynode_growing_source_retained_segments` | 按 node、VChannel 设置 release handoff 保留 segment 数。 | 不导出；原因同 retained bytes。 |
 | `milvus_querynode_segment_prune_ratio` | 每个 collection/prune type 设置 prune ratio。 | 不导出；ratio 需要权重才能合并。 |
