@@ -22,15 +22,20 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
 	"github.com/milvus-io/milvus/internal/views/queryclient"
+	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/util/contextutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
+	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
 func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collectionName string) error {
@@ -109,7 +114,7 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 					mlog.FieldDbName(dbName),
 					mlog.FieldCollectionName(collectionName),
 					mlog.FieldCollectionID(collectionID))
-				status, err := node.LoadCollection(loadCtx, loadRequest)
+				status, err := node.loadCollectionForDQL(loadCtx, loadRequest)
 				if err := merr.CheckRPCCall(status, err); err != nil {
 					return struct{}{}, merr.Wrap(err, "load collection before DQL request")
 				}
@@ -148,4 +153,46 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 		mlog.FieldCollectionID(collectionID),
 		mlog.Duration("wait", time.Since(waitStartedAt)))
 	return nil
+}
+
+// loadCollectionForDQL submits a shared automatic load without a task queue.
+// Blocking the DQL dispatcher on a full main pool would also prevent it from
+// dispatching the requery subtasks needed by the searches occupying that pool.
+func (node *Proxy) loadCollectionForDQL(ctx context.Context, request *milvuspb.LoadCollectionRequest) (*commonpb.Status, error) {
+	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
+		return merr.Status(err), nil
+	}
+
+	ctx, span := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-LoadCollection")
+	defer span.End()
+	tr := timerecord.NewTimeRecorder("LoadCollection")
+	lct := &loadCollectionTask{
+		baseTask:              baseTask{metaCache: node.getMetaCache()},
+		ctx:                   ctx,
+		LoadCollectionRequest: request,
+		mixCoord:              node.mixCoord,
+	}
+	if err := lct.OnEnqueue(); err != nil {
+		return merr.Status(err), nil
+	}
+	// Preserve the request identity normally assigned by the task queue.
+	ts, err := node.tsoAllocator.AllocOne(ctx)
+	if err != nil {
+		return merr.Status(err), nil
+	}
+	lct.SetTs(ts)
+	lct.SetID(UniqueID(ts))
+	if err := lct.PreExecute(ctx); err != nil {
+		return merr.Status(err), nil
+	}
+	if err := lct.Execute(ctx); err != nil {
+		return merr.Status(err), nil
+	}
+	if err := lct.PostExecute(ctx); err != nil {
+		return merr.Status(err), nil
+	}
+	metrics.ProxyReqLatency.WithLabelValues(
+		strconv.FormatInt(paramtable.GetNodeID(), 10), "LoadCollection",
+	).Observe(float64(tr.ElapseSpan().Milliseconds()))
+	return lct.result, nil
 }
