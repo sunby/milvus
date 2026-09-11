@@ -87,6 +87,7 @@ func TestBroadcaster(t *testing.T) {
 			}, nil
 		}).Times(1)
 	done := typeutil.NewConcurrentSet[uint64]()
+	meta.EXPECT().RemoveBroadcastTasks(mock.Anything, mock.Anything).Return(nil).Maybe()
 	meta.EXPECT().SaveBroadcastTask(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, broadcastID uint64, bt *streamingpb.BroadcastTask) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -257,6 +258,15 @@ func TestBroadcastTaskNotCreatedOnStoppedBroadcaster(t *testing.T) {
 	nextGuards, lockErr := locker.FastLock(rk)
 	require.NoError(t, lockErr)
 	nextGuards.Unlock()
+}
+
+func registerDropCollectionNoopCallbacks() {
+	registry.RegisterDropCollectionV1AckCallback(func(ctx context.Context, msg message.BroadcastResultDropCollectionMessageV1) error {
+		return nil
+	})
+	registry.RegisterDropCollectionV1AckOnceCallback(func(ctx context.Context, msg message.AckResultDropCollectionMessageV1) error {
+		return nil
+	})
 }
 
 func createNewBroadcastTask(broadcastID uint64, vchannels []string, rks ...message.ResourceKey) *streamingpb.BroadcastTask {
