@@ -17,6 +17,8 @@ Non-primary clusters reject all broadcasts with `ErrNotPrimary`.
 5. **AckCallback**: CChannel ACK enqueues the task into `ackCallbackScheduler`. The callback executes only after all VChannels are ACKed. For tasks with conflicting ResourceKeys, callbacks execute in CChannel TimeTick order. Callbacks retry with exponential backoff until success.
 6. **Tombstone & GC**: After callbacks complete and TOMBSTONE is persisted, release the callback resource locks before handing the task to `tombstoneScheduler`. Handoff appends to an in-memory queue and coalesces wakeups; catalog deletion runs outside the queue lock. Every queued ID is retained until drained. Recovery rebuilds this queue from durable TOMBSTONE tasks if shutdown interrupts handoff. GC applies the existing count and lifetime limits; a sustained deletion deficit can still grow the queue.
 
+GC removes eligible tombstones in batches bounded by `metastore.maxEtcdTxnNum` (default 64), using exact broadcast-task keys. Each successful batch retires its in-memory tasks and advances the queue; failures retain the batch for idempotent retry, including when the deletion result is ambiguous. Late ACKs on TOMBSTONE or DONE tasks are ignored, so GC deletion holds neither task nor manager locks. Manager shutdown cancels an in-flight deletion; recovery only enqueues records still present in the catalog and does not replay their completed callbacks.
+
 ## Resource Key Locking
 
 Each ResourceKey has: **Domain** (resource type), **Key** (entity identifier), **Shared** (read vs exclusive). Every broadcast automatically acquires SharedCluster.
