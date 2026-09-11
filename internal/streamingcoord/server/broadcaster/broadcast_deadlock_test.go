@@ -373,7 +373,7 @@ func TestRemoveBroadcastTaskDoesNotAcquireTaskLock(t *testing.T) {
 	defer task.mu.Unlock()
 	done := make(chan struct{})
 	go func() {
-		bm.removeBroadcastTask(108)
+		bm.removeBroadcastTasks([]uint64{108})
 		close(done)
 	}()
 	select {

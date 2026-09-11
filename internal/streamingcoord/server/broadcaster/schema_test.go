@@ -149,8 +149,8 @@ func TestSchemaTargetPersistenceBoundary(t *testing.T) {
 		require.Contains(t, bm.tasks, uint64(1), "retirement preserves the tombstone and deduplication")
 		require.NoError(t, task.MarkAckCallbackDone(t.Context()))
 		require.Nil(t, task.schemaForTarget, "completion releases the task's cached schema")
-		require.NoError(t, task.DropTombstone(t.Context()))
-		bm.removeBroadcastTask(1)
+		task.markTombstoneDropped()
+		bm.removeBroadcastTasks([]uint64{1})
 		require.Zero(t, bm.schemaTaskCount(100))
 	})
 }
@@ -197,7 +197,7 @@ func TestSchemaTargetSecondaryAndRecovery(t *testing.T) {
 			if id < 11 {
 				requireSchemaTarget(t, next, 100, id+1)
 			}
-			next.removeBroadcastTask(id)
+			next.removeBroadcastTasks([]uint64{id})
 		}
 		requireSchemaTarget(t, next, 100, 0)
 		requireSchemaTarget(t, next, 999, 0)
