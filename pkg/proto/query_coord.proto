@@ -115,6 +115,8 @@ service QueryCoord {
   rpc RunAnalyzer(RunAnalyzerRequest) returns(milvus.RunAnalyzerResponse){}
   rpc ComputePhraseMatchSlop(ComputePhraseMatchSlopRequest) returns(ComputePhraseMatchSlopResponse){}
   rpc ValidateAnalyzer(ValidateAnalyzerRequest) returns(ValidateAnalyzerResponse){}
+  // Waits for all expected shards to become queryable. Does not initiate load.
+  rpc WaitCollectionReady(WaitCollectionReadyRequest) returns (common.Status) {}
 }
 
 service QueryNode {
@@ -1271,4 +1273,12 @@ message ListLoadedSegmentsRequest {
 message ListLoadedSegmentsResponse {
     common.Status status = 1;
     repeated int64 segmentIDs = 2;
+}
+
+message WaitCollectionReadyRequest {
+    common.MsgBase base = 1;
+    int64 collectionID = 2;
+    repeated string expected_vchannels = 3;
+    // Perform the same readiness check without waiting for state changes.
+    bool check_only = 4;
 }

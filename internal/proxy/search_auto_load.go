@@ -81,12 +81,11 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 		return merr.Wrap(err, "check collection load state before DQL request")
 	}
 
+	loadRequest := &milvuspb.LoadCollectionRequest{DbName: dbName, CollectionName: collectionName}
+	needsLoad := loadState.GetState() == commonpb.LoadState_LoadStateNotLoad
 	switch loadState.GetState() {
 	case commonpb.LoadState_LoadStateNotLoad:
-		loadRequest := &milvuspb.LoadCollectionRequest{
-			DbName:         dbName,
-			CollectionName: collectionName,
-		}
+		// Every caller must authorize its own load before joining shared work.
 		ctx, err = PrivilegeInterceptor(ctx, loadRequest)
 		if err != nil {
 			if grpcstatus.Code(err) == codes.PermissionDenied {
@@ -94,20 +93,26 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 			}
 			return err
 		}
-		resultCh := node.autoLoadCollectionGroup.DoChan(strconv.FormatInt(collectionID, 10), func() (struct{}, error) {
-			loadCtx, cancelLifecycle := contextutil.MergeContext(context.WithoutCancel(ctx), node.ctx)
-			defer cancelLifecycle()
-			loadCtx, cancelTimeout := context.WithTimeout(loadCtx, loadTimeout)
-			defer cancelTimeout()
+	case commonpb.LoadState_LoadStateLoading, commonpb.LoadState_LoadStateLoaded:
+	case commonpb.LoadState_LoadStateNotExist:
+		return merr.WrapErrCollectionNotFoundWithDB(dbName, collectionName)
+	default:
+		return merr.WrapErrServiceInternalMsg("unexpected collection load state %s", loadState.GetState().String())
+	}
 
-			loadState, err := node.GetLoadState(loadCtx, &milvuspb.GetLoadStateRequest{
-				DbName:         dbName,
-				CollectionName: collectionName,
-			})
+	// Share the complete load-and-wait lifecycle, including callers that observe
+	// Loading after another request has already submitted the load.
+	resultCh := node.autoLoadCollectionGroup.DoChan(strconv.FormatInt(collectionID, 10), func() (struct{}, error) {
+		loadCtx, cancelLifecycle := contextutil.MergeContext(context.WithoutCancel(ctx), node.ctx)
+		defer cancelLifecycle()
+		loadCtx, cancelTimeout := context.WithTimeout(loadCtx, loadTimeout)
+		defer cancelTimeout()
+
+		if needsLoad {
+			loadState, err := node.GetLoadState(loadCtx, &milvuspb.GetLoadStateRequest{DbName: dbName, CollectionName: collectionName})
 			if err := merr.CheckRPCCall(loadState, err); err != nil {
 				return struct{}{}, merr.Wrap(err, "recheck collection load state before DQL request")
 			}
-
 			switch loadState.GetState() {
 			case commonpb.LoadState_LoadStateNotLoad:
 				mlog.Info(loadCtx, "load collection before DQL request",
@@ -124,35 +129,25 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 			default:
 				return struct{}{}, merr.WrapErrServiceInternalMsg("unexpected collection load state %s", loadState.GetState().String())
 			}
-			return struct{}{}, nil
-		})
-		select {
-		case result := <-resultCh:
-			if result.Err != nil {
-				return result.Err
-			}
-		case <-ctx.Done():
+		}
+		waitStartedAt := time.Now()
+		if err := readiness.WaitForCollectionReady(loadCtx, collectionID, collectionInfo.VChannels); err != nil {
+			return struct{}{}, err
+		}
+		mlog.Info(loadCtx, "[load on search] wait collection ready done",
+			mlog.FieldDbName(dbName), mlog.FieldCollectionName(collectionName),
+			mlog.FieldCollectionID(collectionID), mlog.Duration("wait", time.Since(waitStartedAt)))
+		return struct{}{}, nil
+	})
+	select {
+	case result := <-resultCh:
+		if err := ctx.Err(); err != nil {
 			return context.Cause(ctx)
 		}
-	case commonpb.LoadState_LoadStateLoading, commonpb.LoadState_LoadStateLoaded:
-		// Recheck QueryCoord readiness below after load submission or while
-		// the collection's query views are still becoming available.
-	case commonpb.LoadState_LoadStateNotExist:
-		return merr.WrapErrCollectionNotFoundWithDB(dbName, collectionName)
-	default:
-		return merr.WrapErrServiceInternalMsg("unexpected collection load state %s", loadState.GetState().String())
+		return result.Err
+	case <-ctx.Done():
+		return context.Cause(ctx)
 	}
-
-	waitStartedAt := time.Now()
-	if err := readiness.WaitForCollectionReady(ctx, collectionID, collectionInfo.VChannels); err != nil {
-		return err
-	}
-	mlog.Info(ctx, "[load on search] wait collection ready done",
-		mlog.FieldDbName(dbName),
-		mlog.FieldCollectionName(collectionName),
-		mlog.FieldCollectionID(collectionID),
-		mlog.Duration("wait", time.Since(waitStartedAt)))
-	return nil
 }
 
 // loadCollectionForDQL submits a shared automatic load without a task queue.

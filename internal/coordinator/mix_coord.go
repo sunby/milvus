@@ -1057,6 +1057,10 @@ func (s *mixCoordImpl) ListCheckers(ctx context.Context, req *querypb.ListChecke
 	return s.queryCoordServer.ListCheckers(ctx, req)
 }
 
+func (s *mixCoordImpl) WaitCollectionReady(ctx context.Context, req *querypb.WaitCollectionReadyRequest) (*commonpb.Status, error) {
+	return s.queryCoordServer.WaitCollectionReady(ctx, req)
+}
+
 func (s *mixCoordImpl) ShowLoadCollections(ctx context.Context, req *querypb.ShowCollectionsRequest) (*querypb.ShowCollectionsResponse, error) {
 	return s.queryCoordServer.ShowLoadCollections(ctx, req)
 }

@@ -18,126 +18,88 @@ package proxy
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	grpcstatus "google.golang.org/grpc/status"
 
+	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
-func TestCheckCollectionReadyUsesQueryCoordReadiness(t *testing.T) {
-	tests := []struct {
-		name string
-		resp *querypb.ShowCollectionsResponse
-		err  error
-		want error
-	}{
-		{
-			name: "loaded",
-			resp: &querypb.ShowCollectionsResponse{
-				Status: merr.Success(), CollectionIDs: []int64{100}, QueryServiceAvailable: []bool{true},
-			},
-		},
-		{
-			name: "views not yet available",
-			resp: &querypb.ShowCollectionsResponse{
-				Status: merr.Success(), CollectionIDs: []int64{100}, QueryServiceAvailable: []bool{false},
-			},
-			want: merr.ErrCollectionNotLoaded,
-		},
-		{
-			name: "another collection cannot satisfy readiness",
-			resp: &querypb.ShowCollectionsResponse{
-				Status: merr.Success(), CollectionIDs: []int64{101}, QueryServiceAvailable: []bool{true},
-			},
-			want: merr.ErrCollectionNotLoaded,
-		},
-		{
-			name: "released",
-			resp: &querypb.ShowCollectionsResponse{Status: merr.Status(merr.WrapErrCollectionNotLoaded(100))},
-			want: merr.ErrCollectionNotLoaded,
-		},
-		{
-			name: "querycoord error is preserved",
-			resp: &querypb.ShowCollectionsResponse{Status: merr.Status(merr.WrapErrServiceUnavailableMsg("recovering"))},
-			want: merr.ErrServiceUnavailable,
-		},
-		{
-			name: "transport error is preserved",
-			err:  context.DeadlineExceeded,
-			want: context.DeadlineExceeded,
-		},
-		{
-			name: "malformed readiness response",
-			resp: &querypb.ShowCollectionsResponse{Status: merr.Success(), CollectionIDs: []int64{100}},
-			want: merr.ErrServiceInternal,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
+func TestCollectionReadinessUsesOneRPC(t *testing.T) {
+	for _, checkOnly := range []bool{true, false} {
+		for _, want := range []error{nil, merr.ErrCollectionNotLoaded, merr.ErrServiceUnavailable} {
+			calls := 0
 			node := &Proxy{mixCoord: &MixCoordMock{
-				ShowLoadCollectionsFunc: func(_ context.Context, req *querypb.ShowCollectionsRequest, _ ...grpc.CallOption) (*querypb.ShowCollectionsResponse, error) {
-					require.Equal(t, []int64{100}, req.GetCollectionIDs())
-					return test.resp, test.err
+				WaitCollectionReadyFunc: func(_ context.Context, req *querypb.WaitCollectionReadyRequest, _ ...grpc.CallOption) (*commonpb.Status, error) {
+					calls++
+					require.EqualValues(t, 100, req.GetCollectionID())
+					require.Equal(t, []string{"v0", "v1"}, req.GetExpectedVchannels())
+					require.Equal(t, checkOnly, req.GetCheckOnly())
+					return merr.Status(want), nil
+				},
+				ShowLoadCollectionsFunc: func(context.Context, *querypb.ShowCollectionsRequest, ...grpc.CallOption) (*querypb.ShowCollectionsResponse, error) {
+					t.Fatal("readiness must not poll ShowLoadCollections")
+					return nil, nil
 				},
 			}}
-			err := node.CheckCollectionReady(context.Background(), 100, []string{"v0", "v1"})
-			if test.want == nil {
-				require.NoError(t, err)
+			var err error
+			if checkOnly {
+				err = node.CheckCollectionReady(context.Background(), 100, []string{"v0", "v1"})
 			} else {
-				require.ErrorIs(t, err, test.want)
+				err = node.WaitForCollectionReady(context.Background(), 100, []string{"v0", "v1"})
 			}
-		})
+			require.ErrorIs(t, err, want)
+			require.Equal(t, 1, calls)
+		}
 	}
 }
 
-func TestWaitForCollectionReadyUsesQueryCoord(t *testing.T) {
-	t.Run("waits until query service is available", func(t *testing.T) {
-		calls := 0
-		node := &Proxy{mixCoord: &MixCoordMock{
-			ShowLoadCollectionsFunc: func(context.Context, *querypb.ShowCollectionsRequest, ...grpc.CallOption) (*querypb.ShowCollectionsResponse, error) {
-				calls++
-				return &querypb.ShowCollectionsResponse{
-					Status: merr.Success(), CollectionIDs: []int64{100}, QueryServiceAvailable: []bool{calls >= 3},
-				}, nil
-			},
-		}}
-		require.NoError(t, node.WaitForCollectionReady(context.Background(), 100, []string{"v0"}))
-		require.Equal(t, 3, calls)
-	})
+func TestCollectionReadinessCancellationDoesNotPoll(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	var calls atomic.Int32
+	node := &Proxy{mixCoord: &MixCoordMock{
+		WaitCollectionReadyFunc: func(ctx context.Context, _ *querypb.WaitCollectionReadyRequest, _ ...grpc.CallOption) (*commonpb.Status, error) {
+			calls.Add(1)
+			close(started)
+			<-ctx.Done()
+			return nil, grpcstatus.FromContextError(ctx.Err()).Err()
+		},
+	}}
+	result := make(chan error, 1)
+	go func() { result <- node.WaitForCollectionReady(ctx, 100, []string{"v0"}) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("RPC did not start")
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("wait returned before cancellation: %v", err)
+	case <-time.After(35 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-result:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("RPC did not stop on cancellation")
+	}
+	require.EqualValues(t, 1, calls.Load())
+}
 
-	t.Run("cancellation stops waiting", func(t *testing.T) {
-		ctx, cancel := context.WithCancelCause(context.Background())
-		defer cancel(nil)
-		calls := 0
-		node := &Proxy{mixCoord: &MixCoordMock{
-			ShowLoadCollectionsFunc: func(context.Context, *querypb.ShowCollectionsRequest, ...grpc.CallOption) (*querypb.ShowCollectionsResponse, error) {
-				calls++
-				cancel(context.DeadlineExceeded)
-				return &querypb.ShowCollectionsResponse{Status: merr.Status(merr.WrapErrCollectionNotLoaded(100))}, nil
-			},
-		}}
-		require.ErrorIs(t, node.WaitForCollectionReady(ctx, 100, []string{"v0"}), context.DeadlineExceeded)
-		require.Equal(t, 1, calls)
-	})
-
-	t.Run("other errors do not loop", func(t *testing.T) {
-		calls := 0
-		node := &Proxy{mixCoord: &MixCoordMock{
-			ShowLoadCollectionsFunc: func(context.Context, *querypb.ShowCollectionsRequest, ...grpc.CallOption) (*querypb.ShowCollectionsResponse, error) {
-				calls++
-				return &querypb.ShowCollectionsResponse{Status: merr.Status(merr.WrapErrServiceInternalMsg("failed"))}, nil
-			},
-		}}
-		require.ErrorIs(t, node.WaitForCollectionReady(context.Background(), 100, []string{"v0"}), merr.ErrServiceInternal)
-		require.Equal(t, 1, calls)
-	})
-
-	t.Run("empty topology does not wait", func(t *testing.T) {
-		node := &Proxy{}
-		require.ErrorIs(t, node.CheckCollectionReady(context.Background(), 100, nil), merr.ErrCollectionNotLoaded)
-		require.ErrorIs(t, node.WaitForCollectionReady(context.Background(), 100, nil), merr.ErrCollectionNotLoaded)
-	})
+func TestCollectionReadinessRejectsEmptyTopologyAndCanceledContext(t *testing.T) {
+	node := &Proxy{}
+	require.ErrorIs(t, node.CheckCollectionReady(context.Background(), 100, nil), merr.ErrCollectionNotLoaded)
+	require.ErrorIs(t, node.WaitForCollectionReady(context.Background(), 100, nil), merr.ErrCollectionNotLoaded)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(context.DeadlineExceeded)
+	require.ErrorIs(t, node.WaitForCollectionReady(ctx, 100, []string{"v0"}), context.DeadlineExceeded)
 }
