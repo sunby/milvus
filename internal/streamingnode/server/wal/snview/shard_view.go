@@ -254,20 +254,8 @@ func (s *snShardView) applyOneLocked(av *handler.ApplyView) {
 					s.notifyUnrecoverable(version)
 				},
 			})
-		case qviews.QueryViewStateDropped:
-			// View doesn't exist (e.g., SN restarted). Report Dropped immediately
-			// so Coord can finish cleanup.
-			if av.OnReport != nil {
-				av.OnReport(av.View)
-			}
 		default:
-			// View unknown to this node (e.g., state lost after restart).
-			// Report Unrecoverable so Coord can generate a replacement view.
-			if av.OnReport != nil {
-				pb := av.View.IntoProto()
-				pb.Meta.State = viewpb.QueryViewState(qviews.QueryViewStateUnrecoverable)
-				av.OnReport(qviews.NewQueryViewAtWorkNodeFromProto(pb))
-			}
+			reportUnknownView(av)
 		}
 		return
 	}
@@ -290,6 +278,21 @@ func (s *snShardView) applyOneLocked(av *handler.ApplyView) {
 		},
 	})
 	s.consumeReportPersistAndCleanup(key.QueryViewVersion, entry)
+}
+
+// reportUnknownView lets Coord finish cleanup of a lost view or replace it.
+// Preparing views must be handled by a shard's state machine instead.
+func reportUnknownView(av *handler.ApplyView) {
+	if av.OnReport == nil {
+		return
+	}
+	if av.View.State() == qviews.QueryViewStateDropped {
+		av.OnReport(av.View)
+		return
+	}
+	pb := av.View.IntoProto()
+	pb.Meta.State = viewpb.QueryViewState(qviews.QueryViewStateUnrecoverable)
+	av.OnReport(qviews.NewQueryViewAtWorkNodeFromProto(pb))
 }
 
 // retireSupersededRecoveredViewsLocked removes startup-only views that are no

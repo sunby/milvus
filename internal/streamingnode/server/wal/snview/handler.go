@@ -73,6 +73,9 @@ type SNQueryViewHandler struct {
 	catalog          metastore.StreamingNodeCataLog
 	resMgr           StreamingNodeResourceManager
 	localOptimizer   optimizer.LocalOptimizer
+	// Unknown-view reports have no shard lock for CloseForHandoff to drain.
+	// Add is serialized with the closed check under mu; Wait runs after close.
+	unknownReportsWG sync.WaitGroup
 }
 
 type QueryViewLease struct {
@@ -163,8 +166,12 @@ func (h *SNQueryViewHandler) ApplyViews(views []handler.ApplyView) {
 
 	// Apply each group atomically under the shard lock.
 	for shardID, shardViews := range grouped {
-		shard := h.getOrCreateShard(shardID)
+		shard, closed := h.getShardForApply(shardID, shardViews)
+		if closed {
+			continue
+		}
 		if shard == nil {
+			h.reportUnknownViews(shardViews)
 			continue
 		}
 		shard.ApplyViews(shardViews)
@@ -185,6 +192,23 @@ func (h *SNQueryViewHandler) CloseForHandoff() {
 	for _, shard := range shards {
 		shard.CloseForHandoff()
 	}
+	h.unknownReportsWG.Wait()
+}
+
+// reportUnknownViews drains a batch registered by getShardForApply without
+// holding h.mu, preserving the shard's Up-first report ordering.
+func (h *SNQueryViewHandler) reportUnknownViews(views []handler.ApplyView) {
+	defer h.unknownReportsWG.Done()
+	for i := range views {
+		if views[i].View.State() == qviews.QueryViewStateUp {
+			reportUnknownView(&views[i])
+		}
+	}
+	for i := range views {
+		if views[i].View.State() != qviews.QueryViewStateUp {
+			reportUnknownView(&views[i])
+		}
+	}
 }
 
 func (h *SNQueryViewHandler) AcquireLatestUpView(ctx context.Context, shardID qviews.ShardID) (*QueryViewLease, error) {
@@ -194,47 +218,71 @@ func (h *SNQueryViewHandler) AcquireLatestUpView(ctx context.Context, shardID qv
 	default:
 	}
 	h.mu.Lock()
-	shard := h.shards[shardID]
-	if shard == nil && shardID.ReplicaID == qviews.UnknownReplicaID {
-		// The client resolves shards by vchannel only and carries an unknown
-		// replica ID before Phase 1; resolve through the vchannel index.
-		// A vchannel may be served by several replicas (one shard per replica);
-		// the lookup picks one of them — unambiguous under the single-replica
-		// semantics the query client targets.
-		if shardIDs, ok := h.shardsByVChannel[shardID.VChannel]; ok {
-			for indexed := range shardIDs {
-				shard = h.shards[indexed]
-				break
-			}
+	if shardID.ReplicaID != qviews.UnknownReplicaID {
+		shard := h.shards[shardID]
+		h.mu.Unlock()
+		if shard == nil {
+			return nil, viewerror.NewViewNotFound("query view %s is not found", shardID.String())
+		}
+		return shard.acquireLatestUpView(ctx)
+	}
+
+	// Replica lifecycles can overlap on the same vchannel. Snapshot all
+	// candidates, then acquire without h.mu: shard cleanup takes s.mu -> h.mu.
+	shards := make([]*snShardView, 0, len(h.shardsByVChannel[shardID.VChannel]))
+	for indexed := range h.shardsByVChannel[shardID.VChannel] {
+		if shard := h.shards[indexed]; shard != nil {
+			shards = append(shards, shard)
 		}
 	}
 	h.mu.Unlock()
-	if shard == nil {
-		return nil, viewerror.NewViewNotFound("query view %s is not found", shardID.String())
-	}
-	return shard.acquireLatestUpView(ctx)
+	return acquireLatestUpViewFromShards(ctx, shardID, shards)
 }
 
-func (h *SNQueryViewHandler) getOrCreateShard(shardID qviews.ShardID) *snShardView {
+func acquireLatestUpViewFromShards(ctx context.Context, shardID qviews.ShardID, shards []*snShardView) (*QueryViewLease, error) {
+	for _, shard := range shards {
+		lease, err := shard.acquireLatestUpView(ctx)
+		if err == nil {
+			return lease, nil
+		}
+		if !viewerror.AsViewError(err).IsViewNotFound() {
+			return nil, err
+		}
+	}
+	return nil, viewerror.NewViewNotFound("query view %s is not found", shardID.String())
+}
+
+// getShardForApply creates a shard only when the complete batch contains a
+// Preparing view. Other pushes for a missing shard only need a state report;
+// registering an empty shard would leave a stale query-planning candidate.
+func (h *SNQueryViewHandler) getShardForApply(shardID qviews.ShardID, views []handler.ApplyView) (shard *snShardView, closed bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return nil
+		return nil, true
 	}
-	shard, ok := h.shards[shardID]
-	if !ok {
-		shard = &snShardView{
-			pchannel: h.pchannel,
-			shardID:  shardID,
-			views:    make(map[qviews.QueryViewVersion]*snViewEntry),
-			catalog:  h.catalog,
-			resMgr:   h.resMgr,
-			onEmpty:  h.makeOnEmpty(shardID),
+	if shard := h.shards[shardID]; shard != nil {
+		return shard, false
+	}
+	for _, view := range views {
+		if view.View.State() == qviews.QueryViewStatePreparing {
+			shard := &snShardView{
+				pchannel: h.pchannel,
+				shardID:  shardID,
+				views:    make(map[qviews.QueryViewVersion]*snViewEntry),
+				catalog:  h.catalog,
+				resMgr:   h.resMgr,
+				onEmpty:  h.makeOnEmpty(shardID),
+			}
+			h.shards[shardID] = shard
+			h.indexShardLocked(shardID)
+			return shard, false
 		}
-		h.shards[shardID] = shard
-		h.indexShardLocked(shardID)
 	}
-	return shard
+	// Register before unlocking, so CloseForHandoff cannot finish before
+	// this batch's reports and no Add can race with Wait after close.
+	h.unknownReportsWG.Add(1)
+	return nil, false
 }
 
 // indexShardLocked registers shardID in the vchannel secondary index.
