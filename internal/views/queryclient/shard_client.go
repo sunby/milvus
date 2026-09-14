@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/proto"
 
@@ -11,10 +13,12 @@ import (
 	"github.com/milvus-io/milvus/internal/views/queryclient/reducer"
 	"github.com/milvus-io/milvus/internal/views/qviews"
 	"github.com/milvus-io/milvus/internal/views/viewerror"
+	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
@@ -156,6 +160,7 @@ func (s *shardViewQueryClient) executeShard(
 
 	for attempt := 0; attempt < s.maxRetries; attempt++ {
 		attemptStart := time.Now()
+		metrics.QueryStageItems.WithLabelValues("proxy", "shard_query", "attempt", "attempts").Inc()
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -170,7 +175,9 @@ func (s *shardViewQueryClient) executeShard(
 			mlog.FieldVChannel(vchannel),
 			mlog.Int("attempt", attempt+1))
 		planStart := time.Now()
-		plan, err := s.executeGetQueryPlan(ctx, targetShardID, planReq, params)
+		planCtx, planTimer := clientPlan.Start(ctx)
+		plan, err := s.executeGetQueryPlan(planCtx, targetShardID, planReq, params)
+		planTimer.End(err)
 		if err != nil {
 			if ve := viewerror.AsViewError(err); ve != nil && ve.IsRetryable() {
 				lastErr = err
@@ -185,7 +192,9 @@ func (s *shardViewQueryClient) executeShard(
 
 		// Phase 2: Fan out to all work nodes concurrently.
 		fanoutStart := time.Now()
-		err = s.fanOutToWorkNodes(ctx, workNodes, plan, shardID, params.dispatchNode)
+		fanoutCtx, fanoutTimer := clientFanout.Start(ctx)
+		err = s.fanOutToWorkNodes(fanoutCtx, workNodes, plan, shardID, params.dispatchNode)
+		fanoutTimer.End(err)
 		fanoutDuration := time.Since(fanoutStart)
 		if err != nil {
 			if ve := viewerror.AsViewError(err); ve != nil && ve.IsRetryable() {
@@ -263,7 +272,14 @@ func (s *shardViewQueryClient) fanOutToWorkNodes(
 	for _, node := range workNodes {
 		node := node
 		g.Go(func() error {
-			return dispatchNode(gCtx, node, plan, shardID)
+			nodeCtx, nodeTimer := clientDispatch.Start(gCtx)
+			sp := trace.SpanFromContext(nodeCtx)
+			if sp.IsRecording() {
+				sp.SetAttributes(attribute.String("view.shard", shardID.String()), attribute.String("view.version", qviews.FromProtoQueryViewVersion(plan.GetVersion()).String()), attribute.String("work_node", node.String()))
+			}
+			err := dispatchNode(nodeCtx, node, plan, shardID)
+			nodeTimer.End(err)
+			return err
 		})
 	}
 	return g.Wait()
@@ -314,3 +330,10 @@ func workNodesFromPlan(plan *viewpb.QueryPlan) []qviews.WorkNode {
 	}
 	return nodes
 }
+
+var (
+	clientPlan   = stage.New("proxy", "shard_query", "get_plan")
+	clientFanout = stage.New("proxy", "shard_query", "fanout")
+)
+
+var clientDispatch = stage.New("proxy", "shard_query", "node_dispatch")

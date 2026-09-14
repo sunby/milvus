@@ -12,6 +12,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 // Server implements ViewQueryService as a thin provider+scheduler adapter.
@@ -93,7 +94,10 @@ func (s *Server) executeAdvancedSearch(ctx context.Context, req *viewpb.SearchOn
 	return assembleAdvancedSearchResults(results), nil
 }
 
-func (s *Server) executeSearch(ctx context.Context, req *viewpb.SearchOnViewRequest, searchReq *internalpb.SearchRequest) (*internalpb.SearchResults, error) {
+func (s *Server) executeSearch(ctx context.Context, req *viewpb.SearchOnViewRequest, searchReq *internalpb.SearchRequest) (retResp *internalpb.SearchResults, retErr error) {
+	ctx, totalTimer := workerQueryTotal.Start(ctx)
+	defer totalTimer.EndError(&retErr)
+	acquireTimer := workerQueryAcquire.Begin()
 	tasks, err := s.provider.AcquireSearchSegmentTasks(
 		ctx,
 		qviews.FromProtoShardID(req.GetShardId()),
@@ -101,6 +105,7 @@ func (s *Server) executeSearch(ctx context.Context, req *viewpb.SearchOnViewRequ
 		req.GetMvcc(),
 		searchReq,
 	)
+	acquireTimer.End(err)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +114,9 @@ func (s *Server) executeSearch(ctx context.Context, req *viewpb.SearchOnViewRequ
 		return emptySearchResults(searchReq), nil
 	}
 
-	result, err := s.scheduler.Search(ctx, tasks)
+	executeCtx, executeTimer := workerQueryExecute.Start(ctx)
+	result, err := s.scheduler.Search(executeCtx, tasks)
+	executeTimer.End(err)
 	if err != nil {
 		return nil, err
 	}
@@ -145,3 +152,9 @@ func (s *Server) QueryOnView(ctx context.Context, req *viewpb.QueryOnViewRequest
 func (s *Server) RequeryOnView(context.Context, *viewpb.RequeryOnViewRequest) (*viewpb.RequeryOnViewResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "RequeryOnView is not implemented")
 }
+
+var (
+	workerQueryTotal   = stage.New("worker", "Search", "total")
+	workerQueryAcquire = stage.New("worker", "Search", "acquire_tasks")
+	workerQueryExecute = stage.New("worker", "Search", "execute_tasks")
+)

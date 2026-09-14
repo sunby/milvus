@@ -8,6 +8,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 var _ viewquery.TaskProvider = (*SNQueryViewHandler)(nil)
@@ -22,13 +23,18 @@ func (h *SNQueryViewHandler) AcquireSearchSegmentTasks(
 	if req.GetIgnoreGrowing() {
 		return NewSNSearchSegmentTasks(nil), nil
 	}
-	lease, err := h.AcquireUpView(ctx, shardID, version)
+	leaseCtx, leaseTimer := queryLease.Start(ctx)
+	lease, err := h.AcquireUpView(leaseCtx, shardID, version)
+	leaseTimer.End(err)
 	if err != nil {
 		return nil, err
 	}
 	defer lease.Release()
 
-	if err := h.localOptimizer.OptimizeSearch(ctx, req); err != nil {
+	queryOptimizeCtx, queryOptimizeTimer := queryOptimize.Start(ctx)
+	queryOptimizeErr := h.localOptimizer.OptimizeSearch(queryOptimizeCtx, req)
+	queryOptimizeTimer.End(queryOptimizeErr)
+	if err := queryOptimizeErr; err != nil {
 		return nil, err
 	}
 	runtime, err := h.queryRuntime(qviews.QueryViewKey{ShardID: shardID, QueryViewVersion: version})
@@ -42,10 +48,15 @@ func (h *SNQueryViewHandler) AcquireSearchSegmentTasks(
 		mlog.Uint64("growingTimeTick", mvcc.GetGrowingTimetick()),
 		mlog.Uint64("transformingTimeTick", mvcc.GetTransformingTimetick()),
 	)
-	if err := runtime.WaitMVCCVisible(ctx, mvcc.GetGrowingTimetick(), mvcc.GetTransformingTimetick()); err != nil {
+	queryVisibleCtx, queryVisibleTimer := queryVisible.Start(ctx)
+	queryVisibleErr := runtime.WaitMVCCVisible(queryVisibleCtx, mvcc.GetGrowingTimetick(), mvcc.GetTransformingTimetick())
+	queryVisibleTimer.End(queryVisibleErr)
+	if err := queryVisibleErr; err != nil {
 		return nil, err
 	}
-	handles, err := runtime.AcquireGrowingSegmentHandles(ctx, selectedPartitionIDs(req.GetPartitionIDs()))
+	handlesCtx, handlesTimer := queryHandles.Start(ctx)
+	handles, err := runtime.AcquireGrowingSegmentHandles(handlesCtx, selectedPartitionIDs(req.GetPartitionIDs()))
+	handlesTimer.End(err)
 	if err != nil {
 		return nil, err
 	}
@@ -73,13 +84,18 @@ func (h *SNQueryViewHandler) AcquireQuerySegmentTasks(
 	mvcc *viewpb.QueryPlanMVCC,
 	req *internalpb.RetrieveRequest,
 ) (viewquery.QuerySegmentTasks, error) {
-	lease, err := h.AcquireUpView(ctx, shardID, version)
+	leaseCtx, leaseTimer := queryLease.Start(ctx)
+	lease, err := h.AcquireUpView(leaseCtx, shardID, version)
+	leaseTimer.End(err)
 	if err != nil {
 		return nil, err
 	}
 	defer lease.Release()
 
-	if err := h.localOptimizer.OptimizeRetrieve(ctx, req); err != nil {
+	queryOptimizeCtx, queryOptimizeTimer := queryOptimize.Start(ctx)
+	queryOptimizeErr := h.localOptimizer.OptimizeRetrieve(queryOptimizeCtx, req)
+	queryOptimizeTimer.End(queryOptimizeErr)
+	if err := queryOptimizeErr; err != nil {
 		return nil, err
 	}
 	runtime, err := h.queryRuntime(qviews.QueryViewKey{ShardID: shardID, QueryViewVersion: version})
@@ -93,10 +109,15 @@ func (h *SNQueryViewHandler) AcquireQuerySegmentTasks(
 		mlog.Uint64("growingTimeTick", mvcc.GetGrowingTimetick()),
 		mlog.Uint64("transformingTimeTick", mvcc.GetTransformingTimetick()),
 	)
-	if err := runtime.WaitMVCCVisible(ctx, mvcc.GetGrowingTimetick(), mvcc.GetTransformingTimetick()); err != nil {
+	queryVisibleCtx, queryVisibleTimer := queryVisible.Start(ctx)
+	queryVisibleErr := runtime.WaitMVCCVisible(queryVisibleCtx, mvcc.GetGrowingTimetick(), mvcc.GetTransformingTimetick())
+	queryVisibleTimer.End(queryVisibleErr)
+	if err := queryVisibleErr; err != nil {
 		return nil, err
 	}
-	handles, err := runtime.AcquireGrowingSegmentHandles(ctx, selectedPartitionIDs(req.GetPartitionIDs()))
+	handlesCtx, handlesTimer := queryHandles.Start(ctx)
+	handles, err := runtime.AcquireGrowingSegmentHandles(handlesCtx, selectedPartitionIDs(req.GetPartitionIDs()))
+	handlesTimer.End(err)
 	if err != nil {
 		return nil, err
 	}
@@ -116,3 +137,10 @@ func (h *SNQueryViewHandler) AcquireQuerySegmentTasks(
 	}
 	return NewSNQuerySegmentTasks(tasks), nil
 }
+
+var (
+	queryLease    = stage.New("streamingNode", "query_acquire", "lease")
+	queryOptimize = stage.New("streamingNode", "query_acquire", "local_optimize")
+	queryVisible  = stage.New("streamingNode", "query_acquire", "visibility_wait")
+	queryHandles  = stage.New("streamingNode", "query_acquire", "segment_handles")
+)

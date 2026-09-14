@@ -14,6 +14,7 @@ import (
 	"github.com/milvus-io/milvus/internal/views/viewerror"
 	"github.com/milvus-io/milvus/internal/views/worknode/handler"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 // snShardView manages all query view state machines for a single shard on a StreamingNode.
@@ -157,6 +158,7 @@ func (s *snShardView) CloseForHandoff() {
 	var wg sync.WaitGroup
 	wg.Add(len(releases))
 	for _, key := range releases {
+		qvobserve.CancelView("streamingNode", key)
 		k := key
 		s.resMgr.Release(ReleaseResource{
 			Key: k,
@@ -470,7 +472,10 @@ func (s *snShardView) consumeAndPersist(entry *snViewEntry) {
 		View:  entry.View.QueryViewKey(),
 		State: qviews.QueryViewState(persist.GetMeta().GetState()),
 	})
-	if err := s.catalog.SaveQueryViews(context.Background(), s.pchannel, []*viewpb.QueryViewOfShard{persist}); err != nil {
+	persistTimer := snCatalogSave.Begin()
+	persistErr := s.catalog.SaveQueryViews(context.Background(), s.pchannel, []*viewpb.QueryViewOfShard{persist})
+	persistTimer.End(persistErr)
+	if err := persistErr; err != nil {
 		panic(fmt.Sprintf("persist query view %s failed: %v", persist.GetMeta().GetVchannel(), err))
 	}
 }
@@ -505,3 +510,5 @@ func (s *snShardView) releaseQueryResourceLocked(version qviews.QueryViewVersion
 func collectionIDForEntry(entry *snViewEntry) int64 {
 	return entry.sm.Meta().GetCollectionId()
 }
+
+var snCatalogSave = stage.New("streamingNode", "view_load", "catalog_save")

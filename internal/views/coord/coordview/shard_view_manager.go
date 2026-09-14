@@ -9,6 +9,7 @@ import (
 	"github.com/milvus-io/milvus/internal/views/qviews"
 	qvobserve "github.com/milvus-io/milvus/internal/views/qviews/observe"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 // ShardViewManager manages multiple QueryViews for a single shard (vchannel)
@@ -56,6 +57,14 @@ type syncEntry struct {
 	sm    *CoordQueryViewStateMachine
 	views []qviews.QueryViewAtWorkNode
 }
+
+var (
+	prepareDuration      = stage.New("coord", "apply", "prepare")
+	preparePin           = stage.New("coord", "apply", "pin_dataview")
+	prepareLock          = stage.New("coord", "apply", "shard_lock_wait")
+	publishStatsDuration = stage.New("coord", "apply", "publish_stats")
+	reportDuration       = stage.New("coord", "sync", "apply_report")
+)
 
 // newShardViewManager creates a new ShardViewManager for the given shard.
 //
@@ -310,13 +319,19 @@ func segmentSet(segments []int64) map[int64]bool {
 // (injected with synthetic Unrecoverable → Dropping).
 //
 // Validation: The new DataVersion must not be lower than any existing view's DataVersion.
-func (m *ShardViewManager) AddPreparing(ctx context.Context, builder *qviews.QueryViewAtCoordBuilder) error {
+func (m *ShardViewManager) AddPreparing(ctx context.Context, builder *qviews.QueryViewAtCoordBuilder) (retErr error) {
+	ctx, timer := prepareDuration.Start(ctx)
+	defer timer.EndError(&retErr)
+	lockTimer := prepareLock.Begin()
 	m.mu.Lock()
+	lockTimer.End(nil)
+	holdTimer := prepareHold.Begin()
 
 	newDV := builder.DataVersion()
 
 	// Validate no DataVersion rollback.
 	if err := m.validateDataVersionLocked(newDV); err != nil {
+		holdTimer.End(nil)
 		m.mu.Unlock()
 		return err
 	}
@@ -327,7 +342,11 @@ func (m *ShardViewManager) AddPreparing(ctx context.Context, builder *qviews.Que
 	builder.SetQueryVersion(qv)
 	view := builder.Build()
 	sm := NewCoordQueryViewStateMachine(view)
-	if err := m.dataViewReferences.PinDataView(ctx, view.GetMeta().GetCollectionId(), newDV); err != nil {
+	pinCtx, pinTimer := preparePin.Start(ctx)
+	pinErr := m.dataViewReferences.PinDataView(pinCtx, view.GetMeta().GetCollectionId(), newDV)
+	pinTimer.End(pinErr)
+	if err := pinErr; err != nil {
+		holdTimer.End(nil)
 		m.mu.Unlock()
 		return err
 	}
@@ -369,6 +388,7 @@ func (m *ShardViewManager) AddPreparing(ctx context.Context, builder *qviews.Que
 	// Move all accumulated effects into one shard-scoped event.
 	event := m.consumeDirtyEventLocked()
 	m.publishStatsLocked()
+	holdTimer.End(nil)
 	m.mu.Unlock()
 	m.submitDirtyEvent(event)
 	return nil
@@ -381,7 +401,9 @@ func (m *ShardViewManager) AddPreparing(ctx context.Context, builder *qviews.Que
 // - Down/Dropping views: already tearing down, no-op.
 //
 // The actual cleanup completes asynchronously through callbacks.
-func (m *ShardViewManager) RequestRelease(ctx context.Context) error {
+func (m *ShardViewManager) RequestRelease(ctx context.Context) (retErr error) {
+	ctx, timer := releaseDuration.Start(ctx)
+	defer timer.EndError(&retErr)
 	m.mu.Lock()
 
 	if m.preparingView != nil {
@@ -580,6 +602,8 @@ func (m *ShardViewManager) consumeDirtyEventLocked() dirtyViewEvent {
 // Returns true when this node has completed the sync represented by target.
 func (m *ShardViewManager) makeOnSyncResponse(version qviews.QueryViewVersion, target qviews.QueryViewAtWorkNode) func(resp qviews.QueryViewAtWorkNode) bool {
 	return func(resp qviews.QueryViewAtWorkNode) bool {
+		timer := reportDuration.Begin()
+		defer timer.End(nil)
 		m.mu.Lock()
 
 		sm, ok := m.views[version]
@@ -712,6 +736,8 @@ func queryViewSegmentProgress(sm *CoordQueryViewStateMachine) (int, int) {
 }
 
 func (m *ShardViewManager) publishStatsLocked() {
+	timer := publishStatsDuration.Begin()
+	defer timer.End(nil)
 	if m.observe != nil {
 		m.observe(m.shardID, m.statsLocked())
 	}
@@ -815,3 +841,8 @@ func (m *ShardViewManager) nextQueryVersion(newDV qviews.DataVersion) int64 {
 	}
 	return maxQV + 1
 }
+
+var (
+	prepareHold     = stage.New("coord", "apply", "shard_lock_hold")
+	releaseDuration = stage.New("coord", "apply", "release")
+)

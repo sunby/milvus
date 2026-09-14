@@ -3167,7 +3167,9 @@ func GetCollectionRateSubLabel(req any) string {
 }
 
 // Search searches the most similar records of requests.
-func (node *Proxy) Search(ctx context.Context, request *milvuspb.SearchRequest) (*milvuspb.SearchResults, error) {
+func (node *Proxy) Search(ctx context.Context, request *milvuspb.SearchRequest) (retResp *milvuspb.SearchResults, retErr error) {
+	ctx, timing := startDQL(ctx, "Search")
+	defer func() { timing.End(retResp.GetStatus(), retErr) }()
 	var err error
 	rsp := &milvuspb.SearchResults{
 		Status: merr.Success(),
@@ -3176,6 +3178,7 @@ func (node *Proxy) Search(ctx context.Context, request *milvuspb.SearchRequest) 
 		rsp.Status = merr.Status(err)
 		return rsp, nil
 	}
+	timing.Ready()
 
 	optimizedSearch := true
 	resultSizeInsufficient := false
@@ -3461,7 +3464,9 @@ func (node *Proxy) search(ctx context.Context, request *milvuspb.SearchRequest, 
 	return qt.result, qt.resultSizeInsufficient, qt.isTopkReduce, qt.isRecallEvaluation, nil
 }
 
-func (node *Proxy) HybridSearch(ctx context.Context, request *milvuspb.HybridSearchRequest) (*milvuspb.SearchResults, error) {
+func (node *Proxy) HybridSearch(ctx context.Context, request *milvuspb.HybridSearchRequest) (retResp *milvuspb.SearchResults, retErr error) {
+	ctx, timing := startDQL(ctx, "HybridSearch")
+	defer func() { timing.End(retResp.GetStatus(), retErr) }()
 	var err error
 	rsp := &milvuspb.SearchResults{
 		Status: merr.Success(),
@@ -3470,6 +3475,7 @@ func (node *Proxy) HybridSearch(ctx context.Context, request *milvuspb.HybridSea
 		rsp.Status = merr.Status(err)
 		return rsp, nil
 	}
+	timing.Ready()
 	optimizedSearch := true
 	resultSizeInsufficient := false
 	isTopkReduce := false
@@ -4129,10 +4135,13 @@ func (node *Proxy) query(ctx context.Context, qt *queryTask, sp trace.Span) (*mi
 }
 
 // Query get the records by primary keys.
-func (node *Proxy) Query(ctx context.Context, request *milvuspb.QueryRequest) (*milvuspb.QueryResults, error) {
+func (node *Proxy) Query(ctx context.Context, request *milvuspb.QueryRequest) (retResp *milvuspb.QueryResults, retErr error) {
+	ctx, timing := startDQL(ctx, "Query")
+	defer func() { timing.End(retResp.GetStatus(), retErr) }()
 	if err := node.ensureCollectionReady(ctx, request.GetDbName(), request.GetCollectionName()); err != nil {
 		return &milvuspb.QueryResults{Status: merr.Status(err)}, nil
 	}
+	timing.Ready()
 
 	qt := &queryTask{
 		baseTask: baseTask{

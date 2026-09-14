@@ -9,8 +9,10 @@ import (
 
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/storagev2/packed"
+	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 type sealedCacheKey string
@@ -61,11 +63,15 @@ func (c *segmentCache) retain(
 		entry.refs++
 		stats := entry.stats
 		c.mu.Unlock()
+		metrics.QueryStageItems.WithLabelValues("streamingNode", "bm25_stats", "cache", "hit").Inc()
 		return stats, nil
 	}
 	c.mu.Unlock()
 
-	stats, err := loadSealedSegmentStats(ctx, chunkManager, resource)
+	metrics.QueryStageItems.WithLabelValues("streamingNode", "bm25_stats", "cache", "miss").Inc()
+	loadCtx, loadTimer := bm25Load.Start(ctx)
+	stats, err := loadSealedSegmentStats(loadCtx, chunkManager, resource)
+	loadTimer.End(err)
 	if err != nil {
 		return nil, err
 	}
@@ -145,11 +151,15 @@ func loadSealedSegmentStats(
 	stats := make(bm25Stats)
 	for fieldID, paths := range pathsByField {
 		for _, path := range paths {
-			bytes, err := chunkManager.Read(ctx, path)
+			readCtx, readTimer := bm25Read.Start(ctx)
+			bytes, err := chunkManager.Read(readCtx, path)
+			readTimer.End(err)
 			if err != nil {
 				return nil, err
 			}
+			decodeTimer := bm25Decode.Begin()
 			loaded, err := storage.NewBM25StatsWithBytes(bytes)
+			decodeTimer.End(err)
 			if err != nil {
 				return nil, err
 			}
@@ -163,3 +173,9 @@ func loadSealedSegmentStats(
 	}
 	return stats, nil
 }
+
+var (
+	bm25Load   = stage.New("streamingNode", "bm25_stats", "load")
+	bm25Read   = stage.New("streamingNode", "bm25_stats", "read")
+	bm25Decode = stage.New("streamingNode", "bm25_stats", "decode")
+)

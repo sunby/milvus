@@ -119,7 +119,7 @@ type Proxy struct {
 
 	// query view
 	viewQueryClient         queryclient.Client
-	autoLoadCollectionGroup conc.Singleflight[struct{}]
+	autoLoadCollectionGroup conc.Singleflight[autoLoadResult]
 
 	// delete rate limiter
 	enableComplexDeleteLimit bool

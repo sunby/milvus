@@ -9,6 +9,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/nodescheduler"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 func newSegmentLoadTask(loader PhysicalSegmentLoader, estimator SegmentResourceEstimator, task SegmentLoadTask) *SegmentLoadTask {
@@ -17,7 +18,8 @@ func newSegmentLoadTask(loader PhysicalSegmentLoader, estimator SegmentResourceE
 	return &task
 }
 
-func (t *SegmentLoadTask) Execute(schedulerCtx context.Context) error {
+func (t *SegmentLoadTask) Execute(schedulerCtx context.Context) (retErr error) {
+	totalTimer := segmentLoadTotal.Begin()
 	startedAt := time.Now()
 	timing := segmentLoadTimingSample{}
 	logCtx := schedulerCtx
@@ -31,6 +33,13 @@ func (t *SegmentLoadTask) Execute(schedulerCtx context.Context) error {
 	ctx, cancel := mergeTaskContext(schedulerCtx, t.Context)
 	defer cancel()
 	logCtx = ctx
+	defer func() {
+		err := retErr
+		if err == nil {
+			err = ctx.Err()
+		}
+		totalTimer.End(err)
+	}()
 	if ctx.Err() != nil {
 		return nil
 	}
@@ -46,6 +55,7 @@ func (t *SegmentLoadTask) Execute(schedulerCtx context.Context) error {
 		onLoadedStartedAt := time.Now()
 		t.OnLoaded(segment)
 		timing.onLoaded = time.Since(onLoadedStartedAt)
+		segmentOnLoaded.Observe(timing.onLoaded, stage.Success)
 	}
 	return nil
 }
@@ -58,12 +68,14 @@ func (t *SegmentLoadTask) load(ctx context.Context, timing *segmentLoadTimingSam
 	updateIndexMetaStartedAt := time.Now()
 	err = updateCollectionIndexMeta(ctx, t.Collection, indexes)
 	timing.updateIndexMeta = time.Since(updateIndexMetaStartedAt)
+	segmentUpdateIndex.Observe(timing.updateIndexMeta, stage.Outcome(err))
 	if err != nil {
 		return nil, err
 	}
 	reserveResourceStartedAt := time.Now()
 	reservation, err := t.reserve(ctx, loadInfo)
 	timing.reserveResource = time.Since(reserveResourceStartedAt)
+	segmentReserve.Observe(timing.reserveResource, stage.Outcome(err))
 	if err != nil {
 		return nil, err
 	}
@@ -72,6 +84,7 @@ func (t *SegmentLoadTask) load(ctx context.Context, timing *segmentLoadTimingSam
 			releaseResourceStartedAt := time.Now()
 			reservation.Release()
 			timing.releaseResource = time.Since(releaseResourceStartedAt)
+			segmentUnreserve.Observe(timing.releaseResource, stage.Success)
 		}()
 	}
 	physicalLoadDetail := &segments.PhysicalLoadTiming{}
@@ -79,6 +92,7 @@ func (t *SegmentLoadTask) load(ctx context.Context, timing *segmentLoadTimingSam
 	physicalLoadStartedAt := time.Now()
 	segment, err := t.loader.Load(ctx, loadInfo, t.Collection)
 	timing.physicalLoad = time.Since(physicalLoadStartedAt)
+	segmentPhysical.Observe(timing.physicalLoad, stage.Outcome(err))
 	timing.physicalDetail = *physicalLoadDetail
 	if err != nil {
 		return nil, err
@@ -221,3 +235,12 @@ func (s *transformStartSegment) Collection() *segments.Collection {
 	}
 	return readable.Collection()
 }
+
+var (
+	segmentLoadTotal   = stage.New("queryNode", "segment_load", "total")
+	segmentUpdateIndex = stage.New("queryNode", "segment_load", "update_index")
+	segmentReserve     = stage.New("queryNode", "segment_load", "reserve")
+	segmentUnreserve   = stage.New("queryNode", "segment_load", "release_reservation")
+	segmentPhysical    = stage.New("queryNode", "segment_load", "physical_load")
+	segmentOnLoaded    = stage.New("queryNode", "segment_load", "on_loaded")
+)

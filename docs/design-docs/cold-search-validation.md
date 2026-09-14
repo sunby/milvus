@@ -1,0 +1,66 @@
+# Validation record — 2026-09-14
+
+Implementation branch: `codex/cold-search-observability`.
+Initial validation base: `66bff8f29ad063494dc8d801483254e89a2d1103` (source tree
+matches `86b1671569e7bafc28cd3803bf6d4c15c742f439`). Before PR submission, rebased
+onto `877214740a9ba9609f1ebc2003b63b3131dc8306`, including the empty-segment
+cleanup fix. Rebase preserved all implementation files byte-for-byte. All changes
+are in an isolated worktree.
+
+## Verified locally
+
+Go 1.26.6, macOS arm64, local Milvus native libraries. Go tests used
+`-tags dynamic,test -gcflags='all=-N -l' -count=1`.
+
+- Full package suites passed: coord balancer, coordview, syncer, QV observers,
+  QueryNode qnview/qvresource/viewquery, shared queryclient/viewquery, SN snview,
+  and SN BM25 idf.
+- Targeted QueryCoord readiness/watch cases and SN GetQueryPlan cases passed.
+- After rebase, full balancer, coordview, syncer, lifecycle-observer, SN snview,
+  and SN BM25 idf suites passed again. The new base's targeted empty-segment
+  cleanup and recovered-final-commit cases also passed.
+- Proxy auto-load, independent cancellation, saturated queue bypass, early
+  readiness failures, and same-cohort DQL timing cases passed.
+- Search task/heap merge/marshal/reduce-layout unit cases passed.
+- New pending-cohort and failed-catalog cases passed. Persistence failure did
+  not dispatch sync or execute post-persist reference release callbacks.
+- The independent-collection regression passed after the change. Temporarily
+  restoring normal apply's Begin/Commit made it fail at the five-second guard
+  with `B Ready->Up was held by unrelated A apply`; removing it passed again.
+- Race checks passed for the stage recorder, syncer, and QV lifecycle observer.
+- Changed-lines lint passed on all affected root packages (`0 issues`). Full
+  lint of `pkg/util/stage` and `pkg/metrics` passed (`0 issues`).
+- `make lint-fix` ran its formatters but full-repository type checking stopped
+  at the pre-existing `internal/metastore/kv/querycoord/kv_catalog_test.go:372:
+  undefined: mocks`. Targeted unfiltered lint also reports existing issues;
+  changed-lines validation is not a claim that the whole repository is clean.
+- `run_clang_format.sh` passed using clang-format 15. All unrelated formatter
+  changes were restored. This patch contains no native source edits.
+- Dashboard JSON parses and its 23 panel IDs are unique. It was not imported
+  into or queried against a running Grafana/Prometheus instance.
+
+The final benchmark run of the warmed no-trace timer reported 82.39 ns/op,
+0 B/op and 0 allocs/op on an Apple M5. This is a microbenchmark, not an
+application overhead or latency improvement measurement.
+
+## Baseline failures and unavailable integration coverage
+
+The following failures were reproduced in the untouched base worktree:
+
+- `TestSearchTask_PostExecute/Test_search_rerank`: `types.ProxyComponent is nil,
+  not *proxy.Proxy`.
+- `TestManagerRetriesViewBuildUntilSnapshotReady`: its one-second
+  `attempts.Load() > 1` condition is not satisfied. Other runtime preparation
+  behavior was inspected; no attempt was made to fix this unrelated test here.
+
+A broader native Search-task run blocked in the test fixture's MinIO client
+initialization (`setupTestSegments -> NewPersistentStorageChunkManager ->
+NewMinioClient`), before the instrumented Search execution. The local test was
+stopped and storage-independent unit cases were run separately. Native storage
+integration and injected S3 faults are not verified by these passing unit tests.
+
+No service was deployed, restarted, scaled, or subjected to generated Search
+traffic. There is no post-change production/UAT result, hosted CI result, or
+verified catalog-write amplification measurement. The implementation and
+remaining native/client attribution gaps are described in
+[cold-search-observability.md](cold-search-observability.md).

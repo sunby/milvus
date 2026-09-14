@@ -16,6 +16,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/nodescheduler"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 type bm25Stats map[int64]*storage.BM25Stats
@@ -505,7 +506,9 @@ func (r *oracleRuntime) prepareEagerDataVersion(ctx context.Context, target qvie
 	return nil
 }
 
-func (r *oracleRuntime) ensureMaterialized(ctx context.Context, target qviews.DataVersion) error {
+func (r *oracleRuntime) ensureMaterialized(ctx context.Context, target qviews.DataVersion) (retErr error) {
+	ctx, timer := bm25Materialized.Start(ctx)
+	defer timer.EndError(&retErr)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -536,6 +539,8 @@ func (r *oracleRuntime) ensureMaterialized(ctx context.Context, target qviews.Da
 	}
 	if call := r.materializations[target]; call != nil {
 		r.mu.Unlock()
+		waitTimer := bm25SharedWait.Begin()
+		defer waitTimer.EndError(&retErr)
 		select {
 		case <-call.done:
 			return call.err
@@ -1190,3 +1195,8 @@ func cloneGrowingContributions(src map[int64]growingContribution) map[int64]grow
 	}
 	return dst
 }
+
+var (
+	bm25Materialized = stage.New("streamingNode", "bm25_stats", "ensure_materialized")
+	bm25SharedWait   = stage.New("streamingNode", "bm25_stats", "shared_wait")
+)

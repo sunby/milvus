@@ -13,6 +13,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
@@ -27,6 +28,7 @@ func (l *queryViewPhysicalSegmentLoader) Load(ctx context.Context, info *querypb
 	timing := segments.PhysicalLoadTimingFromContext(ctx)
 	startedAt := time.Now()
 	loaded, err := l.loader.NewSegment(ctx, collection, info)
+	physicalnewsegmentStage.Observe(time.Since(startedAt), stage.Outcome(err))
 	if timing != nil {
 		timing.NewSegment = time.Since(startedAt)
 	}
@@ -41,6 +43,7 @@ func (l *queryViewPhysicalSegmentLoader) Load(ctx context.Context, info *querypb
 	}()
 	startedAt = time.Now()
 	err = l.loader.LoadSegment(ctx, loaded, info)
+	physicalloadsegmentStage.Observe(time.Since(startedAt), stage.Outcome(err))
 	if timing != nil {
 		timing.LoadSegment = time.Since(startedAt)
 	}
@@ -49,6 +52,7 @@ func (l *queryViewPhysicalSegmentLoader) Load(ctx context.Context, info *querypb
 	}
 	startedAt = time.Now()
 	err = l.loader.LoadDeltaLogs(ctx, loaded, info)
+	physicaldeltaStage.Observe(time.Since(startedAt), stage.Outcome(err))
 	if timing != nil {
 		timing.DeltaLogs = time.Since(startedAt)
 	}
@@ -57,6 +61,7 @@ func (l *queryViewPhysicalSegmentLoader) Load(ctx context.Context, info *querypb
 	}
 	startedAt = time.Now()
 	err = l.loader.LoadPKCandidate(ctx, loaded, info)
+	physicalpkStage.Observe(time.Since(startedAt), stage.Outcome(err))
 	if timing != nil {
 		timing.PKCandidate = time.Since(startedAt)
 	}
@@ -261,3 +266,10 @@ func asQVLocalSegment(segment qvLoadedSegment) (*qvLocalSegment, error) {
 	}
 	return local, nil
 }
+
+var (
+	physicalnewsegmentStage  = stage.New("queryNode", "physical_load", "new_segment")
+	physicalloadsegmentStage = stage.New("queryNode", "physical_load", "load_segment")
+	physicaldeltaStage       = stage.New("queryNode", "physical_load", "delta")
+	physicalpkStage          = stage.New("queryNode", "physical_load", "pk")
+)

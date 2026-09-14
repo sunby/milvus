@@ -2,12 +2,14 @@ package balancer
 
 import (
 	"sync"
+	"time"
 
 	"github.com/milvus-io/milvus/internal/views/coord/coordview"
 	"github.com/milvus-io/milvus/internal/views/coord/loadmgr"
 	"github.com/milvus-io/milvus/internal/views/qviews"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 // TriggerScope describes the external event scope that dirtied the Balancer.
@@ -22,8 +24,12 @@ type TriggerScope struct {
 	DirtyCollections []int64
 }
 
+var triggerWait = stage.New("coord", "reconcile", "trigger_wait")
+
 type triggerQueue struct {
-	mu sync.Mutex
+	queuedAt     time.Time
+	pendingTimer stage.Timer
+	mu           sync.Mutex
 
 	full        bool
 	dirtyNodes  map[int64]struct{}
@@ -223,6 +229,10 @@ func (q *triggerQueue) add(scopes ...TriggerScope) {
 }
 
 func (q *triggerQueue) notifyLocked() {
+	if q.queuedAt.IsZero() {
+		q.queuedAt = time.Now()
+		q.pendingTimer = triggerWait.Begin()
+	}
 	select {
 	case q.signal <- struct{}{}:
 	default:
@@ -237,6 +247,10 @@ func (q *triggerQueue) takePending() triggerBatch {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	if !q.queuedAt.IsZero() {
+		q.pendingTimer.End(nil)
+		q.queuedAt = time.Time{}
+	}
 	pending := triggerBatch{
 		full:        q.full,
 		dirtyNodes:  q.dirtyNodes,
