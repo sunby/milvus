@@ -8,12 +8,14 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/views/qviews"
+	"github.com/milvus-io/milvus/internal/views/viewerror"
 	"github.com/milvus-io/milvus/internal/views/worknode/handler"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 )
@@ -306,8 +308,9 @@ func TestSNHandler_CloseForHandoffFencesDetachedShard(t *testing.T) {
 	mgr := newMockResourceManager()
 	h := recoverSNQueryViewHandler(testPChannel, cat, mgr, nil)
 	view := newPreparingSNView(1)
-	shard := h.getOrCreateShard(view.ShardID())
+	shard, closed := h.getShardForApply(view.ShardID(), []handler.ApplyView{{View: view}})
 	require.NotNil(t, shard)
+	require.False(t, closed)
 
 	h.CloseForHandoff()
 
@@ -382,6 +385,122 @@ func TestSNHandler_AcquireLatestUpViewResolvesByVChannelWhenReplicaUnknown(t *te
 	require.Error(t, err)
 }
 
+func TestSNHandler_AcquireLatestUpViewSkipsUnavailableReplicas(t *testing.T) {
+	const emptyState = qviews.QueryViewState(viewpb.QueryViewState_QueryViewStateUnknown)
+	for _, state := range []qviews.QueryViewState{
+		emptyState, // an empty shard left by the previous implementation
+		qviews.QueryViewStatePreparing,
+		qviews.QueryViewStateReady,
+		qviews.QueryViewStateUpRecovering,
+		qviews.QueryViewStateDown,
+		qviews.QueryViewStateDropping,
+		qviews.QueryViewStateDropped,
+		qviews.QueryViewStateUnrecoverable,
+	} {
+		t.Run(state.String(), func(t *testing.T) {
+			mgr := newMockResourceManager()
+			h := recoverSNQueryViewHandler(testPChannel, newMockCatalog(), mgr, nil)
+			oldView := withSNViewReplica(newFullSNViewWithState(100, viewpb.QueryViewState(state), 101), testReplicaID+1)
+			oldShard := &snShardView{
+				shardID: oldView.ShardID(),
+				views:   make(map[qviews.QueryViewVersion]*snViewEntry),
+			}
+			if state != emptyState {
+				pb := oldView.IntoProto()
+				oldShard.views[oldView.QueryViewKey().QueryViewVersion] = &snViewEntry{
+					ApplyView: handler.ApplyView{View: oldView},
+					sm: &snQueryViewStateMachine{
+						state: state, meta: pb.Meta, snView: pb.StreamingNode, queryNodes: pb.QueryNode,
+					},
+				}
+			}
+			h.shards[oldView.ShardID()] = oldShard
+			h.indexShardLocked(oldView.ShardID())
+			unknown := qviews.ShardID{ReplicaID: qviews.UnknownReplicaID, VChannel: testVChannel}
+
+			// With no serving replica, the public query path remains retryable.
+			_, err := h.AcquireLatestUpView(context.Background(), unknown)
+			require.Error(t, err)
+			assert.True(t, viewerror.AsViewError(err).IsViewNotFound())
+			assert.True(t, viewerror.AsViewError(err).IsRetryable())
+
+			newView := newFullSNViewWithState(1, viewpb.QueryViewState_QueryViewStatePreparing, 102)
+			h.ApplyViews([]handler.ApplyView{{View: newView}})
+			acquired, ok := mgr.getAcquired(newView.QueryViewKey())
+			require.True(t, ok)
+			acquired.OnReady()
+			h.ApplyViews([]handler.ApplyView{{View: withSNViewState(newView, qviews.QueryViewStateUp)}})
+			newShard := h.shards[newView.ShardID()]
+
+			// Force the unavailable candidate to be tried first. This assertion
+			// must not depend on Go map iteration choosing the stale replica.
+			lease, err := acquireLatestUpViewFromShards(context.Background(), unknown, []*snShardView{oldShard, newShard})
+			require.NoError(t, err)
+			assert.Equal(t, testReplicaID, lease.Meta.GetReplicaId())
+			assert.Equal(t, newView.QueryViewKey().QueryViewVersion, lease.Version)
+			lease.Release()
+
+			lease, err = h.AcquireLatestUpView(context.Background(), unknown)
+			require.NoError(t, err)
+			assert.Equal(t, testReplicaID, lease.Meta.GetReplicaId())
+			lease.Release()
+			_, err = h.AcquireLatestUpView(context.Background(), oldView.ShardID())
+			require.Error(t, err, "an explicit replica must not fall back")
+			assert.True(t, viewerror.AsViewError(err).IsViewNotFound())
+
+			// A non-Up entry can still be preparing or protecting resources;
+			// skipping it for planning must not remove it from either index.
+			assert.Same(t, oldShard, h.shards[oldView.ShardID()])
+			assert.Contains(t, h.shardsByVChannel[testVChannel], oldView.ShardID())
+			if state != emptyState {
+				require.Len(t, oldShard.views, 1)
+				entry := oldShard.views[oldView.QueryViewKey().QueryViewVersion]
+				assert.Equal(t, state, entry.sm.State())
+				assert.Zero(t, entry.queryRefs)
+			}
+			assert.Zero(t, newShard.views[newView.QueryViewKey().QueryViewVersion].queryRefs)
+		})
+	}
+}
+
+func TestSNHandler_AcquireLatestUpViewPreservesContextErrors(t *testing.T) {
+	for _, expired := range []bool{false, true} {
+		name := "canceled"
+		if expired {
+			name = "deadline"
+		}
+		t.Run(name, func(t *testing.T) {
+			mgr := newMockResourceManager()
+			h := recoverSNQueryViewHandler(testPChannel, newMockCatalog(), mgr, nil)
+			view := newPreparingSNView(1)
+			h.ApplyViews([]handler.ApplyView{{View: view}})
+			acquired, ok := mgr.getAcquired(view.QueryViewKey())
+			require.True(t, ok)
+			acquired.OnReady()
+			h.ApplyViews([]handler.ApplyView{{View: withSNViewState(view, qviews.QueryViewStateUp)}})
+			shard := h.shards[view.ShardID()]
+			emptyShard := &snShardView{shardID: qviews.ShardID{ReplicaID: testReplicaID + 1, VChannel: testVChannel}}
+
+			var ctx context.Context
+			var cancel context.CancelFunc
+			if expired {
+				ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			} else {
+				ctx, cancel = context.WithCancel(context.Background())
+			}
+			cancel()
+			unknown := qviews.ShardID{ReplicaID: qviews.UnknownReplicaID, VChannel: testVChannel}
+			lease, err := acquireLatestUpViewFromShards(ctx, unknown, []*snShardView{emptyShard, shard})
+			assert.Nil(t, lease)
+			assert.True(t, err == ctx.Err(), "candidate fallback must preserve the original context error")
+			lease, err = h.AcquireLatestUpView(ctx, unknown)
+			assert.Nil(t, lease)
+			assert.True(t, err == ctx.Err())
+			assert.Zero(t, shard.views[view.QueryViewKey().QueryViewVersion].queryRefs)
+		})
+	}
+}
+
 func TestSNHandler_VChannelIndexTracksMultipleReplicas(t *testing.T) {
 	cat := newMockCatalog()
 	mgr := newMockResourceManager()
@@ -390,8 +509,10 @@ func TestSNHandler_VChannelIndexTracksMultipleReplicas(t *testing.T) {
 	// A vchannel maps to one shard per replica hosting it: index is 1:N.
 	replica1 := qviews.ShardID{ReplicaID: 1, VChannel: testVChannel}
 	replica2 := qviews.ShardID{ReplicaID: 2, VChannel: testVChannel}
-	require.NotNil(t, h.getOrCreateShard(replica1))
-	require.NotNil(t, h.getOrCreateShard(replica2))
+	h.ApplyViews([]handler.ApplyView{
+		{View: withSNViewReplica(newPreparingSNView(1), replica1.ReplicaID)},
+		{View: withSNViewReplica(newPreparingSNView(1), replica2.ReplicaID)},
+	})
 
 	h.mu.Lock()
 	indexed, ok := h.shardsByVChannel[testVChannel]
