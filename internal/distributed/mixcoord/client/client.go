@@ -1645,6 +1645,14 @@ func (c *Client) ListIndexes(ctx context.Context, in *indexpb.ListIndexesRequest
 	})
 }
 
+func (c *Client) WaitCollectionReady(ctx context.Context, req *querypb.WaitCollectionReadyRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	req = typeutil.Clone(req)
+	commonpbutil.UpdateMsgBase(req.GetBase(), commonpbutil.FillMsgBaseFromClient(paramtable.GetNodeID(), commonpbutil.WithTargetID(c.grpcClient.GetNodeID())))
+	return wrapGrpcCall(ctx, c, func(client MixCoordClient) (*commonpb.Status, error) {
+		return client.WaitCollectionReady(ctx, req, opts...)
+	})
+}
+
 func (c *Client) ShowLoadCollections(ctx context.Context, req *querypb.ShowCollectionsRequest, opts ...grpc.CallOption) (*querypb.ShowCollectionsResponse, error) {
 	req = typeutil.Clone(req)
 	commonpbutil.UpdateMsgBase(

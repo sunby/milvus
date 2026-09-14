@@ -112,6 +112,7 @@ type MixCoordMock struct {
 	DescribeIndexFunc       func(ctx context.Context, request *indexpb.DescribeIndexRequest, opts ...grpc.CallOption) (*indexpb.DescribeIndexResponse, error)
 	GetShardLeadersFunc     func(ctx context.Context, request *querypb.GetShardLeadersRequest, opts ...grpc.CallOption) (*querypb.GetShardLeadersResponse, error)
 	ShowLoadPartitionsFunc  func(ctx context.Context, request *querypb.ShowPartitionsRequest, opts ...grpc.CallOption) (*querypb.ShowPartitionsResponse, error)
+	WaitCollectionReadyFunc func(context.Context, *querypb.WaitCollectionReadyRequest, ...grpc.CallOption) (*commonpb.Status, error)
 	ShowLoadCollectionsFunc func(ctx context.Context, request *querypb.ShowCollectionsRequest, opts ...grpc.CallOption) (*querypb.ShowCollectionsResponse, error)
 	GetGetCredentialFunc
 	DescribeCollectionFunc
@@ -1669,6 +1670,13 @@ func (coord *MixCoordMock) GetIndexBuildProgress(ctx context.Context, req *index
 	return &indexpb.GetIndexBuildProgressResponse{
 		Status: merr.Success(),
 	}, nil
+}
+
+func (coord *MixCoordMock) WaitCollectionReady(ctx context.Context, req *querypb.WaitCollectionReadyRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	if coord.WaitCollectionReadyFunc != nil {
+		return coord.WaitCollectionReadyFunc(ctx, req, opts...)
+	}
+	return merr.Success(), nil
 }
 
 func (coord *MixCoordMock) ShowLoadCollections(ctx context.Context, in *querypb.ShowCollectionsRequest, opts ...grpc.CallOption) (*querypb.ShowCollectionsResponse, error) {

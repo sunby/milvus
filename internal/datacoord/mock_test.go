@@ -778,6 +778,10 @@ func (s *mockMixCoord) ListCheckers(ctx context.Context, req *querypb.ListChecke
 	panic("implement me")
 }
 
+func (s *mockMixCoord) WaitCollectionReady(ctx context.Context, req *querypb.WaitCollectionReadyRequest) (*commonpb.Status, error) {
+	return &commonpb.Status{}, nil
+}
+
 func (s *mockMixCoord) ShowLoadCollections(ctx context.Context, req *querypb.ShowCollectionsRequest) (*querypb.ShowCollectionsResponse, error) {
 	panic("implement me")
 }

@@ -18,9 +18,6 @@ package proxy
 
 import (
 	"context"
-	"time"
-
-	"github.com/cockroachdb/errors"
 
 	"github.com/milvus-io/milvus/internal/views/queryclient"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
@@ -29,49 +26,30 @@ import (
 
 var _ queryclient.CollectionReadiness = (*Proxy)(nil)
 
-// CheckCollectionReady checks QueryCoord's query-service readiness. Assignment
-// discovery no longer carries collection shard views, and the metadata cache's
-// vchannels describe topology regardless of whether the collection is loaded.
 func (node *Proxy) CheckCollectionReady(ctx context.Context, collectionID int64, expectedVChannels []string) error {
+	return node.checkOrWaitCollectionReady(ctx, collectionID, expectedVChannels, true)
+}
+
+// WaitForCollectionReady sends one RPC. QueryCoord wakes it on state changes;
+// the Proxy does not poll ShowLoadCollections while the collection loads.
+func (node *Proxy) WaitForCollectionReady(ctx context.Context, collectionID int64, expectedVChannels []string) error {
+	return node.checkOrWaitCollectionReady(ctx, collectionID, expectedVChannels, false)
+}
+
+func (node *Proxy) checkOrWaitCollectionReady(ctx context.Context, collectionID int64, expectedVChannels []string, checkOnly bool) error {
 	if err := ctx.Err(); err != nil {
 		return context.Cause(ctx)
 	}
 	if len(expectedVChannels) == 0 {
 		return merr.WrapErrCollectionNotLoaded(collectionID)
 	}
-	resp, err := node.mixCoord.ShowLoadCollections(ctx, &querypb.ShowCollectionsRequest{
-		CollectionIDs: []int64{collectionID},
+	resp, err := node.mixCoord.WaitCollectionReady(ctx, &querypb.WaitCollectionReadyRequest{
+		CollectionID:      collectionID,
+		ExpectedVchannels: expectedVChannels,
+		CheckOnly:         checkOnly,
 	})
-	if err := merr.CheckRPCCall(resp, err); err != nil {
-		return err
+	if ctx.Err() != nil {
+		return context.Cause(ctx)
 	}
-	if len(resp.GetCollectionIDs()) != len(resp.GetQueryServiceAvailable()) {
-		return merr.WrapErrServiceInternalMsg("query service readiness does not match collection IDs")
-	}
-	for i, id := range resp.GetCollectionIDs() {
-		if id == collectionID && resp.GetQueryServiceAvailable()[i] {
-			return nil
-		}
-	}
-	return merr.WrapErrCollectionNotLoaded(collectionID)
-}
-
-// WaitForCollectionReady waits for QueryCoord to report available query views.
-func (node *Proxy) WaitForCollectionReady(ctx context.Context, collectionID int64, expectedVChannels []string) error {
-	if len(expectedVChannels) == 0 {
-		return merr.WrapErrCollectionNotLoaded(collectionID)
-	}
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		err := node.CheckCollectionReady(ctx, collectionID, expectedVChannels)
-		if !errors.Is(err, merr.ErrCollectionNotLoaded) {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return context.Cause(ctx)
-		case <-ticker.C:
-		}
-	}
+	return merr.CheckRPCCall(resp, err)
 }

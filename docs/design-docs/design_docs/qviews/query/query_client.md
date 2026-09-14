@@ -432,58 +432,23 @@ ViewQueryServiceClient
 - **Dispatch**: The top-level `ViewQueryServiceClient` switches on `WorkNode` type
   and delegates to the appropriate sub-client.
 
-### 5.5 Shard Discovery via Channel Assignment
+### 5.5 Shard Resolution and Collection Readiness
 
-ShardResolver is backed by the existing channel assignment service discovery
-(`streaming.proto`), extended to publish per-SN shard and primary information
-alongside pchannel→SN binding.
+The Proxy resolves collection vchannels through its metadata cache. These
+vchannels describe static topology and remain available even when the collection
+is unloaded. Channel assignment discovery continues to provide PChannel-to-node
+routing and primary/secondary roles; it carries no collection shard entries.
 
-**Data flow:** Coord publishes shard assignments as part of channel assignment
-full updates. `StreamingNodeAssignment` is extended with two new fields:
+Phase 1 addresses the primary StreamingNode with `UnknownReplicaID`. The node
+resolves the query view by vchannel and returns the real replica ID in the query
+plan. Phase 2 uses that replica ID when executing the plan.
 
-- `shard_assignment`: A `ShardAssignmentInfo` carrying pchannel-scoped loaded
-  shards on this node. Each `PChannelShardAssignment` names one pchannel and
-  carries its shard replicas as (collection_id, shard_index, replica_id).
-- `secondary_channels`: Secondary (read-only) pchannel replicas on this SN.
-  Primary pchannels remain in the existing `channels` field, preserving backward
-  compatibility. Old clients ignore the new field.
-
-The client-side watcher maintains a local cache, so shard resolution is a pure
-local lookup with zero network overhead on the query path.
-
-**Supply ownership and dependencies:**
-
-- `secondary_channels` is supplied by StreamingCoord's channel assignment layer.
-  StreamingCoord already owns the pchannel to StreamingNode binding and each
-  `PChannelInfo` carries an `access_mode`; the assignment publisher splits
-  read-write pchannels into `channels` and read-only pchannels into
-  `secondary_channels`.
-- `shard_assignment` is supplied by the qviews Coord layer, not inferred by the
-  StreamingCoord channel manager. The authoritative source is the qviews
-  load/view management pipeline (`CollectionLoadManager`, Coord-side balancer,
-  `ShardViewRegistry` / `ShardViewManager`), which owns the mapping from
-  `(collection_id, pchannel, shard_index, replica_id)` to the StreamingNode that
-  hosts that shard replica. The client derives the vchannel with
-  `funcutil.GetVirtualChannel(pchannel, collection_id, shard_index)`.
-- Each `PChannelShardAssignment.pchannel` must appear in either `channels` or
-  `secondary_channels` of the same `StreamingNodeAssignment`. This keeps the
-  pchannel role and shard mapping in one consistent assignment snapshot.
-- The assignment discovery service is the aggregation and publication boundary:
-  it joins the StreamingCoord pchannel assignment snapshot with the qviews shard
-  assignment snapshot into a single full assignment update. Clients should
-  consume this unified snapshot instead of joining channel topology and qviews
-  topology independently, so shard routing and primary detection are based on a
-  consistent versioned view.
-
-**Primary replica derivation:** The existing `channels` field contains primary
-pchannels (WAL owner, read-write); the new `secondary_channels` field contains
-secondary pchannels (WAL subscriber, read-only). A replica's shard inherits the
-primary/secondary status of its pchannel on the same SN. The client identifies
-the primary replica for each vchannel: the replica whose shard is on the SN where
-the corresponding pchannel appears in `channels` (not `secondary_channels`).
-
-All proto definitions are in `streaming.proto` under `ShardAssignmentInfo`,
-`PChannelShardAssignment`, and `ShardAssignmentEntry`.
+Automatic loading has a separate readiness barrier. The Proxy uses QueryCoord's
+`WaitCollectionReady` RPC, with a nonblocking check for the initial DQL fast path
+and an event-driven wait after a load has been submitted. Readiness does not
+reintroduce full shard-assignment publication. See
+[Collection Readiness](collection_readiness.md) for the complete expected-shard
+check, cancellation, shared waits, and release semantics.
 
 ## 6. Package Layout
 

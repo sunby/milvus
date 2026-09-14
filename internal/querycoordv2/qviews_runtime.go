@@ -34,6 +34,7 @@ import (
 	"github.com/milvus-io/milvus/internal/views/coord/coordview/syncer"
 	"github.com/milvus-io/milvus/internal/views/coord/loadmgr"
 	"github.com/milvus-io/milvus/internal/views/coord/nodeview"
+	"github.com/milvus-io/milvus/internal/views/coord/readiness"
 	"github.com/milvus-io/milvus/internal/views/qviews"
 	"github.com/milvus-io/milvus/pkg/v3/kv"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
@@ -50,6 +51,7 @@ type qviewsRuntime struct {
 	loadConfigStore   *loadmgr.LoadConfigStore
 	loadManager       *loadmgr.CollectionLoadManager
 	shardViewRegistry *coordview.ShardViewRegistry
+	readyChanges      *readiness.Notifications
 	syncer            syncer.ReliableSyncer
 	balancer          qviewsBalancer
 
@@ -148,11 +150,13 @@ func newQViewsRuntime(ctx context.Context, deps qviewsRuntimeDependencies) (*qvi
 			balancerController.Trigger(balancer.TriggerScope{DirtyCollections: []int64{collectionID}})
 		},
 	)
+	readyChanges := newCollectionReadiness(loadConfigStore, shardViewRegistry)
 
 	return &qviewsRuntime{
 		loadConfigStore:      loadConfigStore,
 		loadManager:          loadManager,
 		shardViewRegistry:    shardViewRegistry,
+		readyChanges:         readyChanges,
 		syncer:               reliableSyncer,
 		balancer:             balancerController,
 		queryNodeManager:     deps.queryNodeManager,
@@ -167,6 +171,9 @@ func (r *qviewsRuntime) start(ctx context.Context) {
 
 func (r *qviewsRuntime) stop() {
 	r.stopOnce.Do(func() {
+		if r.readyChanges != nil {
+			r.readyChanges.Close()
+		}
 		r.balancer.Stop()
 		if r.shardViewRegistry != nil {
 			r.shardViewRegistry.Close()

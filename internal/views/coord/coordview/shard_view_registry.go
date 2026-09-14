@@ -172,6 +172,22 @@ func (r *ShardViewRegistry) Get(shardID qviews.ShardID) *ShardViewManager {
 	return r.shards[shardID]
 }
 
+// AllShardsUp checks a complete expected shard set without allocating a snapshot.
+func (r *ShardViewRegistry) AllShardsUp(shards []qviews.ShardID) bool {
+	if len(shards) == 0 {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, shardID := range shards {
+		stats := r.stats[shardID]
+		if stats == nil || stats.UpVersion == nil {
+			return false
+		}
+	}
+	return true
+}
+
 // removeEmptyManager reclaims a manager after its last QueryView has completed
 // durable removal. Recheck both emptiness and identity because the callback is
 // invoked after releasing the manager lock.
