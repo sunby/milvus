@@ -36,6 +36,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/fastpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
 )
 
@@ -240,6 +241,7 @@ func (t *SearchTask) executeGoReduceWithTiming(
 ) (*mergeResult, error) {
 	reduceStart := time.Now()
 	result, err := heapMergeReduceRange(defaultAllocator, segDFs, topK, groupByOpts, nqOffset, nq)
+	reduceheapStage.Observe(time.Since(reduceStart), stage.Outcome(err))
 	if timing != nil {
 		timing.heapReduce += time.Since(reduceStart)
 	}
@@ -371,6 +373,7 @@ func (t *SearchTask) marshalReducedResultWithTiming(
 ) (*schemapb.SearchResultData, error) {
 	marshalStart := time.Now()
 	searchResultData, err := marshalReduceResult(reduced)
+	reducemarshalStage.Observe(time.Since(marshalStart), stage.Outcome(err))
 	if timing != nil {
 		timing.marshalReduce += time.Since(marshalStart)
 	}
@@ -450,6 +453,7 @@ func (t *SearchTask) encodeAndAssignReducedResultWithTiming(
 		t.originTopks[i],
 		metricType,
 	)
+	reduceencodeStage.Observe(time.Since(encodeStart), stage.Outcome(err))
 	if timing != nil {
 		timing.encodeResult += time.Since(encodeStart)
 	}
@@ -521,6 +525,7 @@ func lateMaterializeOutputFieldsWithTiming(
 
 	fillStart := time.Now()
 	protoBytes, err := segcore.FillOutputFieldsOrdered(ctx, results, plan, segIndices, segOffsets)
+	reducefillStage.Observe(time.Since(fillStart), stage.Outcome(err))
 	if timing != nil {
 		timing.fillOutputFields += time.Since(fillStart)
 	}
@@ -535,7 +540,9 @@ func lateMaterializeOutputFieldsWithTiming(
 	// fastpb: wire-equivalent fast decoder for the late-materialize output-fields
 	// hot path (~2x varchar / ~6x vector vs proto.Unmarshal).
 	decodeStart := time.Now()
-	if err := fastpb.UnmarshalSearchResultData(protoBytes, &fieldResult); err != nil {
+	decodeErr := fastpb.UnmarshalSearchResultData(protoBytes, &fieldResult)
+	reducedecodeStage.Observe(time.Since(decodeStart), stage.Outcome(decodeErr))
+	if err := decodeErr; err != nil {
 		return err
 	}
 	if timing != nil {
@@ -645,3 +652,11 @@ func extractSlice(result *mergeResult, nqOffset, nqCount int, maxRowsPerNQ int64
 func emptyDF() *chain.DataFrame {
 	return chain.NewDataFrameBuilder().Build()
 }
+
+var (
+	reduceheapStage    = stage.New("queryNode", "reduce", "heap_merge")
+	reducemarshalStage = stage.New("queryNode", "reduce", "marshal_reduce")
+	reducefillStage    = stage.New("queryNode", "reduce", "fill_output_fields")
+	reduceencodeStage  = stage.New("queryNode", "reduce", "encode_result")
+	reducedecodeStage  = stage.New("queryNode", "reduce", "decode_output_fields")
+)

@@ -32,6 +32,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 	"github.com/milvus-io/milvus/pkg/v3/util/tsoutil"
 )
 
@@ -78,27 +79,39 @@ func (req *CreateCSegmentRequest) getCSegmentType() C.SegmentType {
 func CreateCSegment(req *CreateCSegmentRequest) (CSegment, error) {
 	var ptr C.CSegmentInterface
 	var status C.CStatus
+	var createTimer stage.Timer
 	if req.LoadInfo != nil {
+		convertTimer := segmentConvert.Begin()
 		segLoadInfo, err := ConvertToSegcoreSegmentLoadInfo(req.LoadInfo)
+		convertTimer.End(err)
 		if err != nil {
 			return nil, merr.Wrap(err, "failed to convert segment load info")
 		}
+		marshalTimer := segmentMarshal.Begin()
 		loadInfoBlob, err := proto.Marshal(segLoadInfo)
+		marshalTimer.End(err)
 		if err != nil {
 			return nil, err
 		}
 
+		createTimer = segmentCgoCreate.Begin()
 		status = C.NewSegmentWithLoadInfo(req.Collection.rawPointer(), req.getCSegmentType(), C.int64_t(req.SegmentID), &ptr, C.bool(req.IsSorted), (*C.uint8_t)(unsafe.Pointer(&loadInfoBlob[0])), C.int64_t(len(loadInfoBlob)))
 	} else {
+		createTimer = segmentCgoCreate.Begin()
 		status = C.NewSegment(req.Collection.rawPointer(), req.getCSegmentType(), C.int64_t(req.SegmentID), &ptr, C.bool(req.IsSorted))
 	}
-	if err := ConsumeCStatusIntoError(&status); err != nil {
+	createErr := ConsumeCStatusIntoError(&status)
+	createTimer.End(createErr)
+	if err := createErr; err != nil {
 		return nil, err
 	}
 	seg := &cSegmentImpl{id: req.SegmentID, ptr: ptr}
 	if req.LoadInfo != nil {
 		if commitTs := req.LoadInfo.GetCommitTimestamp(); commitTs != 0 {
-			if err := seg.SetCommitTimestamp(commitTs); err != nil {
+			commitTimer := segmentCommit.Begin()
+			commitErr := seg.SetCommitTimestamp(commitTs)
+			commitTimer.End(commitErr)
+			if err := commitErr; err != nil {
 				C.DeleteSegment(ptr)
 				return nil, merr.Wrap(err, "failed to set commit timestamp on segment")
 			}
@@ -693,3 +706,10 @@ func convertJSONKeyStats(src map[int64]*datapb.JsonKeyStats, basePaths map[int64
 	}
 	return result
 }
+
+var (
+	segmentConvert   = stage.New("queryNode", "segment_create", "convert_load_info")
+	segmentMarshal   = stage.New("queryNode", "segment_create", "marshal")
+	segmentCgoCreate = stage.New("queryNode", "segment_create", "cgo_create")
+	segmentCommit    = stage.New("queryNode", "segment_create", "commit_timestamp")
+)

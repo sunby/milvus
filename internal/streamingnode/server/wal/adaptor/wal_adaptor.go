@@ -33,6 +33,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/streaming/walimpls"
 	"github.com/milvus-io/milvus/pkg/v3/util/conc"
 	"github.com/milvus-io/milvus/pkg/v3/util/contextutil"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
@@ -166,7 +167,9 @@ func (w *walAdaptorImpl) GetLatestQueryPlanMVCC(ctx context.Context, vchannel st
 	}, nil
 }
 
-func (w *walAdaptorImpl) GetQueryPlan(ctx context.Context, req *viewpb.GetQueryPlanRequest) (*viewpb.QueryPlan, error) {
+func (w *walAdaptorImpl) GetQueryPlan(ctx context.Context, req *viewpb.GetQueryPlanRequest) (retPlan *viewpb.QueryPlan, retErr error) {
+	totalTimer := planTotal.Begin()
+	defer totalTimer.EndError(&retErr)
 	if !w.lifetime.Add(typeutil.LifetimeStateWorking) {
 		return nil, viewerror.NewOnShutdownError("wal is on shutdown")
 	}
@@ -180,7 +183,9 @@ func (w *walAdaptorImpl) GetQueryPlan(ctx context.Context, req *viewpb.GetQueryP
 	}
 
 	shardID := qviews.FromProtoShardID(req.GetShardId())
+	leaseTimer := planLease.Begin()
 	lease, err := w.queryViewHandler.AcquireLatestUpView(ctx, shardID)
+	leaseTimer.End(err)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +199,9 @@ func (w *walAdaptorImpl) GetQueryPlan(ctx context.Context, req *viewpb.GetQueryP
 	// real replica.
 	viewShardID := qviews.NewShardIDFromQVMeta(lease.Meta)
 
+	mvccTimer := planMVCC.Begin()
 	mvcc, err := w.resolveQueryPlanMVCC(ctx, req, shardID.VChannel)
+	mvccTimer.End(err)
 	if err != nil {
 		return nil, err
 	}
@@ -219,13 +226,17 @@ func (w *walAdaptorImpl) GetQueryPlan(ctx context.Context, req *viewpb.GetQueryP
 		}
 		searchReq := proto.Clone(request.LegacySearchRequest).(*internalpb.SearchRequest)
 		fillSearchRequestPartitionIDs(searchReq, req.GetPartitionIds())
+		optTimer := planOptimize.Begin()
 		optimization, err := optimizer.OptimizeSearch(ctx, searchReq)
+		optTimer.End(err)
 		if err != nil {
 			return nil, err
 		}
 		plan.Request = &viewpb.QueryPlan_LegacySearchRequest{LegacySearchRequest: searchReq}
 		if !optimization.Skip {
+			buildTimer := planNodes.Begin()
 			plan.WorkNodes = buildQueryPlanWorkNodes(lease.View, searchQueryPlanWorkNodeOptions(searchReq, runtime, mvcc))
+			buildTimer.End(nil)
 		}
 	case *viewpb.GetQueryPlanRequest_LegacyRetrieveRequest:
 		if request.LegacyRetrieveRequest == nil {
@@ -233,7 +244,10 @@ func (w *walAdaptorImpl) GetQueryPlan(ctx context.Context, req *viewpb.GetQueryP
 		}
 		retrieveReq := proto.Clone(request.LegacyRetrieveRequest).(*internalpb.RetrieveRequest)
 		fillRetrieveRequestPartitionIDs(retrieveReq, req.GetPartitionIds())
-		if err := optimizer.OptimizeRetrieve(ctx, retrieveReq); err != nil {
+		optTimer := planOptimize.Begin()
+		optErr := optimizer.OptimizeRetrieve(ctx, retrieveReq)
+		optTimer.End(optErr)
+		if err := optErr; err != nil {
 			return nil, err
 		}
 		plan.Request = &viewpb.QueryPlan_LegacyRetrieveRequest{LegacyRetrieveRequest: retrieveReq}
@@ -720,3 +734,11 @@ func buildInterceptorsAndReleaseInitialSnapshot(
 	param.InitialRecoverSnapshot = nil
 	return result
 }
+
+var (
+	planTotal    = stage.New("streamingNode", "query_plan", "total")
+	planLease    = stage.New("streamingNode", "query_plan", "lease")
+	planMVCC     = stage.New("streamingNode", "query_plan", "mvcc")
+	planOptimize = stage.New("streamingNode", "query_plan", "global_optimize")
+	planNodes    = stage.New("streamingNode", "query_plan", "build_nodes")
+)

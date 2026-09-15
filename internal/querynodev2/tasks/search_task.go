@@ -27,6 +27,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
@@ -176,7 +177,15 @@ func (t *SearchTask) ExecuteOnSegments(selected []segments.Segment) error {
 	return t.execute(selected)
 }
 
-func (t *SearchTask) execute(selected []segments.Segment) error {
+func (t *SearchTask) execute(selected []segments.Segment) (retErr error) {
+	totalTimer := taskSearchTotal.Begin()
+	var covered time.Duration
+	wallStart := time.Now()
+	defer func() {
+		taskSearchOther.Observe(time.Since(wallStart)-covered, stage.Outcome(retErr))
+		totalTimer.End(retErr)
+	}()
+
 	executeStart := time.Now()
 	timing := searchPhaseTiming{queue: t.queueTime}
 	mlog.Info(t.ctx, "search task execute start",
@@ -194,7 +203,15 @@ func (t *SearchTask) execute(selected []segments.Segment) error {
 	tr := timerecord.NewTimeRecorderWithTrace(t.ctx, "SearchTask")
 
 	req := t.req
+	prepareTimer := taskSearchPrepare.Begin()
+	defer func() { prepareTimer.End(retErr) }()
 	prepareStart := time.Now()
+	var prepareFinished bool
+	defer func() {
+		if !prepareFinished {
+			covered += time.Since(prepareStart)
+		}
+	}()
 	err := t.combinePlaceHolderGroups()
 	if err != nil {
 		return err
@@ -205,12 +222,16 @@ func (t *SearchTask) execute(selected []segments.Segment) error {
 	}
 	defer searchReq.Delete()
 	timing.prepareRequest = time.Since(prepareStart)
+	prepareTimer.End(nil)
+	covered += timing.prepareRequest
+	prepareFinished = true
 
 	var (
 		results          []*segments.SearchResult
 		searchedSegments []segments.Segment
 	)
 	searchStart := time.Now()
+	searchTimer := taskSegmentSearch.Begin()
 	stageStart := searchStart
 	mlog.Info(t.ctx, "search task segment search start",
 		mlog.FieldCollectionID(t.collection.ID()),
@@ -239,6 +260,8 @@ func (t *SearchTask) execute(selected []segments.Segment) error {
 			req.GetSegmentIDs(),
 		)
 	}
+	searchTimer.End(err)
+	covered += time.Since(searchStart)
 	if selected == nil {
 		defer t.segmentManager.Segment.Unpin(searchedSegments)
 	}
@@ -331,6 +354,9 @@ func (t *SearchTask) execute(selected []segments.Segment) error {
 	// side effect of resetting tr.last and would steal part of the span if we
 	// measured the reduce metric off tr.
 	reduceTR := timerecord.NewTimeRecorder("reduce")
+	reduceTimer := taskReduceTotal.Begin()
+	reduceStageStart := time.Now()
+	defer func() { covered += time.Since(reduceStageStart); reduceTimer.End(retErr) }()
 	stageStart = time.Now()
 	mlog.Info(t.ctx, "search task reduce start",
 		mlog.FieldCollectionID(t.collection.ID()),
@@ -339,6 +365,7 @@ func (t *SearchTask) execute(selected []segments.Segment) error {
 
 	// Mutates results in place; must run before Arrow export.
 	prepareExportStart := time.Now()
+	exportPrepareTimer := taskPrepareExport.Begin()
 	allSearchCount, err := segcore.PrepareSearchResultsForExport(
 		t.ctx,
 		searchReq.Plan(),
@@ -347,6 +374,7 @@ func (t *SearchTask) execute(selected []segments.Segment) error {
 		t.originNqs,
 		t.originTopks,
 	)
+	exportPrepareTimer.End(err)
 	if err != nil {
 		mlog.Warn(t.ctx, "failed to prepare search results for export", mlog.Err(err))
 		return err
@@ -365,6 +393,7 @@ func (t *SearchTask) execute(selected []segments.Segment) error {
 	}
 	arrowExportStart := time.Now()
 	segDFs, err := t.exportSearchResultsAsArrow(results, searchReq.Plan(), l0InputFieldIDs)
+	taskArrowExport.Observe(time.Since(arrowExportStart), stage.Outcome(err))
 	if err != nil {
 		return err
 	}
@@ -640,3 +669,14 @@ func (t *SearchTask) combinePlaceHolderGroups() error {
 	t.placeholderGroup, _ = proto.Marshal(ret)
 	return nil
 }
+
+var (
+	taskSearchTotal   = stage.New("queryNode", "search_task", "total")
+	taskSearchPrepare = stage.New("queryNode", "search_task", "prepare_request")
+	taskSegmentSearch = stage.New("queryNode", "search_task", "segment_search")
+	taskReduceTotal   = stage.New("queryNode", "search_task", "reduce_total")
+	taskPrepareExport = stage.New("queryNode", "search_task", "prepare_export")
+	taskArrowExport   = stage.New("queryNode", "search_task", "arrow_export")
+)
+
+var taskSearchOther = stage.New("queryNode", "search_task", "unattributed")

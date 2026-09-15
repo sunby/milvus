@@ -10,6 +10,7 @@ import (
 	"github.com/milvus-io/milvus/internal/views/coord/coordview"
 	"github.com/milvus-io/milvus/internal/views/qviews"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 // Balancer is the scheduling controller that reconciles dirty shards into
@@ -137,9 +138,18 @@ func (b *DefaultBalancer) loop(ctx context.Context) {
 	}
 }
 
+var (
+	reconcileTotal    = stage.New("coord", "reconcile", "total")
+	reconcileSnapshot = stage.New("coord", "reconcile", "snapshot")
+	reconcilePlan     = stage.New("coord", "reconcile", "plan")
+	reconcileApply    = stage.New("coord", "reconcile", "apply")
+)
+
 // Reconcile runs one reconcile cycle. It is exported primarily for tests and
 // for callers that want a synchronous controller pass during startup.
-func (b *DefaultBalancer) Reconcile(ctx context.Context) error {
+func (b *DefaultBalancer) Reconcile(ctx context.Context) (retErr error) {
+	timer := reconcileTotal.Begin()
+	defer timer.EndError(&retErr)
 	if b.snapshotBuilder == nil || b.viewRegistry == nil || b.policy == nil {
 		return nil
 	}
@@ -155,6 +165,7 @@ func (b *DefaultBalancer) Reconcile(ctx context.Context) error {
 	snapshotStartedAt := time.Now()
 	snap, dirty := b.snapshotBuilder.build(ctx, pending)
 	snapshotDuration := time.Since(snapshotStartedAt)
+	reconcileSnapshot.Observe(snapshotDuration, stage.Success)
 	if len(dirty) == 0 {
 		logReconcileStats(
 			ctx,
@@ -173,9 +184,11 @@ func (b *DefaultBalancer) Reconcile(ctx context.Context) error {
 	planStartedAt := time.Now()
 	plan := b.policy.Plan(snap, dirty)
 	planDuration := time.Since(planStartedAt)
+	reconcilePlan.Observe(planDuration, stage.Success)
 	applyStartedAt := time.Now()
 	err := b.apply(ctx, plan)
 	applyDuration := time.Since(applyStartedAt)
+	reconcileApply.Observe(applyDuration, stage.Outcome(err))
 	logReconcileStats(
 		ctx,
 		pending,
@@ -235,8 +248,9 @@ func (b *DefaultBalancer) apply(ctx context.Context, plan *BalancePlan) error {
 	if plan == nil {
 		return nil
 	}
-	batch := b.viewRegistry.Begin()
-	defer batch.Commit()
+	// Each manager emits a complete shard-scoped event. Let the flush scheduler
+	// batch ready lanes without holding unrelated Ready/Up callbacks until this
+	// entire plan has been applied. Explicit batching is reserved for recovery.
 	var errs []error
 	for _, shardID := range plan.Releases {
 		mgr := b.viewRegistry.Get(shardID)

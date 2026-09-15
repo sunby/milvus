@@ -43,11 +43,13 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 		return err
 	}
 	if !Params.ProxyCfg.EnableAutoLoad.GetAsBool() {
+		setDQLPath(ctx, "disabled")
 		return nil
 	}
 
 	readiness, ok := node.viewQueryClient.(queryclient.CollectionReadiness)
 	if !ok {
+		setDQLPath(ctx, "unavailable")
 		return nil
 	}
 
@@ -67,6 +69,7 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 
 	err = readiness.CheckCollectionReady(ctx, collectionID, collectionInfo.VChannels)
 	if err == nil {
+		setDQLPath(ctx, "ready")
 		return nil
 	}
 	if !errors.Is(err, merr.ErrCollectionNotLoaded) {
@@ -83,6 +86,10 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 
 	loadRequest := &milvuspb.LoadCollectionRequest{DbName: dbName, CollectionName: collectionName}
 	needsLoad := loadState.GetState() == commonpb.LoadState_LoadStateNotLoad
+	setDQLPath(ctx, "loading")
+	if needsLoad {
+		setDQLPath(ctx, "unloaded")
+	}
 	switch loadState.GetState() {
 	case commonpb.LoadState_LoadStateNotLoad:
 		// Every caller must authorize its own load before joining shared work.
@@ -102,15 +109,20 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 
 	// Share the complete load-and-wait lifecycle, including callers that observe
 	// Loading after another request has already submitted the load.
-	resultCh := node.autoLoadCollectionGroup.DoChan(strconv.FormatInt(collectionID, 10), func() (struct{}, error) {
+	resultCh := node.autoLoadCollectionGroup.DoChan(strconv.FormatInt(collectionID, 10), func() (_ struct{}, retErr error) {
 		loadCtx, cancelLifecycle := contextutil.MergeContext(context.WithoutCancel(ctx), node.ctx)
 		defer cancelLifecycle()
 		loadCtx, cancelTimeout := context.WithTimeout(loadCtx, loadTimeout)
 		defer cancelTimeout()
+		lifecycleTimer := autoLoadTotal.Begin()
+		defer lifecycleTimer.EndError(&retErr)
 
 		if needsLoad {
+			recheckTimer := autoLoadRecheck.Begin()
 			loadState, err := node.GetLoadState(loadCtx, &milvuspb.GetLoadStateRequest{DbName: dbName, CollectionName: collectionName})
-			if err := merr.CheckRPCCall(loadState, err); err != nil {
+			err = merr.CheckRPCCall(loadState, err)
+			recheckTimer.End(err)
+			if err != nil {
 				return struct{}{}, merr.Wrap(err, "recheck collection load state before DQL request")
 			}
 			switch loadState.GetState() {
@@ -119,8 +131,11 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 					mlog.FieldDbName(dbName),
 					mlog.FieldCollectionName(collectionName),
 					mlog.FieldCollectionID(collectionID))
+				submitTimer := autoLoadSubmit.Begin()
 				status, err := node.loadCollectionForDQL(loadCtx, loadRequest)
-				if err := merr.CheckRPCCall(status, err); err != nil {
+				err = merr.CheckRPCCall(status, err)
+				submitTimer.End(err)
+				if err != nil {
 					return struct{}{}, merr.Wrap(err, "load collection before DQL request")
 				}
 			case commonpb.LoadState_LoadStateLoading, commonpb.LoadState_LoadStateLoaded:
@@ -131,7 +146,10 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 			}
 		}
 		waitStartedAt := time.Now()
-		if err := readiness.WaitForCollectionReady(loadCtx, collectionID, collectionInfo.VChannels); err != nil {
+		readyTimer := autoLoadReady.Begin()
+		readyErr := readiness.WaitForCollectionReady(loadCtx, collectionID, collectionInfo.VChannels)
+		readyTimer.End(readyErr)
+		if err := readyErr; err != nil {
 			return struct{}{}, err
 		}
 		mlog.Info(loadCtx, "[load on search] wait collection ready done",
@@ -139,13 +157,20 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 			mlog.FieldCollectionID(collectionID), mlog.Duration("wait", time.Since(waitStartedAt)))
 		return struct{}{}, nil
 	})
+	callerTimer := autoLoadCaller.Begin()
 	select {
 	case result := <-resultCh:
+		callerErr := result.Err
+		if ctx.Err() != nil {
+			callerErr = context.Cause(ctx)
+		}
+		callerTimer.End(callerErr)
 		if err := ctx.Err(); err != nil {
 			return context.Cause(ctx)
 		}
 		return result.Err
 	case <-ctx.Done():
+		callerTimer.End(context.Cause(ctx))
 		return context.Cause(ctx)
 	}
 }

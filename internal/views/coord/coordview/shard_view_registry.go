@@ -9,10 +9,12 @@ import (
 	"github.com/milvus-io/milvus/internal/metastore/kv/queryview"
 	"github.com/milvus-io/milvus/internal/views/coord/coordview/syncer"
 	"github.com/milvus-io/milvus/internal/views/qviews"
+	qvobserve "github.com/milvus-io/milvus/internal/views/qviews/observe"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
 	"github.com/milvus-io/milvus/pkg/v3/util/nodescheduler"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 // ShardViewRegistry owns the lifecycle of every ShardViewManager on this Coord
@@ -121,9 +123,13 @@ func RecoverShardViewRegistry(
 	return registry, nil
 }
 
+var registryEnsure = stage.New("coord", "apply", "ensure")
+
 // Ensure returns the ShardViewManager for shardID, creating a fresh one if
 // none exists. Safe to call repeatedly.
 func (r *ShardViewRegistry) Ensure(shardID qviews.ShardID) *ShardViewManager {
+	timer := registryEnsure.Begin()
+	defer timer.End(nil)
 	// Fast path: already present.
 	r.mu.RLock()
 	if mgr, ok := r.shards[shardID]; ok {
@@ -156,6 +162,19 @@ func (r *ShardViewRegistry) Close() {
 		return
 	}
 	r.flushScheduler.Close()
+	r.mu.RLock()
+	managers := make([]*ShardViewManager, 0, len(r.shards))
+	for _, manager := range r.shards {
+		managers = append(managers, manager)
+	}
+	r.mu.RUnlock()
+	for _, manager := range managers {
+		manager.mu.Lock()
+		for _, sm := range manager.views {
+			qvobserve.CancelView("coord", manager.keyForStateMachine(sm))
+		}
+		manager.mu.Unlock()
+	}
 }
 
 // Begin opens an explicit cross-shard QueryView flush batch. Existing flush

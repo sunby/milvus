@@ -48,6 +48,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexcgopb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 // ExternalReaderContext carries per-collection context needed by the FFI
@@ -423,13 +424,17 @@ func GetManifestHandleWithExtfs(
 	extfs ExternalSpecContext,
 ) (loonManifestHandle *C.LoonManifest, err error) {
 	var cManifestHandle *C.LoonManifest
+	totalTimer := manifestTotal.Begin()
+	defer totalTimer.EndError(&err)
 	basePath, version, err := UnmarshalManifestPath(manifestPath)
 	if err != nil {
 		return cManifestHandle, err
 	}
 	mlog.Debug(context.TODO(), "GetManifest", mlog.String("manifestPath", manifestPath), mlog.String("basePath", basePath), mlog.Int64("version", version))
 
+	propertiesTimer := manifestProperties.Begin()
 	cProperties, err := MakePropertiesFromStorageConfig(storageConfig, nil)
+	propertiesTimer.End(err)
 	if err != nil {
 		return cManifestHandle, err
 	}
@@ -441,15 +446,19 @@ func GetManifestHandleWithExtfs(
 	defer C.free(unsafe.Pointer(cBasePath))
 
 	var cTransactionHandle C.LoonTransactionHandle
+	beginTimer := manifestBegin.Begin()
 	result := C.loon_transaction_begin(cBasePath, cProperties, C.int64_t(version), C.int32_t(0) /* resolve_id */, C.uint32_t(1) /* retry_limit */, &cTransactionHandle)
 	err = HandleLoonFFIResult(result)
+	beginTimer.End(err)
 	if err != nil {
 		return cManifestHandle, err
 	}
 	defer C.loon_transaction_destroy(cTransactionHandle)
 
+	getTimer := manifestGet.Begin()
 	result = C.loon_transaction_get_manifest(cTransactionHandle, &cManifestHandle)
 	err = HandleLoonFFIResult(result)
+	getTimer.End(err)
 	if err != nil {
 		return cManifestHandle, err
 	}
@@ -459,3 +468,10 @@ func GetManifestHandleWithExtfs(
 
 // Ensure FFIPackedReader implements array.RecordReader interface
 // var _ array.RecordReader = (*FFIPackedReader)(nil)
+
+var (
+	manifestTotal      = stage.New("storage", "manifest", "total")
+	manifestProperties = stage.New("storage", "manifest", "properties")
+	manifestBegin      = stage.New("storage", "manifest", "transaction_begin")
+	manifestGet        = stage.New("storage", "manifest", "get_manifest")
+)

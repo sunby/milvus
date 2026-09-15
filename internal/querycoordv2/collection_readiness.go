@@ -20,6 +20,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/cockroachdb/errors"
+
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus/internal/views/coord/coordview"
 	"github.com/milvus-io/milvus/internal/views/coord/loadmgr"
@@ -29,6 +31,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 // WaitCollectionReady observes the existing load; it never initiates a load.
@@ -36,7 +39,24 @@ func (s *Server) WaitCollectionReady(ctx context.Context, req *querypb.WaitColle
 	return merr.Status(s.waitCollectionReady(ctx, req)), nil
 }
 
-func (s *Server) waitCollectionReady(ctx context.Context, req *querypb.WaitCollectionReadyRequest) error {
+var (
+	collectionReadyWait  = stage.New("coord", "readiness", "wait")
+	collectionReadyCheck = stage.New("coord", "readiness", "check")
+)
+
+func (s *Server) waitCollectionReady(ctx context.Context, req *querypb.WaitCollectionReadyRequest) (retErr error) {
+	recorder := collectionReadyWait
+	if req.GetCheckOnly() {
+		recorder = collectionReadyCheck
+	}
+	timer := recorder.Begin()
+	defer func() {
+		if req.GetCheckOnly() && errors.Is(retErr, merr.ErrCollectionNotLoaded) {
+			timer.EndResult(stage.NotReady)
+		} else {
+			timer.End(retErr)
+		}
+	}()
 	if err := merr.CheckHealthy(s.State()); err != nil {
 		return err
 	}
