@@ -14,6 +14,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 // Balancer is the scheduling controller that reconciles dirty shards into
@@ -160,16 +161,26 @@ func (b *DefaultBalancer) loop(ctx context.Context) {
 	}
 }
 
+var (
+	reconcileTotal    = stage.New("coord", "reconcile", "total")
+	reconcileSnapshot = stage.New("coord", "reconcile", "snapshot")
+	reconcilePlan     = stage.New("coord", "reconcile", "plan")
+	reconcileApply    = stage.New("coord", "reconcile", "apply")
+)
+
 // Reconcile runs one reconcile cycle. It is exported primarily for tests and
 // for callers that want a synchronous controller pass during startup.
 // It waits for cache readiness before consuming queued work; ctx cancels that wait.
-func (b *DefaultBalancer) Reconcile(ctx context.Context) error {
+func (b *DefaultBalancer) Reconcile(ctx context.Context) (retErr error) {
 	if b.cache == nil || b.viewRegistry == nil || b.policy == nil {
 		return nil
 	}
 	if err := b.cache.WaitForReady(ctx); err != nil {
 		return err
 	}
+	// Exclude the startup cache-readiness wait from reconcile latency.
+	timer := reconcileTotal.Begin()
+	defer timer.EndError(&retErr)
 	b.reconcileMu.Lock()
 	defer b.reconcileMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -197,6 +208,7 @@ func (b *DefaultBalancer) Reconcile(ctx context.Context) error {
 	reader := newPlanningContext(b.cache)
 	dirty := resolveCacheScope(reader, pending)
 	snapshotDuration := time.Since(snapshotStartedAt)
+	reconcileSnapshot.Observe(snapshotDuration, stage.Success)
 	if len(dirty) == 0 {
 		logReconcileStats(ctx, pending, 0, nil, snapshotDuration, triggerDuration, 0, 0, time.Since(totalStartedAt), nil)
 		return nil
@@ -215,11 +227,14 @@ func (b *DefaultBalancer) Reconcile(ctx context.Context) error {
 		})
 	}
 	planDuration := time.Since(planStartedAt)
+	reconcilePlan.Observe(planDuration, stage.Outcome(err))
 	applyStartedAt := time.Now()
 	applyErr := b.apply(ctx, plan)
 	recoveryErr := b.recoverPublishedSchemas(ctx, reader, dirty)
 	applyDuration := time.Since(applyStartedAt)
-	err = errors.CombineErrors(err, errors.CombineErrors(applyErr, recoveryErr))
+	applyErr = errors.CombineErrors(applyErr, recoveryErr)
+	reconcileApply.Observe(applyDuration, stage.Outcome(applyErr))
+	err = errors.CombineErrors(err, applyErr)
 	logReconcileStats(ctx, pending, len(dirty), plan, snapshotDuration, triggerDuration, planDuration, applyDuration, time.Since(totalStartedAt), err)
 	return err
 }

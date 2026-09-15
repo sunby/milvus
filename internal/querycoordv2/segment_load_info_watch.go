@@ -18,6 +18,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 type queryViewSegmentLoadInfoSubscription struct {
@@ -115,6 +116,7 @@ func (s *queryViewSegmentLoadInfoWatchSession) sendResponse(resp *querypb.WatchQ
 	if resp == nil || len(resp.GetSnapshots()) == 0 && merr.Ok(resp.GetStatus()) {
 		return true
 	}
+	sendTimer := watchSend.Begin()
 	err := qviews.SendSegmentLoadInfoResponses(resp, func(batch *querypb.WatchQueryViewSegmentLoadInfoResponse) error {
 		if err := s.stream.Send(batch); err != nil {
 			return err
@@ -122,6 +124,7 @@ func (s *queryViewSegmentLoadInfoWatchSession) sendResponse(resp *querypb.WatchQ
 		s.updateSnapshotRevisions(batch.GetSnapshots())
 		return nil
 	})
+	sendTimer.End(err)
 	if err != nil {
 		mlog.Warn(s.stream.Context(), "query view segment load info watch send failed", mlog.Err(err))
 		return false
@@ -197,7 +200,9 @@ func (s *queryViewSegmentLoadInfoWatchSession) handleDirtySegments() *querypb.Wa
 	return resp
 }
 
-func (s *queryViewSegmentLoadInfoWatchSession) buildSnapshots(ctx context.Context, subscriptions []queryViewSegmentLoadInfoSubscription) ([]*querypb.QueryViewSegmentLoadInfoSnapshot, []*querypb.QueryViewCollectionIndexes, error) {
+func (s *queryViewSegmentLoadInfoWatchSession) buildSnapshots(ctx context.Context, subscriptions []queryViewSegmentLoadInfoSubscription) (retSnapshots []*querypb.QueryViewSegmentLoadInfoSnapshot, retCollections []*querypb.QueryViewCollectionIndexes, retErr error) {
+	timer := watchBuild.Begin()
+	defer timer.EndError(&retErr)
 	byCollection := make(map[int64][]queryViewSegmentLoadInfoSubscription)
 	for _, subscription := range subscriptions {
 		if subscription.collectionID == 0 || subscription.segmentID == 0 {
@@ -221,7 +226,9 @@ func (s *queryViewSegmentLoadInfoWatchSession) buildSnapshots(ctx context.Contex
 		indexRevision := calculateQueryViewIndexRevision(indexInfos)
 		before := len(snapshots)
 		for _, loadInfo := range infos {
+			revisionTimer := watchRevision.Begin()
 			revision := calculateQueryViewSegmentRevision(loadInfo, indexRevision)
+			revisionTimer.End(nil)
 			if sameQueryViewSegmentLoadInfoRevision(expected[loadInfo.GetSegmentID()], revision) {
 				continue
 			}
@@ -562,3 +569,9 @@ func sameQueryViewSegmentLoadInfoRevision(left, right *querypb.QueryViewSegmentL
 	}
 	return left.GetLoadInfoRevision() == right.GetLoadInfoRevision()
 }
+
+var (
+	watchBuild    = stage.New("coord", "load_info_watch", "build_snapshot")
+	watchRevision = stage.New("coord", "load_info_watch", "revision_hash")
+	watchSend     = stage.New("coord", "load_info_watch", "send")
+)

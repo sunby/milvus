@@ -18,6 +18,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/nodescheduler"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
@@ -85,14 +86,16 @@ type segmentBase struct {
 // A resource remains in the registry through Closing. Bindings arriving during
 // closure wait for its done channel before installing a replacement owner.
 type segmentResource struct {
-	manager        *SegmentResourceManager
-	id             int64
-	collectionID   int64
-	ctx            context.Context
-	cancel         context.CancelFunc
-	bindings       []*segmentBinding
-	snapshot       *SegmentLoadInfoSnapshot
-	subscription   SegmentLoadInfoSubscription
+	manager      *SegmentResourceManager
+	id           int64
+	collectionID int64
+	ctx          context.Context
+	cancel       context.CancelFunc
+	bindings     []*segmentBinding
+	snapshot     *SegmentLoadInfoSnapshot
+	subscription SegmentLoadInfoSubscription
+	// firstSnapshot spans subscription through the first usable snapshot; guarded by manager.mu.
+	firstSnapshot  stage.Timer
 	metadataClosed bool
 	bases          []*segmentBase
 	reads          []*preparedSegmentRead
@@ -315,6 +318,7 @@ func (r *segmentResource) reconcile(schedulerCtx context.Context) error {
 			return nil
 		}
 		if r.subscription == nil {
+			r.firstSnapshot = loadInfoFirstSnapshot.Begin()
 			m.mu.Unlock()
 			sub := m.stream.Subscribe(SegmentLoadInfoSubscriptionOption{CollectionID: r.collectionID, SegmentID: r.id, Handler: resourceMetadataHandler{r}})
 			m.mu.Lock()
@@ -457,6 +461,7 @@ func (r *segmentResource) nextBindingLocked() (*segmentBinding, time.Time) {
 }
 
 func (r *segmentResource) prepare(ctx context.Context, b *segmentBinding, collection CollectionRuntime, snapshot SegmentLoadInfoSnapshot) (_ *preparedSegmentRead, err error) {
+	totalTimer := segmentLoadTotal.Begin()
 	m := r.manager
 	info := snapshot.LoadInfo
 	startedAt := time.Now()
@@ -465,10 +470,12 @@ func (r *segmentResource) prepare(ctx context.Context, b *segmentBinding, collec
 		timing.total = time.Since(startedAt)
 		timing.failed = err != nil
 		recordSQNSegmentLoadTiming(ctx, timing)
+		totalTimer.End(err)
 	}()
 	updateIndexMetaStartedAt := time.Now()
 	err = updateCollectionIndexMeta(ctx, collection, snapshot.IndexInfos)
 	timing.updateIndexMeta = time.Since(updateIndexMetaStartedAt)
+	segmentUpdateIndex.Observe(timing.updateIndexMeta, stage.Outcome(err))
 	if err != nil {
 		return nil, err
 	}
@@ -476,6 +483,7 @@ func (r *segmentResource) prepare(ctx context.Context, b *segmentBinding, collec
 		reserveResourceStartedAt := time.Now()
 		reservation, err := m.estimator.Reserve(ctx, info, collection)
 		timing.reserveResource = time.Since(reserveResourceStartedAt)
+		segmentReserve.Observe(timing.reserveResource, stage.Outcome(err))
 		if err != nil {
 			return nil, err
 		}
@@ -484,6 +492,7 @@ func (r *segmentResource) prepare(ctx context.Context, b *segmentBinding, collec
 				releaseResourceStartedAt := time.Now()
 				reservation.Release()
 				timing.releaseResource = time.Since(releaseResourceStartedAt)
+				segmentUnreserve.Observe(timing.releaseResource, stage.Success)
 			}()
 		}
 	}
@@ -512,6 +521,7 @@ func (r *segmentResource) prepare(ctx context.Context, b *segmentBinding, collec
 		physicalLoadStartedAt := time.Now()
 		segment, err := m.loader.Load(segments.WithPhysicalLoadTiming(ctx, physicalLoadDetail), info, collection)
 		timing.physicalLoad = time.Since(physicalLoadStartedAt)
+		segmentPhysical.Observe(timing.physicalLoad, stage.Outcome(err))
 		timing.physicalDetail = *physicalLoadDetail
 		if err != nil {
 			return nil, err
@@ -530,6 +540,7 @@ func (r *segmentResource) prepare(ctx context.Context, b *segmentBinding, collec
 	onLoadedStartedAt := time.Now()
 	read, err := m.loader.PrepareReadState(ctx, base.segment, reuse, collection, snapshot)
 	timing.onLoaded = time.Since(onLoadedStartedAt)
+	segmentOnLoaded.Observe(timing.onLoaded, stage.Outcome(err))
 	if err != nil {
 		return nil, err
 	}
@@ -577,6 +588,7 @@ func (r *segmentResource) close() {
 		_ = base.segment.Release(context.WithoutCancel(r.ctx))
 	}
 	m.mu.Lock()
+	r.firstSnapshot.End(context.Canceled)
 	delete(m.resources, r.id)
 	if len(r.bindings) > 0 {
 		next := m.newResourceLocked(r.id, r.collectionID)
@@ -659,6 +671,7 @@ func (h resourceMetadataHandler) Handle(snapshot SegmentLoadInfoSnapshot) error 
 		owned := snapshot
 		owned.LoadInfo = proto.Clone(snapshot.LoadInfo).(*querypb.SegmentLoadInfo)
 		r.snapshot = &owned
+		r.firstSnapshot.End(nil)
 		r.wakeLocked()
 	}
 	r.manager.mu.Unlock()
@@ -818,3 +831,13 @@ func (r *segmentResource) releaseBases(bases []*segmentBase) {
 		_ = base.segment.Release(context.WithoutCancel(r.ctx))
 	}
 }
+
+var (
+	segmentLoadTotal      = stage.New("queryNode", "segment_load", "total")
+	segmentUpdateIndex    = stage.New("queryNode", "segment_load", "update_index")
+	segmentReserve        = stage.New("queryNode", "segment_load", "reserve")
+	segmentUnreserve      = stage.New("queryNode", "segment_load", "release_reservation")
+	segmentPhysical       = stage.New("queryNode", "segment_load", "physical_load")
+	segmentOnLoaded       = stage.New("queryNode", "segment_load", "on_loaded")
+	loadInfoFirstSnapshot = stage.New("queryNode", "load_info", "first_snapshot")
+)

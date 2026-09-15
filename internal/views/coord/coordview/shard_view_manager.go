@@ -10,6 +10,7 @@ import (
 	qvobserve "github.com/milvus-io/milvus/internal/views/qviews/observe"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 // DataViewRefProvider acquires DataViewRefs for QueryViews. The DataView
@@ -71,6 +72,14 @@ type syncEntry struct {
 	sm    *CoordQueryViewStateMachine
 	views []qviews.QueryViewAtWorkNode
 }
+
+var (
+	prepareDuration      = stage.New("coord", "apply", "prepare")
+	preparePin           = stage.New("coord", "apply", "pin_dataview")
+	prepareLock          = stage.New("coord", "apply", "shard_lock_wait")
+	publishStatsDuration = stage.New("coord", "apply", "publish_stats")
+	reportDuration       = stage.New("coord", "sync", "apply_report")
+)
 
 // newShardViewManager creates a new ShardViewManager for the given shard.
 //
@@ -418,7 +427,9 @@ func (m *ShardViewManager) AddPublishedRecovery(ctx context.Context, builder *qv
 	return m.addPreparing(ctx, builder, &source)
 }
 
-func (m *ShardViewManager) addPreparing(ctx context.Context, builder *qviews.QueryViewAtCoordBuilder, source *qviews.QueryViewVersion) error {
+func (m *ShardViewManager) addPreparing(ctx context.Context, builder *qviews.QueryViewAtCoordBuilder, source *qviews.QueryViewVersion) (retErr error) {
+	timer := prepareDuration.Begin()
+	defer timer.EndError(&retErr)
 	newDV := builder.DataVersion()
 	view := builder.Build()
 	m.mu.Lock()
@@ -433,13 +444,19 @@ func (m *ShardViewManager) addPreparing(ctx context.Context, builder *qviews.Que
 	// callbacks, Stats and RequestRelease can continue while it waits.
 	var ref qviews.DataViewRef
 	if m.dataViewRefs != nil {
+		pinTimer := preparePin.Begin()
 		ref, err = m.dataViewRefs.Get(ctx, view.GetMeta().GetCollectionId(), newDV.IntoProto())
 		if err == nil && ref == nil {
 			err = merr.WrapErrServiceUnavailableMsg("DataView %s of collection %d is no longer available; replan the QueryView", newDV.String(), view.GetMeta().GetCollectionId())
 		}
+		pinTimer.End(err)
 	}
+	lockTimer := prepareLock.Begin()
 	m.mu.Lock()
+	lockTimer.End(nil)
+	holdTimer := prepareHold.Begin()
 	if err != nil {
+		holdTimer.End(nil)
 		m.releaseEmptyAfterFailedPrepareLocked()
 		return err
 	}
@@ -450,6 +467,7 @@ func (m *ShardViewManager) addPreparing(ctx context.Context, builder *qviews.Que
 		err = ctx.Err()
 	}
 	if err != nil {
+		holdTimer.End(nil)
 		m.releaseEmptyAfterFailedPrepareLocked()
 		if ref != nil {
 			ref.Deref()
@@ -505,6 +523,7 @@ func (m *ShardViewManager) addPreparing(ctx context.Context, builder *qviews.Que
 	event := m.consumeDirtyEventLocked()
 	m.publishStatsLocked()
 	m.submitDirtyEvent(event)
+	holdTimer.End(nil)
 	m.mu.Unlock()
 	return nil
 }
@@ -518,7 +537,9 @@ func (m *ShardViewManager) addPreparing(ctx context.Context, builder *qviews.Que
 // An explicit release, or a failed initial Prepare leaving an empty manager,
 // makes it eligible for registry removal. Resident views complete teardown
 // asynchronously through callbacks.
-func (m *ShardViewManager) RequestRelease(ctx context.Context) error {
+func (m *ShardViewManager) RequestRelease(ctx context.Context) (retErr error) {
+	timer := releaseDuration.Begin()
+	defer timer.EndError(&retErr)
 	m.mu.Lock()
 	m.releaseRequested = true
 
@@ -754,6 +775,8 @@ func (m *ShardViewManager) consumeDirtyEventLocked() dirtyViewEvent {
 // Returns true when this node has completed the sync represented by target.
 func (m *ShardViewManager) makeOnSyncResponse(version qviews.QueryViewVersion, target qviews.QueryViewAtWorkNode) func(resp qviews.QueryViewAtWorkNode) bool {
 	return func(resp qviews.QueryViewAtWorkNode) bool {
+		timer := reportDuration.Begin()
+		defer timer.End(nil)
 		m.mu.Lock()
 
 		sm, ok := m.views[version]
@@ -847,6 +870,8 @@ func (m *ShardViewManager) submitDirtyEvent(event dirtyViewEvent) {
 }
 
 func (m *ShardViewManager) publishStatsLocked() {
+	timer := publishStatsDuration.Begin()
+	defer timer.End(nil)
 	if m.observe != nil {
 		m.observe(m.shardID, m, m.statsLocked())
 	}
@@ -1009,3 +1034,8 @@ func (m *ShardViewManager) abortRecovery() {
 		ref.Deref()
 	}
 }
+
+var (
+	prepareHold     = stage.New("coord", "apply", "shard_lock_hold")
+	releaseDuration = stage.New("coord", "apply", "release")
+)
