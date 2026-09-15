@@ -27,6 +27,7 @@ import (
 type snShardView struct {
 	mu              sync.Mutex
 	closed          bool
+	detached        bool
 	pchannel        string
 	shardID         qviews.ShardID
 	collectionID    int64
@@ -34,7 +35,7 @@ type snShardView struct {
 	views           map[qviews.QueryViewVersion]*snViewEntry
 	catalog         metastore.StreamingNodeCataLog
 	resMgr          StreamingNodeResourceManager
-	onEmpty         func() // called (under mu) when the last view entry is removed
+	onEmpty         func(*snShardView) // called under mu after the empty shard is detached
 }
 
 // snViewEntry pairs an ApplyView (carrying the OnReport callback) with its state machine.
@@ -117,11 +118,12 @@ func recoverSnShardView(
 // ApplyViews applies a batch of coord-pushed views atomically.
 // Preparing and Up views are processed first so new serving candidates are
 // installed before old views are released.
-func (s *snShardView) ApplyViews(views []handler.ApplyView) {
+// Returns false if the batch must be retried on the handler's current shard.
+func (s *snShardView) ApplyViews(views []handler.ApplyView) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
-		return
+	if s.closed || s.detached {
+		return false
 	}
 
 	for i := range views {
@@ -136,6 +138,8 @@ func (s *snShardView) ApplyViews(views []handler.ApplyView) {
 			s.applyOneLocked(&views[i])
 		}
 	}
+	s.detachIfEmptyLocked()
+	return true
 }
 
 func (s *snShardView) CloseForHandoff() {
@@ -151,7 +155,7 @@ func (s *snShardView) CloseForHandoff() {
 	}
 	s.views = make(map[qviews.QueryViewVersion]*snViewEntry)
 	if s.onEmpty != nil {
-		s.onEmpty()
+		s.onEmpty(s)
 	}
 	s.mu.Unlock()
 
@@ -256,11 +260,13 @@ func (s *snShardView) applyOneLocked(av *handler.ApplyView) {
 					s.notifyUnrecoverable(version)
 				},
 			})
-		case qviews.QueryViewStateDropped:
-			// View doesn't exist (e.g., SN restarted). Report Dropped immediately
-			// so Coord can finish cleanup.
+		case qviews.QueryViewStateDown, qviews.QueryViewStateDropped:
+			// This teardown view is already absent (e.g., SN restarted).
+			// Report Dropped so Coord can fast-forward cleanup.
 			if av.OnReport != nil {
-				av.OnReport(av.View)
+				pb := av.View.IntoProto()
+				pb.Meta.State = viewpb.QueryViewState_QueryViewStateDropped
+				av.OnReport(qviews.NewQueryViewAtWorkNodeFromProto(pb))
 			}
 		default:
 			// View unknown to this node (e.g., state lost after restart).
@@ -455,8 +461,18 @@ func (s *snShardView) cleanupIfDropped(version qviews.QueryViewVersion, entry *s
 		return
 	}
 	delete(s.views, version)
-	if len(s.views) == 0 && s.onEmpty != nil {
-		s.onEmpty()
+	s.detachIfEmptyLocked()
+}
+
+// detachIfEmptyLocked also handles batches containing only unknown views,
+// which never create an entry and therefore cannot reach cleanupIfDropped.
+func (s *snShardView) detachIfEmptyLocked() {
+	if len(s.views) != 0 || s.detached {
+		return
+	}
+	s.detached = true
+	if s.onEmpty != nil {
+		s.onEmpty(s)
 	}
 }
 
