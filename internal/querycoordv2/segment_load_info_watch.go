@@ -193,7 +193,7 @@ func (s *queryViewSegmentLoadInfoWatchSession) handleDirtySegments() *querypb.Wa
 }
 
 func (s *queryViewSegmentLoadInfoWatchSession) buildSnapshots(ctx context.Context, subscriptions []queryViewSegmentLoadInfoSubscription) (ret []*querypb.QueryViewSegmentLoadInfoSnapshot, retErr error) {
-	ctx, timer := watchBuild.Start(ctx)
+	timer := watchBuild.Begin()
 	defer timer.EndError(&retErr)
 	byCollection := make(map[int64][]queryViewSegmentLoadInfoSubscription)
 	for _, subscription := range subscriptions {

@@ -20,9 +20,6 @@ import (
 	"context"
 	"time"
 
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/time/rate"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
@@ -39,7 +36,6 @@ type (
 		operation, path string
 		started, ready  time.Time
 		timer           stage.Timer
-		span            trace.Span
 	}
 )
 
@@ -50,8 +46,7 @@ var dqlRecorders = map[string]*stage.Recorder{
 }
 
 func startDQL(ctx context.Context, operation string) (context.Context, *dqlTiming) {
-	ctx, span := otel.Tracer("milvus/query-stages").Start(ctx, "Proxy-"+operation+"-Request")
-	t := &dqlTiming{ctx: ctx, operation: operation, path: "unknown", started: time.Now(), timer: dqlRecorders[operation].Begin(), span: span}
+	t := &dqlTiming{ctx: ctx, operation: operation, path: "unknown", started: time.Now(), timer: dqlRecorders[operation].Begin()}
 	return context.WithValue(ctx, dqlTimingKey{}, t), t
 }
 
@@ -85,30 +80,18 @@ func (t *dqlTiming) finish(ended time.Time, result stage.Result) {
 		d := [...]time.Duration{total, readiness, execution}[i]
 		metrics.QueryRequestStageDuration.WithLabelValues(t.operation, t.path, cohort, name, result.String()).Observe(d.Seconds())
 	}
-	t.span.SetAttributes(attribute.String("load.path", t.path), attribute.String("result", result.String()),
-		attribute.Float64("readiness.seconds", readiness.Seconds()), attribute.Float64("execution.seconds", execution.Seconds()))
-
-	recording := "unsampled"
-	if t.span.IsRecording() {
-		recording = "sampled"
-	}
-	metrics.QueryStageItems.WithLabelValues("proxy", t.operation, "trace_coverage", recording).Inc()
 	if cohort == "gt1s" || result != stage.Success {
 		metrics.QueryStageItems.WithLabelValues("proxy", t.operation, "slow_summary", "candidate").Inc()
 		if mlog.LevelEnabled(mlog.InfoLevel) && dqlSummaryLimiter.Allow() {
 			metrics.QueryStageItems.WithLabelValues("proxy", t.operation, "slow_summary", "emitted").Inc()
 			mlog.Info(t.ctx, "DQL request stages", mlog.String("operation", t.operation), mlog.String("loadPath", t.path),
-				mlog.String("result", result.String()), mlog.Duration("total", total), mlog.Duration("readiness", readiness), mlog.Duration("execution", execution),
-				mlog.String("traceID", t.span.SpanContext().TraceID().String()))
+				mlog.String("result", result.String()), mlog.Duration("total", total), mlog.Duration("readiness", readiness), mlog.Duration("execution", execution))
 		} else {
 			metrics.QueryStageItems.WithLabelValues("proxy", t.operation, "slow_summary", "dropped").Inc()
 		}
 	}
 	t.timer.EndResult(result)
-	t.span.End()
 }
-
-type autoLoadResult struct{ SpanContext trace.SpanContext }
 
 var (
 	autoLoadTotal   = stage.New("proxy", "auto_load", "shared_lifecycle")

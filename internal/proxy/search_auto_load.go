@@ -23,8 +23,6 @@ import (
 
 	"github.com/cockroachdb/errors"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 
@@ -64,7 +62,6 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 	if err != nil {
 		return err
 	}
-	trace.SpanFromContext(ctx).SetAttributes(attribute.Int64("collection.id", collectionID))
 	collectionInfo, err := metaCache.GetCollectionInfo(ctx, dbName, collectionName, collectionID)
 	if err != nil {
 		return err
@@ -112,16 +109,12 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 
 	// Share the complete load-and-wait lifecycle, including callers that observe
 	// Loading after another request has already submitted the load.
-	resultCh := node.autoLoadCollectionGroup.DoChan(strconv.FormatInt(collectionID, 10), func() (result autoLoadResult, retErr error) {
+	resultCh := node.autoLoadCollectionGroup.DoChan(strconv.FormatInt(collectionID, 10), func() (_ struct{}, retErr error) {
 		loadCtx, cancelLifecycle := contextutil.MergeContext(context.WithoutCancel(ctx), node.ctx)
 		defer cancelLifecycle()
 		loadCtx, cancelTimeout := context.WithTimeout(loadCtx, loadTimeout)
 		defer cancelTimeout()
-		loadCtx, lifecycleSpan := otel.Tracer("milvus/query-stages").Start(loadCtx, "Proxy-AutoLoadLifecycle", trace.WithNewRoot(), trace.WithLinks(trace.Link{SpanContext: trace.SpanContextFromContext(ctx)}))
-		defer lifecycleSpan.End()
-		lifecycleSpan.SetAttributes(attribute.Int64("collection.id", collectionID))
-		result.SpanContext = lifecycleSpan.SpanContext()
-		loadCtx, lifecycleTimer := autoLoadTotal.Start(loadCtx)
+		lifecycleTimer := autoLoadTotal.Begin()
 		defer lifecycleTimer.EndError(&retErr)
 
 		if needsLoad {
@@ -130,7 +123,7 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 			err = merr.CheckRPCCall(loadState, err)
 			recheckTimer.End(err)
 			if err != nil {
-				return result, merr.Wrap(err, "recheck collection load state before DQL request")
+				return struct{}{}, merr.Wrap(err, "recheck collection load state before DQL request")
 			}
 			switch loadState.GetState() {
 			case commonpb.LoadState_LoadStateNotLoad:
@@ -138,36 +131,35 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 					mlog.FieldDbName(dbName),
 					mlog.FieldCollectionName(collectionName),
 					mlog.FieldCollectionID(collectionID))
-				submitCtx, submitTimer := autoLoadSubmit.Start(loadCtx)
-				status, err := node.loadCollectionForDQL(submitCtx, loadRequest)
+				submitTimer := autoLoadSubmit.Begin()
+				status, err := node.loadCollectionForDQL(loadCtx, loadRequest)
 				err = merr.CheckRPCCall(status, err)
 				submitTimer.End(err)
 				if err != nil {
-					return result, merr.Wrap(err, "load collection before DQL request")
+					return struct{}{}, merr.Wrap(err, "load collection before DQL request")
 				}
 			case commonpb.LoadState_LoadStateLoading, commonpb.LoadState_LoadStateLoaded:
 			case commonpb.LoadState_LoadStateNotExist:
-				return result, merr.WrapErrCollectionNotFoundWithDB(dbName, collectionName)
+				return struct{}{}, merr.WrapErrCollectionNotFoundWithDB(dbName, collectionName)
 			default:
-				return result, merr.WrapErrServiceInternalMsg("unexpected collection load state %s", loadState.GetState().String())
+				return struct{}{}, merr.WrapErrServiceInternalMsg("unexpected collection load state %s", loadState.GetState().String())
 			}
 		}
 		waitStartedAt := time.Now()
-		readyCtx, readyTimer := autoLoadReady.Start(loadCtx)
-		readyErr := readiness.WaitForCollectionReady(readyCtx, collectionID, collectionInfo.VChannels)
+		readyTimer := autoLoadReady.Begin()
+		readyErr := readiness.WaitForCollectionReady(loadCtx, collectionID, collectionInfo.VChannels)
 		readyTimer.End(readyErr)
 		if err := readyErr; err != nil {
-			return result, err
+			return struct{}{}, err
 		}
 		mlog.Info(loadCtx, "[load on search] wait collection ready done",
 			mlog.FieldDbName(dbName), mlog.FieldCollectionName(collectionName),
 			mlog.FieldCollectionID(collectionID), mlog.Duration("wait", time.Since(waitStartedAt)))
-		return result, nil
+		return struct{}{}, nil
 	})
 	callerTimer := autoLoadCaller.Begin()
 	select {
 	case result := <-resultCh:
-		trace.SpanFromContext(ctx).AddLink(trace.Link{SpanContext: result.Val.SpanContext})
 		callerErr := result.Err
 		if ctx.Err() != nil {
 			callerErr = context.Cause(ctx)

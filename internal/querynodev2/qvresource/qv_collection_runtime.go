@@ -30,7 +30,7 @@ func newQueryViewCollectionRuntimeManager(meta qnview.QueryViewLoadMetadataProvi
 }
 
 func (m *queryViewCollectionRuntimeManager) Acquire(ctx context.Context, view *qviews.QueryViewAtQueryNode) (ret qnview.CollectionRuntimeGuard, retryable bool, retErr error) {
-	ctx, timer := runtimeAcquire.Start(ctx)
+	timer := runtimeAcquire.Begin()
 	defer timer.EndError(&retErr)
 	if view == nil {
 		return nil, false, merr.WrapErrServiceInternalMsg("query view is nil")
@@ -91,7 +91,7 @@ func isRetryableCollectionRuntimeError(err error) bool {
 }
 
 func (m *queryViewCollectionRuntimeManager) loadInfo(ctx context.Context, meta *viewpb.QueryViewMeta) (ret qnview.QueryViewLoadInfo, retErr error) {
-	ctx, timer := runtimeMetadata.Start(ctx)
+	timer := runtimeMetadata.Begin()
 	defer timer.EndError(&retErr)
 	return m.meta.GetQueryViewLoadInfo(ctx, meta.GetCollectionId(), qnview.QueryViewLoadInfoVersionFromProto(meta.GetLoadInfoVersion()))
 }

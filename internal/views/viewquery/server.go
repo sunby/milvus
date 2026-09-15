@@ -95,7 +95,7 @@ func (s *Server) executeAdvancedSearch(ctx context.Context, req *viewpb.SearchOn
 }
 
 func (s *Server) executeSearch(ctx context.Context, req *viewpb.SearchOnViewRequest, searchReq *internalpb.SearchRequest) (retResp *internalpb.SearchResults, retErr error) {
-	ctx, totalTimer := workerQueryTotal.Start(ctx)
+	totalTimer := workerQueryTotal.Begin()
 	defer totalTimer.EndError(&retErr)
 	acquireTimer := workerQueryAcquire.Begin()
 	tasks, err := s.provider.AcquireSearchSegmentTasks(
@@ -114,8 +114,8 @@ func (s *Server) executeSearch(ctx context.Context, req *viewpb.SearchOnViewRequ
 		return emptySearchResults(searchReq), nil
 	}
 
-	executeCtx, executeTimer := workerQueryExecute.Start(ctx)
-	result, err := s.scheduler.Search(executeCtx, tasks)
+	executeTimer := workerQueryExecute.Begin()
+	result, err := s.scheduler.Search(ctx, tasks)
 	executeTimer.End(err)
 	if err != nil {
 		return nil, err

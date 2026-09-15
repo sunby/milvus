@@ -168,7 +168,7 @@ func (w *walAdaptorImpl) GetLatestQueryPlanMVCC(ctx context.Context, vchannel st
 }
 
 func (w *walAdaptorImpl) GetQueryPlan(ctx context.Context, req *viewpb.GetQueryPlanRequest) (retPlan *viewpb.QueryPlan, retErr error) {
-	ctx, totalTimer := planTotal.Start(ctx)
+	totalTimer := planTotal.Begin()
 	defer totalTimer.EndError(&retErr)
 	if !w.lifetime.Add(typeutil.LifetimeStateWorking) {
 		return nil, viewerror.NewOnShutdownError("wal is on shutdown")
@@ -183,8 +183,8 @@ func (w *walAdaptorImpl) GetQueryPlan(ctx context.Context, req *viewpb.GetQueryP
 	}
 
 	shardID := qviews.FromProtoShardID(req.GetShardId())
-	leaseCtx, leaseTimer := planLease.Start(ctx)
-	lease, err := w.queryViewHandler.AcquireLatestUpView(leaseCtx, shardID)
+	leaseTimer := planLease.Begin()
+	lease, err := w.queryViewHandler.AcquireLatestUpView(ctx, shardID)
 	leaseTimer.End(err)
 	if err != nil {
 		return nil, err
@@ -199,8 +199,8 @@ func (w *walAdaptorImpl) GetQueryPlan(ctx context.Context, req *viewpb.GetQueryP
 	// real replica.
 	viewShardID := qviews.NewShardIDFromQVMeta(lease.Meta)
 
-	mvccCtx, mvccTimer := planMVCC.Start(ctx)
-	mvcc, err := w.resolveQueryPlanMVCC(mvccCtx, req, shardID.VChannel)
+	mvccTimer := planMVCC.Begin()
+	mvcc, err := w.resolveQueryPlanMVCC(ctx, req, shardID.VChannel)
 	mvccTimer.End(err)
 	if err != nil {
 		return nil, err
@@ -226,8 +226,8 @@ func (w *walAdaptorImpl) GetQueryPlan(ctx context.Context, req *viewpb.GetQueryP
 		}
 		searchReq := proto.Clone(request.LegacySearchRequest).(*internalpb.SearchRequest)
 		fillSearchRequestPartitionIDs(searchReq, req.GetPartitionIds())
-		optCtx, optTimer := planOptimize.Start(ctx)
-		optimization, err := optimizer.OptimizeSearch(optCtx, searchReq)
+		optTimer := planOptimize.Begin()
+		optimization, err := optimizer.OptimizeSearch(ctx, searchReq)
 		optTimer.End(err)
 		if err != nil {
 			return nil, err
@@ -244,8 +244,8 @@ func (w *walAdaptorImpl) GetQueryPlan(ctx context.Context, req *viewpb.GetQueryP
 		}
 		retrieveReq := proto.Clone(request.LegacyRetrieveRequest).(*internalpb.RetrieveRequest)
 		fillRetrieveRequestPartitionIDs(retrieveReq, req.GetPartitionIds())
-		optCtx, optTimer := planOptimize.Start(ctx)
-		optErr := optimizer.OptimizeRetrieve(optCtx, retrieveReq)
+		optTimer := planOptimize.Begin()
+		optErr := optimizer.OptimizeRetrieve(ctx, retrieveReq)
 		optTimer.End(optErr)
 		if err := optErr; err != nil {
 			return nil, err

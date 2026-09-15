@@ -4,8 +4,6 @@ import (
 	"context"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/proto"
 
@@ -175,8 +173,8 @@ func (s *shardViewQueryClient) executeShard(
 			mlog.FieldVChannel(vchannel),
 			mlog.Int("attempt", attempt+1))
 		planStart := time.Now()
-		planCtx, planTimer := clientPlan.Start(ctx)
-		plan, err := s.executeGetQueryPlan(planCtx, targetShardID, planReq, params)
+		planTimer := clientPlan.Begin()
+		plan, err := s.executeGetQueryPlan(ctx, targetShardID, planReq, params)
 		planTimer.End(err)
 		if err != nil {
 			if ve := viewerror.AsViewError(err); ve != nil && ve.IsRetryable() {
@@ -192,8 +190,8 @@ func (s *shardViewQueryClient) executeShard(
 
 		// Phase 2: Fan out to all work nodes concurrently.
 		fanoutStart := time.Now()
-		fanoutCtx, fanoutTimer := clientFanout.Start(ctx)
-		err = s.fanOutToWorkNodes(fanoutCtx, workNodes, plan, shardID, params.dispatchNode)
+		fanoutTimer := clientFanout.Begin()
+		err = s.fanOutToWorkNodes(ctx, workNodes, plan, shardID, params.dispatchNode)
 		fanoutTimer.End(err)
 		fanoutDuration := time.Since(fanoutStart)
 		if err != nil {
@@ -272,12 +270,8 @@ func (s *shardViewQueryClient) fanOutToWorkNodes(
 	for _, node := range workNodes {
 		node := node
 		g.Go(func() error {
-			nodeCtx, nodeTimer := clientDispatch.Start(gCtx)
-			sp := trace.SpanFromContext(nodeCtx)
-			if sp.IsRecording() {
-				sp.SetAttributes(attribute.String("view.shard", shardID.String()), attribute.String("view.version", qviews.FromProtoQueryViewVersion(plan.GetVersion()).String()), attribute.String("work_node", node.String()))
-			}
-			err := dispatchNode(nodeCtx, node, plan, shardID)
+			nodeTimer := clientDispatch.Begin()
+			err := dispatchNode(gCtx, node, plan, shardID)
 			nodeTimer.End(err)
 			return err
 		})

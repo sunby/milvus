@@ -23,16 +23,16 @@ func (h *SNQueryViewHandler) AcquireSearchSegmentTasks(
 	if req.GetIgnoreGrowing() {
 		return NewSNSearchSegmentTasks(nil), nil
 	}
-	leaseCtx, leaseTimer := queryLease.Start(ctx)
-	lease, err := h.AcquireUpView(leaseCtx, shardID, version)
+	leaseTimer := queryLease.Begin()
+	lease, err := h.AcquireUpView(ctx, shardID, version)
 	leaseTimer.End(err)
 	if err != nil {
 		return nil, err
 	}
 	defer lease.Release()
 
-	queryOptimizeCtx, queryOptimizeTimer := queryOptimize.Start(ctx)
-	queryOptimizeErr := h.localOptimizer.OptimizeSearch(queryOptimizeCtx, req)
+	queryOptimizeTimer := queryOptimize.Begin()
+	queryOptimizeErr := h.localOptimizer.OptimizeSearch(ctx, req)
 	queryOptimizeTimer.End(queryOptimizeErr)
 	if err := queryOptimizeErr; err != nil {
 		return nil, err
@@ -48,14 +48,14 @@ func (h *SNQueryViewHandler) AcquireSearchSegmentTasks(
 		mlog.Uint64("growingTimeTick", mvcc.GetGrowingTimetick()),
 		mlog.Uint64("transformingTimeTick", mvcc.GetTransformingTimetick()),
 	)
-	queryVisibleCtx, queryVisibleTimer := queryVisible.Start(ctx)
-	queryVisibleErr := runtime.WaitMVCCVisible(queryVisibleCtx, mvcc.GetGrowingTimetick(), mvcc.GetTransformingTimetick())
+	queryVisibleTimer := queryVisible.Begin()
+	queryVisibleErr := runtime.WaitMVCCVisible(ctx, mvcc.GetGrowingTimetick(), mvcc.GetTransformingTimetick())
 	queryVisibleTimer.End(queryVisibleErr)
 	if err := queryVisibleErr; err != nil {
 		return nil, err
 	}
-	handlesCtx, handlesTimer := queryHandles.Start(ctx)
-	handles, err := runtime.AcquireGrowingSegmentHandles(handlesCtx, selectedPartitionIDs(req.GetPartitionIDs()))
+	handlesTimer := queryHandles.Begin()
+	handles, err := runtime.AcquireGrowingSegmentHandles(ctx, selectedPartitionIDs(req.GetPartitionIDs()))
 	handlesTimer.End(err)
 	if err != nil {
 		return nil, err
@@ -84,16 +84,16 @@ func (h *SNQueryViewHandler) AcquireQuerySegmentTasks(
 	mvcc *viewpb.QueryPlanMVCC,
 	req *internalpb.RetrieveRequest,
 ) (viewquery.QuerySegmentTasks, error) {
-	leaseCtx, leaseTimer := queryLease.Start(ctx)
-	lease, err := h.AcquireUpView(leaseCtx, shardID, version)
+	leaseTimer := queryLease.Begin()
+	lease, err := h.AcquireUpView(ctx, shardID, version)
 	leaseTimer.End(err)
 	if err != nil {
 		return nil, err
 	}
 	defer lease.Release()
 
-	queryOptimizeCtx, queryOptimizeTimer := queryOptimize.Start(ctx)
-	queryOptimizeErr := h.localOptimizer.OptimizeRetrieve(queryOptimizeCtx, req)
+	queryOptimizeTimer := queryOptimize.Begin()
+	queryOptimizeErr := h.localOptimizer.OptimizeRetrieve(ctx, req)
 	queryOptimizeTimer.End(queryOptimizeErr)
 	if err := queryOptimizeErr; err != nil {
 		return nil, err
@@ -109,14 +109,14 @@ func (h *SNQueryViewHandler) AcquireQuerySegmentTasks(
 		mlog.Uint64("growingTimeTick", mvcc.GetGrowingTimetick()),
 		mlog.Uint64("transformingTimeTick", mvcc.GetTransformingTimetick()),
 	)
-	queryVisibleCtx, queryVisibleTimer := queryVisible.Start(ctx)
-	queryVisibleErr := runtime.WaitMVCCVisible(queryVisibleCtx, mvcc.GetGrowingTimetick(), mvcc.GetTransformingTimetick())
+	queryVisibleTimer := queryVisible.Begin()
+	queryVisibleErr := runtime.WaitMVCCVisible(ctx, mvcc.GetGrowingTimetick(), mvcc.GetTransformingTimetick())
 	queryVisibleTimer.End(queryVisibleErr)
 	if err := queryVisibleErr; err != nil {
 		return nil, err
 	}
-	handlesCtx, handlesTimer := queryHandles.Start(ctx)
-	handles, err := runtime.AcquireGrowingSegmentHandles(handlesCtx, selectedPartitionIDs(req.GetPartitionIDs()))
+	handlesTimer := queryHandles.Begin()
+	handles, err := runtime.AcquireGrowingSegmentHandles(ctx, selectedPartitionIDs(req.GetPartitionIDs()))
 	handlesTimer.End(err)
 	if err != nil {
 		return nil, err

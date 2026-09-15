@@ -17,12 +17,7 @@
 package observe
 
 import (
-	"context"
 	"time"
-
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/milvus-io/milvus/internal/views/qviews"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
@@ -46,13 +41,12 @@ type viewLifecycle struct {
 	phase int
 	since time.Time
 	total stage.Timer
-	span  trace.Span
 }
 
 // Lifecycle timestamps are independent of the existing state-age TopK. Progress
 // reports and reconnects never reset them. The map shares the observer's existing
-// mutex; observations and span completion happen after releasing it.
-func (o *MetricsObserver) observeLifecycle(ctx context.Context, event Event) {
+// mutex; completed intervals are recorded after releasing it.
+func (o *MetricsObserver) observeLifecycle(event Event) {
 	component := event.ComponentInfo()
 	var view qviews.QueryViewKey
 	begin, finish := false, false
@@ -134,11 +128,7 @@ func (o *MetricsObserver) observeLifecycle(ctx context.Context, event Event) {
 	now := o.now()
 	life := o.lifecycles[key]
 	if begin && life == nil {
-		_, span := otel.Tracer("milvus/query-stages").Start(ctx, component+"-ViewLoad", trace.WithNewRoot(), trace.WithLinks(trace.Link{SpanContext: trace.SpanContextFromContext(ctx)}))
-		if span.IsRecording() {
-			span.SetAttributes(attribute.String("view.shard", view.ShardID.String()), attribute.String("view.version", view.QueryViewVersion.String()))
-		}
-		life = &viewLifecycle{since: now, total: viewLifeTotals[component].Begin(), span: span}
+		life = &viewLifecycle{since: now, total: viewLifeTotals[component].Begin()}
 		o.lifecycles[key] = life
 	}
 	var recorder *stage.Recorder
@@ -167,8 +157,6 @@ func (o *MetricsObserver) observeLifecycle(ctx context.Context, event Event) {
 			metrics.QueryStageItems.WithLabelValues(component, "view_load", "coverage", "complete").Inc()
 		}
 		life.total.EndResult(result)
-		life.span.SetAttributes(attribute.String("result", result.String()), attribute.Bool("phases.complete", result == stage.Success && !missing))
-		life.span.End()
 	}
 }
 
@@ -186,7 +174,5 @@ func (o *MetricsObserver) cancelView(component string, view qviews.QueryViewKey)
 	o.mu.Unlock()
 	if life != nil {
 		life.total.EndResult(stage.Canceled)
-		life.span.SetAttributes(attribute.String("result", "canceled"))
-		life.span.End()
 	}
 }

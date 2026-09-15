@@ -148,7 +148,7 @@ var (
 // Reconcile runs one reconcile cycle. It is exported primarily for tests and
 // for callers that want a synchronous controller pass during startup.
 func (b *DefaultBalancer) Reconcile(ctx context.Context) (retErr error) {
-	ctx, timer := reconcileTotal.Start(ctx)
+	timer := reconcileTotal.Begin()
 	defer timer.EndError(&retErr)
 	if b.snapshotBuilder == nil || b.viewRegistry == nil || b.policy == nil {
 		return nil

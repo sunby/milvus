@@ -912,8 +912,8 @@
     {
       "id": 22,
       "type": "timeseries",
-      "title": "Summary and trace coverage / second",
-      "description": "Each stage retains its own population; nested stages overlap.",
+      "title": "Slow request summaries / second",
+      "description": "Candidates include slow or unsuccessful requests. Emitted summaries are rate limited; dropped includes logging disabled. Histograms still cover every completed request.",
       "datasource": {
         "type": "prometheus",
         "uid": "$DS_PROMETHEUS"
@@ -927,8 +927,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by(stage,kind)(rate(milvus_qv_stage_items_total{instance=~\"$instance\",component=\"proxy\",stage=~\"trace_coverage|slow_summary\"}[$__rate_interval]))",
-          "legendFormat": "{{stage}} {{result}} {{kind}}",
+          "expr": "sum by(kind)(rate(milvus_qv_stage_items_total{instance=~\"$instance\",component=\"proxy\",operation=~\"$operation\",stage=\"slow_summary\"}[$__rate_interval]))",
+          "legendFormat": "{{kind}}",
           "range": true
         }
       ],

@@ -24,9 +24,10 @@ Existing metric names and labels are unchanged. New durations use seconds:
 - `milvus_qv_flush_oldest_pending_seconds`
 
 Labels at instrumentation sites are fixed enums. No collection, shard, segment,
-node, trace ID, error string, or manifest path becomes a metric label. Histogram
-result series are created on first observation and then cached. Inflight starts at Begin/Start, including hangs. Stages that reuse existing
-completed intervals via Observe have no inflight series; absence is not zero. `result` distinguishes success, error,
+node, request ID, error string, or manifest path becomes a metric label. Histogram
+result series are created on first observation and then cached. Inflight starts
+at Begin, including hangs. Stages that reuse existing completed intervals via
+Observe have no inflight series; absence is not zero. `result` distinguishes success, error,
 canceled, timeout, superseded, and expected `not_ready` checks. Embedded RPC
 Status is inspected; a nil Go error is not sufficient to classify success.
 
@@ -65,7 +66,7 @@ Status is inspected; a nil Go error is not sufficient to classify success.
 disabled, unavailable, or unknown. It is not an assertion that the caller won
 singleflight or that native caches are warm. `latency_class` is `le1s`/`gt1s`,
 chosen from that same request's total at completion. Comparing readiness and
-execution for `gt1s` addresses the whole slow-request cohort rather than one trace.
+execution for `gt1s` accounts for the whole slow-request cohort.
 
 Different rows have different populations and parallelism. Never sum per-segment
 latencies into request latency, sum stage P99s, or average pod P99s. Parent stages
@@ -73,23 +74,18 @@ contain children. The same-cohort request phases and the exclusive flush wait
 reasons are the intended additive groups. Search task `unattributed` reports
 elapsed time outside its three main sequential phases, including cleanup.
 
-## Traces, pending work, and limits
+## Pending work, request summaries, and limits
 
-The Proxy root span covers the readiness gate. The shared auto-load lifecycle has
-its own root and an initiating-request link; completed waiters link to that
-lifecycle. A waiter canceled before singleflight completes cannot receive the
-result's span context. View lifecycle traces and node dispatch spans carry the
-existing shard/version keys. No wire/protobuf format is changed: asynchronous
-stream lifecycles correlate by these keys, not guaranteed parent-child links.
-Determine the critical path from actual span end times; a long branch finishing
-earlier is not necessarily the branch that delayed the response.
+All new stage measurements write directly to Prometheus metrics. They cover
+operations regardless of whether tracing is configured. The metrics timers do
+not create spans or trace links, change trace context, or require an OTel provider.
+Existing tracing outside this patch is unchanged. Cross-service per-request
+critical paths remain outside this patch's aggregate metrics.
 
-`trace_coverage/{sampled,unsampled}` counts completed Proxy roots. This is local
-sampling coverage, not evidence that the collector exported or retained a trace.
 Slow (>1 second) and unsuccessful completions are candidates for a request
 summary. A process-wide limiter allows 2/second with burst 10;
 `slow_summary/{candidate,emitted,dropped}` exposes its coverage. Summaries do not
-replace whole-population histograms or guarantee retention of every slow trace.
+replace whole-population histograms or retain every slow request.
 
 View timestamps never reset on repeated progress reports. Recovered views lack
 an original Created timestamp and are excluded from new-view latency. A worker
@@ -117,8 +113,8 @@ Tests cover independent Ready/Up progress, durable persist-before-sync, deletion
 before unpin, same-shard serialization, recovery, pending-cohort timing, repeated
 lifecycle events, incomplete boundary order, aborted prepares, embedded RPC
 errors, canceled nil-return load tasks, and the same-request phase partition.
-The timer benchmark measures a warmed recorder without a recording parent; it
-does not measure exporter overhead or full-load impact.
+The timer benchmark measures a warmed metrics recorder; it does not measure
+scrape overhead or full-load impact.
 
 Before evaluating a deployment, import `cold-search-dashboard.json`, select the
 Prometheus data source/instances, and retain one identical workload window for

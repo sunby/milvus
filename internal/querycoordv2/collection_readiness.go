@@ -49,7 +49,7 @@ func (s *Server) waitCollectionReady(ctx context.Context, req *querypb.WaitColle
 	if req.GetCheckOnly() {
 		recorder = collectionReadyCheck
 	}
-	ctx, timer := recorder.Start(ctx)
+	timer := recorder.Begin()
 	defer func() {
 		if req.GetCheckOnly() && errors.Is(retErr, merr.ErrCollectionNotLoaded) {
 			timer.EndResult(stage.NotReady)

@@ -320,7 +320,7 @@ func segmentSet(segments []int64) map[int64]bool {
 //
 // Validation: The new DataVersion must not be lower than any existing view's DataVersion.
 func (m *ShardViewManager) AddPreparing(ctx context.Context, builder *qviews.QueryViewAtCoordBuilder) (retErr error) {
-	ctx, timer := prepareDuration.Start(ctx)
+	timer := prepareDuration.Begin()
 	defer timer.EndError(&retErr)
 	lockTimer := prepareLock.Begin()
 	m.mu.Lock()
@@ -342,8 +342,8 @@ func (m *ShardViewManager) AddPreparing(ctx context.Context, builder *qviews.Que
 	builder.SetQueryVersion(qv)
 	view := builder.Build()
 	sm := NewCoordQueryViewStateMachine(view)
-	pinCtx, pinTimer := preparePin.Start(ctx)
-	pinErr := m.dataViewReferences.PinDataView(pinCtx, view.GetMeta().GetCollectionId(), newDV)
+	pinTimer := preparePin.Begin()
+	pinErr := m.dataViewReferences.PinDataView(ctx, view.GetMeta().GetCollectionId(), newDV)
 	pinTimer.End(pinErr)
 	if err := pinErr; err != nil {
 		holdTimer.End(nil)
@@ -402,7 +402,7 @@ func (m *ShardViewManager) AddPreparing(ctx context.Context, builder *qviews.Que
 //
 // The actual cleanup completes asynchronously through callbacks.
 func (m *ShardViewManager) RequestRelease(ctx context.Context) (retErr error) {
-	ctx, timer := releaseDuration.Start(ctx)
+	timer := releaseDuration.Begin()
 	defer timer.EndError(&retErr)
 	m.mu.Lock()
 

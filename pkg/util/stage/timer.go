@@ -14,9 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package stage records bounded-cardinality query lifecycle metrics and sampled
-// child spans. Recorders belong at package scope; request identifiers are trace
-// attributes, never metric labels.
+// Package stage records bounded-cardinality query lifecycle metrics.
+// Recorders belong at package scope; request identifiers never become metric labels.
 package stage
 
 import (
@@ -26,9 +25,6 @@ import (
 
 	"github.com/cockroachdb/errors"
 	"github.com/prometheus/client_golang/prometheus"
-	"go.opentelemetry.io/otel"
-	otelcodes "go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -83,39 +79,24 @@ type Recorder struct {
 	labels       [3]string
 	inflight     prometheus.Gauge
 	inflightOnce sync.Once
-	name         string
 }
 
 // New accepts fixed labels from an instrumentation site, never request identifiers.
 func New(component, operation, name string) *Recorder {
-	r := &Recorder{
-		labels: [3]string{component, operation, name}, name: component + "." + operation + "." + name,
-	}
-	return r
+	return &Recorder{labels: [3]string{component, operation, name}}
 }
 
 // Timer belongs to one operation. It must not be copied or ended concurrently.
 type Timer struct {
 	recorder *Recorder
 	started  time.Time
-	span     trace.Span
 }
 
-// Begin measures unsampled operations without allocating trace contexts.
+// Begin starts measuring an operation and increments its inflight gauge.
 func (r *Recorder) Begin() Timer {
 	r.inflightOnce.Do(func() { r.inflight = metrics.QueryStageInflight.WithLabelValues(r.labels[0], r.labels[1], r.labels[2]) })
 	r.inflight.Inc()
 	return Timer{recorder: r, started: time.Now()}
-}
-
-// Start attaches a child only when the caller's trace is recording. Metrics are
-// always recorded, including requests omitted by the trace sampler.
-func (r *Recorder) Start(ctx context.Context) (context.Context, Timer) {
-	t := r.Begin()
-	if trace.SpanFromContext(ctx).IsRecording() {
-		ctx, t.span = otel.Tracer("milvus/query-stages").Start(ctx, r.name)
-	}
-	return ctx, t
 }
 
 // End is idempotent on this timer. Do not copy an active timer to another owner.
@@ -128,16 +109,10 @@ func (t *Timer) EndResult(result Result) {
 	t.recorder.Observe(time.Since(t.started), result)
 	t.recorder.inflight.Dec()
 	t.recorder = nil
-	if t.span != nil {
-		if result != Success {
-			t.span.SetStatus(otelcodes.Error, result.String())
-		}
-		t.span.End()
-	}
 }
 
 // Observe records a completed interval measured by an existing lifecycle owner.
-// It does not create an inflight series: live intervals require Begin or Start.
+// It does not create an inflight series: live intervals require Begin.
 func (r *Recorder) Observe(d time.Duration, result Result) {
 	r.once[result].Do(func() {
 		r.durations[result] = metrics.QueryStageDuration.WithLabelValues(r.labels[0], r.labels[1], r.labels[2], result.String())

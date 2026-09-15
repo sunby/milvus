@@ -1,4 +1,4 @@
-# Validation record — 2026-09-14
+# Cold Search validation — 2026-09-14 to 2026-09-15
 
 Implementation branch: `codex/cold-search-observability`.
 Initial validation base: `66bff8f29ad063494dc8d801483254e89a2d1103` (source tree
@@ -9,7 +9,8 @@ are in an isolated worktree.
 
 ## Verified locally
 
-Go 1.26.6, macOS arm64, local Milvus native libraries. Go tests used
+Checks ran on macOS arm64 with local Milvus native libraries. The root module
+selected Go 1.26.6; the `pkg` module selected Go 1.26.5. Go tests used
 `-tags dynamic,test -gcflags='all=-N -l' -count=1`.
 
 - Full package suites passed: coord balancer, coordview, syncer, QV observers,
@@ -39,8 +40,16 @@ Go 1.26.6, macOS arm64, local Milvus native libraries. Go tests used
 - Dashboard JSON parses and its 23 panel IDs are unique. It was not imported
   into or queried against a running Grafana/Prometheus instance.
 
-The final benchmark run of the warmed no-trace timer reported 82.39 ns/op,
-0 B/op and 0 allocs/op on an Apple M5. This is a microbenchmark, not an
+After removing newly added tracing on 2026-09-15, all eleven full package suites
+listed above passed again. Targeted Proxy, QueryCoord, SN query-plan, and SN
+query-runtime cases also passed. The timer's race check verifies that each outcome
+records a histogram observation exactly once and balances its inflight gauge,
+without initializing a tracing provider. The final PR diff adds no OTel code and
+removes no tracing that existed in the base revision. Syncer and lifecycle-observer
+race checks also passed again after tracing removal.
+
+The warmed metrics-only timer benchmark reported 96.46 ns/op, 0 B/op and
+0 allocs/op on an Apple M5 with Go 1.26.5. This is a microbenchmark, not an
 application overhead or latency improvement measurement.
 
 ## Baseline failures and unavailable integration coverage
@@ -52,6 +61,11 @@ The following failures were reproduced in the untouched base worktree:
 - `TestManagerRetriesViewBuildUntilSnapshotReady`: its one-second
   `attempts.Load() > 1` condition is not satisfied. Other runtime preparation
   behavior was inspected; no attempt was made to fix this unrelated test here.
+- The additional full `pkg/metrics` race run failed in
+  `TestCleanupProxyCollectionMetricsDropsEveryCollectionSeries` because an
+  unchanged fixture passes six label values to an existing four-label counter
+  (`metrics_test.go:295`). Running that same case on the untouched base reproduces
+  the panic. This is separate from the new stage-metric timer tests, which passed.
 
 A broader native Search-task run blocked in the test fixture's MinIO client
 initialization (`setupTestSegments -> NewPersistentStorageChunkManager ->
@@ -60,7 +74,8 @@ stopped and storage-independent unit cases were run separately. Native storage
 integration and injected S3 faults are not verified by these passing unit tests.
 
 No service was deployed, restarted, scaled, or subjected to generated Search
-traffic. There is no post-change production/UAT result, hosted CI result, or
-verified catalog-write amplification measurement. The implementation and
+traffic. There is no post-change production/UAT result or verified catalog-write
+amplification measurement. Hosted CI is tracked on the PR separately from these
+local checks. The implementation and
 remaining native/client attribution gaps are described in
 [cold-search-observability.md](cold-search-observability.md).

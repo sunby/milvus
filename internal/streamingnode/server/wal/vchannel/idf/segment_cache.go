@@ -69,8 +69,8 @@ func (c *segmentCache) retain(
 	c.mu.Unlock()
 
 	metrics.QueryStageItems.WithLabelValues("streamingNode", "bm25_stats", "cache", "miss").Inc()
-	loadCtx, loadTimer := bm25Load.Start(ctx)
-	stats, err := loadSealedSegmentStats(loadCtx, chunkManager, resource)
+	loadTimer := bm25Load.Begin()
+	stats, err := loadSealedSegmentStats(ctx, chunkManager, resource)
 	loadTimer.End(err)
 	if err != nil {
 		return nil, err
@@ -151,8 +151,8 @@ func loadSealedSegmentStats(
 	stats := make(bm25Stats)
 	for fieldID, paths := range pathsByField {
 		for _, path := range paths {
-			readCtx, readTimer := bm25Read.Start(ctx)
-			bytes, err := chunkManager.Read(readCtx, path)
+			readTimer := bm25Read.Begin()
+			bytes, err := chunkManager.Read(ctx, path)
 			readTimer.End(err)
 			if err != nil {
 				return nil, err

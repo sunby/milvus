@@ -167,7 +167,7 @@ func (o *MetricsObserver) collectViewStateMaxAge() []metrics.QVViewStateMaxAgeMe
 }
 
 func (o *MetricsObserver) Observe(ctx context.Context, event Event) {
-	o.observeLifecycle(ctx, event)
+	o.observeLifecycle(event)
 	component := event.ComponentInfo()
 	if component == "" {
 		return

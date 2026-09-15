@@ -23,14 +23,14 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
@@ -55,38 +55,19 @@ func TestOutcome(t *testing.T) {
 func TestTimerBalancesEveryOutcomeAndIsIdempotent(t *testing.T) {
 	r := New("test", "timer", "balanced")
 	for result := Success; result < resultCount; result++ {
+		var before dto.Metric
+		observer, err := metrics.QueryStageDuration.GetMetricWithLabelValues("test", "timer", "balanced", result.String())
+		require.NoError(t, err)
+		metric := observer.(prometheus.Metric)
+		require.NoError(t, metric.Write(&before))
 		timer := r.Begin()
 		require.Equal(t, float64(1), testutil.ToFloat64(r.inflight))
 		timer.EndResult(result)
 		timer.EndResult(result)
 		require.Zero(t, testutil.ToFloat64(r.inflight))
-	}
-}
-
-func TestTimerOnlyCreatesSampledChild(t *testing.T) {
-	for _, sample := range []bool{false, true} {
-		spans := tracetest.NewSpanRecorder()
-		sampler := sdktrace.NeverSample()
-		if sample {
-			sampler = sdktrace.AlwaysSample()
-		}
-		provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sampler), sdktrace.WithSpanProcessor(spans))
-		old := otel.GetTracerProvider()
-		otel.SetTracerProvider(provider)
-		ctx, parent := provider.Tracer("test").Start(context.Background(), "parent")
-		r := New("test", "timer", "trace")
-		childCtx, timer := r.Start(ctx)
-		require.NotNil(t, childCtx)
-		timer.End(context.Canceled)
-		parent.End()
-		if sample {
-			require.Len(t, spans.Ended(), 2)
-		} else {
-			require.Empty(t, spans.Ended())
-		}
-		require.Zero(t, testutil.ToFloat64(r.inflight))
-		otel.SetTracerProvider(old)
-		require.NoError(t, provider.Shutdown(context.Background()))
+		var after dto.Metric
+		require.NoError(t, metric.Write(&after))
+		require.Equal(t, before.GetHistogram().GetSampleCount()+1, after.GetHistogram().GetSampleCount())
 	}
 }
 

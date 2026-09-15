@@ -507,7 +507,7 @@ func (r *oracleRuntime) prepareEagerDataVersion(ctx context.Context, target qvie
 }
 
 func (r *oracleRuntime) ensureMaterialized(ctx context.Context, target qviews.DataVersion) (retErr error) {
-	ctx, timer := bm25Materialized.Start(ctx)
+	timer := bm25Materialized.Begin()
 	defer timer.EndError(&retErr)
 	if err := ctx.Err(); err != nil {
 		return err

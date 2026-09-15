@@ -67,7 +67,7 @@ func newQueryRuntime(dispatcher *Dispatcher, modules ...QueryRuntimeModule) *Que
 }
 
 func (r *QueryRuntime) Initialize(ctx context.Context, view walview.VChannelWALView) (retErr error) {
-	ctx, timer := runtimeInitialize.Start(ctx)
+	timer := runtimeInitialize.Begin()
 	defer timer.EndError(&retErr)
 	if r == nil {
 		return nil
@@ -154,7 +154,7 @@ func (r *QueryRuntime) Advance(oldestDataVersion qviews.DataVersion) {
 }
 
 func (r *QueryRuntime) PrepareDataVersion(ctx context.Context, dataVersion qviews.DataVersion) (retErr error) {
-	ctx, timer := runtimePrepareVersion.Start(ctx)
+	timer := runtimePrepareVersion.Begin()
 	defer timer.EndError(&retErr)
 	if r == nil {
 		return nil

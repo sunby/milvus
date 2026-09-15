@@ -298,7 +298,7 @@ func (s *DirtyViewFlushScheduler) flushBatch(
 	ctx context.Context,
 	batch map[qviews.ShardID]*pendingDirtyViewEvent,
 ) (retErr error) {
-	ctx, timer := flushTotal.Start(ctx)
+	timer := flushTotal.Begin()
 	defer timer.EndError(&retErr)
 	if len(batch) == 0 {
 		return nil
@@ -319,8 +319,8 @@ func (s *DirtyViewFlushScheduler) flushBatch(
 	}
 	packTimer.End(nil)
 	if len(persists) > 0 {
-		saveCtx, saveTimer := flushSave.Start(ctx)
-		saveErr := s.catalog.SaveQueryViews(saveCtx, persists)
+		saveTimer := flushSave.Begin()
+		saveErr := s.catalog.SaveQueryViews(ctx, persists)
 		saveTimer.End(saveErr)
 		metrics.QueryStageItems.WithLabelValues("coord", "flush", "catalog_save", "views").Add(float64(len(persists)))
 		if err := saveErr; err != nil {
@@ -339,8 +339,8 @@ func (s *DirtyViewFlushScheduler) flushBatch(
 	}
 	callbackTimer.End(nil)
 	if len(viewsByNode) > 0 {
-		syncCtx, syncTimer := flushSync.Start(ctx)
-		syncErr := s.syncer.SyncViews(syncCtx, syncer.SyncGroup{ViewsByNode: viewsByNode})
+		syncTimer := flushSync.Begin()
+		syncErr := s.syncer.SyncViews(ctx, syncer.SyncGroup{ViewsByNode: viewsByNode})
 		syncTimer.End(syncErr)
 		if err := syncErr; err != nil {
 			return err
