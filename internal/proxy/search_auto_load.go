@@ -29,6 +29,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/retry"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 // retryDQL replans the entire request when its read view has
@@ -71,6 +72,7 @@ func (node *Proxy) retryDQLWithExecutionRetry(ctx context.Context, dbName, colle
 			terminalErr = err
 			return false, err
 		}
+		markDQLReady(ctx)
 		again, err := execute(ctx)
 		if again || retryExecution(err) {
 			return true, err
@@ -110,6 +112,7 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 		return err
 	}
 	if !Params.ProxyCfg.EnableAutoLoad.GetAsBool() {
+		setDQLPath(ctx, stage.PathDisabled)
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, Params.QueryCoordCfg.LoadTimeoutSeconds.GetAsDuration(time.Second))
@@ -128,5 +131,6 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 	if ctx.Err() != nil {
 		return context.Cause(ctx)
 	}
+	setDQLPath(ctx, status.GetExtraInfo()[stage.ReadinessPathKey])
 	return merr.CheckRPCCall(status, err)
 }
