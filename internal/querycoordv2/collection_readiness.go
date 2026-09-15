@@ -37,6 +37,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
@@ -45,7 +46,11 @@ func (s *Server) EnsureCollectionReady(ctx context.Context, req *querypb.EnsureC
 	return merr.Status(s.ensureCollectionReady(ctx, req)), nil
 }
 
-func (s *Server) ensureCollectionReady(ctx context.Context, req *querypb.EnsureCollectionReadyRequest) error {
+var collectionReadyWait = stage.New("coord", "readiness", "wait")
+
+func (s *Server) ensureCollectionReady(ctx context.Context, req *querypb.EnsureCollectionReadyRequest) (retErr error) {
+	timer := collectionReadyWait.Begin()
+	defer timer.EndError(&retErr)
 	if err := merr.CheckHealthy(s.State()); err != nil {
 		return err
 	}

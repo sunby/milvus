@@ -45,6 +45,9 @@ func (node *Proxy) retryDQL(ctx context.Context, dbName, collectionName string, 
 			terminalErr = err
 			return false, err
 		}
+		if timing, ok := ctx.Value(dqlTimingKey{}).(*dqlTiming); ok && timing.ready.IsZero() {
+			timing.Ready()
+		}
 		again, err := execute(ctx)
 		if again || node.shouldRetryDQLLoad(err) {
 			return true, err
@@ -79,11 +82,14 @@ func (node *Proxy) shouldRetryDQLLoad(err error) bool {
 
 // ensureCollectionReady sends one load-and-wait RPC per DQL attempt.
 // QueryCoord owns load state, concurrent load submission and readiness waiting.
-func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collectionName string) error {
+func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collectionName string) (retErr error) {
+	timer := autoLoadCaller.Begin()
+	defer timer.EndError(&retErr)
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
 		return err
 	}
 	if !Params.ProxyCfg.EnableAutoLoad.GetAsBool() {
+		setDQLPath(ctx, "disabled")
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, Params.QueryCoordCfg.LoadTimeoutSeconds.GetAsDuration(time.Second))

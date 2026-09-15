@@ -11,6 +11,7 @@ import (
 	"github.com/milvus-io/milvus/internal/metastore/kv/queryview"
 	"github.com/milvus-io/milvus/internal/views/coord/coordview/syncer"
 	"github.com/milvus-io/milvus/internal/views/qviews"
+	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/nodescheduler"
 )
@@ -35,6 +36,7 @@ func (e dirtyViewEvent) empty() bool {
 }
 
 type pendingDirtyViewEvent struct {
+	timing       pendingTiming
 	persists     map[qviews.QueryViewKey]*viewpb.QueryViewOfShard
 	syncs        map[dirtyViewSyncKey]syncer.SyncView
 	afterPersist []func()
@@ -47,6 +49,7 @@ type dirtyViewSyncKey struct {
 
 func newPendingDirtyViewEvent() *pendingDirtyViewEvent {
 	return &pendingDirtyViewEvent{
+		timing:   newPendingTiming(),
 		persists: make(map[qviews.QueryViewKey]*viewpb.QueryViewOfShard),
 		syncs:    make(map[dirtyViewSyncKey]syncer.SyncView),
 	}
@@ -129,7 +132,7 @@ func newDirtyViewFlushScheduler(
 	if maxTxnOps <= 0 {
 		maxTxnOps = 1
 	}
-	return &DirtyViewFlushScheduler{
+	scheduler := &DirtyViewFlushScheduler{
 		catalog:       catalog,
 		syncer:        s,
 		maxTxnOps:     maxTxnOps,
@@ -141,6 +144,8 @@ func newDirtyViewFlushScheduler(
 		tasks:         make(map[*dirtyViewFlushTask]nodescheduler.TaskHandle),
 		notify:        make(chan struct{}, 1),
 	}
+	metrics.SetQueryFlushOldestProvider(scheduler.oldestPendingAge)
+	return scheduler
 }
 
 // Begin opens an explicit batching window. Existing tasks continue running;
@@ -197,12 +202,14 @@ func (s *DirtyViewFlushScheduler) Submit(event dirtyViewEvent) {
 		s.readyOps -= pending.operationCount()
 	}
 	pending.merge(event)
+	pending.timing.change(s.waitReason(event.shardID))
 	if wasReady {
 		s.readyOps += pending.operationCount()
 	}
 	if s.batchDepth > 0 {
 		s.removeReadyLocked(event.shardID)
 		s.held[event.shardID] = struct{}{}
+		pending.timing.change(s.waitReason(event.shardID))
 	} else {
 		s.markReadyLocked(event.shardID)
 		s.scheduleReadyTasksLocked()
@@ -243,6 +250,7 @@ func (s *DirtyViewFlushScheduler) claim() map[qviews.ShardID]*pendingDirtyViewEv
 		if len(claimed) > 0 && usedOps+ops > s.maxTxnOps {
 			continue
 		}
+		event.timing.finish(nil)
 		claimed[shardID] = event
 		s.removeReadyLocked(shardID)
 		delete(s.pending, shardID)
@@ -266,6 +274,9 @@ func (s *DirtyViewFlushScheduler) complete(
 	delete(s.tasks, task)
 	for shardID := range claimed {
 		delete(s.inflight, shardID)
+		if pending := s.pending[shardID]; pending != nil {
+			pending.timing.change(s.waitReason(shardID))
+		}
 		if _, held := s.held[shardID]; !held {
 			s.markReadyLocked(shardID)
 		}
@@ -335,10 +346,13 @@ func claimedShardList(claimed map[qviews.ShardID]*pendingDirtyViewEvent) []strin
 func (s *DirtyViewFlushScheduler) flushBatch(
 	ctx context.Context,
 	batch map[qviews.ShardID]*pendingDirtyViewEvent,
-) error {
+) (retErr error) {
+	timer := flushTotal.Begin()
+	defer timer.EndError(&retErr)
 	if len(batch) == 0 {
 		return nil
 	}
+	packTimer := flushPack.Begin()
 	persists := make([]*viewpb.QueryViewOfShard, 0)
 	viewsByNode := make(map[qviews.WorkNodeKey][]syncer.SyncView)
 	afterPersist := make([]func(), 0)
@@ -352,16 +366,26 @@ func (s *DirtyViewFlushScheduler) flushBatch(
 		}
 		afterPersist = append(afterPersist, event.afterPersist...)
 	}
+	packTimer.End(nil)
 	if len(persists) > 0 {
-		if err := s.persistViews(ctx, persists); err != nil {
+		saveTimer := flushSave.Begin()
+		saveErr := s.persistViews(ctx, persists)
+		saveTimer.End(saveErr)
+		metrics.QueryStageItems.WithLabelValues("coord", "flush", "catalog_save", "views").Add(float64(len(persists)))
+		if err := saveErr; err != nil {
 			return err
 		}
 	}
+	callbackTimer := flushCallbacks.Begin()
 	for _, callback := range afterPersist {
 		callback()
 	}
+	callbackTimer.End(nil)
 	if len(viewsByNode) > 0 {
-		if err := s.syncer.SyncViews(ctx, syncer.SyncGroup{ViewsByNode: viewsByNode}); err != nil {
+		syncTimer := flushSync.Begin()
+		syncErr := s.syncer.SyncViews(ctx, syncer.SyncGroup{ViewsByNode: viewsByNode})
+		syncTimer.End(syncErr)
+		if err := syncErr; err != nil {
 			return err
 		}
 	}
@@ -438,6 +462,7 @@ func (s *DirtyViewFlushScheduler) Close() {
 		return
 	}
 	s.closed = true
+	s.finishPending()
 	clear(s.pending)
 	clear(s.ready)
 	s.readyOps = 0
@@ -478,6 +503,7 @@ func (s *DirtyViewFlushScheduler) markReadyLocked(shardID qviews.ShardID) {
 	if event == nil {
 		return
 	}
+	event.timing.change(waitEligible)
 	s.ready[shardID] = struct{}{}
 	s.readyOps += event.operationCount()
 }
