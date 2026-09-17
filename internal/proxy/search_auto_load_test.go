@@ -543,6 +543,9 @@ func TestHybridSearchStopsBeforeExecutionWhenCollectionIsNotReady(t *testing.T) 
 
 func TestQueryStopsBeforeExecutionWhenCollectionIsNotReady(t *testing.T) {
 	node := &Proxy{}
+	previousRateCol := rateCol
+	require.NoError(t, node.initRateCollector())
+	t.Cleanup(func() { rateCol = previousRateCol })
 	node.UpdateStateCode(commonpb.StateCode_Healthy)
 	readinessCalls := 0
 	queryCalls := 0
