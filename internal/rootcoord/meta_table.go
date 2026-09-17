@@ -44,6 +44,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/contextutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/crypto"
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/v3/util/lock"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/rbacutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
@@ -201,6 +202,26 @@ type MetaTable struct {
 
 	ddLock         sync.RWMutex
 	permissionLock sync.RWMutex
+
+	// Background GC does not acquire broadcaster resource locks. Serialize it
+	// with collection drops before taking ddLock, including legacy partition GC
+	// that rewrites the collection record. Initialize lazily for zero-value use.
+	collectionGCLocksOnce sync.Once
+	collectionGCLocks     *lock.KeyLock[UniqueID]
+
+	// Collection GC deletes grants and legacy aliases by name. Keep namespace
+	// changes ordered with those deletions without blocking metadata readers or
+	// collection drops on ddLock. Acquire before ddLock: GC takes a read lock,
+	// while database, collection name and alias writers take it exclusively.
+	namespaceLock sync.RWMutex
+}
+
+func (mt *MetaTable) lockCollectionGC(collectionID UniqueID) func() {
+	mt.collectionGCLocksOnce.Do(func() {
+		mt.collectionGCLocks = lock.NewKeyLock[UniqueID]()
+	})
+	mt.collectionGCLocks.Lock(collectionID)
+	return func() { mt.collectionGCLocks.Unlock(collectionID) }
 }
 
 // NewMetaTable creates a new MetaTable with specified catalog and allocator.
@@ -618,6 +639,9 @@ func (mt *MetaTable) CheckIfDatabaseCreatable(ctx context.Context, req *milvuspb
 }
 
 func (mt *MetaTable) CreateDatabase(ctx context.Context, db *model.Database, ts typeutil.Timestamp) error {
+	mt.namespaceLock.Lock()
+	defer mt.namespaceLock.Unlock()
+
 	mt.ddLock.Lock()
 	defer mt.ddLock.Unlock()
 
@@ -684,6 +708,9 @@ func (mt *MetaTable) CheckIfDatabaseDroppable(ctx context.Context, req *milvuspb
 }
 
 func (mt *MetaTable) DropDatabase(ctx context.Context, dbName string, ts typeutil.Timestamp) error {
+	mt.namespaceLock.Lock()
+	defer mt.namespaceLock.Unlock()
+
 	mt.ddLock.Lock()
 	defer mt.ddLock.Unlock()
 
@@ -776,6 +803,11 @@ func (mt *MetaTable) AddCollection(ctx context.Context, coll *model.Collection) 
 		return err
 	}
 
+	// Catalog creation is independent of GC, but do not publish a reused name
+	// until GC has finished deleting the previous collection's grants.
+	mt.namespaceLock.Lock()
+	defer mt.namespaceLock.Unlock()
+
 	mt.ddLock.Lock()
 	defer mt.ddLock.Unlock()
 
@@ -816,6 +848,9 @@ func (mt *MetaTable) AddCollection(ctx context.Context, coll *model.Collection) 
 }
 
 func (mt *MetaTable) DropCollection(ctx context.Context, collectionID UniqueID, ts Timestamp) error {
+	unlock := mt.lockCollectionGC(collectionID)
+	defer unlock()
+
 	dbName, collectionName, dropped, err := mt.markCollectionDropping(ctx, collectionID, ts)
 	if err != nil || !dropped {
 		return err
@@ -835,14 +870,11 @@ func (mt *MetaTable) DropCollection(ctx context.Context, collectionID UniqueID, 
 }
 
 func (mt *MetaTable) markCollectionDropping(ctx context.Context, collectionID UniqueID, ts Timestamp) (string, string, bool, error) {
-	mt.ddLock.Lock()
-	defer mt.ddLock.Unlock()
+	mt.ddLock.RLock()
 
 	coll, ok := mt.collID2Meta[collectionID]
-	if !ok {
-		return "", "", false, nil
-	}
-	if coll.State == pb.CollectionState_CollectionDropping {
+	if !ok || coll.State == pb.CollectionState_CollectionDropping {
+		mt.ddLock.RUnlock()
 		return "", "", false, nil
 	}
 
@@ -852,8 +884,15 @@ func (mt *MetaTable) markCollectionDropping(ctx context.Context, collectionID Un
 	// and channel stats are updated.
 	db, err := mt.getDatabaseByIDInternal(ctx, normalizeCollectionDBID(coll.DBID), typeutil.MaxTimestamp)
 	if err != nil {
+		mt.ddLock.RUnlock()
 		return "", "", false, merr.Wrapf(err, "dbID not found for collection:%d", collectionID)
 	}
+	// The broadcaster serializes DDL for this collection and lockCollectionGC
+	// excludes background GC. Pass an independent snapshot to the catalog so
+	// unrelated collections and metadata readers can progress during I/O.
+	coll = coll.ShallowClone()
+	dbName := db.Name
+	mt.ddLock.RUnlock()
 
 	clone := coll.Clone()
 	clone.State = pb.CollectionState_CollectionDropping
@@ -863,12 +902,15 @@ func (mt *MetaTable) markCollectionDropping(ctx context.Context, collectionID Un
 	if err := mt.catalog.AlterCollection(ctx1, coll, clone, metastore.MODIFY, ts, false); err != nil {
 		return "", "", false, err
 	}
+	mt.ddLock.Lock()
+	defer mt.ddLock.Unlock()
+
 	mt.collID2Meta[collectionID] = clone
 	for _, fileResourceID := range coll.FileResourceIds {
 		if mt.fileResourceRefCnt[fileResourceID] > 0 {
 			mt.fileResourceRefCnt[fileResourceID]--
 		} else {
-			mlog.Warn(context.TODO(), "DropCollection: file resource refCnt underflow",
+			mlog.Warn(ctx, "DropCollection: file resource refCnt underflow",
 				mlog.Int64("collectionID", collectionID), mlog.Int64("fileResourceID", fileResourceID))
 		}
 	}
@@ -885,13 +927,13 @@ func (mt *MetaTable) markCollectionDropping(ctx context.Context, collectionID Un
 		mt.decreaseAvailableCollectionCountLocked(coll.DBID)
 	}
 	channel.StaticPChannelStatsManager.MustGet().RemoveVChannel(coll.VirtualChannelNames...)
-	metrics.RootCoordNumOfCollections.WithLabelValues(db.Name).Dec()
+	metrics.RootCoordNumOfCollections.WithLabelValues(dbName).Dec()
 	metrics.RootCoordNumOfPartitions.WithLabelValues().Sub(float64(pn))
 
 	mlog.Info(ctx, "drop collection from meta table", mlog.Int64("collection", collectionID),
 		mlog.String("state", coll.State.String()), mlog.Uint64("ts", ts))
 
-	return db.Name, coll.Name, true, nil
+	return dbName, coll.Name, true, nil
 }
 
 func (mt *MetaTable) removeIfNameMatchedInternal(ctx context.Context, collectionID UniqueID, name string) {
@@ -942,22 +984,36 @@ func (mt *MetaTable) removeCollectionByIDInternal(ctx context.Context, collectio
 }
 
 func (mt *MetaTable) RemoveCollection(ctx context.Context, collectionID UniqueID, ts Timestamp) error {
-	mt.ddLock.Lock()
-	defer mt.ddLock.Unlock()
+	unlock := mt.lockCollectionGC(collectionID)
+	defer unlock()
+	mt.namespaceLock.RLock()
+	defer mt.namespaceLock.RUnlock()
+
+	mt.ddLock.RLock()
 
 	// Note: we cannot handle case that dropping collection with `ts1` but a collection exists in catalog with newer ts
 	// which is bigger than `ts1`. So we assume that ts should always be the latest.
 	coll, ok := mt.collID2Meta[collectionID]
 	if !ok {
+		mt.ddLock.RUnlock()
 		mlog.Warn(ctx, "not found collection, skip remove", mlog.Int64("collectionID", collectionID))
 		return nil
 	}
 	if coll.State != pb.CollectionState_CollectionDropping {
+		mt.ddLock.RUnlock()
 		return merr.WrapErrServiceInternalMsg("remove collection which state is not dropping, collectionID: %d, state: %s", collectionID, coll.State.String())
 	}
 
-	ctx1 := contextutil.WithTenantID(ctx, Params.CommonCfg.ClusterName.GetValue())
 	aliases := mt.listAliasesByID(collectionID)
+	nameOwner, nameExists := mt.names.get(coll.DBName, coll.Name)
+	cleanupGrants := !nameExists || nameOwner == collectionID
+	// Keep the log/grant identity independent of the cache after releasing the
+	// lock. The collection GC lock protects the ID; namespaceLock protects the
+	// name-based aliases and grants included in the catalog deletion.
+	coll = coll.ShallowClone()
+	mt.ddLock.RUnlock()
+
+	ctx1 := contextutil.WithTenantID(ctx, Params.CommonCfg.ClusterName.GetValue())
 	newColl := &model.Collection{
 		CollectionID:      collectionID,
 		Partitions:        model.ClonePartitions(coll.Partitions),
@@ -970,13 +1026,18 @@ func (mt *MetaTable) RemoveCollection(ctx context.Context, collectionID UniqueID
 		return err
 	}
 
-	if err := mt.catalog.DeleteGrantByCollectionName(ctx1, util.DefaultTenant, coll.DBName, coll.Name); err != nil {
-		mlog.Warn(ctx, "failed to delete grants for dropped collection, skipping",
-			mlog.String("dbName", coll.DBName), mlog.String("collectionName", coll.Name), mlog.Err(err))
+	if cleanupGrants {
+		if err := mt.catalog.DeleteGrantByCollectionName(ctx1, util.DefaultTenant, coll.DBName, coll.Name); err != nil {
+			mlog.Warn(ctx, "failed to delete grants for dropped collection, skipping",
+				mlog.String("dbName", coll.DBName), mlog.String("collectionName", coll.Name), mlog.Err(err))
+		}
 	}
 
 	allNames := common.CloneStringList(aliases)
 	allNames = append(allNames, coll.Name)
+
+	mt.ddLock.Lock()
+	defer mt.ddLock.Unlock()
 
 	// We cannot delete the name directly, since newly collection with same name may be created.
 	mt.removeAllNamesIfMatchedInternal(ctx, collectionID, allNames)
@@ -1325,6 +1386,9 @@ func (mt *MetaTable) AlterCollection(ctx context.Context, result message.Broadca
 	header := result.Message.Header()
 	body := result.Message.MustBody()
 
+	mt.namespaceLock.Lock()
+	defer mt.namespaceLock.Unlock()
+
 	mt.ddLock.Lock()
 	defer mt.ddLock.Unlock()
 
@@ -1665,6 +1729,9 @@ func (mt *MetaTable) DropPartition(ctx context.Context, collectionID UniqueID, p
 }
 
 func (mt *MetaTable) RemovePartition(ctx context.Context, collectionID UniqueID, partitionID UniqueID, ts Timestamp) error {
+	unlock := mt.lockCollectionGC(collectionID)
+	defer unlock()
+
 	mt.ddLock.Lock()
 	defer mt.ddLock.Unlock()
 
@@ -1774,6 +1841,9 @@ func (mt *MetaTable) CheckIfAliasDroppable(ctx context.Context, dbName string, a
 }
 
 func (mt *MetaTable) DropAlias(ctx context.Context, result message.BroadcastResultDropAliasMessageV2) error {
+	mt.namespaceLock.Lock()
+	defer mt.namespaceLock.Unlock()
+
 	mt.ddLock.Lock()
 	defer mt.ddLock.Unlock()
 
@@ -1794,6 +1864,9 @@ func (mt *MetaTable) DropAlias(ctx context.Context, result message.BroadcastResu
 }
 
 func (mt *MetaTable) AlterAlias(ctx context.Context, result message.BroadcastResultAlterAliasMessageV2) error {
+	mt.namespaceLock.Lock()
+	defer mt.namespaceLock.Unlock()
+
 	mt.ddLock.Lock()
 	defer mt.ddLock.Unlock()
 
