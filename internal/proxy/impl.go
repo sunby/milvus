@@ -79,7 +79,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/ratelimitutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/requestutil"
-	"github.com/milvus-io/milvus/pkg/v3/util/retry"
 	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
@@ -3174,17 +3173,11 @@ func (node *Proxy) Search(ctx context.Context, request *milvuspb.SearchRequest) 
 	rsp := &milvuspb.SearchResults{
 		Status: merr.Success(),
 	}
-	if err := node.ensureCollectionReady(ctx, request.GetDbName(), request.GetCollectionName()); err != nil {
-		rsp.Status = merr.Status(err)
-		return rsp, nil
-	}
-	timing.Ready()
-
 	optimizedSearch := true
 	resultSizeInsufficient := false
 	isTopkReduce := false
 	isRecallEvaluation := false
-	err2 := retry.Handle(ctx, func() (bool, error) {
+	err2 := node.retryDQL(ctx, request.GetDbName(), request.GetCollectionName(), func(ctx context.Context) (bool, error) {
 		rsp, resultSizeInsufficient, isTopkReduce, isRecallEvaluation, err = node.search(ctx, request, optimizedSearch, false)
 		if merr.Ok(rsp.GetStatus()) && optimizedSearch && resultSizeInsufficient && isTopkReduce && paramtable.Get().AutoIndexConfig.EnableResultLimitCheck.GetAsBool() {
 			// without optimize search
@@ -3206,8 +3199,8 @@ func (node *Proxy) Search(ctx context.Context, request *milvuspb.SearchRequest) 
 				).Inc()
 			}
 		}
-		if errors.Is(merr.Error(rsp.GetStatus()), merr.ErrInconsistentRequery) {
-			return true, merr.Error(rsp.GetStatus())
+		if err := merr.CheckRPCCall(rsp, err); err != nil {
+			return errors.Is(err, merr.ErrInconsistentRequery), err
 		}
 		// search for ground truth and compute recall
 		if isRecallEvaluation && merr.Ok(rsp.GetStatus()) {
@@ -3219,23 +3212,15 @@ func (node *Proxy) Search(ctx context.Context, request *milvuspb.SearchRequest) 
 				request.GetDbName(),
 				request.GetCollectionName(),
 			).Inc()
-			if merr.Ok(rspGT.GetStatus()) {
-				return false, computeRecall(rsp.GetResults(), rspGT.GetResults())
+			if err := merr.CheckRPCCall(rspGT, err); err != nil {
+				return errors.Is(err, merr.ErrInconsistentRequery), err
 			}
-			if errors.Is(merr.Error(rspGT.GetStatus()), merr.ErrInconsistentRequery) {
-				return true, merr.Error(rspGT.GetStatus())
-			}
-			return false, merr.Error(rspGT.GetStatus())
+			return false, computeRecall(rsp.GetResults(), rspGT.GetResults())
 		}
 		return false, nil
 	})
 	if err2 != nil {
 		rsp.Status = merr.Status(err2)
-	} else if err != nil {
-		rsp.Status = merr.Status(err)
-	}
-	if err != nil {
-		rsp.Status = merr.Status(err)
 	}
 	projectSearchResultValidDataForLegacy(rsp)
 	return rsp, nil
@@ -3286,7 +3271,7 @@ func (node *Proxy) search(ctx context.Context, request *milvuspb.SearchRequest, 
 	if err != nil {
 		return &milvuspb.SearchResults{
 			Status: merr.Status(err),
-		}, false, false, false, nil
+		}, false, false, false, err
 	}
 
 	// If all IDs have null vectors (Nq == 0), return empty results without executing search
@@ -3388,7 +3373,7 @@ func (node *Proxy) search(ctx context.Context, request *milvuspb.SearchRequest, 
 
 		return &milvuspb.SearchResults{
 			Status: merr.Status(err),
-		}, false, false, false, nil
+		}, false, false, false, err
 	}
 
 	span := tr.CtxRecord(ctx, "wait search result")
@@ -3471,15 +3456,10 @@ func (node *Proxy) HybridSearch(ctx context.Context, request *milvuspb.HybridSea
 	rsp := &milvuspb.SearchResults{
 		Status: merr.Success(),
 	}
-	if err := node.ensureCollectionReady(ctx, request.GetDbName(), request.GetCollectionName()); err != nil {
-		rsp.Status = merr.Status(err)
-		return rsp, nil
-	}
-	timing.Ready()
 	optimizedSearch := true
 	resultSizeInsufficient := false
 	isTopkReduce := false
-	err2 := retry.Handle(ctx, func() (bool, error) {
+	err2 := node.retryDQL(ctx, request.GetDbName(), request.GetCollectionName(), func(ctx context.Context) (bool, error) {
 		rsp, resultSizeInsufficient, isTopkReduce, err = node.hybridSearch(ctx, request, optimizedSearch)
 		if merr.Ok(rsp.GetStatus()) && optimizedSearch && resultSizeInsufficient && isTopkReduce && paramtable.Get().AutoIndexConfig.EnableResultLimitCheck.GetAsBool() {
 			// without optimize search
@@ -3501,16 +3481,14 @@ func (node *Proxy) HybridSearch(ctx context.Context, request *milvuspb.HybridSea
 				).Inc()
 			}
 		}
-		if errors.Is(merr.Error(rsp.GetStatus()), merr.ErrInconsistentRequery) {
-			return true, merr.Error(rsp.GetStatus())
-		}
-		return false, nil
+		err = merr.CheckRPCCall(rsp, err)
+		return errors.Is(err, merr.ErrInconsistentRequery), err
 	})
 	if err2 != nil {
 		rsp.Status = merr.Status(err2)
 	}
 	projectSearchResultValidDataForLegacy(rsp)
-	return rsp, err
+	return rsp, nil
 }
 
 type hybridSearchRequestExprLogger struct {
@@ -3632,7 +3610,7 @@ func (node *Proxy) hybridSearch(ctx context.Context, request *milvuspb.HybridSea
 
 		return &milvuspb.SearchResults{
 			Status: merr.Status(err),
-		}, false, false, nil
+		}, false, false, err
 	}
 
 	span := tr.CtxRecord(ctx, "wait hybrid search result")
@@ -4105,7 +4083,7 @@ func (node *Proxy) query(ctx context.Context, qt *queryTask, sp trace.Span) (*mi
 
 		return &milvuspb.QueryResults{
 			Status: merr.Status(err),
-		}, segcore.StorageCost{}, nil
+		}, segcore.StorageCost{}, err
 	}
 
 	if !qt.reQuery {
@@ -4138,11 +4116,34 @@ func (node *Proxy) query(ctx context.Context, qt *queryTask, sp trace.Span) (*mi
 func (node *Proxy) Query(ctx context.Context, request *milvuspb.QueryRequest) (retResp *milvuspb.QueryResults, retErr error) {
 	ctx, timing := startDQL(ctx, "Query")
 	defer func() { timing.End(retResp.GetStatus(), retErr) }()
-	if err := node.ensureCollectionReady(ctx, request.GetDbName(), request.GetCollectionName()); err != nil {
+	subLabel := GetCollectionRateSubLabel(request)
+	metrics.GetStats(ctx).
+		SetNodeID(paramtable.GetNodeID()).
+		SetInboundLabel(metrics.QueryLabel).
+		SetDatabaseName(request.GetDbName()).
+		SetCollectionName(request.GetCollectionName())
+	metrics.ProxyReceivedNQ.WithLabelValues(
+		strconv.FormatInt(paramtable.GetNodeID(), 10),
+		metrics.QueryLabel,
+		request.GetDbName(),
+		request.GetCollectionName(),
+	).Add(float64(1))
+
+	rateCol.Add(internalpb.RateType_DQLQuery.String(), 1, subLabel)
+
+	var result *milvuspb.QueryResults
+	err := node.retryDQL(ctx, request.GetDbName(), request.GetCollectionName(), func(ctx context.Context) (bool, error) {
+		var err error
+		result, err = node.executeQuery(ctx, request)
+		return false, merr.CheckRPCCall(result, err)
+	})
+	if err != nil {
 		return &milvuspb.QueryResults{Status: merr.Status(err)}, nil
 	}
-	timing.Ready()
+	return result, nil
+}
 
+func (node *Proxy) executeQuery(ctx context.Context, request *milvuspb.QueryRequest) (*milvuspb.QueryResults, error) {
 	qt := &queryTask{
 		baseTask: baseTask{
 			metaCache: node.getMetaCache(),
@@ -4166,21 +4167,6 @@ func (node *Proxy) Query(ctx context.Context, request *milvuspb.QueryRequest) (r
 		mustUsePartitionKey: Params.ProxyCfg.MustUsePartitionKey.GetAsBool(),
 		chMgr:               node.chMgr,
 	}
-
-	subLabel := GetCollectionRateSubLabel(request)
-	metrics.GetStats(ctx).
-		SetNodeID(paramtable.GetNodeID()).
-		SetInboundLabel(metrics.QueryLabel).
-		SetDatabaseName(request.GetDbName()).
-		SetCollectionName(request.GetCollectionName())
-	metrics.ProxyReceivedNQ.WithLabelValues(
-		strconv.FormatInt(paramtable.GetNodeID(), 10),
-		metrics.QueryLabel,
-		request.GetDbName(),
-		request.GetCollectionName(),
-	).Add(float64(1))
-
-	rateCol.Add(internalpb.RateType_DQLQuery.String(), 1, subLabel)
 
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
 		return &milvuspb.QueryResults{

@@ -29,14 +29,76 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
 	"github.com/milvus-io/milvus/internal/views/queryclient"
+	"github.com/milvus-io/milvus/internal/views/viewerror"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/util/contextutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/retry"
 	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
+
+// retryDQL retries the complete DQL, including its load-and-wait step. The
+// callback may additionally request existing operation-specific retries, such
+// as inconsistent requery. It must create a fresh task for each execution attempt.
+func (node *Proxy) retryDQL(ctx context.Context, dbName, collectionName string, execute func(context.Context) (bool, error)) error {
+	timing := getDQLTiming(ctx)
+	var terminalErr error
+	err := retry.Handle(ctx, func() (bool, error) {
+		timing.Readiness()
+		terminalErr = nil
+		if err := ctx.Err(); err != nil {
+			return false, context.Cause(ctx)
+		}
+		if err := node.ensureCollectionReady(ctx, dbName, collectionName); err != nil {
+			if node.shouldRetryDQLLoad(err) {
+				timing.RetryWait()
+				return true, err
+			}
+			terminalErr = err
+			return false, err
+		}
+		timing.Ready()
+		again, err := execute(ctx)
+		if again || node.shouldRetryDQLLoad(err) {
+			if err != nil {
+				timing.RetryWait()
+			}
+			return true, err
+		}
+		terminalErr = err
+		return false, err
+	})
+	timing.Stop()
+	// retry.Handle may return its previous error when canceled during backoff.
+	if ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	// retry.Handle also returns its previous error when a later attempt stops on
+	// a child-context cancellation or timeout. Preserve that attempt's terminal
+	// error while the parent request context is still valid.
+	if terminalErr != nil {
+		return terminalErr
+	}
+	return err
+}
+
+func (node *Proxy) shouldRetryDQLLoad(err error) bool {
+	if err == nil || !Params.ProxyCfg.EnableAutoLoad.GetAsBool() ||
+		merr.IsCanceledOrTimeout(err) || merr.GetErrorType(err) == merr.InputError {
+		return false
+	}
+	if _, ok := node.viewQueryClient.(queryclient.CollectionReadiness); !ok {
+		return false
+	}
+	if errors.Is(err, merr.ErrCollectionNotLoaded) {
+		return true
+	}
+	viewErr := viewerror.AsViewError(err)
+	return viewErr.IsViewNotFound() || viewErr.IsViewInvalidated()
+}
 
 func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collectionName string) error {
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
