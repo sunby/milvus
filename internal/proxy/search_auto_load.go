@@ -32,29 +32,34 @@ import (
 // callback may additionally request existing operation-specific retries, such
 // as inconsistent requery. It must create a fresh task for each execution attempt.
 func (node *Proxy) retryDQL(ctx context.Context, dbName, collectionName string, execute func(context.Context) (bool, error)) error {
+	timing := getDQLTiming(ctx)
 	var terminalErr error
 	err := retry.Handle(ctx, func() (bool, error) {
+		timing.Readiness()
 		terminalErr = nil
 		if err := ctx.Err(); err != nil {
 			return false, context.Cause(ctx)
 		}
 		if err := node.ensureCollectionReady(ctx, dbName, collectionName); err != nil {
 			if node.shouldRetryDQLLoad(err) {
+				timing.RetryWait()
 				return true, err
 			}
 			terminalErr = err
 			return false, err
 		}
-		if timing, ok := ctx.Value(dqlTimingKey{}).(*dqlTiming); ok && timing.ready.IsZero() {
-			timing.Ready()
-		}
+		timing.Ready()
 		again, err := execute(ctx)
 		if again || node.shouldRetryDQLLoad(err) {
+			if err != nil {
+				timing.RetryWait()
+			}
 			return true, err
 		}
 		terminalErr = err
 		return false, err
 	})
+	timing.Stop()
 	// retry.Handle may return its previous error when canceled during backoff.
 	if ctx.Err() != nil {
 		return context.Cause(ctx)

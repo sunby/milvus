@@ -37,22 +37,27 @@ func requestStageSum(t *testing.T, op, path, cohort, name, result string) float6
 	return m.GetHistogram().GetSampleSum()
 }
 
-func TestDQLTimingUsesOnePopulationAndExactPartition(t *testing.T) {
+func TestDQLTimingAccumulatesRetryAttempts(t *testing.T) {
 	_, timer := startDQL(context.Background(), "Search")
 	timer.path = "unloaded"
-	timer.ready = timer.started.Add(1200 * time.Millisecond)
-	before := [3]float64{}
-	for i, s := range []string{"total", "readiness", "execution"} {
+	timer.switchStage(dqlStageExecution, timer.started.Add(10*time.Millisecond))
+	timer.switchStage(dqlStageRetryWait, timer.started.Add(1010*time.Millisecond))
+	timer.switchStage(dqlStageReadiness, timer.started.Add(1210*time.Millisecond))
+	timer.switchStage(dqlStageExecution, timer.started.Add(1230*time.Millisecond))
+	before := [4]float64{}
+	for i, s := range []string{"total", "readiness", "execution", "retry_wait"} {
 		before[i] = requestStageSum(t, "Search", "unloaded", "gt1s", s, "success")
 	}
-	timer.finish(timer.started.Add(2*time.Second), stage.Success)
-	got := [3]float64{}
-	for i, s := range []string{"total", "readiness", "execution"} {
+	timer.finish(timer.started.Add(1260*time.Millisecond), stage.Success)
+	got := [4]float64{}
+	for i, s := range []string{"total", "readiness", "execution", "retry_wait"} {
 		got[i] = requestStageSum(t, "Search", "unloaded", "gt1s", s, "success") - before[i]
 	}
-	require.InDelta(t, 2, got[0], 1e-9)
-	require.InDelta(t, 1.2, got[1], 1e-9)
-	require.InDelta(t, got[0], got[1]+got[2], 1e-9)
+	require.InDelta(t, 1.26, got[0], 1e-9)
+	require.InDelta(t, 0.03, got[1], 1e-9)
+	require.InDelta(t, 1.03, got[2], 1e-9)
+	require.InDelta(t, 0.2, got[3], 1e-9)
+	require.InDelta(t, got[0], got[1]+got[2]+got[3], 1e-9)
 }
 
 func TestDQLTimingCountsEmbeddedErrorBeforeExecution(t *testing.T) {
