@@ -172,11 +172,11 @@ func TestMetaTable_DropCollectionPreservesPartitionGC(t *testing.T) {
 	drop := startCollectionGCCall(t, release, func() error { return meta.DropCollection(ctx, 100, 30) })
 	waitCollectionGCCatalog(t, started)
 	partition := startCollectionGCCall(t, release, func() error { return meta.RemovePartition(ctx, 100, 1001, 0) })
-	// Queue GC while persistence still owns the shared GC lock. Regardless of
-	// whether GC or Drop publishes first, both cache updates must survive.
+	// Queue the GC writer while persistence still owns the read lock. GC then
+	// runs before Drop can acquire its write lock to publish the state.
 	require.Eventually(t, func() bool {
-		if meta.gcLock.TryRLock() {
-			meta.gcLock.RUnlock()
+		if meta.ddLock.TryRLock() {
+			meta.ddLock.RUnlock()
 			return false
 		}
 		return true
@@ -261,7 +261,7 @@ func TestMetaTable_CollectionGCLeavesRecreatedCollectionGrants(t *testing.T) {
 }
 
 func TestMetaTable_CollectionGCCatalogAllowsMetadataProgress(t *testing.T) {
-	for _, change := range []string{"create", "recreate", "rename", "legacy recreate"} {
+	for _, change := range []string{"create", "drop", "recreate", "rename", "legacy recreate"} {
 		t.Run(change, func(t *testing.T) {
 			ctx := context.Background()
 			meta, catalog := newCollectionGCMeta(t, pb.CollectionState_CollectionDropping)
@@ -274,7 +274,7 @@ func TestMetaTable_CollectionGCCatalogAllowsMetadataProgress(t *testing.T) {
 			catalog.On("DropCollection", mock.Anything, mock.MatchedBy(func(coll *model.Collection) bool {
 				return coll.CollectionID == 100 && len(coll.Aliases) == 0 && len(coll.Partitions) == 2
 			}), mock.Anything).Run(func(mock.Arguments) { close(started); <-proceed }).Return(nil).Once()
-			if change == "create" {
+			if change == "create" || change == "drop" {
 				catalog.On("DeleteGrantByCollectionName", mock.Anything, util.DefaultTenant, util.DefaultDBName, "first").Return(nil).Once()
 			}
 			gc := startCollectionGCCall(t, release, func() error { return meta.RemoveCollection(ctx, 100, 0) })
@@ -286,7 +286,12 @@ func TestMetaTable_CollectionGCCatalogAllowsMetadataProgress(t *testing.T) {
 			waitCollectionGCCall(t, reader)
 			var publish func() error
 			replacementID := int64(300)
-			if change == "rename" {
+			switch change {
+			case "drop":
+				catalog.On("AlterCollection", mock.Anything, mock.Anything, mock.Anything, metastore.MODIFY, mock.Anything, false).Return(nil).Once()
+				catalog.On("DeleteGrantByCollectionName", mock.Anything, util.DefaultTenant, util.DefaultDBName, "second").Return(nil).Once()
+				publish = func() error { return meta.DropCollection(ctx, 200, 40) }
+			case "rename":
 				replacementID = 200
 				catalog.On("AlterCollection", mock.Anything, mock.Anything, mock.Anything, metastore.MODIFY, mock.Anything, false).Return(nil).Once()
 				catalog.On("MigrateGrantCollectionName", mock.Anything, util.DefaultTenant, util.DefaultDBName, "second", util.DefaultDBName, "first").Return(nil).Once()
@@ -300,7 +305,7 @@ func TestMetaTable_CollectionGCCatalogAllowsMetadataProgress(t *testing.T) {
 					Results: map[string]*message.AppendResult{control: {TimeTick: 40}},
 				}
 				publish = func() error { return meta.AlterCollection(ctx, result) }
-			} else {
+			default:
 				name := "first"
 				if change == "create" {
 					name = "new"
@@ -319,39 +324,18 @@ func TestMetaTable_CollectionGCCatalogAllowsMetadataProgress(t *testing.T) {
 			waitCollectionGCCall(t, gc)
 			assert.NotContains(t, meta.collID2Meta, int64(100))
 			assert.NotContains(t, meta.partitionName2ID, int64(100))
-			if change != "create" {
+			if change != "create" && change != "drop" {
 				assert.Equal(t, replacementID, meta.GetCollectionID(ctx, util.DefaultDBName, "first"))
 				catalog.AssertNotCalled(t, "DeleteGrantByCollectionName", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 			} else {
 				_, exists := meta.names.get(util.DefaultDBName, "first")
 				assert.False(t, exists)
 			}
+			if change == "drop" {
+				assert.Equal(t, pb.CollectionState_CollectionDropping, meta.collID2Meta[200].State)
+			}
 		})
 	}
-}
-
-func TestMetaTable_CollectionGCOrdersPartitionGC(t *testing.T) {
-	ctx := context.Background()
-	meta, catalog := newCollectionGCMeta(t, pb.CollectionState_CollectionDropping)
-	started, proceed := make(chan struct{}), make(chan struct{})
-	release := sync.OnceFunc(func() { close(proceed) })
-	catalog.On("DropCollection", mock.Anything, mock.Anything, mock.Anything).
-		Run(func(mock.Arguments) { close(started); <-proceed }).Return(nil).Once()
-	catalog.On("DeleteGrantByCollectionName", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
-	gc := startCollectionGCCall(t, release, func() error { return meta.RemoveCollection(ctx, 100, 0) })
-	waitCollectionGCCatalog(t, started)
-	partition := startCollectionGCCall(t, release, func() error { return meta.RemovePartition(ctx, 100, 1001, 0) })
-	// GC must leave ddLock available, but retain exclusive catalog-GC ownership.
-	require.True(t, meta.ddLock.TryLock())
-	meta.ddLock.Unlock()
-	if meta.gcLock.TryRLock() {
-		meta.gcLock.RUnlock()
-		t.Error("collection GC must exclude partition catalog writes")
-	}
-	release()
-	waitCollectionGCCall(t, gc)
-	waitCollectionGCCall(t, partition)
-	catalog.AssertNotCalled(t, "DropPartition", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 }
 
 func TestMetaTable_CollectionGCCatalogFailureKeepsMetadata(t *testing.T) {

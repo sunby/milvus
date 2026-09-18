@@ -96,6 +96,8 @@ type IMetaTable interface {
 
 	AddCollection(ctx context.Context, coll *model.Collection) error
 	DropCollection(ctx context.Context, collectionID UniqueID, ts Timestamp) error
+	// RemoveCollection and RemovePartition must be serialized by their caller,
+	// the single tombstone sweeper, because legacy partition GC rewrites collections.
 	RemoveCollection(ctx context.Context, collectionID UniqueID, ts Timestamp) error
 	// GetCollectionID retrieves the corresponding collectionID based on the collectionName.
 	// If the collection does not exist, it will return InvalidCollectionID.
@@ -201,11 +203,6 @@ type MetaTable struct {
 
 	ddLock         sync.RWMutex
 	permissionLock sync.RWMutex
-	// GC may rewrite legacy collection records when removing partitions. Keep
-	// those writes ordered with collection removal and Drop persistence without
-	// holding ddLock across the collection GC catalog call. Always acquire this
-	// lock before ddLock; foreground Drop operations share it.
-	gcLock sync.RWMutex
 }
 
 // NewMetaTable creates a new MetaTable with specified catalog and allocator.
@@ -889,13 +886,12 @@ func (mt *MetaTable) markCollectionDropping(ctx context.Context, collectionID Un
 	return dbName, coll.Name, true, nil
 }
 
-// persistCollectionDropping allows catalog writes for different collections to
-// overlap while excluding background GC, including legacy partition GC that
-// rewrites the collection record. Normal DDL for this collection remains ordered
-// by the broadcaster resource locks.
+// persistCollectionDropping shares ddLock so catalog writes for different
+// collections can overlap while excluding partition GC, whose legacy path
+// rewrites the collection record. Collection GC only removes Dropping collections,
+// for which this method is already a no-op. Normal DDL for this collection remains
+// ordered by the broadcaster resource locks.
 func (mt *MetaTable) persistCollectionDropping(ctx context.Context, collectionID UniqueID, ts Timestamp) (string, bool, error) {
-	mt.gcLock.RLock()
-	defer mt.gcLock.RUnlock()
 	mt.ddLock.RLock()
 	defer mt.ddLock.RUnlock()
 
@@ -945,8 +941,6 @@ func (mt *MetaTable) removeCollectionByIDInternal(ctx context.Context, collectio
 }
 
 func (mt *MetaTable) RemoveCollection(ctx context.Context, collectionID UniqueID, ts Timestamp) error {
-	mt.gcLock.Lock()
-	defer mt.gcLock.Unlock()
 	mt.ddLock.Lock()
 	defer mt.ddLock.Unlock()
 
@@ -974,8 +968,9 @@ func (mt *MetaTable) RemoveCollection(ctx context.Context, collectionID UniqueID
 	dropFromCatalog := func() error {
 		if len(aliases) == 0 {
 			// Dropping collections no longer accept DDL: broadcaster resource
-			// locks order prior updates before Drop. gcLock also excludes the
-			// legacy partition GC read-modify-write path. With no alias keys,
+			// locks order prior updates before Drop. The single tombstone sweeper
+			// serializes collection and partition GC, including legacy partition
+			// GC that rewrites the collection record. With no alias keys,
 			// the catalog deletes only keys scoped to this collection ID, so
 			// unrelated DDL and same-name recreation can proceed during I/O.
 			// Historical collections with aliases retain ddLock to protect
@@ -1693,8 +1688,6 @@ func (mt *MetaTable) DropPartition(ctx context.Context, collectionID UniqueID, p
 }
 
 func (mt *MetaTable) RemovePartition(ctx context.Context, collectionID UniqueID, partitionID UniqueID, ts Timestamp) error {
-	mt.gcLock.Lock()
-	defer mt.gcLock.Unlock()
 	mt.ddLock.Lock()
 	defer mt.ddLock.Unlock()
 
