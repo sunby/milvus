@@ -201,6 +201,11 @@ type MetaTable struct {
 
 	ddLock         sync.RWMutex
 	permissionLock sync.RWMutex
+	// GC may rewrite legacy collection records when removing partitions. Keep
+	// those writes ordered with collection removal and Drop persistence without
+	// holding ddLock across the collection GC catalog call. Always acquire this
+	// lock before ddLock; foreground Drop operations share it.
+	gcLock sync.RWMutex
 }
 
 // NewMetaTable creates a new MetaTable with specified catalog and allocator.
@@ -884,11 +889,13 @@ func (mt *MetaTable) markCollectionDropping(ctx context.Context, collectionID Un
 	return dbName, coll.Name, true, nil
 }
 
-// persistCollectionDropping uses the existing read lock so catalog writes for
-// different collections can overlap while excluding background GC, including
-// legacy partition GC that rewrites the collection record. Normal DDL for this
-// collection remains ordered by the broadcaster resource locks.
+// persistCollectionDropping allows catalog writes for different collections to
+// overlap while excluding background GC, including legacy partition GC that
+// rewrites the collection record. Normal DDL for this collection remains ordered
+// by the broadcaster resource locks.
 func (mt *MetaTable) persistCollectionDropping(ctx context.Context, collectionID UniqueID, ts Timestamp) (string, bool, error) {
+	mt.gcLock.RLock()
+	defer mt.gcLock.RUnlock()
 	mt.ddLock.RLock()
 	defer mt.ddLock.RUnlock()
 
@@ -913,42 +920,19 @@ func (mt *MetaTable) persistCollectionDropping(ctx context.Context, collectionID
 	return db.Name, true, nil
 }
 
-func (mt *MetaTable) removeIfNameMatchedInternal(ctx context.Context, collectionID UniqueID, name string) {
-	mt.names.removeIf(func(db string, collection string, id UniqueID) bool {
-		if collectionID == id {
-			mlog.Info(ctx, "remove from names",
-				mlog.String("dbName", db),
-				mlog.String("collectionName", collection),
-				mlog.Int64("collectionID", id),
-			)
-			return true
-		}
-		return false
-	})
-}
-
-func (mt *MetaTable) removeIfAliasMatchedInternal(ctx context.Context, collectionID UniqueID, alias string) {
-	mt.aliases.removeIf(func(db string, collection string, id UniqueID) bool {
-		if collectionID == id {
-			mlog.Info(ctx, "remove from aliases",
-				mlog.String("dbName", db),
-				mlog.String("alias", collection),
-				mlog.Int64("collectionID", id),
-			)
-			return true
-		}
-		return false
-	})
-}
-
-func (mt *MetaTable) removeIfMatchedInternal(ctx context.Context, collectionID UniqueID, name string) {
-	mt.removeIfNameMatchedInternal(ctx, collectionID, name)
-	mt.removeIfAliasMatchedInternal(ctx, collectionID, name)
-}
-
-func (mt *MetaTable) removeAllNamesIfMatchedInternal(ctx context.Context, collectionID UniqueID, names []string) {
+func (mt *MetaTable) removeAllNamesIfMatchedInternal(ctx context.Context, dbName string, collectionID UniqueID, names []string) {
 	for _, name := range names {
-		mt.removeIfMatchedInternal(ctx, collectionID, name)
+		// Name publication, rename and alias rebinding all update these maps
+		// under ddLock. Check ownership at the exact key so GC of an old
+		// collection cannot erase a replacement, without scanning all names.
+		if mt.names.removeIfMatched(dbName, name, collectionID) {
+			mlog.Info(ctx, "remove from names", mlog.String("dbName", dbName),
+				mlog.String("collectionName", name), mlog.Int64("collectionID", collectionID))
+		}
+		if mt.aliases.removeIfMatched(dbName, name, collectionID) {
+			mlog.Info(ctx, "remove from aliases", mlog.String("dbName", dbName),
+				mlog.String("alias", name), mlog.Int64("collectionID", collectionID))
+		}
 	}
 }
 
@@ -961,6 +945,8 @@ func (mt *MetaTable) removeCollectionByIDInternal(ctx context.Context, collectio
 }
 
 func (mt *MetaTable) RemoveCollection(ctx context.Context, collectionID UniqueID, ts Timestamp) error {
+	mt.gcLock.Lock()
+	defer mt.gcLock.Unlock()
 	mt.ddLock.Lock()
 	defer mt.ddLock.Unlock()
 
@@ -985,15 +971,33 @@ func (mt *MetaTable) RemoveCollection(ctx context.Context, collectionID UniqueID
 		Aliases:           aliases,
 		DBID:              coll.DBID,
 	}
-	if err := mt.catalog.DropCollection(ctx1, newColl, ts); err != nil {
+	dropFromCatalog := func() error {
+		if len(aliases) == 0 {
+			// Dropping collections no longer accept DDL: broadcaster resource
+			// locks order prior updates before Drop. gcLock also excludes the
+			// legacy partition GC read-modify-write path. With no alias keys,
+			// the catalog deletes only keys scoped to this collection ID, so
+			// unrelated DDL and same-name recreation can proceed during I/O.
+			// Historical collections with aliases retain ddLock to protect
+			// alias keys against concurrent rebinding.
+			mt.ddLock.Unlock()
+			defer mt.ddLock.Lock()
+		}
+		return mt.catalog.DropCollection(ctx1, newColl, ts)
+	}
+	if err := dropFromCatalog(); err != nil {
 		return err
 	}
 
+	dbName := coll.DBName
+	if dbName == "" {
+		dbName = util.DefaultDBName
+	}
 	// A replacement collection may already own this name. Its grants must
 	// survive the old collection's GC; ddLock keeps this check and cleanup
 	// ordered with name publication and rename.
-	if owner, exists := mt.names.get(coll.DBName, coll.Name); !exists || owner == collectionID {
-		if err := mt.catalog.DeleteGrantByCollectionName(ctx1, util.DefaultTenant, coll.DBName, coll.Name); err != nil {
+	if owner, exists := mt.names.get(dbName, coll.Name); !exists || owner == collectionID {
+		if err := mt.catalog.DeleteGrantByCollectionName(ctx1, util.DefaultTenant, dbName, coll.Name); err != nil {
 			mlog.Warn(ctx, "failed to delete grants for dropped collection, skipping",
 				mlog.String("dbName", coll.DBName), mlog.String("collectionName", coll.Name), mlog.Err(err))
 		}
@@ -1003,7 +1007,7 @@ func (mt *MetaTable) RemoveCollection(ctx context.Context, collectionID UniqueID
 	allNames = append(allNames, coll.Name)
 
 	// We cannot delete the name directly, since newly collection with same name may be created.
-	mt.removeAllNamesIfMatchedInternal(ctx, collectionID, allNames)
+	mt.removeAllNamesIfMatchedInternal(ctx, dbName, collectionID, allNames)
 	mt.removeCollectionByIDInternal(ctx, collectionID)
 
 	mlog.Info(ctx, "remove collection",
@@ -1689,6 +1693,8 @@ func (mt *MetaTable) DropPartition(ctx context.Context, collectionID UniqueID, p
 }
 
 func (mt *MetaTable) RemovePartition(ctx context.Context, collectionID UniqueID, partitionID UniqueID, ts Timestamp) error {
+	mt.gcLock.Lock()
+	defer mt.gcLock.Unlock()
 	mt.ddLock.Lock()
 	defer mt.ddLock.Unlock()
 
