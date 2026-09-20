@@ -115,6 +115,7 @@
 #include "mmap/Types.h"
 #include "common/VirtualPK.h"
 #include "monitor/Monitor.h"
+#include "monitor/QueryMetrics.h"
 #include "monitor/scope_metric.h"
 #include "parquet/metadata.h"
 #include "pb/index_cgo_msg.pb.h"
@@ -397,12 +398,17 @@ CreateManifestColumnGroup(const ManifestColumnGroupBuildContext& context,
                context.segment_id,
                context.original_column_group_index);
 
+    milvus::monitor::QueryStageTimer reader_timer(
+        milvus::monitor::QueryStage::ManifestReaderOpen);
     auto chunk_reader_result = context.reader->get_chunk_reader(
         context.original_column_group_index, context.needed_columns);
     if (!chunk_reader_result.ok()) {
         throw milvus_storage::ToSegcoreError(chunk_reader_result.status());
     }
 
+    reader_timer.End();
+    milvus::monitor::QueryStageTimer translator_timer(
+        milvus::monitor::QueryStage::ManifestTranslator);
     auto translator =
         std::make_unique<storagev2translator::ManifestGroupTranslator>(
             context.segment_id,
@@ -424,6 +430,9 @@ CreateManifestColumnGroup(const ManifestColumnGroupBuildContext& context,
             context.insert_channel,
             std::nullopt,
             /*include_row_id=*/true);
+    translator_timer.End();
+    milvus::monitor::QueryStageTimer cache_timer(
+        milvus::monitor::QueryStage::ManifestCacheSlot);
     return std::make_shared<ChunkedColumnGroup>(std::move(translator));
 }
 
@@ -448,6 +457,8 @@ class LazyManifestColumnGroup {
                 return group_;
             }
             if (attempt_ != nullptr) {
+                milvus::monitor::QueryStageTimer wait_timer(
+                    milvus::monitor::QueryStage::ManifestGroupWait);
                 attempt = attempt_;
                 while (!attempt->done) {
                     attempt->cv.wait_for(lock, std::chrono::milliseconds(20));
@@ -470,7 +481,6 @@ class LazyManifestColumnGroup {
             break;
         }
 
-        auto start = std::chrono::steady_clock::now();
         std::shared_ptr<ChunkedColumnGroup> group;
         std::exception_ptr error;
         bool cancelled = false;
@@ -504,17 +514,6 @@ class LazyManifestColumnGroup {
             std::rethrow_exception(error);
         }
 
-        auto field_count = context_.needed_columns->size();
-        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              std::chrono::steady_clock::now() - start)
-                              .count();
-        LOG_DEBUG(
-            "[StorageV3] lazy manifest column group materialized, segment {}, "
-            "cg {}, fields {}, elapsed {}ms",
-            segment_id_,
-            original_column_group_index_,
-            field_count,
-            elapsed_ms);
         return group_;
     }
 
@@ -4303,9 +4302,16 @@ ChunkedSegmentSealedImpl::prefetch_chunks_locked(milvus::OpContext* op_ctx,
                                                  FieldId field_id) const {
     auto snapshot = CapturePublishedState();
     if (auto column = get_column(snapshot->runtime, field_id)) {
+        // num_chunks may synchronously open a cold manifest reader.
+        milvus::monitor::QueryStageTimer prepare_timer(
+            milvus::monitor::QueryStage::FieldPrefetchPrepare);
         auto num_chunks = column->num_chunks();
         std::vector<int64_t> ids(num_chunks);
         std::iota(ids.begin(), ids.end(), 0);
+        prepare_timer.End();
+        // Includes cache admission, storage I/O, conversion and publication.
+        milvus::monitor::QueryStageTimer load_timer(
+            milvus::monitor::QueryStage::FieldPrefetchLoad);
         column->PrefetchChunks(op_ctx, ids);
     }
 }
