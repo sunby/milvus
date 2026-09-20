@@ -116,6 +116,7 @@
 #include "mmap/Types.h"
 #include "common/VirtualPK.h"
 #include "monitor/Monitor.h"
+#include "monitor/QueryMetrics.h"
 #include "monitor/scope_metric.h"
 #include "parquet/metadata.h"
 #include "pb/index_cgo_msg.pb.h"
@@ -3896,9 +3897,16 @@ ChunkedSegmentSealedImpl::prefetch_chunks_locked(milvus::OpContext* op_ctx,
                                                  FieldId field_id) const {
     auto snapshot = CapturePublishedState();
     if (auto column = get_column(snapshot->runtime, field_id)) {
+        // num_chunks may synchronously open a cold manifest reader.
+        milvus::monitor::QueryStageTimer prepare_timer(
+            milvus::monitor::QueryStage::FieldPrefetchPrepare);
         auto num_chunks = column->num_chunks();
         std::vector<int64_t> ids(num_chunks);
         std::iota(ids.begin(), ids.end(), 0);
+        prepare_timer.End();
+        // Includes cache admission, storage I/O, conversion and publication.
+        milvus::monitor::QueryStageTimer load_timer(
+            milvus::monitor::QueryStage::FieldPrefetchLoad);
         column->PrefetchChunks(op_ctx, ids);
     }
 }
