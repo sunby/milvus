@@ -216,9 +216,15 @@ type guard struct {
 }
 
 func (g *guard) Release() {
+	g.ReleaseReferences()()
+}
+
+func (g *guard) ReleaseReferences() func() {
+	finish := func() {}
 	g.once.Do(func() {
-		g.buffer.releaseGuard(g.startFrom)
+		finish = g.buffer.releaseGuardReferences(g.startFrom)
 	})
+	return finish
 }
 
 func (g *guard) WaitTransformVisible(ctx context.Context, timetick uint64) error {
@@ -366,6 +372,12 @@ func (b *vchannelBuffer) acquireLocked(startFrom uint64) error {
 
 func (b *vchannelBuffer) registerSegment(ctx context.Context, segment qnview.TransformSegment) (qnview.TransformRegistration, error) {
 	b.mu.Lock()
+	// A released segment's queued catch-up must not replace the registration
+	// of a newer physical instance with the same segment ID.
+	if err := ctx.Err(); err != nil {
+		b.mu.Unlock()
+		return nil, err
+	}
 	if b.err != nil {
 		b.mu.Unlock()
 		return nil, b.err
@@ -519,13 +531,19 @@ func (b *vchannelBuffer) unregister(reg *registration) {
 func (b *vchannelBuffer) removeRegistration(reg *registration) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	delete(b.pending, reg.segment.ID())
+	if b.pending[reg.segment.ID()] == reg {
+		delete(b.pending, reg.segment.ID())
+	}
 	if b.live[reg.segment.ID()] == reg {
 		delete(b.live, reg.segment.ID())
 	}
 }
 
 func (b *vchannelBuffer) releaseGuard(startFrom uint64) {
+	b.releaseGuardReferences(startFrom)()
+}
+
+func (b *vchannelBuffer) releaseGuardReferences(startFrom uint64) func() {
 	b.owner.mu.Lock()
 	b.mu.Lock()
 	if count := b.guards[startFrom]; count > 1 {
@@ -533,7 +551,7 @@ func (b *vchannelBuffer) releaseGuard(startFrom uint64) {
 		b.trimLocked()
 		b.mu.Unlock()
 		b.owner.mu.Unlock()
-		return
+		return func() {}
 	}
 	delete(b.guards, startFrom)
 	if len(b.guards) == 0 {
@@ -541,17 +559,19 @@ func (b *vchannelBuffer) releaseGuard(startFrom uint64) {
 		stream := b.owner.removeLocked(b.vchannel, b)
 		b.mu.Unlock()
 		b.owner.mu.Unlock()
-		if sub != nil {
-			_ = sub.Close()
+		return func() {
+			if sub != nil {
+				_ = sub.Close()
+			}
+			if stream != nil {
+				_ = stream.Close()
+			}
 		}
-		if stream != nil {
-			_ = stream.Close()
-		}
-		return
 	}
 	b.trimLocked()
 	b.mu.Unlock()
 	b.owner.mu.Unlock()
+	return func() {}
 }
 
 func (b *vchannelBuffer) trimLocked() {

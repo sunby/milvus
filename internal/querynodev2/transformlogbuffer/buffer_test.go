@@ -266,6 +266,101 @@ func (s *fakeSegment) appliedTicks() []uint64 {
 	return append([]uint64(nil), s.applied...)
 }
 
+func TestBufferLateUnregisterPreservesReplacement(t *testing.T) {
+	buffer := newVChannelBuffer(nil, "pchannel", "vchannel", 0)
+	old := newRegistration(buffer, &fakeSegment{id: 1000})
+	fresh := newRegistration(buffer, &fakeSegment{id: 1000})
+	t.Cleanup(old.cancel)
+	t.Cleanup(fresh.cancel)
+	buffer.pending[1000] = fresh
+	buffer.live[1000] = fresh
+
+	// Both explicit Unregister and a canceled drain can remove the old
+	// registration after a replacement with the same segment ID is installed.
+	old.Unregister()
+	buffer.removeRegistration(old)
+	require.Same(t, fresh, buffer.pending[1000])
+	require.Same(t, fresh, buffer.live[1000])
+	fresh.Unregister()
+	require.Empty(t, buffer.pending)
+	require.Empty(t, buffer.live)
+}
+
+func TestBufferCanceledRegisterPreservesReplacement(t *testing.T) {
+	buffer := newVChannelBuffer(nil, "pchannel", "vchannel", 0)
+	fresh := newRegistration(buffer, &fakeSegment{id: 1000})
+	t.Cleanup(fresh.cancel)
+	buffer.pending[1000] = fresh
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reg, err := buffer.registerSegment(ctx, &fakeSegment{id: 1000})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, reg)
+	require.Same(t, fresh, buffer.pending[1000])
+}
+
+type blockingCloseSubscription struct {
+	fakeSubscription
+	entered chan struct{}
+	resume  <-chan struct{}
+}
+
+func (s blockingCloseSubscription) Close() error {
+	close(s.entered)
+	<-s.resume
+	return nil
+}
+
+func TestBufferReleaseReferencesDetachesBeforeSubscriptionClose(t *testing.T) {
+	streams := newFakeStreamManager()
+	buffer := New(streams)
+	// Keep the shared PChannel stream alive while one vchannel is replaced.
+	other, err := buffer.Acquire(context.Background(), newTestQueryView("p_2v0", 50))
+	require.NoError(t, err)
+	defer other.Release()
+	old, err := buffer.Acquire(context.Background(), newTestQueryView("p_1v0", 50))
+	require.NoError(t, err)
+	resume := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(resume) })
+	defer unblock()
+	sub := blockingCloseSubscription{entered: make(chan struct{}), resume: resume}
+	buffer.mu.Lock()
+	oldBuffer := buffer.channels["p_1v0"]
+	buffer.mu.Unlock()
+	oldBuffer.mu.Lock()
+	oldBuffer.sub = sub
+	oldBuffer.mu.Unlock()
+	oldBuffer.fail(errors.New("old subscription failed"))
+	finish := old.ReleaseReferences()
+	done := make(chan struct{})
+	go func() {
+		finish()
+		close(done)
+	}()
+	select {
+	case <-sub.entered:
+	case <-time.After(time.Second):
+		t.Fatal("subscription Close did not start")
+	}
+	fresh, err := buffer.Acquire(context.Background(), newTestQueryView("p_1v0", 50))
+	require.NoError(t, err, "replacement must not inherit the abandoned buffer's error")
+	defer fresh.Release()
+	buffer.mu.Lock()
+	freshBuffer := buffer.channels["p_1v0"]
+	buffer.mu.Unlock()
+	require.NotSame(t, oldBuffer, freshBuffer)
+	unblock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("subscription Close did not finish")
+	}
+	buffer.mu.Lock()
+	current := buffer.channels["p_1v0"]
+	buffer.mu.Unlock()
+	require.Same(t, freshBuffer, current)
+}
+
 func TestBufferAcquireMultiplexesVChannelsOnOnePChannelStream(t *testing.T) {
 	streams := newFakeStreamManager()
 	buffer := New(streams)
