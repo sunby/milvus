@@ -163,6 +163,8 @@ func (g *fakeTransformLogGuard) Release() {
 	g.released = true
 }
 
+func (g *fakeTransformLogGuard) ReleaseReferences() func() { return g.Release }
+
 type fakeQueryViewCollectionRuntimeManager struct {
 	mu           sync.Mutex
 	acquireView  *qviews.QueryViewAtQueryNode
@@ -242,12 +244,12 @@ type fakePhysicalSegmentManager struct {
 	release func(ReleaseSegments)
 }
 
-func (m fakePhysicalSegmentManager) Acquire(req AcquirePhysicalSegments) {
-	m.acquire(req)
+func (m fakePhysicalSegmentManager) AcquireReferences(req AcquirePhysicalSegments) func() {
+	return func() { m.acquire(req) }
 }
 
-func (m fakePhysicalSegmentManager) Release(req ReleaseSegments) {
-	m.release(req)
+func (m fakePhysicalSegmentManager) ReleaseReferences(req ReleaseSegments) func() {
+	return func() { m.release(req) }
 }
 
 func (m fakePhysicalSegmentManager) ApplyLoadInfoSnapshot(context.Context, SegmentLoadInfoSnapshot) {}
@@ -306,6 +308,8 @@ func (instantTransformGuard) WaitTransformVisible(context.Context, uint64) error
 }
 
 func (instantTransformGuard) Release() {}
+
+func (instantTransformGuard) ReleaseReferences() func() { return func() {} }
 
 type fakeQueryViewLoadMetadataProvider struct {
 	mu             sync.Mutex

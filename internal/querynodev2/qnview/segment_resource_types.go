@@ -27,6 +27,10 @@ type TransformLogBuffer interface {
 type TransformLogGuard interface {
 	WaitTransformVisible(ctx context.Context, timetick uint64) error
 	Release()
+	// ReleaseReferences detaches the local buffer pin synchronously and
+	// transfers any blocking subscription/stream Close to the returned function.
+	// The caller must invoke that function exactly once.
+	ReleaseReferences() func()
 }
 
 // TransformRegistration is a live segment registration in the TransformLogBuffer.
@@ -96,13 +100,17 @@ func UnwrapTransformSegment(segment TransformSegment) TransformSegment {
 // PhysicalSegmentManager owns metadata fetch, load planning, physical load, and
 // physical ref-counted release.
 type PhysicalSegmentManager interface {
-	Acquire(req AcquirePhysicalSegments)
-	Release(req ReleaseSegments)
+	// AcquireReferences and ReleaseReferences synchronously update physical
+	// ownership without invoking callbacks. The returned continuation must be
+	// called exactly once, outside the caller's lifecycle lock. It starts loads
+	// or closes detached subscriptions and completes the release, respectively.
+	AcquireReferences(req AcquirePhysicalSegments) func()
+	ReleaseReferences(req ReleaseSegments) func()
 	ApplyLoadInfoSnapshot(ctx context.Context, snapshot SegmentLoadInfoSnapshot)
 }
 
 type PhysicalSegmentResetter interface {
-	ResetSegment(segmentID int64)
+	ResetSegment(segment TransformSegment)
 }
 
 // AcquirePhysicalSegments is the physical manager request wrapped by
