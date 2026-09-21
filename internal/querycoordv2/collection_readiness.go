@@ -71,6 +71,11 @@ func (s *Server) waitCollectionReady(ctx context.Context, req *querypb.WaitColle
 	if runtime == nil || runtime.readyChanges == nil {
 		return merr.WrapErrServiceNotReady("querycoord", 0, "query view readiness is unavailable")
 	}
+	// Each DQL attempt refreshes activity at its initial check. A blocking
+	// load wait refreshes it when ready, just before query execution resumes.
+	if req.GetCheckOnly() && s.collectionUsage != nil {
+		s.collectionUsage.touch(collectionID)
+	}
 	ctx, cancel := context.WithTimeout(ctx, paramtable.Get().QueryCoordCfg.LoadTimeoutSeconds.GetAsDuration(time.Second))
 	defer cancel()
 
@@ -128,6 +133,9 @@ func (s *Server) waitCollectionReady(ctx context.Context, req *querypb.WaitColle
 			}
 		}
 		if ready {
+			if !req.GetCheckOnly() && s.collectionUsage != nil {
+				s.collectionUsage.touch(collectionID)
+			}
 			return nil
 		}
 		if req.GetCheckOnly() {
