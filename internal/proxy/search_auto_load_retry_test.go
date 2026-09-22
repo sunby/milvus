@@ -194,6 +194,7 @@ func TestDQLAutoLoadRetryThroughTaskAndGRPC(t *testing.T) {
 	for _, test := range []struct{ method, phase string }{
 		{"Search", "plan"},
 		{"Search", "search"},
+		{"HybridSearch", "plan"},
 		{"HybridSearch", "search"},
 		{"Query", "query"},
 		{"Requery", "query"},
