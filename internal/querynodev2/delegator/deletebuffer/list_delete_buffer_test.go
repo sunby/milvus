@@ -137,6 +137,7 @@ func (s *ListDeleteBufferSuite) TestL0SegmentOperations() {
 	// Create mock segments with specific IDs
 	seg1 := segments.NewMockSegment(s.T())
 	seg1.On("ID").Return(int64(1))
+	seg1.On("Collection").Return(int64(1))
 	seg1.On("Release", mock.Anything).Return()
 	seg1.On("StartPosition").Return(&msgpb.MsgPosition{
 		Timestamp: 10,
@@ -144,6 +145,7 @@ func (s *ListDeleteBufferSuite) TestL0SegmentOperations() {
 
 	seg2 := segments.NewMockSegment(s.T())
 	seg2.On("ID").Return(int64(2))
+	seg2.On("Collection").Return(int64(1))
 	seg2.On("Release", mock.Anything).Return()
 	seg2.On("StartPosition").Return(&msgpb.MsgPosition{
 		Timestamp: 20,
@@ -151,6 +153,7 @@ func (s *ListDeleteBufferSuite) TestL0SegmentOperations() {
 
 	seg3 := segments.NewMockSegment(s.T())
 	seg3.On("ID").Return(int64(3))
+	seg3.On("Collection").Return(int64(1))
 	seg3.On("Release", mock.Anything).Return()
 	seg3.On("StartPosition").Return(&msgpb.MsgPosition{
 		Timestamp: 30,
