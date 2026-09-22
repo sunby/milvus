@@ -63,11 +63,22 @@ CopyCString(const std::string& value) {
 
 }  // namespace
 
+bool
+InitCacheShardDiskUsageMetricsMode(bool aggregate) {
+    return milvus::cachinglayer::monitor::
+        set_cache_shard_disk_usage_metrics_mode(aggregate);
+}
+
 char*
 GetCoreMetrics() {
     UpdateArrowIOThreadPoolMetrics();
-    static_cast<void>(
-        milvus::cachinglayer::monitor::collect_cache_shard_disk_usage_stats());
+    // Aggregate gauges are shared for the process lifetime. Only full mode
+    // needs to collect per-shard stats to remove expired metric series.
+    if (!milvus::cachinglayer::monitor::
+            cache_shard_disk_usage_metrics_aggregate()) {
+        static_cast<void>(milvus::cachinglayer::monitor::
+                              collect_cache_shard_disk_usage_stats());
+    }
     auto str = milvus::monitor::getPrometheusClient().GetMetrics();
     auto len = str.length();
     char* res = static_cast<char*>(malloc(len + 1));

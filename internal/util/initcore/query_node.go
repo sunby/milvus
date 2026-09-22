@@ -37,6 +37,7 @@ import (
 	"sync"
 	"unsafe"
 
+	internalmetrics "github.com/milvus-io/milvus/internal/util/metrics"
 	"github.com/milvus-io/milvus/internal/util/pathutil"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/util/hardware"
@@ -49,6 +50,11 @@ var initQueryNodeOnce sync.Once
 
 // InitQueryNode initializes query node once.
 func InitQueryNode(ctx context.Context) error {
+	// QueryNode and StreamingNode can also initialize directly, without roles.Run.
+	// Check on every call so sync.Once cannot hide a conflicting process mode.
+	if err := internalmetrics.InitCollectionLevelMetricsMode(paramtable.Get().CommonCfg.CollectionLevelMetricsMode.GetValue()); err != nil {
+		return err
+	}
 	var err error
 	initQueryNodeOnce.Do(func() {
 		err = doInitQueryNodeOnce(ctx)
