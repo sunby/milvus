@@ -104,6 +104,11 @@ Rules:
   Up or UpRecovering view remains, return the existing retriable view error.
   Missing, Preparing or schema-mismatched views alone do not cause waiting.
 
+Waiting is local to SN; the Coord-facing `UpRecovering` to `Up` projection is
+unchanged. WAL shutdown stops query acquisition before draining its in-flight
+operations: waiters wake and new acquisitions fail with an on-shutdown error.
+QueryView resources are released only after those operations finish.
+
 The handler returns a read lease of the selected view, not a mutable state
 machine entry. The lease must protect the selected version from being released
 while plan generation is using it.
