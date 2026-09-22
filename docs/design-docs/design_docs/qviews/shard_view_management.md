@@ -224,6 +224,10 @@ effects and handles its in-memory cross-view effects:
 - **Down**: Clear `upView` when applicable.
 - **Unrecoverable**: Clear the fast pointers and remain stable until
   `AddPreparing` or `RequestRelease` advances the view to Dropping.
+  When a node report or node loss invalidates a Preparing, Ready, or Up view,
+  append a post-persist notification to the shard event. The registry forwards
+  it to Balancer's dirty-shard queue after persistence, without manager or
+  registry locks. Synthetic failures from preemption/release do not notify.
 - **Dropping**: Wait for node callbacks.
 - **Dropped**: Move the final ETCD deletion effect into the pending persist
   slice and register a post-persist callback. The state machine remains

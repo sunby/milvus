@@ -40,7 +40,8 @@ type ShardViewRegistry struct {
 	collectionShards map[int64]map[qviews.ShardID]struct{}
 	nodeShards       map[int64]map[qviews.ShardID]struct{}
 
-	statsObservers []func(qviews.ShardID, *ShardStats)
+	statsObservers         []func(qviews.ShardID, *ShardStats)
+	unrecoverableNotifiers []func(qviews.ShardID)
 }
 
 // RecoverShardViewRegistry constructs a ShardViewRegistry and rebuilds every
@@ -96,6 +97,7 @@ func RecoverShardViewRegistry(
 		registry.addNodeShardsLocked(sid, stats)
 		mgr.SetStatsObserver(registry.onShardStatsChanged)
 		mgr.setOnReleasedEmpty(registry.removeReleasedManager)
+		mgr.setOnUnrecoverable(registry.onShardUnrecoverable)
 	}
 	// Recovery sync callbacks may update manager stats immediately. Install all
 	// observers and indexes before releasing the held recovery events so those
@@ -126,6 +128,7 @@ func (r *ShardViewRegistry) Ensure(shardID qviews.ShardID) *ShardViewManager {
 	mgr := newShardViewManager(r.ctx, shardID, r.flushScheduler, nil)
 	mgr.SetStatsObserver(r.onShardStatsChanged)
 	mgr.setOnReleasedEmpty(r.removeReleasedManager)
+	mgr.setOnUnrecoverable(r.onShardUnrecoverable)
 	stats := emptyShardStats()
 
 	r.mu.Lock()
@@ -284,6 +287,28 @@ func (r *ShardViewRegistry) RegisterStatsObserver(observer func(qviews.ShardID, 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.statsObservers = append(r.statsObservers, observer)
+}
+
+// RegisterUnrecoverableNotifier subscribes to active views invalidated by node
+// reports or node loss. Notifications follow persistence and run without
+// registry or manager locks. Callbacks must be non-blocking. Recovery state is
+// not replayed; the balancer's initial full scan reconciles existing failures.
+func (r *ShardViewRegistry) RegisterUnrecoverableNotifier(notifier func(qviews.ShardID)) {
+	if notifier == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.unrecoverableNotifiers = append(r.unrecoverableNotifiers, notifier)
+}
+
+func (r *ShardViewRegistry) onShardUnrecoverable(shardID qviews.ShardID) {
+	r.mu.RLock()
+	notifiers := append([]func(qviews.ShardID){}, r.unrecoverableNotifiers...)
+	r.mu.RUnlock()
+	for _, notify := range notifiers {
+		notify(shardID)
+	}
 }
 
 type ShardViewSnapshot struct {
