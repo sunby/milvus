@@ -25,12 +25,13 @@ import (
 //
 // Thread-safety: All methods are thread-safe.
 type ShardViewManager struct {
-	ctx            context.Context // lifecycle context used by callbacks and event observation
-	mu             sync.Mutex
-	shardID        qviews.ShardID
-	eventSubmitter dirtyViewEventSubmitter
-	observe        func(qviews.ShardID, *ShardStats)
-	onEmpty        func(qviews.ShardID, *ShardViewManager)
+	ctx             context.Context // lifecycle context used by callbacks and event observation
+	mu              sync.Mutex
+	shardID         qviews.ShardID
+	eventSubmitter  dirtyViewEventSubmitter
+	observe         func(qviews.ShardID, *ShardStats)
+	onEmpty         func(qviews.ShardID, *ShardViewManager)
+	onUnrecoverable func(qviews.ShardID)
 
 	// All active views keyed by version for O(1) lookup.
 	views map[qviews.QueryViewVersion]*CoordQueryViewStateMachine
@@ -198,6 +199,12 @@ func (m *ShardViewManager) setOnEmpty(callback func(qviews.ShardID, *ShardViewMa
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onEmpty = callback
+}
+
+func (m *ShardViewManager) setOnUnrecoverable(callback func(qviews.ShardID)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onUnrecoverable = callback
 }
 
 // Stats returns an atomic snapshot of this shard's current placement state.
@@ -630,6 +637,7 @@ func (m *ShardViewManager) makeOnSyncResponse(version qviews.QueryViewVersion, t
 		})
 		m.processStateMachine(sm)
 		event := m.consumeDirtyEventLocked()
+		m.notifyUnrecoverableAfterPersist(&event, before, sm.State())
 		m.publishStatsLocked()
 
 		_, exists := m.views[version]
@@ -686,9 +694,25 @@ func (m *ShardViewManager) makeOnQueryNodeLost(version qviews.QueryViewVersion) 
 		})
 		m.processStateMachine(sm)
 		event := m.consumeDirtyEventLocked()
+		m.notifyUnrecoverableAfterPersist(&event, before, sm.State())
 		m.publishStatsLocked()
 		m.mu.Unlock()
 		m.submitDirtyEvent(event)
+	}
+}
+
+// notifyUnrecoverableAfterPersist is called under m.mu for node reports and
+// node loss, never for synthetic failures during preemption or release. The
+// flush callback runs without m.mu after persistence, so reconciliation
+// triggered by this notification cannot overtake its persistence batch.
+func (m *ShardViewManager) notifyUnrecoverableAfterPersist(event *dirtyViewEvent, before, after qviews.QueryViewState) {
+	if after != qviews.QueryViewStateUnrecoverable || m.onUnrecoverable == nil {
+		return
+	}
+	switch before {
+	case qviews.QueryViewStatePreparing, qviews.QueryViewStateReady, qviews.QueryViewStateUp:
+		notify := m.onUnrecoverable
+		event.afterPersist = append(event.afterPersist, func() { notify(m.shardID) })
 	}
 }
 

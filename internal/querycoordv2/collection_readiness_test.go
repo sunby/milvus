@@ -31,6 +31,7 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	metastoremocks "github.com/milvus-io/milvus/internal/metastore/mocks"
+	"github.com/milvus-io/milvus/internal/views/coord/balancer"
 	"github.com/milvus-io/milvus/internal/views/coord/coordview"
 	"github.com/milvus-io/milvus/internal/views/coord/coordview/syncer"
 	"github.com/milvus-io/milvus/internal/views/coord/loadmgr"
@@ -140,6 +141,147 @@ func TestWaitCollectionReadyWakesFromStreamingNodeUp(t *testing.T) {
 	}
 	status, err = s.WaitCollectionReady(ctx, req)
 	require.NoError(t, merr.CheckRPCCall(status, err), "an already-ready collection needs no new notification")
+}
+
+type readinessNodeProvider struct{}
+
+func (*readinessNodeProvider) Snapshot() *balancer.NodeSnapshot {
+	return balancer.NewNodeSnapshot(1, nil)
+}
+
+type readinessDataViewProvider struct {
+	fakeRuntimeDataViewProvider
+	view *viewpb.DataViewOfCollection
+}
+
+func (p *readinessDataViewProvider) DataViewSnapshotForCollections(_ context.Context, ids map[int64]struct{}) *balancer.DataViewSnapshot {
+	if _, ok := ids[p.view.GetCollectionId()]; !ok && ids != nil {
+		return balancer.NewDataViewSnapshot(1, nil, nil)
+	}
+	return balancer.NewDataViewSnapshot(1, []*viewpb.DataViewOfCollection{p.view}, nil)
+}
+
+func newReadinessRecoveryBalancer(runtime *qviewsRuntime, channel string) *balancer.DefaultBalancer {
+	config := balancer.DefaultBalanceConfig()
+	config.TickerInterval = 0
+	return balancer.NewDefaultBalancer(balancer.NewSnapshotBuilder(
+		runtime.loadConfigStore, runtime.shardViewRegistry, &readinessNodeProvider{},
+		&readinessDataViewProvider{view: &viewpb.DataViewOfCollection{
+			CollectionId: 100, DataVersion: &viewpb.DataVersion{StreamingVersion: 1},
+			Shards: []*viewpb.DataViewOfShard{{Vchannel: channel}},
+		}}, config,
+	), runtime.shardViewRegistry, nil)
+}
+
+func TestWaitCollectionReadyRebuildsUnrecoverableWithoutPeriodicScan(t *testing.T) {
+	const channel = "by-dev-rootcoord-dml_100v0"
+	s, _, stream := newReadinessTestServer(t)
+	b := newReadinessRecoveryBalancer(s.qviewsRuntime, channel)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	b.Start(ctx)
+	defer b.Stop()
+
+	preparing := receiveReadinessSync(t, stream, qviews.QueryViewStatePreparing)
+	ready := preparing.View.IntoProto()
+	ready.Meta.State = viewpb.QueryViewState_QueryViewStateReady
+	preparing.OnSyncResponse(qviews.NewQueryViewAtWorkNodeFromProto(ready))
+	up := receiveReadinessSync(t, stream, qviews.QueryViewStateUp)
+	result := make(chan error, 1)
+	go func() {
+		status, err := s.WaitCollectionReady(ctx, readinessRequest(channel))
+		result <- merr.CheckRPCCall(status, err)
+	}()
+	assertReadinessBlocked(t, result)
+
+	// Reproduce an SN losing its Ready view before acknowledging Up. The
+	// running balancer must replace it without any explicit Trigger/Reconcile.
+	failed := up.View.IntoProto()
+	failed.Meta.State = viewpb.QueryViewState_QueryViewStateUnrecoverable
+	up.OnSyncResponse(qviews.NewQueryViewAtWorkNodeFromProto(failed))
+	replacement := receiveRecoverySync(t, stream, qviews.QueryViewStatePreparing)
+	require.True(t, replacement.View.Version().GT(preparing.View.Version()))
+	assertReadinessBlocked(t, result)
+	ready = replacement.View.IntoProto()
+	ready.Meta.State = viewpb.QueryViewState_QueryViewStateReady
+	replacement.OnSyncResponse(qviews.NewQueryViewAtWorkNodeFromProto(ready))
+	replacementUp := receiveRecoverySync(t, stream, qviews.QueryViewStateUp)
+	assertReadinessBlocked(t, result)
+	replacementUp.OnSyncResponse(replacementUp.View)
+	select {
+	case err := <-result:
+		require.NoError(t, err)
+	case <-ctx.Done():
+		t.Fatal("replacement Up did not complete the original readiness request")
+	}
+}
+
+func TestLateUnrecoverableNotificationDoesNotRestoreReleasedReplica(t *testing.T) {
+	for _, reload := range []bool{false, true} {
+		name := "released"
+		if reload {
+			name = "reloaded with a new replica"
+		}
+		t.Run(name, func(t *testing.T) {
+			const channel = "by-dev-rootcoord-dml_100v0"
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			s, catalog, stream := newReadinessTestServer(t)
+			runtime := s.qviewsRuntime
+			b := newReadinessRecoveryBalancer(runtime, channel)
+			b.Trigger(balancer.TriggerScope{DirtyCollections: []int64{100}})
+			require.NoError(t, b.Reconcile(ctx))
+			preparing := receiveReadinessSync(t, stream, qviews.QueryViewStatePreparing)
+
+			catalog.EXPECT().ReleaseReplicas(mock.Anything, int64(100)).Return(nil).Once()
+			catalog.EXPECT().ReleaseCollection(mock.Anything, int64(100)).Return(nil).Once()
+			require.NoError(t, runtime.loadConfigStore.Remove(ctx, 100))
+			if reload {
+				catalog.EXPECT().SaveCollection(mock.Anything, mock.Anything).Return(nil).Once()
+				catalog.EXPECT().SaveReplica(mock.Anything, mock.Anything).Return(nil).Once()
+				require.NoError(t, runtime.loadConfigStore.Put(ctx, &loadmgr.LoadConfig{
+					CollectionID: 100, Replicas: []*loadmgr.ReplicaAssignment{{ReplicaID: 2000}},
+				}))
+			}
+
+			// Deliver the old replica's failure after its desired state has
+			// been removed. Wait until the real notifier enqueues this shard.
+			notified := make(chan struct{}, 1)
+			runtime.shardViewRegistry.RegisterUnrecoverableNotifier(func(qviews.ShardID) { notified <- struct{}{} })
+			failed := preparing.View.IntoProto()
+			failed.Meta.State = viewpb.QueryViewState_QueryViewStateUnrecoverable
+			preparing.OnSyncResponse(qviews.NewQueryViewAtWorkNodeFromProto(failed))
+			select {
+			case <-notified:
+			case <-ctx.Done():
+				t.Fatal("late failure was not enqueued")
+			}
+			require.NoError(t, b.Reconcile(ctx))
+			stats := runtime.shardViewRegistry.Get(preparing.View.ShardID()).Stats()
+			require.Nil(t, stats.PreparingVersion, "the removed replica must not be reloaded")
+			require.Nil(t, stats.UpVersion)
+		})
+	}
+}
+
+func receiveRecoverySync(t *testing.T, s *readinessSyncer, state qviews.QueryViewState) syncer.SyncView {
+	t.Helper()
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case view := <-s.sent:
+			if view.View.State() == qviews.QueryViewStateDropped {
+				view.OnSyncResponse(view.View)
+				continue
+			}
+			require.Equal(t, state, view.View.State())
+			return view
+		case <-timer.C:
+			t.Fatal("timed out waiting for replacement view sync")
+			return syncer.SyncView{}
+		}
+	}
 }
 
 func assertReadinessBlocked(t *testing.T, result <-chan error) {

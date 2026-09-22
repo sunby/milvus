@@ -184,8 +184,17 @@ to the latest visible DataViews in the planning scope.
 | Node Manager | Node crash / scale-out / graceful shutdown | `Trigger(TriggerScope{NodeChanged: true})` |
 | DataView Manager | New DataVersion (Flush/Compact) | Observed by the periodic full scan; the current provider interface has no direct change notifier |
 | CollectionLoadManager | Load config updated (DDL callback) | `Trigger(TriggerScope{DirtyCollections: [collID]})` |
-| ShardViewManager | View becomes Unrecoverable | Node-loss cases are covered by `NodeChanged`; other cases are observed by the periodic full scan |
+| ShardViewManager | Active view becomes Unrecoverable after a node report or node loss | After persisting the failure, the registry notifies Balancer with `Trigger(TriggerScope{DirtyShards: [shardID]})` |
 | Periodic ticker | Timer fires | `Trigger()` (full scan) |
+
+The failure notification uses the existing deduplicating trigger queue. It is
+emitted once per active-view transition, outside manager and registry locks.
+Synthetic failures during preemption or release and repeated failure reports do
+not enqueue new work. Planning reads the current load configuration. A release
+or replica removal visible in that snapshot is honored even when the failure
+notification comes from an earlier load.
+Views already Unrecoverable during recovery are covered by the initial full scan.
+The queue does not provide retry backoff or requeue failed reconcile attempts.
 
 ### 2.2 BalancePolicy
 

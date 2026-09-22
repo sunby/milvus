@@ -67,6 +67,11 @@ func NewDefaultBalancer(
 	if builder != nil {
 		balancer.registerNodeChangedNotifier(builder.nodeProvider)
 	}
+	if registry != nil {
+		registry.RegisterUnrecoverableNotifier(func(shardID qviews.ShardID) {
+			balancer.Trigger(TriggerScope{DirtyShards: []qviews.ShardID{shardID}})
+		})
+	}
 	return balancer
 }
 
