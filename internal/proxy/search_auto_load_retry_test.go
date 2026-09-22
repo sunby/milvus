@@ -29,7 +29,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
@@ -62,6 +64,9 @@ type dqlRetryServer struct {
 }
 
 func (s *dqlRetryServer) failure(phase string) error {
+	if s.failPhase == "transport" && phase == "plan" {
+		return status.Error(codes.Unavailable, "connection reset by peer")
+	}
 	if s.failPhase == phase && s.injected.CompareAndSwap(false, true) {
 		s.loaded.Store(false)
 		return viewerror.NewGRPCStatusFromViewError(viewerror.NewViewInvalidated("collection released during %s", phase)).Err()
@@ -320,6 +325,38 @@ func TestDQLAutoLoadRetryDoesNotReloadHealthyCollection(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, client.checkCalls)
 	require.Equal(t, 0, client.waitCalls)
+}
+
+func TestDQLQueryPlanTransportRetryDoesNotMultiplyAttempts(t *testing.T) {
+	for _, method := range []string{"Search", "HybridSearch", "Query"} {
+		t.Run(method, func(t *testing.T) {
+			enableAutoLoad(t)
+			client := newDQLRetryClient(t, "transport")
+			node := &Proxy{metaCache: mockSearchCollectionMeta(t, 100, []string{"v0"}), viewQueryClient: client}
+			node.UpdateStateCode(commonpb.StateCode_Healthy)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			calls := 0
+			err := node.retryDQL(ctx, "db", "collection", func(ctx context.Context) (bool, error) {
+				calls++
+				if method == "Query" {
+					_, err := client.Legacy().Query(ctx, &queryclient.LegacyQueryRequest{Req: &internalpb.RetrieveRequest{CollectionID: 100}})
+					return false, err
+				}
+				_, err := client.Legacy().Search(ctx, &queryclient.LegacySearchRequest{Req: &internalpb.SearchRequest{
+					CollectionID: 100, IsAdvanced: method == "HybridSearch",
+				}})
+				return false, err
+			})
+			require.Equal(t, codes.Unavailable, status.Code(err))
+			require.Equal(t, 1, calls)
+			require.EqualValues(t, 3, client.server.plans.Load())
+			require.EqualValues(t, 1, client.checks.Load())
+			require.Zero(t, client.waits.Load())
+			require.Zero(t, client.server.searches.Load())
+			require.Zero(t, client.server.queries.Load())
+		})
+	}
 }
 
 func TestDQLAutoLoadRetryStopsOnPermanentErrorsAndCancellation(t *testing.T) {

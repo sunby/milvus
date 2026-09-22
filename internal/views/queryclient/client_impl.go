@@ -16,7 +16,7 @@ const defaultMaxRetries = 3
 
 // ViewQueryClientConfig holds configuration for the ViewQueryClient.
 type ViewQueryClientConfig struct {
-	MaxRetries int // Maximum per-shard retries on retryable errors. 0 uses default (3).
+	MaxRetries int // Maximum per-shard attempts, including the first. 0 uses default (3).
 }
 
 // viewQueryClientImpl implements ViewQueryClient.

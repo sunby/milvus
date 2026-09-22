@@ -340,9 +340,23 @@ Query(req):
 
 - **Scope**: Per-shard. Only the failed shard retries from Phase 1; other shards'
   results are preserved.
-- **Max retries**: Configurable (default 3).
+- **Attempt budget**: `MaxRetries` limits total per-shard attempts, including the
+  first (default 3). Retryable ViewErrors and Phase 1 transport failures consume
+  the same budget.
 - **Timeout**: Shared with the overall request context.
-- **On retry**: `ResetShard` discards stale results before re-executing.
+- **On Phase 2 view retry**: `ResetShard` discards that shard's stale results
+  before re-executing. A failed Phase 1 has not produced results to discard.
+- **Phase 1 connection failures**: gRPC `Unavailable` (including connection
+  resets) and EOF retry with a context-cancelable backoff starting at 100 ms,
+  doubling up to 1 s. Every new `GetQueryPlan` call reads the current channel
+  assignment and uses its node ID and term. Cancellation, deadline errors,
+  input errors and other gRPC status codes do not enter this transport retry.
+  No backoff occurs after the final attempt. Phase 2 transport policy is unchanged.
+- **Retry ownership**: Phase 1 RPC errors remain outside HandlerClient's
+  handler-creation retry loop, and QueryPlanService has no gRPC service-config
+  retry policy. Exhaustion returns the original error; a transport failure does
+  not trigger Proxy's outer load/readiness retry. Existing ViewError-driven
+  collection reloads retain their separate outer retry policy.
 
 ## 5. Node-Side Implementation
 
