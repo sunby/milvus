@@ -2,9 +2,13 @@ package queryclient
 
 import (
 	"context"
+	"io"
 	"time"
 
+	"github.com/cockroachdb/errors"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	commonpb "github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
@@ -147,7 +151,8 @@ type shardExecParams struct {
 // The client always targets the primary replica; the real replica ID is
 // learned from the Phase 1 plan and used for Phase 2.
 //
-// Shard-level retry handles ViewErrors (view invalidated, not found, etc.).
+// Shard-level retry handles ViewErrors and Phase 1 transport failures using
+// the same attempt budget. Each Phase 1 call resolves the current SN assignment.
 // Per-node retry within fanOutToWorkNodes handles transient non-view errors.
 func (s *shardViewQueryClient) executeShard(
 	ctx context.Context,
@@ -155,6 +160,7 @@ func (s *shardViewQueryClient) executeShard(
 	params *shardExecParams,
 ) (*ShardPlan, error) {
 	var lastErr error
+	planRetryDelay := 100 * time.Millisecond
 
 	for attempt := 0; attempt < s.maxRetries; attempt++ {
 		attemptStart := time.Now()
@@ -177,8 +183,23 @@ func (s *shardViewQueryClient) executeShard(
 		plan, err := s.executeGetQueryPlan(ctx, targetShardID, planReq, params)
 		planTimer.End(err)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			if ve := viewerror.AsViewError(err); ve != nil && ve.IsRetryable() {
 				lastErr = err
+				continue
+			}
+			if isQueryPlanTransportError(err) && attempt+1 < s.maxRetries {
+				lastErr = err
+				timer := time.NewTimer(planRetryDelay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return nil, ctx.Err()
+				case <-timer.C:
+				}
+				planRetryDelay = min(2*planRetryDelay, time.Second)
 				continue
 			}
 			return nil, err
@@ -220,6 +241,16 @@ func (s *shardViewQueryClient) executeShard(
 		}, nil
 	}
 	return nil, lastErr
+}
+
+// gRPC reports broken connections (including TCP resets) as Unavailable.
+// Preserve the original error on exhaustion so Proxy does not treat a transport
+// failure as a missing view and restart the whole DQL/load retry loop.
+func isQueryPlanTransportError(err error) bool {
+	if merr.IsCanceledOrTimeout(err) || merr.GetErrorType(err) == merr.InputError {
+		return false
+	}
+	return status.Code(err) == codes.Unavailable || errors.Is(err, io.EOF)
 }
 
 // executeGetQueryPlan handles consistency-level routing and dispatches Phase 1.
