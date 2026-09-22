@@ -141,6 +141,9 @@ type Server struct {
 	// query view runtime
 	qviewsRuntime *qviewsRuntime
 
+	// DQL activity tracking and TTL-based collection release.
+	collectionUsage *collectionUsageManager
+
 	// query view segment load info watch
 	segmentLoadInfoWatcher *queryViewSegmentLoadInfoWatcher
 }
@@ -405,6 +408,10 @@ func (s *Server) initQViewsRuntime() error {
 		return err
 	}
 	s.qviewsRuntime = runtime
+	s.collectionUsage = newCollectionUsageManager(
+		runtime.loadConfigStore,
+		s.autoReleaseCollection,
+	)
 	return nil
 }
 
@@ -536,12 +543,20 @@ func (s *Server) startServerLoop() {
 	if s.qviewsRuntime != nil {
 		s.qviewsRuntime.start(s.ctx)
 	}
+	if s.collectionUsage != nil {
+		s.collectionUsage.start(s.ctx)
+	}
 }
 
 func (s *Server) Stop() error {
 	// FOLLOW the dependence graph:
 	// job scheduler -> checker controller -> task scheduler -> dist controller -> cluster -> session
 	// observers -> dist controller
+
+	if s.collectionUsage != nil {
+		mlog.Info(s.ctx, "stop collection usage manager...")
+		s.collectionUsage.close()
+	}
 
 	if s.loadConfigWatcher != nil {
 		mlog.Info(s.ctx, "stop load config watcher...")
