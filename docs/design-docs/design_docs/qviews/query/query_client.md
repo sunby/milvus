@@ -389,7 +389,9 @@ Implements both QueryPlanService and ViewQueryService gRPC servers.
 2. Return the latest WAL read frontiers as `QueryPlanMVCC`.
 
 **Phase 2 — Search/Query/Requery:**
-1. Validate view version exists and is Up/UpRecovering.
+1. Validate the exact view version exists. If it is `UpRecovering`, wait on SN
+   for local recovery with the request context; only `Up` can proceed. Recovery
+   failure, view retirement, cancellation/deadline, or WAL shutdown ends the wait.
 2. Delegate to **SearchScheduler** for execution (see Section 5.3).
 
 ### 5.2 QueryNode — Server Side

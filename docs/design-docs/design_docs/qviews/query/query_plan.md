@@ -88,11 +88,20 @@ shard.
 Rules:
 
 - Only `Up` views can generate query plans.
-- `UpRecovering` views do not serve queries.
+- `UpRecovering` views do not generate plans yet. If no matching `Up` view
+  exists, wait for local recovery using state-change notifications and the
+  request context, then reselect. An existing `Up` view is used immediately,
+  even when another version or replica is still recovering.
 - `Preparing`, `Ready`, `Down`, `Dropping`, `Dropped`, and `Unrecoverable` do not
   serve plans.
-- If no Up view exists, `GetQueryPlan` returns a retriable view-not-ready or
-  view-not-found error.
+- If neither an `Up` nor an `UpRecovering` candidate exists, `GetQueryPlan`
+  returns a retriable view-not-found error. Recovery failure or retirement
+  wakes waiters to reselect; request cancellation/deadline and WAL shutdown
+  also end the wait.
+
+Waiting is local to SN; the Coord-facing `UpRecovering` to `Up` projection is
+unchanged. WAL shutdown stops query acquisition before draining its in-flight
+operations, then releases QueryView resources after those operations finish.
 
 The handler returns a read lease of the selected view, not a mutable state
 machine entry. The lease must protect the selected version from being released
