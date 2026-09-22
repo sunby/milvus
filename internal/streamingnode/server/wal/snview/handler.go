@@ -9,7 +9,6 @@ import (
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/views/optimizer"
 	"github.com/milvus-io/milvus/internal/views/qviews"
-	"github.com/milvus-io/milvus/internal/views/viewerror"
 	"github.com/milvus-io/milvus/internal/views/worknode/handler"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
@@ -74,6 +73,8 @@ type SNQueryViewHandler struct {
 	// the vchannel. It serves the UnknownReplicaID lookup without scanning
 	// every shard of the pchannel.
 	shardsByVChannel map[string]map[qviews.ShardID]struct{}
+	queryWaiters     map[string]*queryViewWaiters // recovery waiters by vchannel
+	queriesStopped   bool
 	catalog          metastore.StreamingNodeCataLog
 	resMgr           StreamingNodeResourceManager
 	localOptimizer   optimizer.LocalOptimizer
@@ -94,6 +95,7 @@ func recoverSNQueryViewHandler(
 		pchannel:         pchannel,
 		shards:           make(map[qviews.ShardID]*snShardView),
 		shardsByVChannel: make(map[string]map[qviews.ShardID]struct{}),
+		queryWaiters:     make(map[string]*queryViewWaiters),
 		catalog:          catalog,
 		resMgr:           resMgr,
 		localOptimizer:   optimizer.NewNoopLocalOptimizer(),
@@ -120,6 +122,7 @@ func recoverSNQueryViewHandler(
 		shard := recoverSnShardView(ctx, pchannel, shardID, shardViews, catalog, resMgr)
 		shard.leaseDuration = h.leaseDuration
 		shard.onEmpty = h.makeOnEmpty(shardID)
+		shard.onChange = h.notifyQueryWaiters
 		h.addShardLocked(shardID, shard)
 	}
 	views = slices.Clone(views)
@@ -193,6 +196,7 @@ func (h *SNQueryViewHandler) ApplyViews(views []handler.ApplyView) {
 }
 
 func (h *SNQueryViewHandler) CloseForHandoff() {
+	h.StopQueryAcquisition()
 	h.mu.Lock()
 	h.closed = true
 	shards := make([]*snShardView, 0, len(h.shards))
@@ -224,6 +228,7 @@ func (h *SNQueryViewHandler) getOrCreateShard(shardID qviews.ShardID) *snShardVi
 			catalog:       h.catalog,
 			resMgr:        h.resMgr,
 			onEmpty:       h.makeOnEmpty(shardID),
+			onChange:      h.notifyQueryWaiters,
 			leaseDuration: h.leaseDuration,
 		}
 		h.addShardLocked(shardID, shard)
@@ -279,38 +284,9 @@ func (h *SNQueryViewHandler) AcquireUpViewAtSchema(ctx context.Context, shardID 
 }
 
 func (h *SNQueryViewHandler) acquireUpViewForSchema(ctx context.Context, shardID qviews.ShardID, schema *int32) (*QueryViewLease, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-	h.mu.Lock()
-	shard := h.shards[shardID]
-	if shard != nil {
-		h.mu.Unlock()
-		return shard.acquireUpViewForSchema(ctx, schema)
-	}
-	if shardID.ReplicaID != qviews.UnknownReplicaID {
-		h.mu.Unlock()
-		return nil, viewerror.NewViewNotFound("query view %s is not found", shardID.String())
-	}
-	var candidates []*snShardView
-	for id := range h.shardsByVChannel[shardID.VChannel] {
-		if candidate := h.shards[id]; candidate != nil {
-			candidates = append(candidates, candidate)
-		}
-	}
-	h.mu.Unlock()
 	// A matching replica may be preparing or tearing down. Acquire an Up lease
-	// before choosing it. Never nest shard locks under h.mu: onEmpty takes h.mu.
-	for _, candidate := range candidates {
-		lease, err := candidate.acquireUpViewForSchema(ctx, schema)
-		if err == nil {
-			return lease, nil
-		}
-		if !viewerror.AsViewError(err).IsViewNotFound() {
-			return nil, err
-		}
-	}
-	return nil, viewerror.NewViewNotFound("latest up query view %s is not found", shardID.String())
+	// before choosing it; wait only while a matching view is still recovering.
+	return h.acquireQueryView(ctx, shardID, true, func(shard *snShardView) (*QueryViewLease, bool, error) {
+		return shard.acquireUpViewForSchema(ctx, schema)
+	})
 }

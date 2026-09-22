@@ -20,24 +20,136 @@ func (h *SNQueryViewHandler) AcquireUpView(ctx context.Context, shardID qviews.S
 // Query execution only needs a reference and metadata; planning also needs an
 // owned topology snapshot. Both acquisitions use the same serving lease rules.
 func (h *SNQueryViewHandler) acquireUpView(ctx context.Context, shardID qviews.ShardID, version qviews.QueryViewVersion, withTopology bool) (*QueryViewLease, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-	h.mu.Lock()
-	shard := h.shards[shardID]
-	h.mu.Unlock()
-	if shard == nil {
-		return nil, viewerror.NewViewNotFound("query view %s is not found", shardID.String())
-	}
-	return shard.acquireUpView(ctx, version, withTopology)
+	return h.acquireQueryView(ctx, shardID, false, func(shard *snShardView) (*QueryViewLease, bool, error) {
+		return shard.acquireUpView(ctx, version, withTopology)
+	})
 }
 
-func (s *snShardView) acquireUpView(ctx context.Context, version qviews.QueryViewVersion, withTopology bool) (*QueryViewLease, error) {
+// queryViewWaiters shares state-change notifications between queries waiting on
+// the same vchannel. All fields are protected by SNQueryViewHandler.mu.
+type queryViewWaiters struct {
+	changed chan struct{}
+	count   int
+}
+
+// StopQueryAcquisition wakes recovery waiters without releasing resources used
+// by in-flight queries. WAL shutdown must call this before waiting for queries
+// to finish; CloseForHandoff performs resource cleanup after that wait.
+func (h *SNQueryViewHandler) StopQueryAcquisition() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.queriesStopped {
+		return
+	}
+	h.queriesStopped = true
+	for _, waiters := range h.queryWaiters {
+		close(waiters.changed)
+	}
+}
+
+// notifyQueryWaiters is called under the changed shard's mutex.
+func (h *SNQueryViewHandler) notifyQueryWaiters(shardID qviews.ShardID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if waiters := h.queryWaiters[shardID.VChannel]; waiters != nil && !h.queriesStopped {
+		close(waiters.changed)
+		waiters.changed = make(chan struct{})
+	}
+}
+
+// acquireQueryView waits only while a matching view is UpRecovering. Phase 1
+// may resolve an unknown replica through the vchannel index; Phase 2 always
+// acquires the exact replica and version from its query plan. acquire never
+// waits and reports whether recovery can still produce a matching Up view.
+func (h *SNQueryViewHandler) acquireQueryView(
+	ctx context.Context,
+	shardID qviews.ShardID,
+	resolveUnknownReplica bool,
+	acquire func(*snShardView) (*QueryViewLease, bool, error),
+) (*QueryViewLease, error) {
+	var waiters *queryViewWaiters
+	defer func() {
+		if waiters != nil {
+			h.mu.Lock()
+			waiters.count--
+			if waiters.count == 0 && h.queryWaiters[shardID.VChannel] == waiters {
+				delete(h.queryWaiters, shardID.VChannel)
+			}
+			h.mu.Unlock()
+		}
+	}()
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		h.mu.Lock()
+		if h.queriesStopped {
+			h.mu.Unlock()
+			return nil, viewerror.NewOnShutdownError("query view handler is shutting down")
+		}
+		var changed <-chan struct{}
+		if waiters != nil {
+			changed = waiters.changed
+		}
+		// Snapshot before taking shard locks: state changes and cleanup hold a
+		// shard lock while taking h.mu.
+		var candidates []*snShardView
+		if shard := h.shards[shardID]; shard != nil {
+			candidates = append(candidates, shard)
+		} else if resolveUnknownReplica && shardID.ReplicaID == qviews.UnknownReplicaID {
+			for id := range h.shardsByVChannel[shardID.VChannel] {
+				if candidate := h.shards[id]; candidate != nil {
+					candidates = append(candidates, candidate)
+				}
+			}
+		}
+		h.mu.Unlock()
+
+		recovering := false
+		var lastErr error
+		for _, candidate := range candidates {
+			lease, pending, err := acquire(candidate)
+			if err == nil {
+				return lease, nil
+			}
+			if !pending && !viewerror.AsViewError(err).IsViewNotFound() {
+				return nil, err
+			}
+			lastErr = err
+			recovering = recovering || pending
+		}
+		if !recovering {
+			if lastErr == nil {
+				lastErr = viewerror.NewViewNotFound("query view %s is not found", shardID.String())
+			}
+			return nil, lastErr
+		}
+		if waiters == nil {
+			h.mu.Lock()
+			waiters = h.queryWaiters[shardID.VChannel]
+			if waiters == nil {
+				waiters = &queryViewWaiters{changed: make(chan struct{})}
+				h.queryWaiters[shardID.VChannel] = waiters
+			}
+			waiters.count++
+			h.mu.Unlock()
+			// Subscribe only on the slow path, then recheck. A state change
+			// between the first scan and subscription must not be missed.
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
+// acquireUpView also reports whether the exact version is still recovering.
+func (s *snShardView) acquireUpView(ctx context.Context, version qviews.QueryViewVersion, withTopology bool) (*QueryViewLease, bool, error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, false, ctx.Err()
 	default:
 	}
 	s.mu.Lock()
@@ -45,13 +157,13 @@ func (s *snShardView) acquireUpView(ctx context.Context, version qviews.QueryVie
 
 	entry, exists := s.views[version]
 	if !exists {
-		return nil, viewerror.NewViewNotFound("query view %s is not found", version.String())
+		return nil, false, viewerror.NewViewNotFound("query view %s is not found", version.String())
 	}
 	s.advancePendingDownLocked(version, entry)
-	if entry.sm.State() != qviews.QueryViewStateUp {
-		return nil, viewerror.NewViewInvalidated("query view %s is not up, current state is %s", version.String(), entry.sm.State().String())
+	if state := entry.sm.State(); state != qviews.QueryViewStateUp {
+		return nil, state == qviews.QueryViewStateUpRecovering, viewerror.NewViewInvalidated("query view %s is not up, current state is %s", version.String(), state.String())
 	}
-	return s.newQueryViewLeaseLocked(version, entry, withTopology), nil
+	return s.newQueryViewLeaseLocked(version, entry, withTopology), false, nil
 }
 
 // Caller holds the shard mutex.

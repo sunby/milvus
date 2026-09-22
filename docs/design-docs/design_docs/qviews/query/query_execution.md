@@ -209,7 +209,9 @@ SNQueryViewHandler
 First-version `Acquire*SegmentTasks` behavior:
 
 1. Match request `shard_id` and `version`.
-2. Reject any state except `Up`.
+2. If the exact requested version is `UpRecovering`, wait for its local recovery
+   with the request context. Acquire it only after it becomes `Up`; reject other
+   states or a missing version without substituting another version or replica.
 3. Acquire the QueryView/runtime ref.
 4. Wait growing visibility to `mvcc.growing_timetick`.
 5. Collect local growing segment candidates from the runtime and view version.
@@ -236,7 +238,10 @@ perform separate segment-level waits.
 Segments that have already been handed off to QueryNode are excluded according to
 the QueryView version and the growing runtime's DataVersion rules.
 
-`UpRecovering` does not serve Phase 2 queries in the primary milestone.
+`UpRecovering` never executes Phase 2 queries. Recovery completion wakes waiting
+requests, which acquire an `Up` lease and continue through the existing MVCC
+visibility wait. Recovery failure, Down/Dropped, request cancellation/deadline,
+and WAL shutdown end the recovery wait without executing against that view.
 
 ## 7. QueryNode Task Acquisition
 

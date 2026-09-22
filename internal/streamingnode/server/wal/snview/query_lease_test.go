@@ -290,9 +290,9 @@ func TestServingLeaseCancelledAndMissingAcquisitionDoesNotRenew(t *testing.T) {
 	version := newPreparingSNView(1).QueryViewKey().QueryViewVersion
 	_, err := h.AcquireUpView(ctx, shard.shardID, version)
 	require.ErrorIs(t, err, context.Canceled)
-	_, err = shard.acquireUpView(ctx, version, false)
+	_, _, err = shard.acquireUpView(ctx, version, false)
 	require.ErrorIs(t, err, context.Canceled)
-	_, err = shard.acquireLatestUpView(ctx)
+	_, _, err = shard.acquireLatestUpView(ctx)
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = h.AcquireUpView(context.Background(), qviews.ShardID{}, version)
 	require.Error(t, err)

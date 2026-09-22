@@ -35,7 +35,8 @@ type snShardView struct {
 	catalog         metastore.StreamingNodeCataLog
 	resMgr          StreamingNodeResourceManager
 	leaseDuration   time.Duration
-	onEmpty         func(*snShardView) // called (under mu) when the last view entry is removed
+	onEmpty         func(*snShardView)   // called (under mu) when the last view entry is removed
+	onChange        func(qviews.ShardID) // called (under mu) after a view state update
 }
 
 // snViewEntry pairs an ApplyView (carrying the OnReport callback) with its state machine.
@@ -355,6 +356,11 @@ func (s *snShardView) notifyDropped(version qviews.QueryViewVersion) {
 // persisting, Coord would believe the state advanced while SN lost it.
 // Caller must hold s.mu.
 func (s *snShardView) consumeReportPersistAndCleanup(version qviews.QueryViewVersion, entry *snViewEntry) {
+	// Local recovery outcomes (e.g. recovery failure) have no Coord report, but
+	// queries waiting for an UpRecovering view must still wake and reselect.
+	if s.onChange != nil {
+		defer s.onChange(s.shardID)
+	}
 	if !s.consumeAndPersist(entry) {
 		return
 	}
@@ -439,14 +445,16 @@ func (s *snShardView) startReleaseLocked(version qviews.QueryViewVersion, entry 
 	return entry.releaseDone
 }
 
-func (s *snShardView) acquireLatestUpView(ctx context.Context) (*QueryViewLease, error) {
+func (s *snShardView) acquireLatestUpView(ctx context.Context) (*QueryViewLease, bool, error) {
 	return s.acquireUpViewForSchema(ctx, nil)
 }
 
-func (s *snShardView) acquireUpViewForSchema(ctx context.Context, schema *int32) (*QueryViewLease, error) {
+// acquireUpViewForSchema also reports whether recovery can still produce a
+// matching Up view. It never waits, so the caller can first check other replicas.
+func (s *snShardView) acquireUpViewForSchema(ctx context.Context, schema *int32) (*QueryViewLease, bool, error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, false, ctx.Err()
 	default:
 	}
 	s.mu.Lock()
@@ -454,9 +462,14 @@ func (s *snShardView) acquireUpViewForSchema(ctx context.Context, schema *int32)
 
 	var selected *snViewEntry
 	var selectedVersion qviews.QueryViewVersion
+	recovering := false
 	for version, entry := range s.views {
 		s.advancePendingDownLocked(version, entry)
-		if entry.sm.State() != qviews.QueryViewStateUp || (schema != nil && entry.sm.Meta().GetSchemaVersion() != *schema) {
+		if schema != nil && entry.sm.Meta().GetSchemaVersion() != *schema {
+			continue
+		}
+		recovering = recovering || entry.sm.State() == qviews.QueryViewStateUpRecovering
+		if entry.sm.State() != qviews.QueryViewStateUp {
 			continue
 		}
 		if selected == nil || version.GT(selectedVersion) {
@@ -465,9 +478,9 @@ func (s *snShardView) acquireUpViewForSchema(ctx context.Context, schema *int32)
 		}
 	}
 	if selected == nil {
-		return nil, viewerror.NewViewNotFound("latest up query view %s is not found", s.shardID.String())
+		return nil, recovering, viewerror.NewViewNotFound("latest up query view %s is not found", s.shardID.String())
 	}
-	return s.newQueryViewLeaseLocked(selectedVersion, selected, true), nil
+	return s.newQueryViewLeaseLocked(selectedVersion, selected, true), false, nil
 }
 
 func (s *snShardView) releaseQueryViewLease(version qviews.QueryViewVersion) {

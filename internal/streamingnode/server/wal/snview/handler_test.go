@@ -1076,8 +1076,11 @@ func TestSNHandler_AcquireLatestUpViewSkipsUnavailableReplicas(t *testing.T) {
 				shard.views[view.Version()] = &snViewEntry{ApplyView: handler.ApplyView{View: view}, sm: sm}
 			}
 			// Explicit replica requests must never fall back to another replica.
-			_, err := h.AcquireLatestUpView(context.Background(), id)
-			require.True(t, viewerror.AsViewError(err).IsViewNotFound())
+			// UpRecovering waits instead; covered by QueryWaitsForRecovery.
+			if state != qviews.QueryViewStateUpRecovering {
+				_, err := h.AcquireLatestUpView(context.Background(), id)
+				require.True(t, viewerror.AsViewError(err).IsViewNotFound())
+			}
 		}
 		for range 128 {
 			lease, err := h.AcquireLatestUpView(context.Background(), unknown)
@@ -1092,8 +1095,12 @@ func TestSNHandler_AcquireLatestUpViewSkipsUnavailableReplicas(t *testing.T) {
 		cancel()
 		_, err := h.AcquireLatestUpView(ctx, unknown)
 		require.ErrorIs(t, err, context.Canceled)
-		// If all replicas are unavailable, preserve the retryable error code.
-		h.shards[up.ShardID()].views[up.Version()].sm.state = qviews.QueryViewStateDown
+		// If no replica is Up or recovering, preserve the retryable error code.
+		for _, shard := range h.shards {
+			for _, entry := range shard.views {
+				entry.sm.state = qviews.QueryViewStateDown
+			}
+		}
 		_, err = h.AcquireLatestUpView(context.Background(), unknown)
 		require.True(t, viewerror.AsViewError(err).IsViewNotFound())
 	})
@@ -1137,10 +1144,10 @@ func TestSNHandler_AcquireLatestUpViewRetriesCandidateThatGoesDown(t *testing.T)
 				shard.notifyRecoveringDone(version)
 			}
 		}
-		var original func(*snShardView, context.Context, *int32) (*QueryViewLease, error)
+		var original func(*snShardView, context.Context, *int32) (*QueryViewLease, bool, error)
 		var unavailable *snShardView
 		attempts := 0
-		mockey.Mock((*snShardView).acquireUpViewForSchema).Origin(&original).To(func(shard *snShardView, ctx context.Context, schema *int32) (*QueryViewLease, error) {
+		mockey.Mock((*snShardView).acquireUpViewForSchema).Origin(&original).To(func(shard *snShardView, ctx context.Context, schema *int32) (*QueryViewLease, bool, error) {
 			attempts++
 			if attempts == 1 {
 				unavailable = shard
@@ -1166,8 +1173,8 @@ func TestSNHandler_AcquireLatestUpViewCanceledDuringReplicaLookup(t *testing.T) 
 		h.getOrCreateShard(qviews.ShardID{ReplicaID: testReplicaID, VChannel: testVChannel})
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		var original func(*snShardView, context.Context, *int32) (*QueryViewLease, error)
-		mockey.Mock((*snShardView).acquireUpViewForSchema).Origin(&original).To(func(shard *snShardView, ctx context.Context, schema *int32) (*QueryViewLease, error) {
+		var original func(*snShardView, context.Context, *int32) (*QueryViewLease, bool, error)
+		mockey.Mock((*snShardView).acquireUpViewForSchema).Origin(&original).To(func(shard *snShardView, ctx context.Context, schema *int32) (*QueryViewLease, bool, error) {
 			cancel()
 			return original(shard, ctx, schema)
 		}).Build()
