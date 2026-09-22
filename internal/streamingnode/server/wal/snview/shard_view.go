@@ -35,7 +35,8 @@ type snShardView struct {
 	views           map[qviews.QueryViewVersion]*snViewEntry
 	catalog         metastore.StreamingNodeCataLog
 	resMgr          StreamingNodeResourceManager
-	onEmpty         func(*snShardView) // called under mu after the empty shard is detached
+	onEmpty         func(*snShardView)   // called under mu after the empty shard is detached
+	onChange        func(qviews.ShardID) // called under mu after a state update
 }
 
 // snViewEntry pairs an ApplyView (carrying the OnReport callback) with its state machine.
@@ -56,6 +57,7 @@ func recoverSnShardView(
 	views map[qviews.QueryViewVersion]*snQueryViewStateMachine,
 	catalog metastore.StreamingNodeCataLog,
 	resMgr StreamingNodeResourceManager,
+	onChange func(qviews.ShardID),
 ) *snShardView {
 	entries := make(map[qviews.QueryViewVersion]*snViewEntry, len(views))
 	for version, sm := range views {
@@ -78,6 +80,7 @@ func recoverSnShardView(
 		views:    entries,
 		catalog:  catalog,
 		resMgr:   resMgr,
+		onChange: onChange,
 	}
 	for _, sm := range views {
 		s.setCollectionIDLocked(sm.Meta().GetCollectionId())
@@ -174,10 +177,12 @@ func (s *snShardView) CloseForHandoff() {
 	wg.Wait()
 }
 
-func (s *snShardView) acquireLatestUpView(ctx context.Context) (*QueryViewLease, error) {
+// acquireLatestUpView also reports whether recovery can still produce an Up view.
+// It never waits, so the caller can first check other replicas for a serving view.
+func (s *snShardView) acquireLatestUpView(ctx context.Context) (*QueryViewLease, bool, error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, false, ctx.Err()
 	default:
 	}
 	s.mu.Lock()
@@ -185,7 +190,9 @@ func (s *snShardView) acquireLatestUpView(ctx context.Context) (*QueryViewLease,
 
 	var selected *snViewEntry
 	var selectedVersion qviews.QueryViewVersion
+	recovering := false
 	for version, entry := range s.views {
+		recovering = recovering || entry.sm.State() == qviews.QueryViewStateUpRecovering
 		if entry.sm.State() != qviews.QueryViewStateUp {
 			continue
 		}
@@ -195,7 +202,7 @@ func (s *snShardView) acquireLatestUpView(ctx context.Context) (*QueryViewLease,
 		}
 	}
 	if selected == nil {
-		return nil, viewerror.NewViewNotFound("latest up query view %s is not found", s.shardID.String())
+		return nil, recovering, viewerror.NewViewNotFound("latest up query view %s is not found", s.shardID.String())
 	}
 	selected.queryRefs++
 	view := proto.Clone(selected.View.IntoProto()).(*viewpb.QueryViewOfShard)
@@ -205,7 +212,7 @@ func (s *snShardView) acquireLatestUpView(ctx context.Context) (*QueryViewLease,
 		Meta:    proto.Clone(view.GetMeta()).(*viewpb.QueryViewMeta),
 		View:    view,
 		Release: func() { once.Do(func() { s.releaseQueryViewLease(selectedVersion) }) },
-	}, nil
+	}, false, nil
 }
 
 func (s *snShardView) releaseQueryViewLease(version qviews.QueryViewVersion) {
@@ -451,6 +458,10 @@ func (s *snShardView) consumeReportPersistAndCleanup(version qviews.QueryViewVer
 	s.consumeReport(entry)
 	s.consumeAndRelease(version, entry)
 	s.cleanupIfDropped(version, entry)
+	// Recovery failure has no Coord report, but local queries must still wake.
+	if s.onChange != nil {
+		s.onChange(s.shardID)
+	}
 }
 
 // cleanupIfDropped removes the entry if it has reached Dropped state,
