@@ -19,6 +19,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/streamingutil/service/lazygrpc"
 	"github.com/milvus-io/milvus/internal/util/streamingutil/service/resolver"
 	"github.com/milvus-io/milvus/internal/util/streamingutil/status"
+	"github.com/milvus-io/milvus/internal/views/viewerror"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/streamingpb"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/options"
@@ -348,6 +349,9 @@ func (hc *handlerClientImpl) createHandlerAfterStreamingNodeReady(ctx context.Co
 	backoff.Reset()
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		assign := hc.watcher.Get(ctx, pchannel)
 		if assign != nil {
 			// Find assignment, try to create producer on this assignment.
@@ -373,6 +377,14 @@ func (hc *handlerClientImpl) createHandlerAfterStreamingNodeReady(ctx context.Co
 			if isPermanentFailureUntilNewAssignment(err) {
 				reportErr := hc.rebalanceTrigger.ReportAssignmentError(ctx, assign.Channel, err)
 				logger.Info(ctx, "report assignment error", mlog.NamedError("assignmentError", err), mlog.Err(reportErr))
+			}
+			if viewerror.IsNodeNotMatch(err) {
+				// Backoff cannot repair a node ID belonging to a previous process.
+				// Wait for a strictly newer term using the original request deadline.
+				if err := hc.watcher.Watch(ctx, pchannel, assign); err != nil {
+					return nil, err
+				}
+				continue
 			}
 		} else {
 			mlog.Warn(ctx, "assignment not found")
@@ -419,6 +431,9 @@ func (hc *handlerClientImpl) Close() {
 func isPermanentFailureUntilNewAssignment(err error) bool {
 	if err == nil {
 		return false
+	}
+	if viewerror.IsNodeNotMatch(err) {
+		return true
 	}
 	// The error is reported by grpc balancer at client that the sub connection is not exist (remote server is down at view of session).
 	if picker.IsErrSubConnNoExist(err) {

@@ -8,7 +8,9 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/milvus-io/milvus/internal/util/streamingutil/status"
+	"github.com/milvus-io/milvus/internal/views/viewerror"
 	"github.com/milvus-io/milvus/pkg/v3/proto/streamingpb"
+	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
@@ -28,6 +30,16 @@ func NewStreamingServiceUnaryServerInterceptor() grpc.UnaryServerInterceptor {
 				return resp, nil
 			}
 			return resp, status.NewGRPCStatusFromStreamingError(err).Err()
+		}
+		switch info.FullMethod {
+		case viewpb.QueryPlanService_GetQueryPlan_FullMethodName,
+			viewpb.QueryPlanService_GetMVCCTimestamp_FullMethodName,
+			viewpb.ViewQueryService_SearchOnView_FullMethodName,
+			viewpb.ViewQueryService_QueryOnView_FullMethodName,
+			viewpb.ViewQueryService_RequeryOnView_FullMethodName:
+			if merr.Code(err) == merr.Code(merr.ErrNodeNotMatch) {
+				return resp, viewerror.NewGRPCStatusFromNodeNotMatch(err).Err()
+			}
 		}
 		return resp, err
 	}
