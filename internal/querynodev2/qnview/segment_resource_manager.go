@@ -468,9 +468,10 @@ func (r *segmentResource) prepare(ctx context.Context, b *segmentBinding, collec
 	timing := segmentLoadTimingSample{}
 	defer func() {
 		timing.total = time.Since(startedAt)
-		timing.failed = err != nil
+		timing.result = stage.Outcome(err)
+		timing.failed = timing.result != stage.Success
 		recordSQNSegmentLoadTiming(ctx, timing)
-		totalTimer.End(err)
+		totalTimer.EndResult(timing.result)
 	}()
 	updateIndexMetaStartedAt := time.Now()
 	err = updateCollectionIndexMeta(ctx, collection, snapshot.IndexInfos)
