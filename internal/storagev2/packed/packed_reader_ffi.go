@@ -462,25 +462,9 @@ func getManifestHandleWithTiming(
 	var cTransactionHandle C.LoonTransactionHandle
 	beginTimer := manifestBegin.Begin()
 	beginStartedAt := time.Now()
-	var result C.LoonFFIResult
-	if timing == nil {
-		result = C.loon_transaction_begin(cBasePath, cProperties, C.int64_t(version), C.int32_t(0), C.uint32_t(1), &cTransactionHandle)
-	} else {
-		var stats C.LoonManifestReadStats
-		result = C.loon_transaction_begin_with_stats(cBasePath, cProperties, C.int64_t(version), C.int32_t(0), C.uint32_t(1), &cTransactionHandle, &stats)
+	result := C.loon_transaction_begin(cBasePath, cProperties, C.int64_t(version), C.int32_t(0) /* resolve_id */, C.uint32_t(1) /* retry_limit */, &cTransactionHandle)
+	if timing != nil {
 		timing.durations[manifestReadBegin] = time.Since(beginStartedAt)
-		timing.durations[manifestReadFilesystem] = time.Duration(stats.filesystem_ns)
-		timing.durations[manifestReadCacheLookup] = time.Duration(stats.cache_lookup_ns)
-		timing.durations[manifestReadOpen] = time.Duration(stats.open_ns)
-		timing.durations[manifestReadRead] = time.Duration(stats.read_ns)
-		timing.durations[manifestReadDeserialize] = time.Duration(stats.deserialize_ns)
-		timing.durations[manifestReadPaths] = time.Duration(stats.paths_ns)
-		timing.durations[manifestReadCacheInsert] = time.Duration(stats.cache_insert_ns)
-		timing.durations[manifestReadRetryDelay] = time.Duration(stats.retry_delay_requested_ns)
-		timing.items = [len(manifestReadItemNames)]uint64{
-			uint64(stats.cache_hits), uint64(stats.cache_misses), uint64(stats.read_bytes),
-			uint64(stats.s3_503s), uint64(stats.s3_retries),
-		}
 	}
 	err = HandleLoonFFIResult(result)
 	beginTimer.End(err)

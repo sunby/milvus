@@ -17,9 +17,6 @@ package packed
 import (
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-
-	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
@@ -39,56 +36,34 @@ const (
 	manifestReadTotal = iota
 	manifestReadProperties
 	manifestReadBegin
-	manifestReadFilesystem
-	manifestReadCacheLookup
-	manifestReadOpen
-	manifestReadRead
-	manifestReadDeserialize
-	manifestReadPaths
-	manifestReadCacheInsert
 	manifestReadGet
 	manifestReadExtract
-	manifestReadRetryDelay
 	manifestReadPhaseCount
 )
 
 var manifestReadPhaseNames = [manifestReadPhaseCount]string{
-	"total", "properties", "transaction_begin", "filesystem", "cache_lookup",
-	"open", "read", "deserialize", "paths", "cache_insert", "get_manifest",
-	"extract_stats", "retry_delay_requested",
+	"total", "properties", "transaction_begin", "get_manifest", "extract_stats",
 }
-
-var manifestReadItemNames = [...]string{"cache_hit", "cache_miss", "read_bytes", "s3_503", "s3_retry"}
 
 type manifestReadTiming struct {
 	durations [manifestReadPhaseCount]time.Duration
-	items     [len(manifestReadItemNames)]uint64
 }
 
-var manifestReadMetrics = func() [manifestReadOriginCount]struct {
-	durations [manifestReadPhaseCount]*stage.Recorder
-	items     [len(manifestReadItemNames)]prometheus.Counter
-} {
-	var result [manifestReadOriginCount]struct {
-		durations [manifestReadPhaseCount]*stage.Recorder
-		items     [len(manifestReadItemNames)]prometheus.Counter
-	}
+var manifestReadMetrics = func() [manifestReadOriginCount][manifestReadPhaseCount]*stage.Recorder {
+	var result [manifestReadOriginCount][manifestReadPhaseCount]*stage.Recorder
 	for origin, operation := range [...]string{
 		"manifest_other", "manifest_create", "manifest_preload", "manifest_postsync", "manifest_reopen",
 	} {
 		for phase, name := range manifestReadPhaseNames {
-			result[origin].durations[phase] = stage.New("storage", operation, name)
-		}
-		for item, name := range manifestReadItemNames {
-			result[origin].items[item] = metrics.QueryStageItems.WithLabelValues("storage", operation, "transaction_begin", name)
+			result[origin][phase] = stage.New("storage", operation, name)
 		}
 	}
 	return result
 }()
 
 // Observe once per GetManifestStats attempt with a single final outcome and
-// zero for skipped stages. Native retry backoff is requested delay, overlaps
-// open/read, and is not an extra disjoint wall-time stage.
+// zero for skipped stages. The existing FFI exposes transaction begin as one
+// interval; its cache, I/O, decode and retry work cannot be separated here.
 func (t *manifestReadTiming) observe(origin ManifestReadOrigin, err error) {
 	if origin >= manifestReadOriginCount {
 		origin = ManifestReadOther
@@ -96,9 +71,6 @@ func (t *manifestReadTiming) observe(origin ManifestReadOrigin, err error) {
 	result := stage.Outcome(err)
 	recorders := &manifestReadMetrics[origin]
 	for i, duration := range t.durations {
-		recorders.durations[i].Observe(duration, result)
-	}
-	for i, count := range t.items {
-		recorders.items[i].Add(float64(count))
+		recorders[i].Observe(duration, result)
 	}
 }

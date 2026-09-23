@@ -1,7 +1,7 @@
 # Cold Load latency attribution
 
 These metrics answer two separate questions: where each completed segment load
-spent wall time, and which manifest caller issued slow reads or retried 503s.
+spent wall time, and which manifest caller spent time across the existing FFI.
 They add observability only; they do not change load concurrency, cache capacity,
 retry policy, or lazy loading.
 
@@ -88,39 +88,28 @@ The Go family uses `component="storage"` and one of five fixed operations:
 `manifest_reopen`, `manifest_other`. Resolver-local repeated lookups reuse the
 same result and do not produce another FFI read.
 
-Each GetManifestStats attempt records every stage once with its final outcome:
+Each GetManifestStats attempt records all five stages once with its final outcome:
 
 ```text
 total
 ├── properties: construct FFI properties in Go
-├── transaction_begin
-│   ├── filesystem: native filesystem-cache get / initialization
-│   ├── cache_lookup: manifest key + LRU lookup
-│   ├── open: OpenInputFile + GetSize (including synchronous S3 HEAD)
-│   ├── read: allocation + Read + Close (including synchronous S3 GET)
-│   ├── deserialize: parse manifest
-│   ├── paths: resolve relative paths
-│   └── cache_insert
+├── transaction_begin: complete existing loon_transaction_begin FFI call
 ├── get_manifest: convert native manifest to its C representation
 └── extract_stats: copy the C stats into Go maps
 ```
 
-Cache hits leave open/read/deserialize/paths/cache_insert at zero.
-Returned errors and exceptions retain partial timings. A failed JSON-stats
+Failures retain time spent in the completed or failed FFI calls; later stages
+that were not reached contribute zero. A failed JSON-stats
 lookup can be observed as a manifest error even when the existing caller fallback
 allows its outer load to succeed.
 
-`milvus_qv_stage_items_total{component="storage",operation,stage="transaction_begin",kind}`
-adds fixed kinds `cache_hit`, `cache_miss`, `read_bytes`, `s3_503`, `s3_retry`.
-`s3_503` counts 503 errors seen by the retry policy, including the final rejected
-retry. `s3_retry` counts accepted retry decisions, not proof that another HTTP
-request was sent.
-
-`retry_delay_requested` is the SDK-requested backoff duration in seconds. It is
-not measured sleep and must not be subtracted as exact sleep or added to
-open/read. The SDK owns sleeping/cancellation. Retry counters cover synchronous
-AWS SDK calls on the manifest caller thread; CRT async retries are not covered.
-No new production locks or per-object labels are added.
+`transaction_begin` includes native filesystem initialization, cache lookup,
+file reads, deserialization, path resolution and any SDK retries performed by
+the call. The existing FFI does not expose those internal boundaries or cache
+hit/miss, byte and 503/retry counters. These metrics cannot separate them or
+attribute the entire call to S3. All instrumentation stays in Milvus and uses
+the unchanged dependency ABI. No new production locks or per-object labels are
+added.
 
 ## Queries
 
@@ -152,12 +141,9 @@ scrape after the workload settles. Historical runs cannot recover missing stages
 - `internal/storagev2/packed/{manifest_read_metrics,stats_resolver,ffi_stats,packed_reader_ffi}.go`
 - `internal/core/src/monitor/{SegmentLoadMetrics,QueryMetrics}.{h,cpp}`
 - `internal/core/src/segcore/ChunkedSegmentSealedImpl.cpp`
-- `internal/core/thirdparty/milvus-storage/patches/manifest-read-metrics.patch`
 
-The dependency remains pinned to f4e9dafb91eb2280f11cd411992ab1016e70be10.
-CMake applies the additive `loon_transaction_begin_with_stats` ABI patch before
-compilation. Reconfiguration is idempotent; conflicting dependency edits fail
-without resetting the checkout. Both native storage and Go must be rebuilt.
-The patch includes native FFI cold/cache/error, retry-policy, and scope-isolation
-tests. Milvus tests cover completed-attempt outcomes, resolver origin/cache
-metrics, native phase partitioning, and queued cancellation.
+Third-party source, dependency versions and build integration remain unchanged.
+Milvus tests cover completed-attempt outcomes, existing FFI success/error paths,
+resolver origin and local reuse, native phase partitioning, and queued
+cancellation. The Go manifest tests can link against the unmodified storage
+library; they do not validate native cache hit/miss or SDK retry attribution.
