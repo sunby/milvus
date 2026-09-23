@@ -1164,7 +1164,8 @@ func separateLoadInfoV2(loadInfo *querypb.SegmentLoadInfo, schema *schemapb.Coll
 		}
 	}
 
-	statsResult := packed.NewStatsResolverFromLoadInfo(loadInfo).TextAndJSONIndexStatsWithBasePaths()
+	statsResult := packed.NewStatsResolverFromLoadInfo(loadInfo).
+		WithManifestReadOrigin(packed.ManifestReadPreload).TextAndJSONIndexStatsWithBasePaths()
 	textIndexedInfo := statsResult.TextIndexStats
 	jsonKeyIndexInfo := statsResult.JSONKeyStats
 	textBasePaths := statsResult.TextBasePaths
@@ -1218,6 +1219,17 @@ func separateLoadInfoV2(loadInfo *querypb.SegmentLoadInfo, schema *schemapb.Coll
 }
 
 func (loader *segmentLoader) loadSealedSegment(ctx context.Context, loadInfo *querypb.SegmentLoadInfo, segment *LocalSegment) (err error) {
+	physicalLoadTiming := PhysicalLoadTimingFromContext(ctx)
+	startedAt := time.Now()
+	prepareFinished := false
+	defer func() {
+		if physicalLoadTiming != nil {
+			physicalLoadTiming.SealedLoad = time.Since(startedAt)
+			if !prepareFinished {
+				physicalLoadTiming.SealedPrepare = physicalLoadTiming.SealedLoad
+			}
+		}
+	}()
 	// TODO: we should create a transaction-like api to load segment for segment interface,
 	// but not do many things in segment loader.
 	stateLockGuard, err := segment.StartLoadData()
@@ -1249,8 +1261,11 @@ func (loader *segmentLoader) loadSealedSegment(ctx context.Context, loadInfo *qu
 			mlog.Int("pool size", GetLoadPool().Cap()),
 		)
 	}
-	physicalLoadTiming := PhysicalLoadTimingFromContext(ctx)
 	loadSubmittedAt := time.Now()
+	prepareFinished = true
+	if physicalLoadTiming != nil {
+		physicalLoadTiming.SealedPrepare = loadSubmittedAt.Sub(startedAt)
+	}
 	_, err = GetLoadPool().Submit(func() (any, error) {
 		loadStartedAt := time.Now()
 		if physicalLoadTiming != nil {
@@ -1270,6 +1285,11 @@ func (loader *segmentLoader) loadSealedSegment(ctx context.Context, loadInfo *qu
 	}
 
 	postLoadStartedAt := time.Now()
+	defer func() {
+		if physicalLoadTiming != nil {
+			physicalLoadTiming.SealedPostLoad = time.Since(postLoadStartedAt)
+		}
+	}()
 	for _, indexInfo := range loadInfo.IndexInfos {
 		segment.fieldIndexes.Insert(indexInfo.GetIndexID(), &IndexedFieldInfo{
 			FieldBinlog: &datapb.FieldBinlog{
@@ -1285,9 +1305,6 @@ func (loader *segmentLoader) loadSealedSegment(ctx context.Context, loadInfo *qu
 	// legacy entry num = 0
 	if err := loader.patchEntryNumber(ctx, segment, loadInfo); err != nil {
 		return err
-	}
-	if physicalLoadTiming != nil {
-		physicalLoadTiming.SealedPostLoad = time.Since(postLoadStartedAt)
 	}
 	patchEntryNumberSpan := tr.RecordSpan()
 	mlog.Debug(ctx, "Finish loading segment",
