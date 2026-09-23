@@ -68,11 +68,17 @@ type ROWAL interface {
 	Close()
 }
 
+type WALUnwrapper interface {
+	UnwrapWAL() WAL
+}
+
 // Unwrap exposes optional WAL capabilities hidden by a lifecycle wrapper.
 // The caller must leave Close to the WAL manager.
-func Unwrap(w WAL) WAL {
-	if wrapper, ok := w.(interface{ UnwrapWAL() WAL }); ok {
-		return wrapper.UnwrapWAL()
+func Unwrap(l WAL) WAL {
+	if unwrapper, ok := l.(WALUnwrapper); ok {
+		if raw := unwrapper.UnwrapWAL(); raw != nil {
+			return raw
+		}
 	}
-	return w
+	return l
 }
