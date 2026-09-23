@@ -39,6 +39,7 @@ import "C"
 import (
 	"context"
 	"io"
+	"time"
 	"unsafe"
 
 	"github.com/apache/arrow/go/v17/arrow"
@@ -423,6 +424,15 @@ func GetManifestHandleWithExtfs(
 	storageConfig *indexpb.StorageConfig,
 	extfs ExternalSpecContext,
 ) (loonManifestHandle *C.LoonManifest, err error) {
+	return getManifestHandleWithTiming(manifestPath, storageConfig, extfs, nil)
+}
+
+func getManifestHandleWithTiming(
+	manifestPath string,
+	storageConfig *indexpb.StorageConfig,
+	extfs ExternalSpecContext,
+	timing *manifestReadTiming,
+) (loonManifestHandle *C.LoonManifest, err error) {
 	var cManifestHandle *C.LoonManifest
 	totalTimer := manifestTotal.Begin()
 	defer totalTimer.EndError(&err)
@@ -433,7 +443,11 @@ func GetManifestHandleWithExtfs(
 	mlog.Debug(context.TODO(), "GetManifest", mlog.String("manifestPath", manifestPath), mlog.String("basePath", basePath), mlog.Int64("version", version))
 
 	propertiesTimer := manifestProperties.Begin()
+	propertiesStartedAt := time.Now()
 	cProperties, err := MakePropertiesFromStorageConfig(storageConfig, nil)
+	if timing != nil {
+		timing.durations[manifestReadProperties] = time.Since(propertiesStartedAt)
+	}
 	propertiesTimer.End(err)
 	if err != nil {
 		return cManifestHandle, err
@@ -447,7 +461,27 @@ func GetManifestHandleWithExtfs(
 
 	var cTransactionHandle C.LoonTransactionHandle
 	beginTimer := manifestBegin.Begin()
-	result := C.loon_transaction_begin(cBasePath, cProperties, C.int64_t(version), C.int32_t(0) /* resolve_id */, C.uint32_t(1) /* retry_limit */, &cTransactionHandle)
+	beginStartedAt := time.Now()
+	var result C.LoonFFIResult
+	if timing == nil {
+		result = C.loon_transaction_begin(cBasePath, cProperties, C.int64_t(version), C.int32_t(0), C.uint32_t(1), &cTransactionHandle)
+	} else {
+		var stats C.LoonManifestReadStats
+		result = C.loon_transaction_begin_with_stats(cBasePath, cProperties, C.int64_t(version), C.int32_t(0), C.uint32_t(1), &cTransactionHandle, &stats)
+		timing.durations[manifestReadBegin] = time.Since(beginStartedAt)
+		timing.durations[manifestReadFilesystem] = time.Duration(stats.filesystem_ns)
+		timing.durations[manifestReadCacheLookup] = time.Duration(stats.cache_lookup_ns)
+		timing.durations[manifestReadOpen] = time.Duration(stats.open_ns)
+		timing.durations[manifestReadRead] = time.Duration(stats.read_ns)
+		timing.durations[manifestReadDeserialize] = time.Duration(stats.deserialize_ns)
+		timing.durations[manifestReadPaths] = time.Duration(stats.paths_ns)
+		timing.durations[manifestReadCacheInsert] = time.Duration(stats.cache_insert_ns)
+		timing.durations[manifestReadRetryDelay] = time.Duration(stats.retry_delay_requested_ns)
+		timing.items = [len(manifestReadItemNames)]uint64{
+			uint64(stats.cache_hits), uint64(stats.cache_misses), uint64(stats.read_bytes),
+			uint64(stats.s3_503s), uint64(stats.s3_retries),
+		}
+	}
 	err = HandleLoonFFIResult(result)
 	beginTimer.End(err)
 	if err != nil {
@@ -456,7 +490,11 @@ func GetManifestHandleWithExtfs(
 	defer C.loon_transaction_destroy(cTransactionHandle)
 
 	getTimer := manifestGet.Begin()
+	getStartedAt := time.Now()
 	result = C.loon_transaction_get_manifest(cTransactionHandle, &cManifestHandle)
+	if timing != nil {
+		timing.durations[manifestReadGet] = time.Since(getStartedAt)
+	}
 	err = HandleLoonFFIResult(result)
 	getTimer.End(err)
 	if err != nil {

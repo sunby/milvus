@@ -55,6 +55,9 @@ FetchContent_GetProperties( milvus-storage )
 if ( NOT milvus-storage_POPULATED )
     FetchContent_Populate( milvus-storage )
 
+    set(STORAGE_SOURCE_DIR "${milvus-storage_SOURCE_DIR}")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/ApplyManifestReadMetrics.cmake")
+
     # Adding the following target:
     # milvus-storage
     add_subdirectory( ${milvus-storage_SOURCE_DIR}/cpp

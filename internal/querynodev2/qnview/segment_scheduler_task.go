@@ -18,13 +18,14 @@ func newSegmentLoadTask(loader PhysicalSegmentLoader, estimator SegmentResourceE
 	return &task
 }
 
-func (t *SegmentLoadTask) Execute(schedulerCtx context.Context) (retErr error) {
+func (t *SegmentLoadTask) Execute(schedulerCtx context.Context) error {
 	totalTimer := segmentLoadTotal.Begin()
 	startedAt := time.Now()
-	timing := segmentLoadTimingSample{}
+	timing := segmentLoadTimingSample{result: stage.Error}
 	logCtx := schedulerCtx
 	defer func() {
 		timing.total = time.Since(startedAt)
+		timing.failed = timing.result != stage.Success
 		recordSQNSegmentLoadTiming(logCtx, timing)
 	}()
 	if t.OnFinished != nil {
@@ -34,23 +35,23 @@ func (t *SegmentLoadTask) Execute(schedulerCtx context.Context) (retErr error) {
 	defer cancel()
 	logCtx = ctx
 	defer func() {
-		err := retErr
-		if err == nil {
-			err = ctx.Err()
-		}
-		totalTimer.End(err)
+		totalTimer.EndResult(timing.result)
 	}()
-	if ctx.Err() != nil {
+	if err := ctx.Err(); err != nil {
+		timing.result = stage.Outcome(err)
 		return nil
 	}
 	segment, err := t.load(ctx, &timing)
 	if err != nil {
-		timing.failed = true
+		timing.result = stage.Outcome(err)
 		if t.OnUnrecoverable != nil {
 			t.OnUnrecoverable(err)
 		}
 		return err
 	}
+	// OnLoaded may cancel the task context as part of successful completion.
+	// Capture the load outcome before invoking callbacks or cleanup.
+	timing.result = stage.Success
 	if t.OnLoaded != nil {
 		onLoadedStartedAt := time.Now()
 		t.OnLoaded(segment)
