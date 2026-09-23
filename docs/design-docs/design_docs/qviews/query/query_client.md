@@ -40,6 +40,20 @@ to query orchestration. gRPC WaitForReady applies to the query services.
 `UpRecovering` waits inside the SN handler for local state notifications, under
 the same caller deadline, rather than repeatedly generating plans.
 
+If an SN restarts at the same address, the old assignment can still name its
+previous process ID. The SN's QueryPlanService and ViewQueryService preserve
+`merr.ErrNodeNotMatch` (904) in `commonpb.Status` gRPC details with
+`FailedPrecondition`. Phase 1 returns this routing error to the readiness loop,
+which reports the failed channel/term and waits for a strictly newer assignment
+term before retrying with the new node ID. Both use the original request
+context; there is no retry against the rejected term on a backoff timer.
+Ordinary `Unknown` errors, including messages containing "node not match", do
+not enter this path. Both client and server must support these details; older
+servers' text-only errors are unchanged. A Phase 2 node identity mismatch
+returns `VIEW_INVALIDATED` to the shard retry loop so it resets results and
+obtains a new plan. HandlerClient does not replay the old plan against the
+replacement SN.
+
 ## Reduction and retained requery
 
 Legacy collectors partition responses by shard. Search reduction preserves
