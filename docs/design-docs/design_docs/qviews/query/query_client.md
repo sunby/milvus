@@ -352,8 +352,22 @@ Query(req):
   assignment and uses its node ID and term. Cancellation, deadline errors,
   input errors and other gRPC status codes do not enter this transport retry.
   No backoff occurs after the final attempt. Phase 2 transport policy is unchanged.
-- **Retry ownership**: Phase 1 RPC errors remain outside HandlerClient's
-  handler-creation retry loop, and QueryPlanService has no gRPC service-config
+- **Node identity mismatch**: If an SN restarts at the same address, the old
+  assignment can still name its previous process ID. The SN's QueryPlanService
+  and ViewQueryService preserve `merr.ErrNodeNotMatch` (904) in `commonpb.Status`
+  gRPC details with `FailedPrecondition`. Phase 1 passes this routing error to
+  HandlerClient, reports the failed channel/term, and waits for a strictly newer
+  assignment term before reading the new node ID and retrying. Both reporting
+  and waiting use the original request context; there is no retry against the
+  rejected term on a backoff timer. Ordinary `Unknown` errors, including messages
+  containing "node not match", do not enter this recovery path. Both client and
+  server must support these details; older servers' text-only errors are unchanged.
+- **Phase 2 node identity mismatch**: Return `VIEW_INVALIDATED` to the shard
+  retry loop so it resets results and obtains a new plan. HandlerClient does not
+  replay the old plan against the replacement SN.
+- **Retry ownership**: Except for the structured node identity mismatch above,
+  Phase 1 RPC errors remain outside HandlerClient's handler-creation retry loop,
+  and QueryPlanService has no gRPC service-config
   retry policy. Exhaustion returns the original error; a transport failure does
   not trigger Proxy's outer load/readiness retry. Existing ViewError-driven
   collection reloads retain their separate outer retry policy.
