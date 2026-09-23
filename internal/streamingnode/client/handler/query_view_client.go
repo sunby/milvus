@@ -104,7 +104,13 @@ func executeQueryPlanRPC[T any](
 			return viewRPCResult[T]{}, err
 		}
 		resp, err := call(ctx, client)
-		return viewRPCResult[T]{resp: resp, err: viewerror.ConvertViewError(method, err)}, nil
+		err = viewerror.ConvertViewError(method, err)
+		if viewerror.IsNodeNotMatch(err) {
+			// The assignment still names the previous process at this address.
+			// Let the handler report that term and wait for a new assignment.
+			return viewRPCResult[T]{}, err
+		}
+		return viewRPCResult[T]{resp: resp, err: err}, nil
 	})
 }
 
@@ -122,6 +128,11 @@ func executeViewQueryRPC[T any](
 			return viewRPCResult[T]{}, err
 		}
 		resp, err := call(ctx, client)
+		if viewerror.IsNodeNotMatch(err) {
+			// Phase 2 is bound to an existing plan. Retry from Phase 1 instead
+			// of replaying this plan against the replacement StreamingNode.
+			return viewRPCResult[T]{err: viewerror.NewViewInvalidated("%s: %v", method, err)}, nil
+		}
 		return viewRPCResult[T]{resp: resp, err: viewerror.ConvertViewError(method, err)}, nil
 	})
 }
