@@ -39,6 +39,7 @@ import "C"
 import (
 	"context"
 	"io"
+	"time"
 	"unsafe"
 
 	"github.com/apache/arrow/go/v17/arrow"
@@ -423,6 +424,15 @@ func GetManifestHandleWithExtfs(
 	storageConfig *indexpb.StorageConfig,
 	extfs ExternalSpecContext,
 ) (loonManifestHandle *C.LoonManifest, err error) {
+	return getManifestHandleWithTiming(manifestPath, storageConfig, extfs, nil)
+}
+
+func getManifestHandleWithTiming(
+	manifestPath string,
+	storageConfig *indexpb.StorageConfig,
+	extfs ExternalSpecContext,
+	timing *manifestReadTiming,
+) (loonManifestHandle *C.LoonManifest, err error) {
 	var cManifestHandle *C.LoonManifest
 	totalTimer := manifestTotal.Begin()
 	defer totalTimer.EndError(&err)
@@ -433,7 +443,11 @@ func GetManifestHandleWithExtfs(
 	mlog.Debug(context.TODO(), "GetManifest", mlog.String("manifestPath", manifestPath), mlog.String("basePath", basePath), mlog.Int64("version", version))
 
 	propertiesTimer := manifestProperties.Begin()
+	propertiesStartedAt := time.Now()
 	cProperties, err := MakePropertiesFromStorageConfig(storageConfig, nil)
+	if timing != nil {
+		timing.durations[manifestReadProperties] = time.Since(propertiesStartedAt)
+	}
 	propertiesTimer.End(err)
 	if err != nil {
 		return cManifestHandle, err
@@ -447,7 +461,11 @@ func GetManifestHandleWithExtfs(
 
 	var cTransactionHandle C.LoonTransactionHandle
 	beginTimer := manifestBegin.Begin()
+	beginStartedAt := time.Now()
 	result := C.loon_transaction_begin(cBasePath, cProperties, C.int64_t(version), C.int32_t(0) /* resolve_id */, C.uint32_t(1) /* retry_limit */, &cTransactionHandle)
+	if timing != nil {
+		timing.durations[manifestReadBegin] = time.Since(beginStartedAt)
+	}
 	err = HandleLoonFFIResult(result)
 	beginTimer.End(err)
 	if err != nil {
@@ -456,7 +474,11 @@ func GetManifestHandleWithExtfs(
 	defer C.loon_transaction_destroy(cTransactionHandle)
 
 	getTimer := manifestGet.Begin()
+	getStartedAt := time.Now()
 	result = C.loon_transaction_get_manifest(cTransactionHandle, &cManifestHandle)
+	if timing != nil {
+		timing.durations[manifestReadGet] = time.Since(getStartedAt)
+	}
 	err = HandleLoonFFIResult(result)
 	getTimer.End(err)
 	if err != nil {

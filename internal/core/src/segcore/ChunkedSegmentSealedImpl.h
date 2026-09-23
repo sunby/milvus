@@ -89,6 +89,10 @@
 #include "segcore/storagev2translator/ManifestGroupTranslator.h"
 #endif
 
+namespace milvus::monitor {
+class SegmentLoadTiming;
+}
+
 namespace milvus::segcore {
 
 namespace storagev2translator {
@@ -2163,11 +2167,13 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
     PrepareSchemaForReopen(const SchemaPtr& sch);
 
     void
-    PrepareLoadDiffForReopen(milvus::OpContext* op_ctx,
-                             SegmentLoadInfo& segment_load_info,
-                             LoadDiff& load_diff,
-                             const SchemaPtr& schema_snapshot,
-                             StagedStateCommitter& committer);
+    PrepareLoadDiffForReopen(
+        milvus::OpContext* op_ctx,
+        SegmentLoadInfo& segment_load_info,
+        LoadDiff& load_diff,
+        const SchemaPtr& schema_snapshot,
+        StagedStateCommitter& committer,
+        milvus::monitor::SegmentLoadTiming* timing = nullptr);
 
     void
     FinalizeLoadDiffForReopen(milvus::OpContext* op_ctx,
@@ -2180,7 +2186,8 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
     ApplyLoadDiff(milvus::OpContext* op_ctx,
                   SegmentLoadInfo& segment_load_info,
                   LoadDiff& load_diff,
-                  const SchemaPtr& schema_snapshot);
+                  const SchemaPtr& schema_snapshot,
+                  milvus::monitor::SegmentLoadTiming* timing = nullptr);
 
     void
     ApplyLoadDiff(milvus::OpContext* op_ctx,
