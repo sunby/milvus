@@ -274,17 +274,9 @@ func (queue *ddTaskQueue) updateMetrics() {
 	metrics.ProxyQueueTaskNum.WithLabelValues(strconv.FormatInt(paramtable.GetNodeID(), 10), "ddl", metrics.InProgressIndexTaskLabel).Set(float64(activateTaskNum))
 }
 
-type pChanStatInfo struct {
-	pChanStatistics
-	tsSet map[Timestamp]struct{}
-}
-
 // dmTaskQueue represents queue for DML task such as insert/delete/upsert
 type dmTaskQueue struct {
 	*baseTaskQueue
-
-	statsLock            sync.RWMutex
-	pChanStatisticsInfos map[pChan]*pChanStatInfo
 }
 
 func (queue *dmTaskQueue) updateMetrics() {
@@ -300,11 +292,6 @@ func (queue *dmTaskQueue) updateMetrics() {
 }
 
 func (queue *dmTaskQueue) Enqueue(t task) error {
-	// This statsLock has two functions:
-	//	1) Protect member pChanStatisticsInfos
-	//	2) Serialize the timestamp allocation for dml tasks
-
-	// 1. set the current pChannels for this dmTask
 	dmt := t.(dmlTask)
 	err := dmt.setChannels()
 	if err != nil {
@@ -312,106 +299,7 @@ func (queue *dmTaskQueue) Enqueue(t task) error {
 		return err
 	}
 
-	// 2. enqueue dml task
-	queue.statsLock.Lock()
-	defer queue.statsLock.Unlock()
-	err = queue.baseTaskQueue.Enqueue(t)
-	if err != nil {
-		return err
-	}
-	// 3. commit will use pChannels got previously when preAdding and will definitely succeed
-	pChannels := dmt.getChannels()
-	queue.commitPChanStats(dmt, pChannels)
-	// there's indeed a possibility that the collection info cache was expired after preAddPChanStats
-	// but considering root coord knows everything about meta modification, invalid stats appended after the meta changed
-	// will be discarded by root coord and will not lead to inconsistent state
-	return nil
-}
-
-func (queue *dmTaskQueue) PopActiveTask(taskID UniqueID) task {
-	queue.atLock.Lock()
-	defer queue.atLock.Unlock()
-	t, ok := queue.activeTasks[taskID]
-	if ok {
-		queue.statsLock.Lock()
-		defer queue.statsLock.Unlock()
-
-		delete(queue.activeTasks, taskID)
-		mlog.Debug(t.TraceCtx(), "Proxy dmTaskQueue popPChanStats", mlog.FieldTaskID(t.ID()))
-		queue.popPChanStats(t)
-	} else {
-		mlog.Warn(context.TODO(), "Proxy task not in active task list!", mlog.FieldTaskID(taskID))
-	}
-	return t
-}
-
-func (queue *dmTaskQueue) commitPChanStats(dmt dmlTask, pChannels []pChan) {
-	// 1. prepare new stat for all pChannels
-	newStats := make(map[pChan]pChanStatistics)
-	beginTs := dmt.BeginTs()
-	endTs := dmt.EndTs()
-	for _, channel := range pChannels {
-		newStats[channel] = pChanStatistics{
-			minTs: beginTs,
-			maxTs: endTs,
-		}
-	}
-	// 2. update stats for all pChannels
-	for cName, newStat := range newStats {
-		currentStat, ok := queue.pChanStatisticsInfos[cName]
-		if !ok {
-			currentStat = &pChanStatInfo{
-				pChanStatistics: newStat,
-				tsSet: map[Timestamp]struct{}{
-					newStat.minTs: {},
-				},
-			}
-			queue.pChanStatisticsInfos[cName] = currentStat
-		} else {
-			if currentStat.minTs > newStat.minTs {
-				currentStat.minTs = newStat.minTs
-			}
-			if currentStat.maxTs < newStat.maxTs {
-				currentStat.maxTs = newStat.maxTs
-			}
-			currentStat.tsSet[newStat.minTs] = struct{}{}
-		}
-	}
-}
-
-func (queue *dmTaskQueue) popPChanStats(t task) {
-	channels := t.(dmlTask).getChannels()
-	taskTs := t.BeginTs()
-	for _, cName := range channels {
-		info, ok := queue.pChanStatisticsInfos[cName]
-		if ok {
-			delete(info.tsSet, taskTs)
-			if len(info.tsSet) <= 0 {
-				delete(queue.pChanStatisticsInfos, cName)
-			} else {
-				newMinTs := info.maxTs
-				for ts := range info.tsSet {
-					if newMinTs > ts {
-						newMinTs = ts
-					}
-				}
-				info.minTs = newMinTs
-			}
-		}
-	}
-}
-
-func (queue *dmTaskQueue) getPChanStatsInfo() (map[pChan]*pChanStatistics, error) {
-	ret := make(map[pChan]*pChanStatistics)
-	queue.statsLock.RLock()
-	defer queue.statsLock.RUnlock()
-	for cName, info := range queue.pChanStatisticsInfos {
-		ret[cName] = &pChanStatistics{
-			minTs: info.minTs,
-			maxTs: info.maxTs,
-		}
-	}
-	return ret, nil
+	return queue.baseTaskQueue.Enqueue(t)
 }
 
 // dqTaskQueue represents queue for DQL task such as search/query
@@ -486,8 +374,7 @@ func newDdTaskQueue(tsoAllocatorIns tsoAllocator) *ddTaskQueue {
 
 func newDmTaskQueue(tsoAllocatorIns tsoAllocator) *dmTaskQueue {
 	return &dmTaskQueue{
-		baseTaskQueue:        newBaseTaskQueue(tsoAllocatorIns),
-		pChanStatisticsInfos: make(map[pChan]*pChanStatInfo),
+		baseTaskQueue: newBaseTaskQueue(tsoAllocatorIns),
 	}
 }
 
@@ -718,10 +605,6 @@ func (sched *taskScheduler) Start() error {
 func (sched *taskScheduler) Close() {
 	sched.cancel()
 	sched.wg.Wait()
-}
-
-func (sched *taskScheduler) getPChanStatistics() (map[pChan]*pChanStatistics, error) {
-	return sched.dmQueue.getPChanStatsInfo()
 }
 
 func (sched *taskScheduler) getTaskQueueMetrics(queue *baseTaskQueue, queueType string) metricsinfo.TaskQueueMetrics {
