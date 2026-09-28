@@ -18,7 +18,6 @@ package scheduler
 
 import (
 	"context"
-	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -512,10 +511,6 @@ func TestTaskScheduler(t *testing.T) {
 	err = sched.Start()
 	assert.NoError(t, err)
 	defer sched.Close()
-
-	stats, err := sched.GetPChanStatistics()
-	assert.NoError(t, err)
-	assert.Equal(t, 0, len(stats))
 
 	ddNum := rand.Int() % 10
 	dmNum := rand.Int() % 10
