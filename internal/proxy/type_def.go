@@ -21,8 +21,3 @@ type vChan = string
 
 // pChan shortcuts for physical channel.
 type pChan = string
-
-type pChanStatistics struct {
-	minTs Timestamp
-	maxTs Timestamp
-}
