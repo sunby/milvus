@@ -472,7 +472,9 @@ func (mr *MilvusRoles) Run() {
 		paramtable.Init()
 		paramtable.SetRole(mr.ServerType)
 	}
-	metrics.SetCollectionLevelMetricsMode(paramtable.Get().CommonCfg.CollectionLevelMetricsMode.GetValue())
+	if err := internalmetrics.InitCollectionLevelMetricsMode(paramtable.Get().CommonCfg.CollectionLevelMetricsMode.GetValue()); err != nil {
+		panic(err)
+	}
 	mlog.Info(context.TODO(), "configured collection and VChannel metrics",
 		mlog.String("mode", metrics.CollectionLevelMetricsMode()))
 	mr.enableEmbeddedQueryNodeIfNeeded(paramtable.Get().QueryCoordCfg.EnableSQNServeSegments.GetAsBool())
