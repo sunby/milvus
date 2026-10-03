@@ -28,9 +28,11 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"google.golang.org/protobuf/proto"
 
@@ -49,6 +51,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/function"
 	"github.com/milvus-io/milvus/internal/util/initcore"
 	"github.com/milvus-io/milvus/pkg/v3/common"
+	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
@@ -2373,6 +2376,96 @@ func (s *DelegatorDataSuite) TestLevel0Deletions() {
 	delegator.deleteBuffer.UnRegister(uint64(21))
 	pks, _ = delegator.GetLevel0Deletions(partitionID+1, pkoracle.NewCandidateKey(l0.ID(), l0.Partition(), segments.SegmentTypeGrowing))
 	s.Empty(pks)
+}
+
+func TestRefreshLevel0DeletionStatsSegmentCount(t *testing.T) {
+	for _, mode := range []string{metrics.CollectionLevelMetricsModeFull, metrics.CollectionLevelMetricsModeAggregate} {
+		t.Run(mode, func(t *testing.T) {
+			previousMode := metrics.CollectionLevelMetricsMode()
+			metrics.SetCollectionLevelMetricsMode(mode)
+			resetMetrics := func() {
+				metrics.QueryNodeNumSegments.Reset()
+				metrics.QueryNodeLevelZeroSize.Reset()
+				metrics.QueryNodeDeleteBufferRowNum.Reset()
+				metrics.QueryNodeDeleteBufferSize.Reset()
+			}
+			resetMetrics()
+			t.Cleanup(func() {
+				resetMetrics()
+				metrics.SetCollectionLevelMetricsMode(previousMode)
+			})
+			registry := prometheus.NewRegistry()
+			registry.MustRegister(metrics.QueryNodeNumSegments)
+			assertCounts := func(expected map[string]float64) {
+				t.Helper()
+				families, err := registry.Gather()
+				require.NoError(t, err)
+				counts := make(map[string]float64)
+				for _, family := range families {
+					require.Equal(t, "milvus_querynode_segment_num", family.GetName())
+					for _, metric := range family.GetMetric() {
+						labels := make(map[string]string)
+						for _, label := range metric.GetLabel() {
+							labels[label.GetName()] = label.GetValue()
+						}
+						require.Len(t, labels, 4)
+						require.Equal(t, paramtable.GetStringNodeID(), labels["node_id"])
+						require.Equal(t, "Sealed", labels["segment_state"])
+						require.Equal(t, "L0", labels["segment_level"])
+						counts[labels["collection_id"]] = metric.GetGauge().GetValue()
+					}
+				}
+				require.Equal(t, expected, counts)
+			}
+			collections := make(map[int64]*segments.Collection)
+			for _, collectionID := range []int64{1, 2} {
+				collection, err := segments.NewCollection(collectionID,
+					mock_segcore.GenTestCollectionSchema("l0-metrics", schemapb.DataType_Int64, true), nil,
+					&querypb.LoadMetaInfo{LoadType: querypb.LoadType_LoadCollection})
+				require.NoError(t, err)
+				collections[collectionID] = collection
+				t.Cleanup(func() { segments.DeleteCollection(collection) })
+			}
+			newDelegator := func(collectionID int64, channel string) *shardDelegator {
+				buffer := deletebuffer.NewListDeleteBuffer[*deletebuffer.Item](0, 1000,
+					[]string{paramtable.GetStringNodeID(), channel})
+				t.Cleanup(buffer.Clear)
+				return &shardDelegator{collectionID: collectionID, vchannelName: channel, deleteBuffer: buffer}
+			}
+			first := newDelegator(1, "rootcoord-dml_1v0")
+			second := newDelegator(1, "rootcoord-dml_1v1")
+			otherCollection := newDelegator(2, "rootcoord-dml_2v0")
+			empty := newDelegator(1, "rootcoord-dml_1v2")
+			assertCounts(map[string]float64{})
+			empty.RefreshLevel0DeletionStats()
+			if mode == metrics.CollectionLevelMetricsModeAggregate {
+				assertCounts(map[string]float64{"all": 0})
+			} else {
+				assertCounts(map[string]float64{"1": 0})
+			}
+
+			for i, sd := range []*shardDelegator{first, second, second, otherCollection} {
+				segment, err := segments.NewL0Segment(collections[sd.collectionID], segments.SegmentTypeSealed, 1,
+					&querypb.SegmentLoadInfo{
+						SegmentID: int64(i), CollectionID: sd.collectionID, InsertChannel: sd.vchannelName,
+						Level: datapb.SegmentLevel_L0, StartPosition: &msgpb.MsgPosition{Timestamp: 10},
+					})
+				require.NoError(t, err)
+				sd.deleteBuffer.RegisterL0(segment)
+			}
+			expected := map[string]float64{"1": 3, "2": 1}
+			if mode == metrics.CollectionLevelMetricsModeAggregate {
+				expected = map[string]float64{"all": 4}
+			}
+			assertCounts(expected)
+			for i := 0; i < 2; i++ {
+				for _, sd := range []*shardDelegator{first, second, otherCollection, empty} {
+					sd.RefreshLevel0DeletionStats()
+					assertCounts(expected)
+				}
+			}
+		})
+	}
 }
 
 // TestLoadSegmentsDoesNotBlockProcessDelete verifies that the 3-phase loadStreamDelete

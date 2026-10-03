@@ -19,12 +19,18 @@ package deletebuffer
 import (
 	"context"
 	"sort"
+	"strconv"
 	"sync"
 
 	"github.com/cockroachdb/errors"
+	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
+	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
+	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/tsoutil"
 )
 
@@ -93,6 +99,7 @@ func (c *doubleCacheBuffer[T]) RegisterL0(segmentList ...segments.Segment) {
 	for _, seg := range segmentList {
 		if seg != nil {
 			c.l0Segments = append(c.l0Segments, seg)
+			l0SegmentCount(seg).Inc()
 			mlog.Info(context.TODO(), "register l0 from delete buffer",
 				mlog.FieldSegmentID(seg.ID()),
 				mlog.Time("startPosition", tsoutil.PhysicalTime(seg.StartPosition().GetTimestamp())),
@@ -115,6 +122,7 @@ func (c *doubleCacheBuffer[T]) UnRegister(ts uint64) {
 	for _, s := range c.l0Segments {
 		if s.StartPosition().GetTimestamp() < ts {
 			s.Release(context.TODO())
+			l0SegmentCount(s).Dec()
 			mlog.Info(context.TODO(), "unregister l0 from delete buffer",
 				mlog.FieldSegmentID(s.ID()),
 				mlog.Time("startPosition", tsoutil.PhysicalTime(s.StartPosition().GetTimestamp())),
@@ -133,11 +141,23 @@ func (c *doubleCacheBuffer[T]) Clear() {
 
 	for _, s := range c.l0Segments {
 		s.Release(context.TODO())
+		l0SegmentCount(s).Dec()
 	}
 	c.l0Segments = nil
 	// reset cache block
 	c.tail = c.head
 	c.head = newCacheBlock[T](c.ts, c.maxSize)
+}
+
+// Update this gauge under the buffer lock, together with its registered L0 list.
+// All buffers for a collection share a series, so snapshots cannot be Set here.
+func l0SegmentCount(segment segments.Segment) prometheus.Gauge {
+	return metrics.QueryNodeNumSegments.WithLabelValues(
+		paramtable.GetStringNodeID(),
+		strconv.FormatInt(segment.Collection(), 10),
+		commonpb.SegmentState_Sealed.String(),
+		datapb.SegmentLevel_L0.String(),
+	)
 }
 
 func (c *doubleCacheBuffer[T]) SafeTs() uint64 {
