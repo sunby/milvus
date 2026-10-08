@@ -9,10 +9,12 @@ import (
 	"github.com/milvus-io/milvus/internal/metastore/kv/queryview"
 	"github.com/milvus-io/milvus/internal/views/coord/coordview/syncer"
 	"github.com/milvus-io/milvus/internal/views/qviews"
+	qvobserve "github.com/milvus-io/milvus/internal/views/qviews/observe"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
 	"github.com/milvus-io/milvus/pkg/v3/util/nodescheduler"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 // ShardViewRegistry owns the lifecycle of every ShardViewManager on this Coord
@@ -39,7 +41,8 @@ type ShardViewRegistry struct {
 	collectionShards map[int64]map[qviews.ShardID]struct{}
 	nodeShards       map[int64]map[qviews.ShardID]struct{}
 
-	statsObservers []func(qviews.ShardID, *ShardStats)
+	statsObservers         []func(qviews.ShardID, *ShardStats)
+	unrecoverableNotifiers []func(qviews.ShardID)
 }
 
 // RecoverShardViewRegistry constructs a ShardViewRegistry and rebuilds every
@@ -106,6 +109,7 @@ func RecoverShardViewRegistry(
 		registry.addNodeShardsLocked(sid, stats)
 		mgr.SetStatsObserver(registry.onShardStatsChanged)
 		mgr.setOnEmpty(registry.removeEmptyManager)
+		mgr.setOnUnrecoverable(registry.onShardUnrecoverable)
 	}
 	// Recovery sync callbacks may update manager stats immediately. Install all
 	// observers and indexes before releasing the held recovery events so those
@@ -121,9 +125,13 @@ func RecoverShardViewRegistry(
 	return registry, nil
 }
 
+var registryEnsure = stage.New("coord", "apply", "ensure")
+
 // Ensure returns the ShardViewManager for shardID, creating a fresh one if
 // none exists. Safe to call repeatedly.
 func (r *ShardViewRegistry) Ensure(shardID qviews.ShardID) *ShardViewManager {
+	timer := registryEnsure.Begin()
+	defer timer.End(nil)
 	// Fast path: already present.
 	r.mu.RLock()
 	if mgr, ok := r.shards[shardID]; ok {
@@ -135,6 +143,7 @@ func (r *ShardViewRegistry) Ensure(shardID qviews.ShardID) *ShardViewManager {
 	mgr := newShardViewManager(r.ctx, shardID, r.flushScheduler, nil, r.dataViewReferences)
 	mgr.SetStatsObserver(r.onShardStatsChanged)
 	mgr.setOnEmpty(r.removeEmptyManager)
+	mgr.setOnUnrecoverable(r.onShardUnrecoverable)
 	stats := emptyShardStats()
 
 	r.mu.Lock()
@@ -156,6 +165,19 @@ func (r *ShardViewRegistry) Close() {
 		return
 	}
 	r.flushScheduler.Close()
+	r.mu.RLock()
+	managers := make([]*ShardViewManager, 0, len(r.shards))
+	for _, manager := range r.shards {
+		managers = append(managers, manager)
+	}
+	r.mu.RUnlock()
+	for _, manager := range managers {
+		manager.mu.Lock()
+		for _, sm := range manager.views {
+			qvobserve.CancelView("coord", manager.keyForStateMachine(sm))
+		}
+		manager.mu.Unlock()
+	}
 }
 
 // Begin opens an explicit cross-shard QueryView flush batch. Existing flush
@@ -194,6 +216,22 @@ func (r *ShardViewRegistry) HasUndrainedViews(collectionID int64) bool {
 		}
 	}
 	return false
+}
+
+// AllShardsUp checks a complete expected shard set without allocating a snapshot.
+func (r *ShardViewRegistry) AllShardsUp(shards []qviews.ShardID) bool {
+	if len(shards) == 0 {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, shardID := range shards {
+		stats := r.stats[shardID]
+		if stats == nil || stats.UpVersion == nil {
+			return false
+		}
+	}
+	return true
 }
 
 // removeEmptyManager reclaims a manager after its last QueryView has completed
@@ -255,6 +293,22 @@ func (r *ShardViewRegistry) SnapshotForShards(shardIDs []qviews.ShardID) *ShardV
 	}
 }
 
+// SnapshotForCollection captures the collection index and its current stats
+// under one lock, without refreshing the cached full snapshot.
+func (r *ShardViewRegistry) SnapshotForCollection(collectionID int64) *ShardViewSnapshot {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	shards := r.collectionShards[collectionID]
+	stats := make(map[qviews.ShardID]*ShardStats, len(shards))
+	for shardID := range shards {
+		if shardStats, ok := r.stats[shardID]; ok {
+			stats[shardID] = shardStats
+		}
+	}
+	return &ShardViewSnapshot{version: r.version, stats: stats}
+}
+
 // CollectionShards returns the resident shards belonging to collectionID.
 func (r *ShardViewRegistry) CollectionShards(collectionID int64) []qviews.ShardID {
 	r.mu.RLock()
@@ -291,6 +345,28 @@ func (r *ShardViewRegistry) RegisterStatsObserver(observer func(qviews.ShardID, 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.statsObservers = append(r.statsObservers, observer)
+}
+
+// RegisterUnrecoverableNotifier subscribes to active views invalidated by node
+// reports or node loss. Notifications follow persistence and run without
+// registry or manager locks. Callbacks must be non-blocking. Recovery state is
+// not replayed; the balancer's initial full scan reconciles existing failures.
+func (r *ShardViewRegistry) RegisterUnrecoverableNotifier(notifier func(qviews.ShardID)) {
+	if notifier == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.unrecoverableNotifiers = append(r.unrecoverableNotifiers, notifier)
+}
+
+func (r *ShardViewRegistry) onShardUnrecoverable(shardID qviews.ShardID) {
+	r.mu.RLock()
+	notifiers := append([]func(qviews.ShardID){}, r.unrecoverableNotifiers...)
+	r.mu.RUnlock()
+	for _, notify := range notifiers {
+		notify(shardID)
+	}
 }
 
 type ShardViewSnapshot struct {

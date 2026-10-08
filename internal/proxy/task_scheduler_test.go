@@ -18,7 +18,6 @@ package proxy
 
 import (
 	"context"
-	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -35,7 +34,6 @@ import (
 	"github.com/milvus-io/milvus/internal/proxy/channelmgr"
 	"github.com/milvus-io/milvus/pkg/v3/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
-	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
@@ -267,153 +265,6 @@ func TestDmTaskQueue_Basic(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// test the timestamp statistics
-func TestDmTaskQueue_TimestampStatistics(t *testing.T) {
-	var err error
-	var unissuedTask task
-
-	tsoAllocatorIns := newMockTsoAllocator()
-	queue := newDmTaskQueue(tsoAllocatorIns)
-	assert.NotNil(t, queue)
-
-	st := newDefaultMockDmlTask()
-	stPChans := st.pchans
-
-	err = queue.Enqueue(st)
-	assert.NoError(t, err)
-
-	stats, err := queue.getPChanStatsInfo()
-	assert.NoError(t, err)
-	assert.Equal(t, len(stPChans), len(stats))
-	unissuedTask = queue.FrontUnissuedTask()
-	assert.NotNil(t, unissuedTask)
-	for _, stat := range stats {
-		assert.Equal(t, unissuedTask.BeginTs(), stat.minTs)
-		assert.Equal(t, unissuedTask.EndTs(), stat.maxTs)
-	}
-
-	unissuedTask = queue.PopUnissuedTask()
-	assert.NotNil(t, unissuedTask)
-	assert.True(t, queue.utEmpty())
-
-	queue.AddActiveTask(unissuedTask)
-
-	queue.PopActiveTask(unissuedTask.ID())
-
-	stats, err = queue.getPChanStatsInfo()
-	assert.NoError(t, err)
-	assert.Zero(t, len(stats))
-}
-
-// test the timestamp statistics
-func TestDmTaskQueue_TimestampStatistics2(t *testing.T) {
-	tsoAllocatorIns := newMockTsoAllocator()
-	queue := newDmTaskQueue(tsoAllocatorIns)
-	assert.NotNil(t, queue)
-
-	prefix := funcutil.GenRandomStr()
-	insertNum := 100
-
-	var processWg sync.WaitGroup
-	processWg.Add(1)
-	processCtx, processCancel := context.WithCancel(context.TODO())
-	processCount := insertNum
-	var processCountMut sync.RWMutex
-	go func() {
-		defer processWg.Done()
-		var workerWg sync.WaitGroup
-		workerWg.Add(insertNum)
-		for processCtx.Err() == nil {
-			if queue.utEmpty() {
-				continue
-			}
-			utTask := queue.PopUnissuedTask()
-			go func(ut task) {
-				defer workerWg.Done()
-				assert.NotNil(t, ut)
-				queue.AddActiveTask(ut)
-				dur := time.Duration(50+rand.Int()%10) * time.Millisecond
-				time.Sleep(dur)
-				queue.PopActiveTask(ut.ID())
-				processCountMut.Lock()
-				defer processCountMut.Unlock()
-				processCount--
-			}(utTask)
-		}
-		workerWg.Wait()
-	}()
-
-	var currPChanStats map[pChan]*pChanStatistics
-	var wgSchedule sync.WaitGroup
-	scheduleCtx, scheduleCancel := context.WithCancel(context.TODO())
-	schedule := func() {
-		defer wgSchedule.Done()
-		ticker := time.NewTicker(time.Millisecond * 10)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-scheduleCtx.Done():
-				return
-			case <-ticker.C:
-				stats, err := queue.getPChanStatsInfo()
-				assert.NoError(t, err)
-				if currPChanStats == nil {
-					currPChanStats = stats
-				} else {
-					// assure minTs and maxTs will not go back
-					for p, stat := range stats {
-						curInfo, ok := currPChanStats[p]
-						if ok {
-							fmt.Println("stat.minTs", stat.minTs, " ", "curInfo.minTs:", curInfo.minTs)
-							fmt.Println("stat.maxTs", stat.maxTs, " ", "curInfo.minTs:", curInfo.maxTs)
-							assert.True(t, stat.minTs >= curInfo.minTs)
-							curInfo.minTs = stat.minTs
-							assert.True(t, stat.maxTs >= curInfo.maxTs)
-							curInfo.maxTs = stat.maxTs
-						}
-					}
-				}
-			}
-		}
-	}
-	wgSchedule.Add(1)
-	go schedule()
-
-	var wg sync.WaitGroup
-	wg.Add(insertNum)
-	for i := 0; i < insertNum; i++ {
-		go func() {
-			defer wg.Done()
-			time.Sleep(time.Millisecond)
-			st := newDefaultMockDmlTask()
-			vChannels := make([]string, 2)
-			vChannels[0] = prefix + "_1"
-			vChannels[1] = prefix + "_2"
-			st.vchans = vChannels
-			st.pchans = vChannels
-			err := queue.Enqueue(st)
-			assert.NoError(t, err)
-		}()
-	}
-	wg.Wait()
-	// time.Sleep(time.Millisecond*100)
-	needLoop := true
-	for needLoop {
-		processCountMut.RLock()
-		needLoop = processCount != 0
-		processCountMut.RUnlock()
-	}
-	processCancel()
-	processWg.Wait()
-
-	scheduleCancel()
-	wgSchedule.Wait()
-
-	stats, err := queue.getPChanStatsInfo()
-	assert.NoError(t, err)
-	assert.Zero(t, len(stats))
-}
-
 func TestDqTaskQueue(t *testing.T) {
 	var err error
 	var unissuedTask task
@@ -503,10 +354,6 @@ func TestTaskScheduler(t *testing.T) {
 	err = sched.Start()
 	assert.NoError(t, err)
 	defer sched.Close()
-
-	stats, err := sched.getPChanStatistics()
-	assert.NoError(t, err)
-	assert.Equal(t, 0, len(stats))
 
 	ddNum := rand.Int() % 10
 	dmNum := rand.Int() % 10

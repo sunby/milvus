@@ -96,6 +96,8 @@ type IMetaTable interface {
 
 	AddCollection(ctx context.Context, coll *model.Collection) error
 	DropCollection(ctx context.Context, collectionID UniqueID, ts Timestamp) error
+	// RemoveCollection and RemovePartition must be serialized by their caller,
+	// the single tombstone sweeper, because legacy partition GC rewrites collections.
 	RemoveCollection(ctx context.Context, collectionID UniqueID, ts Timestamp) error
 	// GetCollectionID retrieves the corresponding collectionID based on the collectionName.
 	// If the collection does not exist, it will return InvalidCollectionID.
@@ -835,40 +837,30 @@ func (mt *MetaTable) DropCollection(ctx context.Context, collectionID UniqueID, 
 }
 
 func (mt *MetaTable) markCollectionDropping(ctx context.Context, collectionID UniqueID, ts Timestamp) (string, string, bool, error) {
+	dbName, persisted, err := mt.persistCollectionDropping(ctx, collectionID, ts)
+	if err != nil || !persisted {
+		return "", "", false, err
+	}
+
 	mt.ddLock.Lock()
 	defer mt.ddLock.Unlock()
 
+	// Re-read after changing lock modes: partition GC may have removed a
+	// partition, or another drop may have already published the state.
 	coll, ok := mt.collID2Meta[collectionID]
-	if !ok {
+	if !ok || coll.State == pb.CollectionState_CollectionDropping {
 		return "", "", false, nil
 	}
-	if coll.State == pb.CollectionState_CollectionDropping {
-		return "", "", false, nil
-	}
-
-	// Resolve the database before persisting the Dropping state. Once the
-	// collection becomes Dropping, callback retries take the idempotent return
-	// above, so no fallible lookup should remain before the in-memory counters
-	// and channel stats are updated.
-	db, err := mt.getDatabaseByIDInternal(ctx, normalizeCollectionDBID(coll.DBID), typeutil.MaxTimestamp)
-	if err != nil {
-		return "", "", false, merr.Wrapf(err, "dbID not found for collection:%d", collectionID)
-	}
-
-	clone := coll.Clone()
+	clone := coll.ShallowClone()
 	clone.State = pb.CollectionState_CollectionDropping
 	clone.UpdateTimestamp = ts
 
-	ctx1 := contextutil.WithTenantID(ctx, Params.CommonCfg.ClusterName.GetValue())
-	if err := mt.catalog.AlterCollection(ctx1, coll, clone, metastore.MODIFY, ts, false); err != nil {
-		return "", "", false, err
-	}
 	mt.collID2Meta[collectionID] = clone
 	for _, fileResourceID := range coll.FileResourceIds {
 		if mt.fileResourceRefCnt[fileResourceID] > 0 {
 			mt.fileResourceRefCnt[fileResourceID]--
 		} else {
-			mlog.Warn(context.TODO(), "DropCollection: file resource refCnt underflow",
+			mlog.Warn(ctx, "DropCollection: file resource refCnt underflow",
 				mlog.Int64("collectionID", collectionID), mlog.Int64("fileResourceID", fileResourceID))
 		}
 	}
@@ -885,51 +877,58 @@ func (mt *MetaTable) markCollectionDropping(ctx context.Context, collectionID Un
 		mt.decreaseAvailableCollectionCountLocked(coll.DBID)
 	}
 	channel.StaticPChannelStatsManager.MustGet().RemoveVChannel(coll.VirtualChannelNames...)
-	metrics.RootCoordNumOfCollections.WithLabelValues(db.Name).Dec()
+	metrics.RootCoordNumOfCollections.WithLabelValues(dbName).Dec()
 	metrics.RootCoordNumOfPartitions.WithLabelValues().Sub(float64(pn))
 
 	mlog.Info(ctx, "drop collection from meta table", mlog.Int64("collection", collectionID),
 		mlog.String("state", coll.State.String()), mlog.Uint64("ts", ts))
 
-	return db.Name, coll.Name, true, nil
+	return dbName, coll.Name, true, nil
 }
 
-func (mt *MetaTable) removeIfNameMatchedInternal(ctx context.Context, collectionID UniqueID, name string) {
-	mt.names.removeIf(func(db string, collection string, id UniqueID) bool {
-		if collectionID == id {
-			mlog.Info(ctx, "remove from names",
-				mlog.String("dbName", db),
-				mlog.String("collectionName", collection),
-				mlog.Int64("collectionID", id),
-			)
-			return true
-		}
-		return false
-	})
+// persistCollectionDropping shares ddLock so catalog writes for different
+// collections can overlap while excluding partition GC, whose legacy path
+// rewrites the collection record. Collection GC only removes Dropping collections,
+// for which this method is already a no-op. Normal DDL for this collection remains
+// ordered by the broadcaster resource locks.
+func (mt *MetaTable) persistCollectionDropping(ctx context.Context, collectionID UniqueID, ts Timestamp) (string, bool, error) {
+	mt.ddLock.RLock()
+	defer mt.ddLock.RUnlock()
+
+	coll, ok := mt.collID2Meta[collectionID]
+	if !ok || coll.State == pb.CollectionState_CollectionDropping {
+		return "", false, nil
+	}
+
+	// Resolve the database before persistence so a lookup failure remains
+	// retryable without changing the collection state or its counters.
+	db, err := mt.getDatabaseByIDInternal(ctx, normalizeCollectionDBID(coll.DBID), typeutil.MaxTimestamp)
+	if err != nil {
+		return "", false, merr.Wrapf(err, "dbID not found for collection:%d", collectionID)
+	}
+	clone := coll.ShallowClone()
+	clone.State = pb.CollectionState_CollectionDropping
+	clone.UpdateTimestamp = ts
+	ctx1 := contextutil.WithTenantID(ctx, Params.CommonCfg.ClusterName.GetValue())
+	if err := mt.catalog.AlterCollection(ctx1, coll, clone, metastore.MODIFY, ts, false); err != nil {
+		return "", false, err
+	}
+	return db.Name, true, nil
 }
 
-func (mt *MetaTable) removeIfAliasMatchedInternal(ctx context.Context, collectionID UniqueID, alias string) {
-	mt.aliases.removeIf(func(db string, collection string, id UniqueID) bool {
-		if collectionID == id {
-			mlog.Info(ctx, "remove from aliases",
-				mlog.String("dbName", db),
-				mlog.String("alias", collection),
-				mlog.Int64("collectionID", id),
-			)
-			return true
-		}
-		return false
-	})
-}
-
-func (mt *MetaTable) removeIfMatchedInternal(ctx context.Context, collectionID UniqueID, name string) {
-	mt.removeIfNameMatchedInternal(ctx, collectionID, name)
-	mt.removeIfAliasMatchedInternal(ctx, collectionID, name)
-}
-
-func (mt *MetaTable) removeAllNamesIfMatchedInternal(ctx context.Context, collectionID UniqueID, names []string) {
+func (mt *MetaTable) removeAllNamesIfMatchedInternal(ctx context.Context, dbName string, collectionID UniqueID, names []string) {
 	for _, name := range names {
-		mt.removeIfMatchedInternal(ctx, collectionID, name)
+		// Name publication, rename and alias rebinding all update these maps
+		// under ddLock. Check ownership at the exact key so GC of an old
+		// collection cannot erase a replacement, without scanning all names.
+		if mt.names.removeIfMatched(dbName, name, collectionID) {
+			mlog.Info(ctx, "remove from names", mlog.String("dbName", dbName),
+				mlog.String("collectionName", name), mlog.Int64("collectionID", collectionID))
+		}
+		if mt.aliases.removeIfMatched(dbName, name, collectionID) {
+			mlog.Info(ctx, "remove from aliases", mlog.String("dbName", dbName),
+				mlog.String("alias", name), mlog.Int64("collectionID", collectionID))
+		}
 	}
 }
 
@@ -966,20 +965,44 @@ func (mt *MetaTable) RemoveCollection(ctx context.Context, collectionID UniqueID
 		Aliases:           aliases,
 		DBID:              coll.DBID,
 	}
-	if err := mt.catalog.DropCollection(ctx1, newColl, ts); err != nil {
+	dropFromCatalog := func() error {
+		if len(aliases) == 0 {
+			// Dropping collections no longer accept DDL: broadcaster resource
+			// locks order prior updates before Drop. The single tombstone sweeper
+			// serializes collection and partition GC, including legacy partition
+			// GC that rewrites the collection record. With no alias keys,
+			// the catalog deletes only keys scoped to this collection ID, so
+			// unrelated DDL and same-name recreation can proceed during I/O.
+			// Historical collections with aliases retain ddLock to protect
+			// alias keys against concurrent rebinding.
+			mt.ddLock.Unlock()
+			defer mt.ddLock.Lock()
+		}
+		return mt.catalog.DropCollection(ctx1, newColl, ts)
+	}
+	if err := dropFromCatalog(); err != nil {
 		return err
 	}
 
-	if err := mt.catalog.DeleteGrantByCollectionName(ctx1, util.DefaultTenant, coll.DBName, coll.Name); err != nil {
-		mlog.Warn(ctx, "failed to delete grants for dropped collection, skipping",
-			mlog.String("dbName", coll.DBName), mlog.String("collectionName", coll.Name), mlog.Err(err))
+	dbName := coll.DBName
+	if dbName == "" {
+		dbName = util.DefaultDBName
+	}
+	// A replacement collection may already own this name. Its grants must
+	// survive the old collection's GC; ddLock keeps this check and cleanup
+	// ordered with name publication and rename.
+	if owner, exists := mt.names.get(dbName, coll.Name); !exists || owner == collectionID {
+		if err := mt.catalog.DeleteGrantByCollectionName(ctx1, util.DefaultTenant, dbName, coll.Name); err != nil {
+			mlog.Warn(ctx, "failed to delete grants for dropped collection, skipping",
+				mlog.String("dbName", coll.DBName), mlog.String("collectionName", coll.Name), mlog.Err(err))
+		}
 	}
 
 	allNames := common.CloneStringList(aliases)
 	allNames = append(allNames, coll.Name)
 
 	// We cannot delete the name directly, since newly collection with same name may be created.
-	mt.removeAllNamesIfMatchedInternal(ctx, collectionID, allNames)
+	mt.removeAllNamesIfMatchedInternal(ctx, dbName, collectionID, allNames)
 	mt.removeCollectionByIDInternal(ctx, collectionID)
 
 	mlog.Info(ctx, "remove collection",
@@ -1150,6 +1173,15 @@ func (mt *MetaTable) getCollectionByNameInternal(ctx context.Context, dbName str
 	return filterUnavailablePartition(coll), nil
 }
 
+// IsCollectionAvailable is a positive-only check of current resident metadata.
+// A miss does not prove absence: callers must use the normal lookup before GC.
+func (mt *MetaTable) IsCollectionAvailable(collectionID int64) bool {
+	mt.ddLock.RLock()
+	defer mt.ddLock.RUnlock()
+	collection := mt.collID2Meta[collectionID]
+	return collection != nil && collection.Available()
+}
+
 func (mt *MetaTable) GetCollectionByID(ctx context.Context, dbName string, collectionID UniqueID, ts Timestamp, allowUnavailable bool) (*model.Collection, error) {
 	mt.ddLock.RLock()
 	defer mt.ddLock.RUnlock()
@@ -1189,6 +1221,12 @@ func (mt *MetaTable) ListAllAvailCollections(ctx context.Context) map[int64][]in
 }
 
 func (mt *MetaTable) ListAllAvailPartitions(ctx context.Context) map[int64]map[int64][]int64 {
+	return mt.ListQuotaPartitions(ctx, true)
+}
+
+// ListQuotaPartitions returns the same collection membership as
+// ListAllAvailPartitions, without materializing partition IDs when not needed.
+func (mt *MetaTable) ListQuotaPartitions(ctx context.Context, includePartitions bool) map[int64]map[int64][]int64 {
 	mt.ddLock.RLock()
 	defer mt.ddLock.RUnlock()
 
@@ -1208,9 +1246,32 @@ func (mt *MetaTable) ListAllAvailPartitions(ctx context.Context) map[int64]map[i
 		if _, ok := ret[dbID]; !ok {
 			ret[dbID] = make(map[int64][]int64, 64)
 		}
-		ret[dbID][collMeta.CollectionID] = lo.Map(collMeta.Partitions, func(part *model.Partition, _ int) int64 { return part.PartitionID })
+		var partitionIDs []int64
+		if includePartitions {
+			partitionIDs = lo.Map(collMeta.Partitions, func(part *model.Partition, _ int) int64 { return part.PartitionID })
+		}
+		ret[dbID][collMeta.CollectionID] = partitionIDs
 	}
 	return ret
+}
+
+// GetQuotaCollectionProperties copies only the collection properties for quota
+// calculation, rather than cloning the collection and filtering its partitions.
+func (mt *MetaTable) GetQuotaCollectionProperties(ctx context.Context, collectionID int64) (map[string]string, error) {
+	mt.ddLock.RLock()
+	defer mt.ddLock.RUnlock()
+	coll := mt.collID2Meta[collectionID]
+	if coll == nil || !coll.Available() {
+		return nil, merr.WrapErrCollectionNotFound(collectionID)
+	}
+	if len(coll.Properties) == 0 {
+		return nil, nil
+	}
+	properties := make(map[string]string, len(coll.Properties))
+	for _, pair := range coll.Properties {
+		properties[pair.GetKey()] = pair.GetValue()
+	}
+	return properties, nil
 }
 
 func (mt *MetaTable) ListCollections(ctx context.Context, dbName string, ts Timestamp, onlyAvail bool) ([]*model.Collection, error) {

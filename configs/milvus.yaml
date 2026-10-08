@@ -507,6 +507,11 @@ queryCoord:
   # Enable only after the complete cluster supports synchronous load warmup.
   enableLoadCollectionSyncWarmup: false
   enableSQNServeSegments: true
+  autoRelease:
+    enabled: false # Effective only with proxy.enableAutoLoad=true. Disabling either switch clears activity; enabling both starts a new idle TTL at the next scan.
+    idleTTLSeconds: 600 # Supports runtime updates without resetting activity. Idle time before releasing a collection with load config, even if it is still loading or an earlier query is running.
+    checkIntervalSeconds: 30 # Supports runtime updates that reset the timer for scanning load configs and collection activity.
+    releaseConcurrency: 16 # Maximum concurrent automatic releases in one scan. Runtime updates apply to the next release batch.
   collectionBalanceSegmentBatchSize: 100
   queryNodeTaskParallelismFactor: 100
   taskMergeCap: 1
@@ -574,6 +579,7 @@ queryCoord:
   cleanExcludeSegmentInterval: 60 # the time duration of clean pipeline exclude segment which used for filter invalid data, in seconds
   queryView:
     fullReconsileInterval: 60 # Interval in seconds for periodic QueryView full reconciliation. Set to 0 to disable it.
+    targetRowsPerShardNode: 100000 # Target number of sealed rows per QueryNode used to derive the free fanout budget for each QueryView shard. Changes take effect on the next reconciliation.
   ip:  # TCP/IP address of queryCoord. If not specified, use the first unicastable address
   port: 19531 # TCP port of queryCoord
   grpc:
@@ -764,6 +770,9 @@ indexNode:
 
 dataCoord:
   taskCheckInterval: 1
+  statsInspector:
+    discoveryMode: poll # poll: legacy discovery; shadow: read-only event checks; event: event-driven discovery. Restart required.
+    reconcileInterval: 600 # Seconds. Startup and lost-notification reconciliation use the same budget.
   channel:
     watchTimeoutInterval: 300 # Timeout on watching channels (in seconds). Datanode tickler update watch progress will reset timeout timer.
     legacyVersionWithoutRPCWatch: 2.4.1 # Datanodes <= this version are considered as legacy nodes, which doesn't have rpc based watch(). This is only used during rolling upgrade where legacy nodes won't get new channels

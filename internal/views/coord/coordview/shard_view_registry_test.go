@@ -97,6 +97,8 @@ func TestRegistry_RemovesManagerAfterLastViewDropped(t *testing.T) {
 	require.NoError(t, mgr.AddPreparing(context.Background(), builder))
 	require.True(t, reg.HasUndrainedViews(100))
 	require.NoError(t, reg.flushScheduler.Flush(context.Background()))
+	scopedBeforeDrop := reg.SnapshotForCollection(100)
+	require.Contains(t, scopedBeforeDrop.StatsMap(), shardID)
 	require.NoError(t, mgr.RequestRelease(context.Background()))
 	require.NoError(t, reg.flushScheduler.Flush(context.Background()))
 	require.True(t, reg.HasUndrainedViews(100), "Dropping is not a durable release barrier")
@@ -118,9 +120,12 @@ func TestRegistry_RemovesManagerAfterLastViewDropped(t *testing.T) {
 	assert.Nil(t, reg.Get(shardID))
 	assert.False(t, reg.HasUndrainedViews(100))
 	assert.Empty(t, reg.CollectionShards(100))
+	assert.Empty(t, reg.SnapshotForCollection(100).StatsMap())
+	assert.Contains(t, scopedBeforeDrop.StatsMap(), shardID)
 	assert.Empty(t, reg.ShardIDs())
 	assert.NotContains(t, reg.Snapshot().StatsMap(), shardID)
 	assert.NotSame(t, mgr, reg.Ensure(shardID))
+	assert.Contains(t, reg.SnapshotForCollection(100).StatsMap(), shardID)
 }
 
 func TestRegistry_RecoverWithPersistedViews(t *testing.T) {

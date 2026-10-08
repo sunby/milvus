@@ -549,6 +549,11 @@ func (s *mixCoordImpl) HasCollection(ctx context.Context, req *milvuspb.HasColle
 	return s.rootcoordServer.HasCollection(ctx, req)
 }
 
+// IsCollectionAvailable is an in-process, positive-only GC fast path.
+func (s *mixCoordImpl) IsCollectionAvailable(collectionID int64) bool {
+	return s.rootcoordServer.IsCollectionAvailable(collectionID)
+}
+
 func (s *mixCoordImpl) DescribeCollection(ctx context.Context, req *milvuspb.DescribeCollectionRequest) (*milvuspb.DescribeCollectionResponse, error) {
 	return s.rootcoordServer.DescribeCollection(ctx, req)
 }
@@ -1050,6 +1055,10 @@ func (s *mixCoordImpl) DeactivateChecker(ctx context.Context, req *querypb.Deact
 
 func (s *mixCoordImpl) ListCheckers(ctx context.Context, req *querypb.ListCheckersRequest) (*querypb.ListCheckersResponse, error) {
 	return s.queryCoordServer.ListCheckers(ctx, req)
+}
+
+func (s *mixCoordImpl) WaitCollectionReady(ctx context.Context, req *querypb.WaitCollectionReadyRequest) (*commonpb.Status, error) {
+	return s.queryCoordServer.WaitCollectionReady(ctx, req)
 }
 
 func (s *mixCoordImpl) ShowLoadCollections(ctx context.Context, req *querypb.ShowCollectionsRequest) (*querypb.ShowCollectionsResponse, error) {

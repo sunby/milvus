@@ -102,6 +102,7 @@ type meta struct {
 	segments                  *CachedSegmentsInfo // segment id to segment info
 	dataViewManager           DataViewManager
 	queryViewLoadInfoNotifier QueryViewLoadInfoNotifier
+	statsDiscovery            atomic.Pointer[statsReconcileQueue]
 
 	channelCPs   *channelCPs // vChannel -> channel checkpoint/see position
 	chunkManager storage.ChunkManager
@@ -744,7 +745,11 @@ func (m *meta) addCollectionToCache(collection *collectionInfo) {
 // Note that collection info is just for caching and will not be set into etcd from datacoord
 func (m *meta) AddCollection(collection *collectionInfo) {
 	mlog.Info(context.TODO(), "meta update: add collection", zap.Int64("collectionID", collection.ID))
+	old := m.GetCollection(collection.ID)
 	m.addCollectionToCache(collection)
+	if q := m.statsDiscovery.Load(); q != nil && (old == nil || !proto.Equal(old.Schema, collection.Schema)) {
+		q.requestScan(collection.ID, true)
+	}
 	metrics.DataCoordNumCollections.WithLabelValues().Set(float64(m.collections.Len()))
 	mlog.Info(context.TODO(), "meta update: add collection - complete", zap.Int64("collectionID", collection.ID))
 }
@@ -753,6 +758,9 @@ func (m *meta) AddCollection(collection *collectionInfo) {
 func (m *meta) DropCollection(collectionID int64) {
 	mlog.Info(context.TODO(), "meta update: drop collection", zap.Int64("collectionID", collectionID))
 	if _, ok := m.collections.GetAndRemove(collectionID); ok {
+		if q := m.statsDiscovery.Load(); q != nil {
+			q.requestScan(collectionID, true)
+		}
 		metrics.CleanupDataCoordWithCollectionID(collectionID)
 		metrics.DataCoordNumCollections.WithLabelValues().Set(float64(m.collections.Len()))
 		mlog.Info(context.TODO(), "meta update: drop collection - complete", zap.Int64("collectionID", collectionID))
@@ -866,9 +874,13 @@ func (m *meta) GetQuotaInfo() *metricsinfo.DataCoordQuotaMetrics {
 
 	segments := m.segments.GetSegments()
 	var total int64
-	storedBinlogSize := make(map[string]map[string]int64) // map[collectionID]map[segment_state]size
-	binlogFileCount := make(map[string]int64)             // map[collectionID]count
+	// In aggregate mode these are keyed directly by database / all, rather
+	// than building and discarding collection-level display metrics first.
+	storedBinlogSize := make(map[string]map[string]int64)
+	binlogFileCount := make(map[string]int64)
 	coll2DbName := make(map[string]string)
+	storedRowsByDB := make(map[string]map[commonpb.SegmentState]int64)
+	l0DeleteEntriesByDB := make(map[string]int64)
 
 	for _, segment := range segments {
 		segmentSize := segment.getSegmentSize()
@@ -885,22 +897,34 @@ func (m *meta) GetQuotaInfo() *metricsinfo.DataCoordQuotaMetrics {
 
 			coll, ok := m.collections.Get(segment.GetCollectionID())
 			if ok {
-				collIDStr := strconv.FormatInt(segment.GetCollectionID(), 10)
-				coll2DbName[collIDStr] = coll.DatabaseName
-				if _, ok := storedBinlogSize[collIDStr]; !ok {
-					storedBinlogSize[collIDStr] = make(map[string]int64)
+				metricKey, fileCountKey := coll.DatabaseName, metrics.AllLabel
+				if !aggregateCollectionMetrics {
+					metricKey = strconv.FormatInt(segment.GetCollectionID(), 10)
+					fileCountKey = metricKey
+					coll2DbName[metricKey] = coll.DatabaseName
 				}
-
-				storedBinlogSize[collIDStr][segment.GetState().String()] += segmentSize
-				binlogFileCount[collIDStr] += int64(getBinlogFileCount(segment.SegmentInfo))
-				// } else {
-				// log.Ctx(context.TODO()).Warn("not found database name", zap.Int64("collectionID", segment.GetCollectionID()))
+				if _, ok := storedBinlogSize[metricKey]; !ok {
+					storedBinlogSize[metricKey] = make(map[string]int64)
+				}
+				storedBinlogSize[metricKey][segment.GetState().String()] += segmentSize
+				binlogFileCount[fileCountKey] += int64(getBinlogFileCount(segment.SegmentInfo))
+				if aggregateCollectionMetrics {
+					if _, ok := storedRowsByDB[coll.DatabaseName]; !ok {
+						storedRowsByDB[coll.DatabaseName] = make(map[commonpb.SegmentState]int64)
+					}
+					storedRowsByDB[coll.DatabaseName][segment.GetState()] += segment.GetNumOfRows()
+					if segment.GetLevel() == datapb.SegmentLevel_L0 {
+						l0DeleteEntriesByDB[coll.DatabaseName] += segment.getDeltaCount()
+					}
+				}
 			}
 
-			if _, ok := collectionRowsNum[segment.GetCollectionID()]; !ok {
-				collectionRowsNum[segment.GetCollectionID()] = make(map[commonpb.SegmentState]int64)
+			if !aggregateCollectionMetrics {
+				if _, ok := collectionRowsNum[segment.GetCollectionID()]; !ok {
+					collectionRowsNum[segment.GetCollectionID()] = make(map[commonpb.SegmentState]int64)
+				}
+				collectionRowsNum[segment.GetCollectionID()][segment.GetState()] += segment.GetNumOfRows()
 			}
-			collectionRowsNum[segment.GetCollectionID()][segment.GetState()] += segment.GetNumOfRows()
 
 			if segment.GetLevel() == datapb.SegmentLevel_L0 {
 				collectionL0RowCounts[segment.GetCollectionID()] += segment.getDeltaCount()
@@ -911,17 +935,7 @@ func (m *meta) GetQuotaInfo() *metricsinfo.DataCoordQuotaMetrics {
 	// Reset to remove dropped collection
 	metrics.DataCoordStoredBinlogSize.Reset()
 	if aggregateCollectionMetrics {
-		storedBinlogSizeByDB := make(map[string]map[string]int64)
-		for collectionID, state2Size := range storedBinlogSize {
-			dbName := coll2DbName[collectionID]
-			if _, ok := storedBinlogSizeByDB[dbName]; !ok {
-				storedBinlogSizeByDB[dbName] = make(map[string]int64)
-			}
-			for state, size := range state2Size {
-				storedBinlogSizeByDB[dbName][state] += size
-			}
-		}
-		for dbName, state2Size := range storedBinlogSizeByDB {
+		for dbName, state2Size := range storedBinlogSize {
 			for state, size := range state2Size {
 				metrics.DataCoordStoredBinlogSize.WithLabelValues(dbName, metrics.AllLabel, state).Set(float64(size))
 			}
@@ -936,11 +950,7 @@ func (m *meta) GetQuotaInfo() *metricsinfo.DataCoordQuotaMetrics {
 	// Reset to remove dropped collection
 	metrics.DataCoordSegmentBinLogFileCount.Reset()
 	if aggregateCollectionMetrics {
-		var totalBinlogFileCount int64
-		for _, size := range binlogFileCount {
-			totalBinlogFileCount += size
-		}
-		metrics.DataCoordSegmentBinLogFileCount.WithLabelValues(metrics.AllLabel).Set(float64(totalBinlogFileCount))
+		metrics.DataCoordSegmentBinLogFileCount.WithLabelValues(metrics.AllLabel).Set(float64(binlogFileCount[metrics.AllLabel]))
 	} else {
 		for collectionID, size := range binlogFileCount {
 			metrics.DataCoordSegmentBinLogFileCount.WithLabelValues(collectionID).Set(float64(size))
@@ -949,19 +959,6 @@ func (m *meta) GetQuotaInfo() *metricsinfo.DataCoordQuotaMetrics {
 
 	metrics.DataCoordNumStoredRows.Reset()
 	if aggregateCollectionMetrics {
-		storedRowsByDB := make(map[string]map[commonpb.SegmentState]int64)
-		for collectionID, statesRows := range collectionRowsNum {
-			coll, ok := m.collections.Get(collectionID)
-			if !ok {
-				continue
-			}
-			if _, ok := storedRowsByDB[coll.DatabaseName]; !ok {
-				storedRowsByDB[coll.DatabaseName] = make(map[commonpb.SegmentState]int64)
-			}
-			for state, rows := range statesRows {
-				storedRowsByDB[coll.DatabaseName][state] += rows
-			}
-		}
 		for dbName, statesRows := range storedRowsByDB {
 			for state, rows := range statesRows {
 				metrics.DataCoordNumStoredRows.WithLabelValues(
@@ -981,13 +978,6 @@ func (m *meta) GetQuotaInfo() *metricsinfo.DataCoordQuotaMetrics {
 
 	metrics.DataCoordL0DeleteEntriesNum.Reset()
 	if aggregateCollectionMetrics {
-		l0DeleteEntriesByDB := make(map[string]int64)
-		for collectionID, entriesNum := range collectionL0RowCounts {
-			coll, ok := m.collections.Get(collectionID)
-			if ok {
-				l0DeleteEntriesByDB[coll.DatabaseName] += entriesNum
-			}
-		}
 		for dbName, entriesNum := range l0DeleteEntriesByDB {
 			metrics.DataCoordL0DeleteEntriesNum.WithLabelValues(dbName, metrics.AllLabel).Set(float64(entriesNum))
 		}
@@ -1040,6 +1030,7 @@ func (m *meta) AddSegment(ctx context.Context, segment *SegmentInfo) error {
 		return err
 	}
 	m.segments.SetSegment(segment.GetID(), segment, results[0].Version)
+	m.notifyStatsChange(nil, segment)
 
 	metrics.DataCoordNumSegments.WithLabelValues(segmentMetricLabelValues(segment)...).Inc()
 	logger.Info(ctx, "meta update: adding segment - complete", zap.Int64("segmentID", segment.GetID()))
@@ -1059,6 +1050,7 @@ func (m *meta) DropSegment(ctx context.Context, segment *SegmentInfo) error {
 		if errors.Is(err, ErrKeyNotFound) {
 			logger.Info(ctx, "meta update: dropping segment - already deleted", zap.Int64("segmentID", segmentID))
 			m.segments.DropSegment(segmentID, math.MaxInt64)
+			m.notifyStatsChange(segment, nil)
 			return nil
 		}
 		logger.Warn(ctx, "meta update: dropping segment failed",
@@ -1069,6 +1061,7 @@ func (m *meta) DropSegment(ctx context.Context, segment *SegmentInfo) error {
 	metrics.DataCoordNumSegments.WithLabelValues(segmentMetricLabelValues(segment)...).Dec()
 
 	m.segments.DropSegment(segmentID, results[0].Version)
+	m.notifyStatsChange(segment, nil)
 	logger.Info(ctx, "meta update: dropping segment - complete",
 		zap.Int64("segmentID", segmentID))
 	return nil
@@ -1138,6 +1131,7 @@ func (m *meta) DropSegments(ctx context.Context, candidates []*SegmentInfo) (int
 				if singleErr != nil {
 					if errors.Is(singleErr, ErrKeyNotFound) {
 						m.segments.DropSegment(segment.GetID(), math.MaxInt64)
+						m.notifyStatsChange(segment, nil)
 						removed++
 						continue
 					}
@@ -1152,6 +1146,7 @@ func (m *meta) DropSegments(ctx context.Context, candidates []*SegmentInfo) (int
 				}
 				metrics.DataCoordNumSegments.WithLabelValues(segmentMetricLabelValues(segment)...).Dec()
 				m.segments.DropSegment(segment.GetID(), singleResults[0].Version)
+				m.notifyStatsChange(segment, nil)
 				removed++
 			}
 			return removed, deleteErr
@@ -1167,6 +1162,7 @@ func (m *meta) DropSegments(ctx context.Context, candidates []*SegmentInfo) (int
 	for i, segment := range segments {
 		metrics.DataCoordNumSegments.WithLabelValues(segmentMetricLabelValues(segment)...).Dec()
 		m.segments.DropSegment(segment.GetID(), results[i].Version)
+		m.notifyStatsChange(segment, nil)
 	}
 	return len(segments), nil
 }
@@ -1277,6 +1273,7 @@ func (m *meta) SetState(ctx context.Context, segmentID UniqueID, targetState com
 	}
 	updatedSeg := NewSegmentInfo(results[0].Value)
 	old, existed := m.segments.SetSegment(segmentID, updatedSeg, results[0].Version)
+	m.notifyStatsChange(old, updatedSeg)
 	if existed && old.GetState() != updatedSeg.GetState() {
 		metricMutation := segMetricMutation{stateChange: make(segmentMetricStateChange)}
 		metricMutation.appendSegmentLabelChange(old, updatedSeg)
@@ -1318,7 +1315,9 @@ func (m *meta) UpdateSegment(segmentID int64, operators ...SegmentOperator) erro
 		return err
 	}
 	// Update in-memory meta.
-	m.segments.SetSegment(segmentID, NewSegmentInfo(results[0].Value), results[0].Version)
+	updated := NewSegmentInfo(results[0].Value)
+	old, _ := m.segments.SetSegment(segmentID, updated, results[0].Version)
+	m.notifyStatsChange(old, updated)
 
 	logger.Info(context.TODO(), "meta update: update segment - complete",
 		zap.Int64("segmentID", segmentID))
@@ -1692,7 +1691,8 @@ func (m *meta) UpdateSegmentsInfo(ctx context.Context, mutations map[int64][]Mut
 	type entry struct {
 		segID    int64
 		isInsert bool
-		newSeg   *SegmentInfo // only for inserts
+		newSeg   *SegmentInfo // published insert/update value
+		oldSeg   *SegmentInfo
 	}
 	var entries []entry
 
@@ -1764,6 +1764,8 @@ func (m *meta) UpdateSegmentsInfo(ctx context.Context, mutations map[int64][]Mut
 		} else {
 			newSeg := NewSegmentInfo(results[i].Value)
 			oldSeg, existed := m.segments.SetSegment(e.segID, newSeg, results[i].Version)
+			entries[i].oldSeg = oldSeg
+			entries[i].newSeg = newSeg
 			if existed && !sameSegmentMetricLabels(oldSeg, newSeg) {
 				metricMutation.appendSegmentLabelChange(oldSeg, newSeg)
 			}
@@ -1771,6 +1773,10 @@ func (m *meta) UpdateSegmentsInfo(ctx context.Context, mutations map[int64][]Mut
 	}
 	metricMutation.commit()
 	cacheDur := time.Since(cacheStart)
+	// Publish hints only once the whole committed batch is visible in cache.
+	for _, e := range entries {
+		m.notifyStatsChange(e.oldSeg, e.newSeg)
+	}
 
 	totalDur := time.Since(start)
 	if totalDur > 40*time.Millisecond {
@@ -1929,6 +1935,10 @@ func (m *meta) UpdateDropChannelSegmentInfo(ctx context.Context, channel string,
 	}
 	metricMutation.commit()
 
+	// All cache entries in this transaction have been published.
+	for _, result := range results {
+		m.notifyStatsSegments(result.Value.GetCollectionID(), result.Value.GetID())
+	}
 	logger.Info(ctx, "meta update: update drop channel segment info - complete",
 		zap.String("channel", channel))
 	return nil
@@ -2019,7 +2029,6 @@ func (m *meta) GetFlushingSegments() []*SegmentInfo {
 
 // SelectSegments select segments with selector
 func (m *meta) SelectSegments(ctx context.Context, filters ...SegmentFilter) []*SegmentInfo {
-
 	return m.segments.GetSegmentsBySelector(filters...)
 }
 
@@ -2049,7 +2058,6 @@ func (m *meta) GetCollectionIDsByPartition(ctx context.Context, partitionIDs []i
 }
 
 func (m *meta) GetRealSegmentsForChannel(channel string) []*SegmentInfo {
-
 	return m.segments.GetRealSegmentsForChannel(channel)
 }
 
@@ -2073,14 +2081,12 @@ func (m *meta) AddAllocation(segmentID UniqueID, allocation *Allocation) error {
 }
 
 func (m *meta) SetRowCount(segmentID UniqueID, rowCount int64) {
-
 	m.segments.SetRowCount(segmentID, rowCount)
 }
 
 // SetAllocations set Segment allocations, will overwrite ALL original allocations
 // Note that allocations is not persisted in KV store
 func (m *meta) SetAllocations(segmentID UniqueID, allocations []*Allocation) {
-
 	m.segments.SetAllocations(segmentID, allocations)
 }
 
@@ -2093,26 +2099,22 @@ func (m *meta) SetLastExpire(segmentID UniqueID, lastExpire uint64) {
 // SetLastFlushTime set LastFlushTime for segment with provided `segmentID`
 // Note that lastFlushTime is not persisted in KV store
 func (m *meta) SetLastFlushTime(segmentID UniqueID, t time.Time) {
-
 	m.segments.SetFlushTime(segmentID, t)
 }
 
 // SetLastWrittenTime set LastWrittenTime for segment with provided `segmentID`
 // Note that lastWrittenTime is not persisted in KV store
 func (m *meta) SetLastWrittenTime(segmentID UniqueID) {
-
 	m.segments.SetLastWrittenTime(segmentID)
 }
 
 // SetSegmentCompacting sets compaction state for segment
 func (m *meta) SetSegmentCompacting(segmentID UniqueID, compacting bool) {
-
 	m.segments.SetIsCompacting(segmentID, compacting)
 }
 
 // IsSegmentCompacting check if segment is compacting
 func (m *meta) IsSegmentCompacting(segmentID UniqueID) bool {
-
 	seg := m.segments.GetSegment(segmentID)
 	if seg == nil {
 		return false
@@ -2124,7 +2126,6 @@ func (m *meta) IsSegmentCompacting(segmentID UniqueID) bool {
 // if true, set them compacting and return true
 // if false, skip setting and
 func (m *meta) CheckAndSetSegmentsCompacting(ctx context.Context, segmentIDs []UniqueID) (exist, canDo bool) {
-
 	var hasCompacting bool
 	exist = true
 	for _, segmentID := range segmentIDs {
@@ -2148,7 +2149,6 @@ func (m *meta) CheckAndSetSegmentsCompacting(ctx context.Context, segmentIDs []U
 }
 
 func (m *meta) SetSegmentsCompacting(ctx context.Context, segmentIDs []UniqueID, compacting bool) {
-
 	for _, segmentID := range segmentIDs {
 		m.segments.SetIsCompacting(segmentID, compacting)
 	}
@@ -2470,7 +2470,6 @@ func (m *meta) completeMixCompactionMutation(
 }
 
 func (m *meta) ValidateSegmentStateBeforeCompleteCompactionMutation(t *datapb.CompactionTask) error {
-
 	if t.GetType() != datapb.CompactionType_Level0DeleteCompaction {
 		if m.isCollectionCompactionBlocked(t.GetCollectionID()) {
 			mlog.Info(context.TODO(), "compaction rejected: collection has pending snapshot or unloaded RefIndex",
@@ -2541,6 +2540,10 @@ func (m *meta) CompleteCompactionMutation(ctx context.Context, t *datapb.Compact
 	m.publishDataViewAfterCompaction(ctx, t, lo.Map(newSegments, func(segment *SegmentInfo, _ int) int64 {
 		return segment.GetID()
 	}))
+	m.notifyStatsSegments(t.GetCollectionID(), t.GetInputSegments()...)
+	for _, segment := range newSegments {
+		m.notifyStatsSegments(segment.GetCollectionID(), segment.GetID())
+	}
 	return newSegments, metricMutation, nil
 }
 
@@ -2583,7 +2586,6 @@ func isSegmentHealthy(segment *SegmentInfo) bool {
 }
 
 func (m *meta) HasSegments(segIDs []UniqueID) (bool, error) {
-
 	for _, segID := range segIDs {
 		if m.segments.GetSegment(segID) == nil {
 			return false, fmt.Errorf("segment is not exist with ID = %d", segID)
@@ -2594,7 +2596,6 @@ func (m *meta) HasSegments(segIDs []UniqueID) (bool, error) {
 
 // GetCompactionTo returns the segment info of the segment to be compacted to.
 func (m *meta) GetCompactionTo(segmentID int64) ([]*SegmentInfo, bool) {
-
 	return m.segments.GetCompactionTo(segmentID)
 }
 
@@ -3395,7 +3396,6 @@ func (m *meta) completeBumpSchemaVersionReplacementMutation(
 }
 
 func (m *meta) getSegmentsMetrics(collectionID int64) []*metricsinfo.Segment {
-
 	allSegments := m.segments.GetSegments()
 	segments := make([]*metricsinfo.Segment, 0, len(allSegments))
 	for _, s := range allSegments {
@@ -3421,7 +3421,6 @@ func (m *meta) getSegmentsMetrics(collectionID int64) []*metricsinfo.Segment {
 }
 
 func (m *meta) DropSegmentsOfPartition(ctx context.Context, partitionIDs []int64) error {
-
 	// Collect segments to drop (read-only from cache for key construction).
 	type segRef struct {
 		id  int64
@@ -3463,6 +3462,9 @@ func (m *meta) DropSegmentsOfPartition(ctx context.Context, partitionIDs []int64
 		}
 	}
 	metricMutation.commit()
+	for _, result := range results {
+		m.notifyStatsSegments(result.Value.GetCollectionID(), result.Value.GetID())
+	}
 	return nil
 }
 
@@ -3484,7 +3486,6 @@ func (m *meta) GetFileResources(ctx context.Context, resourceIDs ...int64) ([]*i
 
 // TruncateChannelByTime drops segments of a channel that were updated before the flush timestamp
 func (m *meta) TruncateChannelByTime(ctx context.Context, vChannel string, flushTs uint64) error {
-
 	segments := m.segments.GetSegmentsBySelector(SegmentFilterFunc(isSegmentHealthy), WithChannel(vChannel))
 
 	// Collect segments to drop (read-only from cache for key construction and filtering).
@@ -3533,6 +3534,9 @@ func (m *meta) TruncateChannelByTime(ctx context.Context, vChannel string, flush
 		}
 	}
 	metricMutation.commit()
+	for _, result := range results {
+		m.notifyStatsSegments(result.Value.GetCollectionID(), result.Value.GetID())
+	}
 
 	return nil
 }

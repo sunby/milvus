@@ -240,5 +240,6 @@ func Register(r prometheus.Registerer) {
 	r.MustRegister(ThreadNum)
 	r.MustRegister(ThreadCPUActiveNumByPool)
 	registerNodeScheduler(r)
+	registerQueryStages(r)
 	metricRegisterer = r
 }

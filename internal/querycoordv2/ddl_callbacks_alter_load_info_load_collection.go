@@ -68,7 +68,7 @@ func (s *Server) broadcastAlterLoadConfigCollectionV2ForLoadCollection(ctx conte
 		return err
 	}
 
-	currentLoadConfig := s.qviewsRuntime.loadConfigStore.Snapshot().ConfigsMap()[req.GetCollectionID()]
+	currentLoadConfig := s.qviewsRuntime.loadConfigStore.Get(req.GetCollectionID()).Config
 	syncWarmup, epoch, err := resolveLoadCollectionSyncWarmup(req.GetCollectionID(), req.GetSyncWarmup(), currentLoadConfig)
 	if err != nil {
 		return err

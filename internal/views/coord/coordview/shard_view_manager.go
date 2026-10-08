@@ -9,6 +9,7 @@ import (
 	"github.com/milvus-io/milvus/internal/views/qviews"
 	qvobserve "github.com/milvus-io/milvus/internal/views/qviews/observe"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 // ShardViewManager manages multiple QueryViews for a single shard (vchannel)
@@ -24,12 +25,13 @@ import (
 //
 // Thread-safety: All methods are thread-safe.
 type ShardViewManager struct {
-	ctx            context.Context // lifecycle context used by callbacks and event observation
-	mu             sync.Mutex
-	shardID        qviews.ShardID
-	eventSubmitter dirtyViewEventSubmitter
-	observe        func(qviews.ShardID, *ShardStats)
-	onEmpty        func(qviews.ShardID, *ShardViewManager)
+	ctx             context.Context // lifecycle context used by callbacks and event observation
+	mu              sync.Mutex
+	shardID         qviews.ShardID
+	eventSubmitter  dirtyViewEventSubmitter
+	observe         func(qviews.ShardID, *ShardStats)
+	onEmpty         func(qviews.ShardID, *ShardViewManager)
+	onUnrecoverable func(qviews.ShardID)
 
 	// All active views keyed by version for O(1) lookup.
 	views map[qviews.QueryViewVersion]*CoordQueryViewStateMachine
@@ -56,6 +58,14 @@ type syncEntry struct {
 	sm    *CoordQueryViewStateMachine
 	views []qviews.QueryViewAtWorkNode
 }
+
+var (
+	prepareDuration      = stage.New("coord", "apply", "prepare")
+	preparePin           = stage.New("coord", "apply", "pin_dataview")
+	prepareLock          = stage.New("coord", "apply", "shard_lock_wait")
+	publishStatsDuration = stage.New("coord", "apply", "publish_stats")
+	reportDuration       = stage.New("coord", "sync", "apply_report")
+)
 
 // newShardViewManager creates a new ShardViewManager for the given shard.
 //
@@ -191,6 +201,12 @@ func (m *ShardViewManager) setOnEmpty(callback func(qviews.ShardID, *ShardViewMa
 	m.onEmpty = callback
 }
 
+func (m *ShardViewManager) setOnUnrecoverable(callback func(qviews.ShardID)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onUnrecoverable = callback
+}
+
 // Stats returns an atomic snapshot of this shard's current placement state.
 //
 // The returned snapshot includes placements from the Up view, any in-flight
@@ -312,13 +328,19 @@ func segmentSet(segments []int64) map[int64]bool {
 // (injected with synthetic Unrecoverable → Dropping).
 //
 // Validation: The new DataVersion must not be lower than any existing view's DataVersion.
-func (m *ShardViewManager) AddPreparing(ctx context.Context, builder *qviews.QueryViewAtCoordBuilder) error {
+func (m *ShardViewManager) AddPreparing(ctx context.Context, builder *qviews.QueryViewAtCoordBuilder) (retErr error) {
+	timer := prepareDuration.Begin()
+	defer timer.EndError(&retErr)
+	lockTimer := prepareLock.Begin()
 	m.mu.Lock()
+	lockTimer.End(nil)
+	holdTimer := prepareHold.Begin()
 
 	newDV := builder.DataVersion()
 
 	// Validate no DataVersion rollback.
 	if err := m.validateDataVersionLocked(newDV); err != nil {
+		holdTimer.End(nil)
 		m.mu.Unlock()
 		return err
 	}
@@ -329,7 +351,11 @@ func (m *ShardViewManager) AddPreparing(ctx context.Context, builder *qviews.Que
 	builder.SetQueryVersion(qv)
 	view := builder.Build()
 	sm := NewCoordQueryViewStateMachine(view)
-	if err := m.dataViewReferences.PinDataView(ctx, view.GetMeta().GetCollectionId(), newDV); err != nil {
+	pinTimer := preparePin.Begin()
+	pinErr := m.dataViewReferences.PinDataView(ctx, view.GetMeta().GetCollectionId(), newDV)
+	pinTimer.End(pinErr)
+	if err := pinErr; err != nil {
+		holdTimer.End(nil)
 		m.mu.Unlock()
 		return err
 	}
@@ -371,6 +397,7 @@ func (m *ShardViewManager) AddPreparing(ctx context.Context, builder *qviews.Que
 	// Move all accumulated effects into one shard-scoped event.
 	event := m.consumeDirtyEventLocked()
 	m.publishStatsLocked()
+	holdTimer.End(nil)
 	m.mu.Unlock()
 	m.submitDirtyEvent(event)
 	return nil
@@ -383,7 +410,9 @@ func (m *ShardViewManager) AddPreparing(ctx context.Context, builder *qviews.Que
 // - Down/Dropping views: already tearing down, no-op.
 //
 // The actual cleanup completes asynchronously through callbacks.
-func (m *ShardViewManager) RequestRelease(ctx context.Context) error {
+func (m *ShardViewManager) RequestRelease(ctx context.Context) (retErr error) {
+	timer := releaseDuration.Begin()
+	defer timer.EndError(&retErr)
 	m.mu.Lock()
 
 	if m.preparingView != nil {
@@ -582,6 +611,8 @@ func (m *ShardViewManager) consumeDirtyEventLocked() dirtyViewEvent {
 // Returns true when this node has completed the sync represented by target.
 func (m *ShardViewManager) makeOnSyncResponse(version qviews.QueryViewVersion, target qviews.QueryViewAtWorkNode) func(resp qviews.QueryViewAtWorkNode) bool {
 	return func(resp qviews.QueryViewAtWorkNode) bool {
+		timer := reportDuration.Begin()
+		defer timer.End(nil)
 		m.mu.Lock()
 
 		sm, ok := m.views[version]
@@ -608,6 +639,7 @@ func (m *ShardViewManager) makeOnSyncResponse(version qviews.QueryViewVersion, t
 		})
 		m.processStateMachine(sm)
 		event := m.consumeDirtyEventLocked()
+		m.notifyUnrecoverableAfterPersist(&event, before, sm.State())
 		m.publishStatsLocked()
 
 		_, exists := m.views[version]
@@ -664,9 +696,25 @@ func (m *ShardViewManager) makeOnQueryNodeLost(version qviews.QueryViewVersion) 
 		})
 		m.processStateMachine(sm)
 		event := m.consumeDirtyEventLocked()
+		m.notifyUnrecoverableAfterPersist(&event, before, sm.State())
 		m.publishStatsLocked()
 		m.mu.Unlock()
 		m.submitDirtyEvent(event)
+	}
+}
+
+// notifyUnrecoverableAfterPersist is called under m.mu for node reports and
+// node loss, never for synthetic failures during preemption or release. The
+// flush callback runs without m.mu after persistence, so reconciliation
+// triggered by this notification cannot overtake its persistence batch.
+func (m *ShardViewManager) notifyUnrecoverableAfterPersist(event *dirtyViewEvent, before, after qviews.QueryViewState) {
+	if after != qviews.QueryViewStateUnrecoverable || m.onUnrecoverable == nil {
+		return
+	}
+	switch before {
+	case qviews.QueryViewStatePreparing, qviews.QueryViewStateReady, qviews.QueryViewStateUp:
+		notify := m.onUnrecoverable
+		event.afterPersist = append(event.afterPersist, func() { notify(m.shardID) })
 	}
 }
 
@@ -714,6 +762,8 @@ func queryViewSegmentProgress(sm *CoordQueryViewStateMachine) (int, int) {
 }
 
 func (m *ShardViewManager) publishStatsLocked() {
+	timer := publishStatsDuration.Begin()
+	defer timer.End(nil)
 	if m.observe != nil {
 		m.observe(m.shardID, m.statsLocked())
 	}
@@ -817,3 +867,8 @@ func (m *ShardViewManager) nextQueryVersion(newDV qviews.DataVersion) int64 {
 	}
 	return maxQV + 1
 }
+
+var (
+	prepareHold     = stage.New("coord", "apply", "shard_lock_hold")
+	releaseDuration = stage.New("coord", "apply", "release")
+)

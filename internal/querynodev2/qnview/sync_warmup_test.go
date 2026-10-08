@@ -58,6 +58,26 @@ func TestSyncWarmupRequirementValidation(t *testing.T) {
 	require.Error(t, validateSyncWarmupRequirement(&viewpb.QueryViewMeta{SyncWarmupEpoch: 42}))
 }
 
+func TestSyncWarmupInvalidRequirementDefersFailureUntilContinuation(t *testing.T) {
+	scheduler := nodescheduler.New(1)
+	t.Cleanup(scheduler.Close)
+	manager := NewViewScopedPhysicalSegmentManagerWithNodeScheduler(scheduler, &fakePhysicalLoader{})
+	failed := make(chan struct{})
+	start := manager.AcquireReferences(AcquirePhysicalSegments{
+		Meta:            &viewpb.QueryViewMeta{SyncWarmup: true},
+		OnUnrecoverable: func() { close(failed) },
+	})
+	select {
+	case <-failed:
+		t.Fatal("failure callback ran before the acquire continuation")
+	default:
+	}
+	require.Empty(t, manager.views)
+	require.Empty(t, manager.segments)
+	start()
+	awaitCleanupEvent(t, failed)
+}
+
 func TestSyncWarmupLateLoadCannotReplaceNewAttempt(t *testing.T) {
 	old := &physicalSegmentState{loading: true, loadEpoch: 1}
 	current := &physicalSegmentState{loading: true, loadEpoch: 1}
@@ -140,7 +160,9 @@ func TestSyncWarmupWaitsForOldQueryReferencesBeforeActivating(t *testing.T) {
 	require.True(t, ok)
 	require.Empty(t, old.refs, "new view must not pin the incompatible old lifecycle")
 	guard := &fakeCollectionRuntimeGuard{collectionID: testCollectionID}
-	activation, err := m.activateAcquire(req, ref, guard)
+	m.mu.Lock()
+	activation, err := m.activateAcquireLocked(req, ref, guard)
+	m.mu.Unlock()
 	require.NoError(t, err)
 	require.True(t, activation.current)
 	require.True(t, activation.blocked)
@@ -149,16 +171,18 @@ func TestSyncWarmupWaitsForOldQueryReferencesBeforeActivating(t *testing.T) {
 	require.ErrorIs(t, m.continueAcquire(req, ref, queryView, context.Background(), func() {}), nodescheduler.ErrDelay)
 	m.releaseSealedSegmentHandle(1000)
 	require.NotContains(t, m.segments, int64(1000))
-	activation, err = m.activateAcquire(req, ref, guard)
+	m.mu.Lock()
+	activation, err = m.activateAcquireLocked(req, ref, guard)
+	m.mu.Unlock()
 	require.NoError(t, err)
 	require.True(t, activation.current)
 	require.False(t, activation.blocked)
 	require.Empty(t, activation.readyNow)
 	require.Equal(t, []int64{1000}, activation.physicalRefSegments)
 	require.EqualValues(t, 42, m.segments[1000].warmupEpoch)
-	kept, schedule := m.markPhysicalLoaded(&fakeTransformSegment{id: 1000})
+	kept, schedule := m.markPhysicalLoaded(&fakeTransformSegment{id: 1000}, m.segments[1000])
 	require.False(t, kept, "late ordinary load cannot install into the new state")
-	require.False(t, schedule)
+	require.Nil(t, schedule)
 }
 
 func TestSyncWarmupRejectsIncompatibleActiveViewOwnership(t *testing.T) {

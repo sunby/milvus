@@ -359,6 +359,7 @@ func TestHandlerClientAcquireTransformLogStreamUsesLocalWAL(t *testing.T) {
 	localWAL := mock_wal.NewMockWAL(t)
 	localWAL.EXPECT().Channel().Return(assignment.Channel).Maybe()
 	localWAL.EXPECT().TransformLog().Return(localManager)
+	handlerregistry.ResetRegisterLocalWALManager()
 	handlerregistry.RegisterLocalWALManager(handlerFakeWALManager{wal: localWAL})
 
 	service := mock_lazygrpc.NewMockService[streamingpb.StreamingNodeHandlerServiceClient](t)

@@ -344,6 +344,7 @@ func (s *DeleteRunnerSuite) TestInitSuccess() {
 		s.True(typeutil.NewSet[int64](100, 101).Contain(dr.partitionIDs[0]))
 		s.Equal([]string{"vchan1"}, dr.vChannels)
 		s.Equal([]string{"pchan1"}, dr.pChannels)
+		s.Nil(dr.req.Base, "initialization must not add a header before a task is produced")
 	})
 
 	s.Run("non_pk > 1, partition key", func() {

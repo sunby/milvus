@@ -10,6 +10,7 @@ import (
 	"github.com/milvus-io/milvus/internal/views/coord/loadmgr"
 	"github.com/milvus-io/milvus/internal/views/qviews"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
 
 // SnapshotBuilder assembles a BalancerSnapshot from the various sources:
@@ -109,10 +110,15 @@ func (b *SnapshotBuilder) ObserveShardStats(shardID qviews.ShardID, _ *coordview
 // refreshes the incremental row-count ledger, and returns the exact shard list
 // that BalancePolicy should plan in this cycle.
 func (b *SnapshotBuilder) build(ctx context.Context, pending triggerBatch) (*BalancerSnapshot, []qviews.ShardID) {
-	// 1. Capture load configs and resolve the preliminary trigger scope.
-	loadSnapshot := b.configStore.Snapshot()
-
-	scope := pending.resolveScope(loadSnapshot, b.viewRegistry)
+	// 1. Resolve the trigger scope before reading load configs.
+	scope := pending.resolveScope(b.viewRegistry)
+	var loadSnapshot *loadmgr.LoadConfigSnapshot
+	if scope.full {
+		loadSnapshot = b.configStore.Snapshot()
+		scope = fullReconcileScope(loadSnapshot, b.viewRegistry)
+	} else {
+		loadSnapshot = b.configStore.SnapshotForCollections(maps.Keys(scope.collectionIDs))
+	}
 
 	// 2. Read scoped DataViews and expand collection triggers into target shards.
 	dataViewSnapshot := b.dataViewProvider.DataViewSnapshotForCollections(ctx, scope.collectionIDs)
@@ -131,7 +137,7 @@ func (b *SnapshotBuilder) build(ctx context.Context, pending triggerBatch) (*Bal
 
 	// 4. Assemble the scoped snapshot consumed by BalancePolicy.
 	snap := &BalancerSnapshot{
-		Config:                b.config,
+		Config:                b.currentBalanceConfig(),
 		LoadConfigSnapshot:    loadSnapshot,
 		ShardViewSnapshot:     targetSnapshot,
 		DataViewSnapshot:      dataViewSnapshot,
@@ -150,6 +156,15 @@ func (b *SnapshotBuilder) build(ctx context.Context, pending triggerBatch) (*Bal
 	}
 
 	return snap, targetShards
+}
+
+func (b *SnapshotBuilder) currentBalanceConfig() *BalanceConfig {
+	if b == nil || b.config == nil {
+		return nil
+	}
+	config := *b.config
+	config.TargetRowsPerShardNode = paramtable.Get().QueryCoordCfg.QueryViewTargetRowsPerShardNode.GetAsInt64()
+	return &config
 }
 
 // takeRowCountDirtyShards atomically swaps the observer-owned dirty set. Marks

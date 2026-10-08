@@ -3,7 +3,6 @@ package transformlog
 import (
 	"context"
 	"io"
-	"sort"
 	"sync"
 
 	"github.com/cockroachdb/errors"
@@ -16,7 +15,8 @@ const defaultStreamCatchupWorkers = 4
 
 type streamLogProvider interface {
 	logForStream(vchannel string) *TransformLog
-	streamNotifyStateSince(seq uint64) (<-chan struct{}, uint64, []string)
+	watchStream(vchannel string, notifications *streamNotifications)
+	unwatchStream(vchannel string, notifications *streamNotifications)
 	validatePChannel(pchannel string) error
 }
 
@@ -26,10 +26,10 @@ type StreamManager struct {
 	logs           map[string]*TransformLog
 	catchupWorkers int
 
-	streamMu     sync.Mutex
-	streamNotify chan struct{}
-	streamSeq    uint64
-	streamSeqByV map[string]uint64
+	// Lock order: TransformLog.mu -> streamMu -> streamNotifications.mu.
+	// Stream dispatch must release notification locks before reading a log.
+	streamMu   sync.Mutex
+	streamsByV map[string]map[*streamNotifications]struct{}
 }
 
 // NewStreamManager creates a TransformLog stream manager for one pchannel.
@@ -45,8 +45,7 @@ func NewStreamManagerWithCatchupConcurrency(pchannel string, concurrency int) *S
 		pchannel:       pchannel,
 		logs:           make(map[string]*TransformLog),
 		catchupWorkers: concurrency,
-		streamNotify:   make(chan struct{}),
-		streamSeqByV:   make(map[string]uint64),
+		streamsByV:     make(map[string]map[*streamNotifications]struct{}),
 	}
 }
 
@@ -85,10 +84,38 @@ func (m *StreamManager) notify(vchannel string) {
 }
 
 func (m *StreamManager) notifyLocked(vchannel string) {
-	m.streamSeq++
-	m.streamSeqByV[vchannel] = m.streamSeq
-	close(m.streamNotify)
-	m.streamNotify = make(chan struct{})
+	// Keep the empty-vchannel broadcast semantics, but visit only live watches.
+	if vchannel == "" {
+		for watched, streams := range m.streamsByV {
+			for notifications := range streams {
+				notifications.notify(watched)
+			}
+		}
+		return
+	}
+	for notifications := range m.streamsByV[vchannel] {
+		notifications.notify(vchannel)
+	}
+}
+
+func (m *StreamManager) watchStream(vchannel string, notifications *streamNotifications) {
+	m.streamMu.Lock()
+	defer m.streamMu.Unlock()
+	if m.streamsByV[vchannel] == nil {
+		m.streamsByV[vchannel] = make(map[*streamNotifications]struct{})
+	}
+	m.streamsByV[vchannel][notifications] = struct{}{}
+}
+
+func (m *StreamManager) unwatchStream(vchannel string, notifications *streamNotifications) {
+	m.streamMu.Lock()
+	defer m.streamMu.Unlock()
+	streams := m.streamsByV[vchannel]
+	delete(streams, notifications)
+	if len(streams) == 0 {
+		delete(m.streamsByV, vchannel)
+	}
+	notifications.forget(vchannel)
 }
 
 func (m *StreamManager) logForStream(vchannel string) *TransformLog {
@@ -105,19 +132,6 @@ func (m *StreamManager) validatePChannel(pchannel string) error {
 		return errors.Wrapf(wal.ErrTransformLogInvalidReadOption, "pchannel mismatch, expected %s, got %s", m.pchannel, pchannel)
 	}
 	return nil
-}
-
-func (m *StreamManager) streamNotifyStateSince(seq uint64) (<-chan struct{}, uint64, []string) {
-	m.streamMu.Lock()
-	defer m.streamMu.Unlock()
-	changed := make([]string, 0)
-	for vchannel, vchannelSeq := range m.streamSeqByV {
-		if vchannelSeq > seq {
-			changed = append(changed, vchannel)
-		}
-	}
-	sort.Strings(changed)
-	return m.streamNotify, m.streamSeq, changed
 }
 
 type streamRequestKind int
@@ -176,18 +190,18 @@ func newTransformLogStream(ctx context.Context, provider streamLogProvider, pcha
 	}
 	ctx, cancel := context.WithCancel(ctx) // #nosec G118 -- cancel is owned by transformLogStream.Close/finish.
 	stream := &transformLogStream{
-		ctx:          ctx,
-		cancel:       cancel,
-		provider:     provider,
-		pchannel:     pchannel,
-		requests:     make(chan streamRequest),
-		events:       make(chan streamEvent, 1024),
-		catchupTasks: make(chan *streamSubscription, 1024),
-		done:         make(chan struct{}),
-		subs:         make(map[int64]*streamSubscription),
-		byVChannel:   make(map[string]map[int64]*streamSubscription),
+		ctx:           ctx,
+		cancel:        cancel,
+		provider:      provider,
+		pchannel:      pchannel,
+		requests:      make(chan streamRequest),
+		events:        make(chan streamEvent, 1024),
+		catchupTasks:  make(chan *streamSubscription, 1024),
+		done:          make(chan struct{}),
+		subs:          make(map[int64]*streamSubscription),
+		byVChannel:    make(map[string]map[int64]*streamSubscription),
+		notifications: newStreamNotifications(),
 	}
-	_, stream.seenNotifySeq, _ = provider.streamNotifyStateSince(0)
 	for i := 0; i < catchupWorkers; i++ {
 		go stream.catchupWorker()
 	}
@@ -209,9 +223,9 @@ type transformLogStream struct {
 	done            chan struct{}
 
 	nextID        int64
-	seenNotifySeq uint64
 	subs          map[int64]*streamSubscription
 	byVChannel    map[string]map[int64]*streamSubscription
+	notifications *streamNotifications
 
 	errMu      sync.Mutex
 	err        error
@@ -276,12 +290,6 @@ func (s *transformLogStream) run() {
 	defer close(s.done)
 	defer close(s.catchupTasks)
 	for {
-		notifyCh, notifySeq, changedVChannels := s.provider.streamNotifyStateSince(s.seenNotifySeq)
-		if notifySeq != s.seenNotifySeq {
-			s.seenNotifySeq = notifySeq
-			s.dispatchChangedLive(changedVChannels)
-			continue
-		}
 		var catchupTaskCh chan<- *streamSubscription
 		var catchupTask *streamSubscription
 		if len(s.pendingCatchups) > 0 {
@@ -298,7 +306,10 @@ func (s *transformLogStream) run() {
 			}
 		case event := <-s.events:
 			s.handleEvent(event)
-		case <-notifyCh:
+		case <-s.notifications.ready:
+			for _, vchannel := range s.notifications.takePending() {
+				s.dispatchVChannel(vchannel)
+			}
 		case <-s.ctx.Done():
 			s.finish(s.ctx.Err())
 			return
@@ -406,6 +417,9 @@ func (s *transformLogStream) handleEvent(event streamEvent) {
 		sub.state = subscriptionStateLive
 		if s.byVChannel[sub.vchannel] == nil {
 			s.byVChannel[sub.vchannel] = make(map[int64]*streamSubscription)
+			// Register before the immediate read: updates before registration
+			// are covered by that read; later updates leave a pending wakeup.
+			s.provider.watchStream(sub.vchannel, s.notifications)
 		}
 		s.byVChannel[sub.vchannel][sub.id] = sub
 		s.dispatchVChannel(sub.vchannel)
@@ -452,22 +466,6 @@ func (s *transformLogStream) sendEvent(ctx context.Context, event streamEvent) b
 		return false
 	case <-s.done:
 		return false
-	}
-}
-
-func (s *transformLogStream) dispatchAllLive() {
-	for vchannel := range s.byVChannel {
-		s.dispatchVChannel(vchannel)
-	}
-}
-
-func (s *transformLogStream) dispatchChangedLive(vchannels []string) {
-	for _, vchannel := range vchannels {
-		if vchannel == "" {
-			s.dispatchAllLive()
-			continue
-		}
-		s.dispatchVChannel(vchannel)
 	}
 }
 
@@ -575,6 +573,7 @@ func (s *transformLogStream) finishSubscription(sub *streamSubscription, err err
 		delete(byID, sub.id)
 		if len(byID) == 0 {
 			delete(s.byVChannel, sub.vchannel)
+			s.provider.unwatchStream(sub.vchannel, s.notifications)
 		}
 	}
 	if err != nil {

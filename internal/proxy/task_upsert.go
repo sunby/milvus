@@ -130,23 +130,6 @@ func (it *upsertTask) refreshMutationResultCounts() {
 	it.result.UpsertCnt = it.result.InsertCnt
 }
 
-func (it *upsertTask) getPChanStats() (map[pChan]pChanStatistics, error) {
-	ret := make(map[pChan]pChanStatistics)
-
-	channels := it.getChannels()
-
-	beginTs := it.BeginTs()
-	endTs := it.EndTs()
-
-	for _, channel := range channels {
-		ret[channel] = pChanStatistics{
-			minTs: beginTs,
-			maxTs: endTs,
-		}
-	}
-	return ret, nil
-}
-
 func (it *upsertTask) setChannels() error {
 	collID, err := it.getMetaCache().GetCollectionID(it.ctx, it.req.GetDbName(), it.req.CollectionName)
 	if err != nil {

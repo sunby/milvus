@@ -3123,6 +3123,10 @@ type queryCoordConfig struct {
 	DispatchInterval           ParamItem `refreshable:"false"`
 	HeartbeatAvailableInterval ParamItem `refreshable:"true"`
 	LoadTimeoutSeconds         ParamItem `refreshable:"true"`
+	AutoReleaseEnabled         ParamItem `refreshable:"true"`
+	AutoReleaseIdleTTLSeconds  ParamItem `refreshable:"true"`
+	AutoReleaseCheckInterval   ParamItem `refreshable:"true"`
+	AutoReleaseConcurrency     ParamItem `refreshable:"true"`
 
 	DistributionRequestTimeout  ParamItem `refreshable:"true"`
 	HeartBeatWarningLag         ParamItem `refreshable:"true"`
@@ -3183,6 +3187,7 @@ type queryCoordConfig struct {
 	EnableLoadCollectionSyncWarmup        ParamItem `refreshable:"false"`
 	EnableSQNServeSegments                ParamItem `refreshable:"false"`
 	QueryViewFullReconsileInterval        ParamItem `refreshable:"false"`
+	QueryViewTargetRowsPerShardNode       ParamItem `refreshable:"true"`
 }
 
 func (p *queryCoordConfig) init(base *BaseTable) {
@@ -3520,6 +3525,69 @@ If this parameter is set false, Milvus simply searches the growing segments with
 		Export:       true,
 	}
 	p.LoadTimeoutSeconds.Init(base.mgr)
+
+	p.AutoReleaseEnabled = ParamItem{
+		Key:          "queryCoord.autoRelease.enabled",
+		Version:      "3.0.0",
+		DefaultValue: "false",
+		Doc:          "whether QueryCoord releases collections after an idle TTL; effective only when proxy.enableAutoLoad is true",
+		Export:       true,
+	}
+	p.AutoReleaseEnabled.Init(base.mgr)
+
+	p.AutoReleaseIdleTTLSeconds = ParamItem{
+		Key:          "queryCoord.autoRelease.idleTTLSeconds",
+		Version:      "3.0.0",
+		DefaultValue: "600",
+		PanicIfEmpty: true,
+		Export:       true,
+		Formatter: func(v string) string {
+			seconds, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || seconds <= 0 || seconds > math.MaxInt64/int64(time.Second) {
+				mlog.Warn(context.TODO(), "queryCoord.autoRelease.idleTTLSeconds must be positive and fit time.Duration, using default",
+					mlog.String("configured", v))
+				return "600"
+			}
+			return v
+		},
+	}
+	p.AutoReleaseIdleTTLSeconds.Init(base.mgr)
+
+	p.AutoReleaseCheckInterval = ParamItem{
+		Key:          "queryCoord.autoRelease.checkIntervalSeconds",
+		Version:      "3.0.0",
+		DefaultValue: "30",
+		PanicIfEmpty: true,
+		Export:       true,
+		Formatter: func(v string) string {
+			seconds, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || seconds <= 0 || seconds > math.MaxInt64/int64(time.Second) {
+				mlog.Warn(context.TODO(), "queryCoord.autoRelease.checkIntervalSeconds must be positive and fit time.Duration, using default",
+					mlog.String("configured", v))
+				return "30"
+			}
+			return v
+		},
+	}
+	p.AutoReleaseCheckInterval.Init(base.mgr)
+
+	p.AutoReleaseConcurrency = ParamItem{
+		Key:          "queryCoord.autoRelease.releaseConcurrency",
+		Version:      "3.0.0",
+		DefaultValue: "16",
+		PanicIfEmpty: true,
+		Doc:          "maximum concurrent automatic collection releases in one scan; changes apply to the next release batch",
+		Export:       true,
+		Formatter: func(v string) string {
+			if getAsInt(v) <= 0 {
+				mlog.Warn(context.TODO(), "queryCoord.autoRelease.releaseConcurrency must be positive, using default",
+					mlog.String("configured", v))
+				return "16"
+			}
+			return v
+		},
+	}
+	p.AutoReleaseConcurrency.Init(base.mgr)
 
 	p.HeartbeatAvailableInterval = ParamItem{
 		Key:          "queryCoord.heartbeatAvailableInterval",
@@ -3934,6 +4002,23 @@ Set to 0 to disable the penalty period.`,
 		Export:       true,
 	}
 	p.QueryViewFullReconsileInterval.Init(base.mgr)
+
+	p.QueryViewTargetRowsPerShardNode = ParamItem{
+		Key:          "queryCoord.queryView.targetRowsPerShardNode",
+		Version:      "3.0.0",
+		DefaultValue: "100000",
+		Doc:          "Target number of sealed rows per QueryNode used to derive the free fanout budget for each QueryView shard. Must be positive. Changes take effect on the next reconciliation.",
+		Export:       true,
+		Formatter: func(v string) string {
+			if getAsInt64(v) <= 0 {
+				mlog.Warn(context.TODO(), "queryCoord.queryView.targetRowsPerShardNode must be positive, using default 100000",
+					mlog.String("configured", v))
+				return "100000"
+			}
+			return v
+		},
+	}
+	p.QueryViewTargetRowsPerShardNode.Init(base.mgr)
 }
 
 // /////////////////////////////////////////////////////////////////////////////
@@ -5919,10 +6004,12 @@ type dataCoordConfig struct {
 	StatsTaskSlotUsage                   ParamItem `refreshable:"true"`
 	AnalyzeTaskSlotUsage                 ParamItem `refreshable:"true"`
 
-	EnableSortCompaction       ParamItem `refreshable:"true"`
-	TaskCheckInterval          ParamItem `refreshable:"true"`
-	SortCompactionTriggerCount ParamItem `refreshable:"true"`
-	StatsTaskPendingLimit      ParamItem `refreshable:"true"`
+	EnableSortCompaction            ParamItem `refreshable:"true"`
+	TaskCheckInterval               ParamItem `refreshable:"true"`
+	SortCompactionTriggerCount      ParamItem `refreshable:"true"`
+	StatsTaskPendingLimit           ParamItem `refreshable:"true"`
+	StatsDiscoveryMode              ParamItem `refreshable:"false"`
+	StatsDiscoveryReconcileInterval ParamItem `refreshable:"false"`
 	// Deprecated: JSON stats tasks are throttled by StatsTaskPendingLimit.
 	JSONStatsTriggerCount ParamItem `refreshable:"true"`
 	// Deprecated: JSON stats tasks now run on TaskCheckInterval.
@@ -5935,6 +6022,7 @@ type dataCoordConfig struct {
 }
 
 func (p *dataCoordConfig) init(base *BaseTable) {
+	p.initStatsDiscovery(base)
 	p.WatchTimeoutInterval = ParamItem{
 		Key:          "dataCoord.channel.watchTimeoutInterval",
 		Version:      "2.2.3",

@@ -98,5 +98,5 @@ interface.
 - **MetaCache** (`internal/proxy/metacache/`): the production channel data
   source; `CollectionInfo` carries `VChannels`/`PChannels`. Its own cache and
   invalidation machinery is what keeps channel lookups fast and fresh.
-- **TaskScheduler** (`internal/proxy/task_scheduler.go`): consumes the pchans
-  resolved by tasks for DML timestamp statistics.
+- **TaskScheduler** (`internal/proxy/task_scheduler.go`): prepares DML task
+  channels before admitting tasks to the queue.

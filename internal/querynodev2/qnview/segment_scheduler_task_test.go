@@ -9,16 +9,92 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
+	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v3/util/nodescheduler"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 type qnTaskFunc func(context.Context) error
+
+func loadStageHistogram(t *testing.T, operation, name string, result stage.Result) *dto.Histogram {
+	t.Helper()
+	observer, err := metrics.QueryStageDuration.GetMetricWithLabelValues("queryNode", operation, name, result.String())
+	require.NoError(t, err)
+	var metric dto.Metric
+	require.NoError(t, observer.(prometheus.Metric).Write(&metric))
+	return metric.GetHistogram()
+}
+
+func TestSegmentLoadTaskMetricsUseCompletedAttemptOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		loadErr error
+		cancel  bool
+		result  stage.Result
+	}{
+		{name: "callback cancels successful task", result: stage.Success},
+		{name: "load error", loadErr: errors.New("injected load failure"), result: stage.Error},
+		{name: "load canceled", loadErr: context.Canceled, result: stage.Canceled},
+		{name: "load timeout", loadErr: context.DeadlineExceeded, result: stage.Timeout},
+		{name: "already canceled", cancel: true, result: stage.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancel {
+				cancel()
+			}
+			beforeTotal := loadStageHistogram(t, "segment_load", "total", tc.result)
+			before := make(map[string]*dto.Histogram)
+			for _, name := range []string{"total", "physical_load", "new_segment", "load_segment", "sealed_prepare", "csegment_load", "sync_json_stats", "pk_candidate"} {
+				before[name] = loadStageHistogram(t, "segment_load_attempt", name, tc.result)
+			}
+			called := false
+			loader := &fakePhysicalLoader{
+				loadFnWithContext: func(ctx context.Context, info *querypb.SegmentLoadInfo, collection CollectionRuntime) (TransformSegment, error) {
+					called = true
+					segments.PhysicalLoadTimingFromContext(ctx).NewSegment = 8 * time.Millisecond
+					return &fakeTransformSegment{id: info.GetSegmentID()}, tc.loadErr
+				},
+			}
+			task := newSegmentLoadTask(loader, nil, SegmentLoadTask{
+				Context: ctx, SegmentID: 1000,
+				Collection: &fakeCollectionRuntimeGuard{collectionID: testCollectionID},
+				Snapshot:   testSegmentLoadSnapshot(1000, 10),
+				OnLoaded:   func(TransformSegment) { cancel() },
+				OnFinished: cancel,
+			})
+			err := task.Execute(context.Background())
+			require.ErrorIs(t, err, tc.loadErr)
+			require.Equal(t, !tc.cancel, called)
+			afterTotal := loadStageHistogram(t, "segment_load", "total", tc.result)
+			require.Equal(t, beforeTotal.GetSampleCount()+1, afterTotal.GetSampleCount())
+			for name, old := range before {
+				after := loadStageHistogram(t, "segment_load_attempt", name, tc.result)
+				require.Equal(t, old.GetSampleCount()+1, after.GetSampleCount(), name)
+				switch name {
+				case "new_segment":
+					want := 0.008
+					if tc.cancel {
+						want = 0
+					}
+					require.InDelta(t, want, after.GetSampleSum()-old.GetSampleSum(), 1e-9)
+				case "total", "physical_load":
+				default:
+					require.Equal(t, old.GetSampleSum(), after.GetSampleSum(), "skipped stage "+name)
+				}
+			}
+		})
+	}
+}
 
 func (f qnTaskFunc) Execute(ctx context.Context) error {
 	return f(ctx)

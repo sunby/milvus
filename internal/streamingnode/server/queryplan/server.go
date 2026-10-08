@@ -12,6 +12,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/types"
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
 type walManager interface {
@@ -34,6 +35,11 @@ func (s *Server) GetQueryPlan(ctx context.Context, req *viewpb.GetQueryPlanReque
 	}
 	plan, err := p.GetQueryPlan(ctx, req)
 	if err != nil {
+		if errors.Is(err, merr.ErrCollectionNotLoaded) {
+			// The selected view may outlive its load config during ReleaseCollection.
+			// Let the query client retry against a fresh view.
+			err = viewerror.NewViewInvalidated("%s", err)
+		}
 		return nil, toRPCError(err)
 	}
 	return &viewpb.GetQueryPlanResponse{Plan: plan}, nil

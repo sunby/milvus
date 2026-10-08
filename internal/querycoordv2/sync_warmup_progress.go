@@ -24,7 +24,7 @@ func (s *Server) qviewsLoadPercentageWithWarmup(ctx context.Context, cfg *loadmg
 	if err != nil {
 		return 0, err
 	}
-	stats := s.qviewsRuntime.shardViewRegistry.Snapshot().StatsMap()
+	stats := s.qviewsRuntime.shardViewRegistry.SnapshotForCollection(cfg.CollectionID).StatsMap()
 	return syncWarmupLoadPercentage(cfg, target.vchannels, stats), nil
 }
 
@@ -54,14 +54,14 @@ func (s *Server) syncWarmupTarget(ctx context.Context, cfg *loadmgr.LoadConfig) 
 	}
 	// Channel topology comes from collection metadata, never partial registry
 	// discovery. Recovery reconstructs this cache before reporting completion.
-	snapshot := runtime.loadConfigStore.Snapshot()
+	entry := runtime.loadConfigStore.Get(cfg.CollectionID)
 	collection, err := s.broker.DescribeCollection(ctx, cfg.CollectionID)
 	if err != nil {
 		return syncWarmupTarget{}, err
 	}
 	target := syncWarmupTarget{epoch: cfg.SyncWarmupEpoch, vchannels: append([]string(nil), collection.GetVirtualChannelNames()...)}
 	accepted := false
-	checked, err := runtime.loadConfigStore.WithConfigVersion(cfg.CollectionID, snapshot.ConfigVersion(cfg.CollectionID), func(current *loadmgr.LoadConfig) error {
+	checked, err := runtime.loadConfigStore.WithConfigVersion(cfg.CollectionID, entry.ConfigVersion, func(current *loadmgr.LoadConfig) error {
 		if current != nil && current.SyncWarmup && current.SyncWarmupEpoch == target.epoch {
 			runtime.syncWarmupTargets.Store(cfg.CollectionID, target)
 			accepted = true

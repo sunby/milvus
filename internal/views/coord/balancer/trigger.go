@@ -2,12 +2,14 @@ package balancer
 
 import (
 	"sync"
+	"time"
 
 	"github.com/milvus-io/milvus/internal/views/coord/coordview"
 	"github.com/milvus-io/milvus/internal/views/coord/loadmgr"
 	"github.com/milvus-io/milvus/internal/views/qviews"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 // TriggerScope describes the external event scope that dirtied the Balancer.
@@ -22,8 +24,12 @@ type TriggerScope struct {
 	DirtyCollections []int64
 }
 
+var triggerWait = stage.New("coord", "reconcile", "trigger_wait")
+
 type triggerQueue struct {
-	mu sync.Mutex
+	queuedAt     time.Time
+	pendingTimer stage.Timer
+	mu           sync.Mutex
 
 	full        bool
 	dirtyNodes  map[int64]struct{}
@@ -43,6 +49,9 @@ type triggerBatch struct {
 // reconcileScope is the scoped DataView-read and Policy-planning boundary
 // resolved from one trigger batch.
 type reconcileScope struct {
+	// full requires expansion from all configured collections and resident shards.
+	full bool
+
 	// collectionIDs selects collections whose DataViews are fetched.
 	collectionIDs map[int64]struct{}
 
@@ -60,13 +69,13 @@ func (b triggerBatch) empty() bool {
 
 // resolveScope converts queued collection and shard events into scoped reads
 // and Policy targets. Collection events include resident residual shards;
-// malformed shard channels conservatively fall back to a full reconcile.
+// malformed shard channels request a full scope, expanded after load configs
+// have been captured by the snapshot builder.
 func (b triggerBatch) resolveScope(
-	loadSnapshot *loadmgr.LoadConfigSnapshot,
 	registry *coordview.ShardViewRegistry,
 ) reconcileScope {
 	if b.full {
-		return fullReconcileScope(loadSnapshot, registry)
+		return reconcileScope{full: true}
 	}
 
 	scope := newReconcileScope()
@@ -80,12 +89,12 @@ func (b triggerBatch) resolveScope(
 
 	for nodeID := range b.dirtyNodes {
 		if registry == nil {
-			return fullReconcileScope(loadSnapshot, registry)
+			return reconcileScope{full: true}
 		}
 		for _, shardID := range registry.NodeShards(nodeID) {
 			collectionID, ok := parseShardCollection(shardID)
 			if !ok {
-				return fullReconcileScope(loadSnapshot, registry)
+				return reconcileScope{full: true}
 			}
 			scope.collectionIDs[collectionID] = struct{}{}
 			scope.targetShards[shardID] = struct{}{}
@@ -95,7 +104,7 @@ func (b triggerBatch) resolveScope(
 	for shardID := range b.dirtyShards {
 		collectionID, ok := parseShardCollection(shardID)
 		if !ok {
-			return fullReconcileScope(loadSnapshot, registry)
+			return reconcileScope{full: true}
 		}
 		scope.collectionIDs[collectionID] = struct{}{}
 		scope.targetShards[shardID] = struct{}{}
@@ -148,6 +157,7 @@ func fullReconcileScope(
 	registry *coordview.ShardViewRegistry,
 ) reconcileScope {
 	scope := newReconcileScope()
+	scope.full = true
 	if loadSnapshot != nil {
 		for collectionID := range loadSnapshot.ConfigsMap() {
 			scope.collectionIDs[collectionID] = struct{}{}
@@ -219,6 +229,10 @@ func (q *triggerQueue) add(scopes ...TriggerScope) {
 }
 
 func (q *triggerQueue) notifyLocked() {
+	if q.queuedAt.IsZero() {
+		q.queuedAt = time.Now()
+		q.pendingTimer = triggerWait.Begin()
+	}
 	select {
 	case q.signal <- struct{}{}:
 	default:
@@ -233,6 +247,10 @@ func (q *triggerQueue) takePending() triggerBatch {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	if !q.queuedAt.IsZero() {
+		q.pendingTimer.End(nil)
+		q.queuedAt = time.Time{}
+	}
 	pending := triggerBatch{
 		full:        q.full,
 		dirtyNodes:  q.dirtyNodes,

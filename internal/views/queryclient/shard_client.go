@@ -2,19 +2,25 @@ package queryclient
 
 import (
 	"context"
+	"io"
 	"time"
 
+	"github.com/cockroachdb/errors"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	commonpb "github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus/internal/views/queryclient/reducer"
 	"github.com/milvus-io/milvus/internal/views/qviews"
 	"github.com/milvus-io/milvus/internal/views/viewerror"
+	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
@@ -145,7 +151,8 @@ type shardExecParams struct {
 // The client always targets the primary replica; the real replica ID is
 // learned from the Phase 1 plan and used for Phase 2.
 //
-// Shard-level retry handles ViewErrors (view invalidated, not found, etc.).
+// Shard-level retry handles ViewErrors and Phase 1 transport failures using
+// the same attempt budget. Each Phase 1 call resolves the current SN assignment.
 // Per-node retry within fanOutToWorkNodes handles transient non-view errors.
 func (s *shardViewQueryClient) executeShard(
 	ctx context.Context,
@@ -153,9 +160,11 @@ func (s *shardViewQueryClient) executeShard(
 	params *shardExecParams,
 ) (*ShardPlan, error) {
 	var lastErr error
+	planRetryDelay := 100 * time.Millisecond
 
 	for attempt := 0; attempt < s.maxRetries; attempt++ {
 		attemptStart := time.Now()
+		metrics.QueryStageItems.WithLabelValues("proxy", "shard_query", "attempt", "attempts").Inc()
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -170,10 +179,27 @@ func (s *shardViewQueryClient) executeShard(
 			mlog.FieldVChannel(vchannel),
 			mlog.Int("attempt", attempt+1))
 		planStart := time.Now()
+		planTimer := clientPlan.Begin()
 		plan, err := s.executeGetQueryPlan(ctx, targetShardID, planReq, params)
+		planTimer.End(err)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			if ve := viewerror.AsViewError(err); ve != nil && ve.IsRetryable() {
 				lastErr = err
+				continue
+			}
+			if isQueryPlanTransportError(err) && attempt+1 < s.maxRetries {
+				lastErr = err
+				timer := time.NewTimer(planRetryDelay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return nil, ctx.Err()
+				case <-timer.C:
+				}
+				planRetryDelay = min(2*planRetryDelay, time.Second)
 				continue
 			}
 			return nil, err
@@ -185,7 +211,9 @@ func (s *shardViewQueryClient) executeShard(
 
 		// Phase 2: Fan out to all work nodes concurrently.
 		fanoutStart := time.Now()
+		fanoutTimer := clientFanout.Begin()
 		err = s.fanOutToWorkNodes(ctx, workNodes, plan, shardID, params.dispatchNode)
+		fanoutTimer.End(err)
 		fanoutDuration := time.Since(fanoutStart)
 		if err != nil {
 			if ve := viewerror.AsViewError(err); ve != nil && ve.IsRetryable() {
@@ -213,6 +241,16 @@ func (s *shardViewQueryClient) executeShard(
 		}, nil
 	}
 	return nil, lastErr
+}
+
+// gRPC reports broken connections (including TCP resets) as Unavailable.
+// Preserve the original error on exhaustion so Proxy does not treat a transport
+// failure as a missing view and restart the whole DQL/load retry loop.
+func isQueryPlanTransportError(err error) bool {
+	if merr.IsCanceledOrTimeout(err) || merr.GetErrorType(err) == merr.InputError {
+		return false
+	}
+	return status.Code(err) == codes.Unavailable || errors.Is(err, io.EOF)
 }
 
 // executeGetQueryPlan handles consistency-level routing and dispatches Phase 1.
@@ -263,7 +301,10 @@ func (s *shardViewQueryClient) fanOutToWorkNodes(
 	for _, node := range workNodes {
 		node := node
 		g.Go(func() error {
-			return dispatchNode(gCtx, node, plan, shardID)
+			nodeTimer := clientDispatch.Begin()
+			err := dispatchNode(gCtx, node, plan, shardID)
+			nodeTimer.End(err)
+			return err
 		})
 	}
 	return g.Wait()
@@ -314,3 +355,10 @@ func workNodesFromPlan(plan *viewpb.QueryPlan) []qviews.WorkNode {
 	}
 	return nodes
 }
+
+var (
+	clientPlan   = stage.New("proxy", "shard_query", "get_plan")
+	clientFanout = stage.New("proxy", "shard_query", "fanout")
+)
+
+var clientDispatch = stage.New("proxy", "shard_query", "node_dispatch")

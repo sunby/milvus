@@ -3894,7 +3894,7 @@ func TestGetQuotaInfoAggregatesCollectionMetrics(t *testing.T) {
 	segment1 := buildSegment(1, 10, 100, "channel-1")
 	segment1.NumOfRows = 10
 	segment1.Level = datapb.SegmentLevel_L0
-	segment1.Stats = &datapb.Statistics{InsertBinlogSize: 100, DeleteNumRows: 3}
+	segment1.Stats = &datapb.Statistics{InsertBinlogSize: 100, InsertBinlogCount: 1, DeleteNumRows: 3}
 	segment1.Binlogs = []*datapb.FieldBinlog{{
 		FieldID: 1,
 		Binlogs: []*datapb.Binlog{{LogID: 1}},
@@ -3904,7 +3904,7 @@ func TestGetQuotaInfoAggregatesCollectionMetrics(t *testing.T) {
 	segment2 := buildSegment(2, 20, 200, "channel-2")
 	segment2.NumOfRows = 20
 	segment2.Level = datapb.SegmentLevel_L0
-	segment2.Stats = &datapb.Statistics{InsertBinlogSize: 200, DeleteNumRows: 4}
+	segment2.Stats = &datapb.Statistics{InsertBinlogSize: 200, InsertBinlogCount: 2, DeleteNumRows: 4}
 	segment2.Binlogs = []*datapb.FieldBinlog{{
 		FieldID: 1,
 		Binlogs: []*datapb.Binlog{{LogID: 2}, {LogID: 3}},

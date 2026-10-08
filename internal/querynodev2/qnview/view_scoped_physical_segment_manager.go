@@ -10,6 +10,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/nodescheduler"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 type ViewScopedPhysicalSegmentManager struct {
@@ -36,6 +37,7 @@ type viewRef struct {
 }
 
 type physicalSegmentState struct {
+	firstSnapshot   stage.Timer
 	segment         TransformSegment
 	collectionID    int64
 	loading         bool
@@ -108,31 +110,41 @@ func NewViewScopedPhysicalSegmentManagerWithNodeSchedulerAndStream(nodeScheduler
 }
 
 func (m *ViewScopedPhysicalSegmentManager) Acquire(req AcquirePhysicalSegments) {
+	m.AcquireReferences(req)()
+}
+
+func (m *ViewScopedPhysicalSegmentManager) AcquireReferences(req AcquirePhysicalSegments) func() {
 	if err := validateSyncWarmupRequirement(req.Meta); err != nil {
-		m.submitCallback(req.OnUnrecoverable)
-		return
+		return func() { m.submitCallback(req.OnUnrecoverable) }
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	toLoad, ok, err := m.recordView(req, cancel)
 	if err != nil {
 		cancel()
-		m.submitCallback(req.OnUnrecoverable)
-		return
+		return func() { m.submitCallback(req.OnUnrecoverable) }
 	}
 	if !ok {
 		cancel()
-		return
+		return func() {}
 	}
-	m.nodeScheduler.Submit(schedulerTaskFunc(func(context.Context) error {
-		m.load(ctx, req, toLoad)
-		return nil
-	}))
+	return func() {
+		m.nodeScheduler.Submit(schedulerTaskFunc(func(context.Context) error {
+			m.load(ctx, req, toLoad)
+			return nil
+		}))
+	}
 }
 
 func (m *ViewScopedPhysicalSegmentManager) Release(req ReleaseSegments) {
+	m.ReleaseReferences(req)()
+}
+
+func (m *ViewScopedPhysicalSegmentManager) ReleaseReferences(req ReleaseSegments) func() {
 	toClose, onDropped := m.removeView(req)
-	m.closeSubscriptions(toClose)
-	m.submitCallback(onDropped)
+	return func() {
+		m.closeSubscriptions(toClose)
+		m.submitCallback(onDropped)
+	}
 }
 
 func (m *ViewScopedPhysicalSegmentManager) ApplyLoadInfoSnapshot(ctx context.Context, snapshot SegmentLoadInfoSnapshot) {
@@ -217,6 +229,7 @@ func (m *ViewScopedPhysicalSegmentManager) recordView(req AcquirePhysicalSegment
 					done:      chainLoadDone(loadDone, loadCancel),
 				})
 			} else {
+				state.firstSnapshot = loadInfoFirstSnapshot.Begin()
 				toSubscribe = append(toSubscribe, segmentLoadInfoSubscriptionRequest{
 					collectionID: req.Meta.GetCollectionId(),
 					segmentID:    segmentID,
@@ -372,6 +385,7 @@ func (m *ViewScopedPhysicalSegmentManager) recordSegmentSnapshot(ctx context.Con
 	if state == nil || len(state.refs) == 0 || (expected != nil && state != expected) {
 		return segmentLoadSubmission{}, segmentUpdateSubmission{}, false
 	}
+	state.firstSnapshot.End(nil)
 	if state.segment == nil {
 		if state.loading {
 			snapshotCopy := snapshot
@@ -803,6 +817,9 @@ func (m *ViewScopedPhysicalSegmentManager) submitSegmentLoadSubmissions(submissi
 }
 
 func (m *ViewScopedPhysicalSegmentManager) detachSubscriptionLocked(state *physicalSegmentState) []SegmentLoadInfoSubscription {
+	if state != nil {
+		state.firstSnapshot.End(context.Canceled)
+	}
 	if state == nil || state.subscription == nil {
 		return nil
 	}
@@ -878,3 +895,5 @@ func onceLoadDone(done func()) func() {
 		once.Do(done)
 	}
 }
+
+var loadInfoFirstSnapshot = stage.New("queryNode", "load_info", "first_snapshot")

@@ -7,7 +7,6 @@ import (
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/views/optimizer"
 	"github.com/milvus-io/milvus/internal/views/qviews"
-	"github.com/milvus-io/milvus/internal/views/viewerror"
 	"github.com/milvus-io/milvus/internal/views/worknode/handler"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 )
@@ -42,7 +41,7 @@ var _ handler.QueryViewHandler = (*SNQueryViewHandler)(nil)
 //
 //   - Preparing: creates SM + calls Acquire. No immediate response.
 //     Response depends on ResourceManager calling OnReady.
-//   - Dropped: responds immediately with the Dropped view (SN restart case).
+//   - Down or Dropped: responds immediately with Dropped (SN restart case).
 //   - Other states: responds immediately with Unrecoverable (state lost after restart).
 //
 // View already exists in handler:
@@ -70,6 +69,8 @@ type SNQueryViewHandler struct {
 	// lookup in AcquireLatestUpView: the query client resolves shards by
 	// vchannel only and picks one of the replica shards.
 	shardsByVChannel map[string]map[qviews.ShardID]struct{}
+	queryWaiters     map[string]*queryViewWaiters
+	queriesStopped   bool
 	catalog          metastore.StreamingNodeCataLog
 	resMgr           StreamingNodeResourceManager
 	localOptimizer   optimizer.LocalOptimizer
@@ -94,6 +95,7 @@ func recoverSNQueryViewHandler(
 		pchannel:         pchannel,
 		shards:           make(map[qviews.ShardID]*snShardView),
 		shardsByVChannel: make(map[string]map[qviews.ShardID]struct{}),
+		queryWaiters:     make(map[string]*queryViewWaiters),
 		catalog:          catalog,
 		resMgr:           resMgr,
 		localOptimizer:   optimizer.NewNoopLocalOptimizer(),
@@ -116,7 +118,7 @@ func recoverSNQueryViewHandler(
 	}
 
 	for shardID, shardViews := range grouped {
-		shard := recoverSnShardView(pchannel, shardID, shardViews, catalog, resMgr)
+		shard := recoverSnShardView(pchannel, shardID, shardViews, catalog, resMgr, h.notifyQueryWaiters)
 		shard.onEmpty = h.makeOnEmpty(shardID)
 		h.shards[shardID] = shard
 		h.indexShardLocked(shardID)
@@ -163,15 +165,19 @@ func (h *SNQueryViewHandler) ApplyViews(views []handler.ApplyView) {
 
 	// Apply each group atomically under the shard lock.
 	for shardID, shardViews := range grouped {
-		shard := h.getOrCreateShard(shardID)
-		if shard == nil {
-			continue
+		for {
+			shard := h.getOrCreateShard(shardID)
+			if shard == nil || shard.ApplyViews(shardViews) {
+				break
+			}
+			// Empty-shard cleanup raced with lookup. Retry on the current
+			// shard so this batch cannot install views into a detached shard.
 		}
-		shard.ApplyViews(shardViews)
 	}
 }
 
 func (h *SNQueryViewHandler) CloseForHandoff() {
+	h.StopQueryAcquisition()
 	h.mu.Lock()
 	h.closed = true
 	shards := make([]*snShardView, 0, len(h.shards))
@@ -188,31 +194,7 @@ func (h *SNQueryViewHandler) CloseForHandoff() {
 }
 
 func (h *SNQueryViewHandler) AcquireLatestUpView(ctx context.Context, shardID qviews.ShardID) (*QueryViewLease, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-	h.mu.Lock()
-	shard := h.shards[shardID]
-	if shard == nil && shardID.ReplicaID == qviews.UnknownReplicaID {
-		// The client resolves shards by vchannel only and carries an unknown
-		// replica ID before Phase 1; resolve through the vchannel index.
-		// A vchannel may be served by several replicas (one shard per replica);
-		// the lookup picks one of them — unambiguous under the single-replica
-		// semantics the query client targets.
-		if shardIDs, ok := h.shardsByVChannel[shardID.VChannel]; ok {
-			for indexed := range shardIDs {
-				shard = h.shards[indexed]
-				break
-			}
-		}
-	}
-	h.mu.Unlock()
-	if shard == nil {
-		return nil, viewerror.NewViewNotFound("query view %s is not found", shardID.String())
-	}
-	return shard.acquireLatestUpView(ctx)
+	return h.acquireQueryView(ctx, shardID, nil)
 }
 
 func (h *SNQueryViewHandler) getOrCreateShard(shardID qviews.ShardID) *snShardView {
@@ -230,6 +212,7 @@ func (h *SNQueryViewHandler) getOrCreateShard(shardID qviews.ShardID) *snShardVi
 			catalog:  h.catalog,
 			resMgr:   h.resMgr,
 			onEmpty:  h.makeOnEmpty(shardID),
+			onChange: h.notifyQueryWaiters,
 		}
 		h.shards[shardID] = shard
 		h.indexShardLocked(shardID)
@@ -249,10 +232,13 @@ func (h *SNQueryViewHandler) indexShardLocked(shardID qviews.ShardID) {
 	shardIDs[shardID] = struct{}{}
 }
 
-func (h *SNQueryViewHandler) makeOnEmpty(shardID qviews.ShardID) func() {
-	return func() {
+func (h *SNQueryViewHandler) makeOnEmpty(shardID qviews.ShardID) func(*snShardView) {
+	return func(shard *snShardView) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
+		if h.shards[shardID] != shard {
+			return
+		}
 		delete(h.shards, shardID)
 		if shardIDs, ok := h.shardsByVChannel[shardID.VChannel]; ok {
 			delete(shardIDs, shardID)

@@ -22,27 +22,96 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
 	"github.com/milvus-io/milvus/internal/views/queryclient"
+	"github.com/milvus-io/milvus/internal/views/viewerror"
+	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/util/contextutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/retry"
+	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
+	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
+
+// retryDQL retries the complete DQL, including its load-and-wait step. The
+// callback may additionally request existing operation-specific retries, such
+// as inconsistent requery. It must create a fresh task for each execution attempt.
+func (node *Proxy) retryDQL(ctx context.Context, dbName, collectionName string, execute func(context.Context) (bool, error)) error {
+	timing := getDQLTiming(ctx)
+	var terminalErr error
+	err := retry.Handle(ctx, func() (bool, error) {
+		timing.Readiness()
+		terminalErr = nil
+		if err := ctx.Err(); err != nil {
+			return false, context.Cause(ctx)
+		}
+		if err := node.ensureCollectionReady(ctx, dbName, collectionName); err != nil {
+			if node.shouldRetryDQLLoad(err) {
+				timing.RetryWait()
+				return true, err
+			}
+			terminalErr = err
+			return false, err
+		}
+		timing.Ready()
+		again, err := execute(ctx)
+		if again || node.shouldRetryDQLLoad(err) {
+			if err != nil {
+				timing.RetryWait()
+			}
+			return true, err
+		}
+		terminalErr = err
+		return false, err
+	})
+	timing.Stop()
+	// retry.Handle may return its previous error when canceled during backoff.
+	if ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	// retry.Handle also returns its previous error when a later attempt stops on
+	// a child-context cancellation or timeout. Preserve that attempt's terminal
+	// error while the parent request context is still valid.
+	if terminalErr != nil {
+		return terminalErr
+	}
+	return err
+}
+
+func (node *Proxy) shouldRetryDQLLoad(err error) bool {
+	if err == nil || !Params.ProxyCfg.EnableAutoLoad.GetAsBool() ||
+		merr.IsCanceledOrTimeout(err) || merr.GetErrorType(err) == merr.InputError {
+		return false
+	}
+	if _, ok := node.viewQueryClient.(queryclient.CollectionReadiness); !ok {
+		return false
+	}
+	if errors.Is(err, merr.ErrCollectionNotLoaded) {
+		return true
+	}
+	viewErr := viewerror.AsViewError(err)
+	return viewErr.IsViewNotFound() || viewErr.IsViewInvalidated()
+}
 
 func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collectionName string) error {
 	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
 		return err
 	}
 	if !Params.ProxyCfg.EnableAutoLoad.GetAsBool() {
+		setDQLPath(ctx, "disabled")
 		return nil
 	}
 
 	readiness, ok := node.viewQueryClient.(queryclient.CollectionReadiness)
 	if !ok {
+		setDQLPath(ctx, "unavailable")
 		return nil
 	}
 
@@ -62,6 +131,7 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 
 	err = readiness.CheckCollectionReady(ctx, collectionID, collectionInfo.VChannels)
 	if err == nil {
+		setDQLPath(ctx, "ready")
 		return nil
 	}
 	if !errors.Is(err, merr.ErrCollectionNotLoaded) {
@@ -76,12 +146,15 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 		return merr.Wrap(err, "check collection load state before DQL request")
 	}
 
+	loadRequest := &milvuspb.LoadCollectionRequest{DbName: dbName, CollectionName: collectionName}
+	needsLoad := loadState.GetState() == commonpb.LoadState_LoadStateNotLoad
+	setDQLPath(ctx, "loading")
+	if needsLoad {
+		setDQLPath(ctx, "unloaded")
+	}
 	switch loadState.GetState() {
 	case commonpb.LoadState_LoadStateNotLoad:
-		loadRequest := &milvuspb.LoadCollectionRequest{
-			DbName:         dbName,
-			CollectionName: collectionName,
-		}
+		// Every caller must authorize its own load before joining shared work.
 		ctx, err = PrivilegeInterceptor(ctx, loadRequest)
 		if err != nil {
 			if grpcstatus.Code(err) == codes.PermissionDenied {
@@ -89,28 +162,42 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 			}
 			return err
 		}
-		resultCh := node.autoLoadCollectionGroup.DoChan(strconv.FormatInt(collectionID, 10), func() (struct{}, error) {
-			loadCtx, cancelLifecycle := contextutil.MergeContext(context.WithoutCancel(ctx), node.ctx)
-			defer cancelLifecycle()
-			loadCtx, cancelTimeout := context.WithTimeout(loadCtx, loadTimeout)
-			defer cancelTimeout()
+	case commonpb.LoadState_LoadStateLoading, commonpb.LoadState_LoadStateLoaded:
+	case commonpb.LoadState_LoadStateNotExist:
+		return merr.WrapErrCollectionNotFoundWithDB(dbName, collectionName)
+	default:
+		return merr.WrapErrServiceInternalMsg("unexpected collection load state %s", loadState.GetState().String())
+	}
 
-			loadState, err := node.GetLoadState(loadCtx, &milvuspb.GetLoadStateRequest{
-				DbName:         dbName,
-				CollectionName: collectionName,
-			})
-			if err := merr.CheckRPCCall(loadState, err); err != nil {
+	// Share the complete load-and-wait lifecycle, including callers that observe
+	// Loading after another request has already submitted the load.
+	resultCh := node.autoLoadCollectionGroup.DoChan(strconv.FormatInt(collectionID, 10), func() (_ struct{}, retErr error) {
+		loadCtx, cancelLifecycle := contextutil.MergeContext(context.WithoutCancel(ctx), node.ctx)
+		defer cancelLifecycle()
+		loadCtx, cancelTimeout := context.WithTimeout(loadCtx, loadTimeout)
+		defer cancelTimeout()
+		lifecycleTimer := autoLoadTotal.Begin()
+		defer lifecycleTimer.EndError(&retErr)
+
+		if needsLoad {
+			recheckTimer := autoLoadRecheck.Begin()
+			loadState, err := node.GetLoadState(loadCtx, &milvuspb.GetLoadStateRequest{DbName: dbName, CollectionName: collectionName})
+			err = merr.CheckRPCCall(loadState, err)
+			recheckTimer.End(err)
+			if err != nil {
 				return struct{}{}, merr.Wrap(err, "recheck collection load state before DQL request")
 			}
-
 			switch loadState.GetState() {
 			case commonpb.LoadState_LoadStateNotLoad:
 				mlog.Info(loadCtx, "load collection before DQL request",
 					mlog.FieldDbName(dbName),
 					mlog.FieldCollectionName(collectionName),
 					mlog.FieldCollectionID(collectionID))
-				status, err := node.LoadCollection(loadCtx, loadRequest)
-				if err := merr.CheckRPCCall(status, err); err != nil {
+				submitTimer := autoLoadSubmit.Begin()
+				status, err := node.loadCollectionForDQL(loadCtx, loadRequest)
+				err = merr.CheckRPCCall(status, err)
+				submitTimer.End(err)
+				if err != nil {
 					return struct{}{}, merr.Wrap(err, "load collection before DQL request")
 				}
 			case commonpb.LoadState_LoadStateLoading, commonpb.LoadState_LoadStateLoaded:
@@ -119,33 +206,75 @@ func (node *Proxy) ensureCollectionReady(ctx context.Context, dbName, collection
 			default:
 				return struct{}{}, merr.WrapErrServiceInternalMsg("unexpected collection load state %s", loadState.GetState().String())
 			}
-			return struct{}{}, nil
-		})
-		select {
-		case result := <-resultCh:
-			if result.Err != nil {
-				return result.Err
-			}
-		case <-ctx.Done():
+		}
+		waitStartedAt := time.Now()
+		readyTimer := autoLoadReady.Begin()
+		readyErr := readiness.WaitForCollectionReady(loadCtx, collectionID, collectionInfo.VChannels)
+		readyTimer.End(readyErr)
+		if err := readyErr; err != nil {
+			return struct{}{}, err
+		}
+		mlog.Info(loadCtx, "[load on search] wait collection ready done",
+			mlog.FieldDbName(dbName), mlog.FieldCollectionName(collectionName),
+			mlog.FieldCollectionID(collectionID), mlog.Duration("wait", time.Since(waitStartedAt)))
+		return struct{}{}, nil
+	})
+	callerTimer := autoLoadCaller.Begin()
+	select {
+	case result := <-resultCh:
+		callerErr := result.Err
+		if ctx.Err() != nil {
+			callerErr = context.Cause(ctx)
+		}
+		callerTimer.End(callerErr)
+		if err := ctx.Err(); err != nil {
 			return context.Cause(ctx)
 		}
-	case commonpb.LoadState_LoadStateLoading, commonpb.LoadState_LoadStateLoaded:
-		// Recheck QueryCoord readiness below after load submission or while
-		// the collection's query views are still becoming available.
-	case commonpb.LoadState_LoadStateNotExist:
-		return merr.WrapErrCollectionNotFoundWithDB(dbName, collectionName)
-	default:
-		return merr.WrapErrServiceInternalMsg("unexpected collection load state %s", loadState.GetState().String())
+		return result.Err
+	case <-ctx.Done():
+		callerTimer.End(context.Cause(ctx))
+		return context.Cause(ctx)
+	}
+}
+
+// loadCollectionForDQL submits a shared automatic load without a task queue.
+// Blocking the DQL dispatcher on a full main pool would also prevent it from
+// dispatching the requery subtasks needed by the searches occupying that pool.
+func (node *Proxy) loadCollectionForDQL(ctx context.Context, request *milvuspb.LoadCollectionRequest) (*commonpb.Status, error) {
+	if err := merr.CheckHealthy(node.GetStateCode()); err != nil {
+		return merr.Status(err), nil
 	}
 
-	waitStartedAt := time.Now()
-	if err := readiness.WaitForCollectionReady(ctx, collectionID, collectionInfo.VChannels); err != nil {
-		return err
+	ctx, span := otel.Tracer(typeutil.ProxyRole).Start(ctx, "Proxy-LoadCollection")
+	defer span.End()
+	tr := timerecord.NewTimeRecorder("LoadCollection")
+	lct := &loadCollectionTask{
+		baseTask:              baseTask{metaCache: node.getMetaCache()},
+		ctx:                   ctx,
+		LoadCollectionRequest: request,
+		mixCoord:              node.mixCoord,
 	}
-	mlog.Info(ctx, "[load on search] wait collection ready done",
-		mlog.FieldDbName(dbName),
-		mlog.FieldCollectionName(collectionName),
-		mlog.FieldCollectionID(collectionID),
-		mlog.Duration("wait", time.Since(waitStartedAt)))
-	return nil
+	if err := lct.OnEnqueue(); err != nil {
+		return merr.Status(err), nil
+	}
+	// Preserve the request identity normally assigned by the task queue.
+	ts, err := node.tsoAllocator.AllocOne(ctx)
+	if err != nil {
+		return merr.Status(err), nil
+	}
+	lct.SetTs(ts)
+	lct.SetID(UniqueID(ts))
+	if err := lct.PreExecute(ctx); err != nil {
+		return merr.Status(err), nil
+	}
+	if err := lct.Execute(ctx); err != nil {
+		return merr.Status(err), nil
+	}
+	if err := lct.PostExecute(ctx); err != nil {
+		return merr.Status(err), nil
+	}
+	metrics.ProxyReqLatency.WithLabelValues(
+		strconv.FormatInt(paramtable.GetNodeID(), 10), "LoadCollection",
+	).Observe(float64(tr.ElapseSpan().Milliseconds()))
+	return lct.result, nil
 }

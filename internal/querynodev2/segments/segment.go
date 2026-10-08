@@ -63,6 +63,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metautil"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 	"github.com/milvus-io/milvus/pkg/v3/util/timerecord"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
@@ -509,6 +510,7 @@ func NewSegment(ctx context.Context,
 		mlog.Any("poolCapacity", pool.Cap()))
 	if _, err := pool.Submit(func() (any, error) {
 		workerStart = time.Now()
+		createPoolWait.Observe(workerStart.Sub(submitTime), stage.Success)
 		logger.Info(ctx, "[xxx] create segment worker start",
 			mlog.Duration("queueWait", workerStart.Sub(submitTime)),
 			mlog.Duration("elapsed", workerStart.Sub(newSegmentStart)),
@@ -574,7 +576,9 @@ func NewSegment(ctx context.Context,
 	}
 
 	initializeSegmentStart := time.Now()
-	if err := segment.initializeSegment(); err != nil {
+	initializeErr := segment.initializeSegment()
+	createInitialize.Observe(time.Since(initializeSegmentStart), stage.Outcome(initializeErr))
+	if err := initializeErr; err != nil {
 		csegment.Release()
 		logger.Warn(ctx, "[xxx] initialize segment failed",
 			mlog.Duration("initializeSegmentDuration", time.Since(initializeSegmentStart)),
@@ -777,6 +781,7 @@ func (s *LocalSegment) LoadIndex(ctx context.Context, loadInfo *querypb.SegmentL
 	// lower-level implementation detail.
 	return s.Reopen(ctx, loadInfo)
 }
+
 func (s *LocalSegment) Indexes() []*IndexedFieldInfo {
 	var result []*IndexedFieldInfo
 	s.fieldIndexes.Range(func(key int64, value *IndexedFieldInfo) bool {
@@ -1318,7 +1323,8 @@ func (s *LocalSegment) syncFieldJSONStatsFromLoadInfo(ctx context.Context, loadI
 		return
 	}
 
-	statsResult := packed.NewStatsResolverFromLoadInfo(loadInfo).TextAndJSONIndexStatsWithBasePaths()
+	statsResult := packed.NewStatsResolverFromLoadInfo(loadInfo).
+		WithManifestReadOrigin(packed.ManifestReadPostSync).TextAndJSONIndexStatsWithBasePaths()
 	jsonKeyStats := statsResult.JSONKeyStats
 	if statsResult.Err() != nil {
 		mlog.Warn(ctx, "failed to resolve json key stats from manifest",
@@ -1962,3 +1968,7 @@ func (s *LocalSegment) FlushData(ctx context.Context, startOffset, endOffset int
 		BM25Stats:              bm25Stats,
 	}, nil
 }
+
+var createPoolWait = stage.New("queryNode", "segment_create", "pool_wait")
+
+var createInitialize = stage.New("queryNode", "segment_create", "initialize")

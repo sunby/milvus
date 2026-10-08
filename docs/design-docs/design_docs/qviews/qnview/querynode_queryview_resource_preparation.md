@@ -81,7 +81,7 @@ Incoming QueryView(Preparing)
                  -> record transform refs and waiters
                  -> report already transform-ready segments, if any
                  -> report empty OnReady if this QN has no assigned segments
-                 -> ViewScopedPhysicalSegmentManager.Acquire for missing segments
+                 -> ViewScopedPhysicalSegmentManager.AcquireReferences for missing segments
                       -> record physical refs
                       -> subscribe the shared SegmentLoadInfoStream for each referenced segment
                       -> if segment is missing:
@@ -291,19 +291,37 @@ When a view is applied as `Dropped`, QueryNode enters local `Dropping` and calls
 
 Release order:
 
-1. `QueryViewSegmentReadinessManager` detaches the view from transform refs.
-2. For each segment whose last transform ref is removed, it cancels catch-up,
-   unregisters TransformLog, and releases the loaded segment.
-3. It calls `ViewScopedPhysicalSegmentManager.Release` to remove physical refs.
-4. The physical manager cancels still-loading segments only when the released
-   view was the last physical ref.
-5. The physical manager closes the segment's SegmentLoadInfo subscription when
-   the final physical ref is removed.
-6. The physical manager waits for the view's in-flight load callbacks.
-7. The transform manager releases the view-level TransformLog guard and
-   collection runtime guard.
-8. `OnDropped` drives the local state machine to `Dropped`.
-9. QueryNode reports `Dropped` and removes the local view entry.
+1. `QueryViewSegmentReadinessManager` synchronously detaches transform refs and
+   calls `ViewScopedPhysicalSegmentManager.ReleaseReferences` under its existing
+   lifecycle mutex. Acquire registers both levels of ownership under that same
+   mutex, then starts loads outside it, so Release cannot overtake registration.
+2. For segments losing their last view ref, it cancels queued or active catch-up
+   and unregisters local TransformLog registrations. The physical manager
+   cancels outstanding loads/updates only when the last physical ref is removed.
+   Query handles continue to pin any segment still in use.
+   The view's TransformLog buffer pin is also detached synchronously, so a new
+   Acquire cannot reuse an abandoned buffer while its subscription is closing.
+3. Release queues cleanup and returns to ViewSync. At most four dedicated workers
+   release TransformLog guards, destroy detached segments, and close detached
+   SegmentLoadInfo subscriptions. Blocking cleanup does not occupy NodeScheduler
+   load workers. The cleanup queue retains pending releases instead of blocking
+   the receive loop on queue capacity; workers exit when it drains.
+4. Cleanup and the view's in-flight physical load callbacks complete independently.
+   Only after both finish does a cleanup worker release the collection runtime
+   guard and invoke `OnDropped` exactly once. No cleanup worker waits for a load
+   callback; completion coordination never blocks a load worker on the cleanup
+   queue.
+5. `OnDropped` drives the local state machine to `Dropped`; QueryNode reports it
+   and removes the local view entry.
+
+Physical load completion and failure validate the physical state identity and
+load attempt epoch. Notifications also carry the expected transform segment
+state, so a late notification cannot populate or fail a replacement lifecycle
+with the same segment ID. Catch-up completion and failure, and physical reset,
+likewise check the segment object they own.
+Catch-up receives its cancellation context before it enters the queue. A canceled
+registration cannot overwrite a replacement, and unregister/drain completion
+removes only the registration object it owns.
 
 Task cancellation is asynchronous. Load release correctness depends on context
 cancellation, ref validation, and waiting for in-flight callbacks rather than

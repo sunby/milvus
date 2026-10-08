@@ -340,9 +340,37 @@ Query(req):
 
 - **Scope**: Per-shard. Only the failed shard retries from Phase 1; other shards'
   results are preserved.
-- **Max retries**: Configurable (default 3).
+- **Attempt budget**: `MaxRetries` limits total per-shard attempts, including the
+  first (default 3). Retryable ViewErrors and Phase 1 transport failures consume
+  the same budget.
 - **Timeout**: Shared with the overall request context.
-- **On retry**: `ResetShard` discards stale results before re-executing.
+- **On Phase 2 view retry**: `ResetShard` discards that shard's stale results
+  before re-executing. A failed Phase 1 has not produced results to discard.
+- **Phase 1 connection failures**: gRPC `Unavailable` (including connection
+  resets) and EOF retry with a context-cancelable backoff starting at 100 ms,
+  doubling up to 1 s. Every new `GetQueryPlan` call reads the current channel
+  assignment and uses its node ID and term. Cancellation, deadline errors,
+  input errors and other gRPC status codes do not enter this transport retry.
+  No backoff occurs after the final attempt. Phase 2 transport policy is unchanged.
+- **Node identity mismatch**: If an SN restarts at the same address, the old
+  assignment can still name its previous process ID. The SN's QueryPlanService
+  and ViewQueryService preserve `merr.ErrNodeNotMatch` (904) in `commonpb.Status`
+  gRPC details with `FailedPrecondition`. Phase 1 passes this routing error to
+  HandlerClient, reports the failed channel/term, and waits for a strictly newer
+  assignment term before reading the new node ID and retrying. Both reporting
+  and waiting use the original request context; there is no retry against the
+  rejected term on a backoff timer. Ordinary `Unknown` errors, including messages
+  containing "node not match", do not enter this recovery path. Both client and
+  server must support these details; older servers' text-only errors are unchanged.
+- **Phase 2 node identity mismatch**: Return `VIEW_INVALIDATED` to the shard
+  retry loop so it resets results and obtains a new plan. HandlerClient does not
+  replay the old plan against the replacement SN.
+- **Retry ownership**: Except for the structured node identity mismatch above,
+  Phase 1 RPC errors remain outside HandlerClient's handler-creation retry loop,
+  and QueryPlanService has no gRPC service-config
+  retry policy. Exhaustion returns the original error; a transport failure does
+  not trigger Proxy's outer load/readiness retry. Existing ViewError-driven
+  collection reloads retain their separate outer retry policy.
 
 ## 5. Node-Side Implementation
 
@@ -375,7 +403,9 @@ Implements both QueryPlanService and ViewQueryService gRPC servers.
 2. Return the latest WAL read frontiers as `QueryPlanMVCC`.
 
 **Phase 2 — Search/Query/Requery:**
-1. Validate view version exists and is Up/UpRecovering.
+1. Validate the exact view version exists. If it is `UpRecovering`, wait on SN
+   for local recovery with the request context; only `Up` can proceed. Recovery
+   failure, view retirement, cancellation/deadline, or WAL shutdown ends the wait.
 2. Delegate to **SearchScheduler** for execution (see Section 5.3).
 
 ### 5.2 QueryNode — Server Side
@@ -432,58 +462,23 @@ ViewQueryServiceClient
 - **Dispatch**: The top-level `ViewQueryServiceClient` switches on `WorkNode` type
   and delegates to the appropriate sub-client.
 
-### 5.5 Shard Discovery via Channel Assignment
+### 5.5 Shard Resolution and Collection Readiness
 
-ShardResolver is backed by the existing channel assignment service discovery
-(`streaming.proto`), extended to publish per-SN shard and primary information
-alongside pchannel→SN binding.
+The Proxy resolves collection vchannels through its metadata cache. These
+vchannels describe static topology and remain available even when the collection
+is unloaded. Channel assignment discovery continues to provide PChannel-to-node
+routing and primary/secondary roles; it carries no collection shard entries.
 
-**Data flow:** Coord publishes shard assignments as part of channel assignment
-full updates. `StreamingNodeAssignment` is extended with two new fields:
+Phase 1 addresses the primary StreamingNode with `UnknownReplicaID`. The node
+resolves the query view by vchannel and returns the real replica ID in the query
+plan. Phase 2 uses that replica ID when executing the plan.
 
-- `shard_assignment`: A `ShardAssignmentInfo` carrying pchannel-scoped loaded
-  shards on this node. Each `PChannelShardAssignment` names one pchannel and
-  carries its shard replicas as (collection_id, shard_index, replica_id).
-- `secondary_channels`: Secondary (read-only) pchannel replicas on this SN.
-  Primary pchannels remain in the existing `channels` field, preserving backward
-  compatibility. Old clients ignore the new field.
-
-The client-side watcher maintains a local cache, so shard resolution is a pure
-local lookup with zero network overhead on the query path.
-
-**Supply ownership and dependencies:**
-
-- `secondary_channels` is supplied by StreamingCoord's channel assignment layer.
-  StreamingCoord already owns the pchannel to StreamingNode binding and each
-  `PChannelInfo` carries an `access_mode`; the assignment publisher splits
-  read-write pchannels into `channels` and read-only pchannels into
-  `secondary_channels`.
-- `shard_assignment` is supplied by the qviews Coord layer, not inferred by the
-  StreamingCoord channel manager. The authoritative source is the qviews
-  load/view management pipeline (`CollectionLoadManager`, Coord-side balancer,
-  `ShardViewRegistry` / `ShardViewManager`), which owns the mapping from
-  `(collection_id, pchannel, shard_index, replica_id)` to the StreamingNode that
-  hosts that shard replica. The client derives the vchannel with
-  `funcutil.GetVirtualChannel(pchannel, collection_id, shard_index)`.
-- Each `PChannelShardAssignment.pchannel` must appear in either `channels` or
-  `secondary_channels` of the same `StreamingNodeAssignment`. This keeps the
-  pchannel role and shard mapping in one consistent assignment snapshot.
-- The assignment discovery service is the aggregation and publication boundary:
-  it joins the StreamingCoord pchannel assignment snapshot with the qviews shard
-  assignment snapshot into a single full assignment update. Clients should
-  consume this unified snapshot instead of joining channel topology and qviews
-  topology independently, so shard routing and primary detection are based on a
-  consistent versioned view.
-
-**Primary replica derivation:** The existing `channels` field contains primary
-pchannels (WAL owner, read-write); the new `secondary_channels` field contains
-secondary pchannels (WAL subscriber, read-only). A replica's shard inherits the
-primary/secondary status of its pchannel on the same SN. The client identifies
-the primary replica for each vchannel: the replica whose shard is on the SN where
-the corresponding pchannel appears in `channels` (not `secondary_channels`).
-
-All proto definitions are in `streaming.proto` under `ShardAssignmentInfo`,
-`PChannelShardAssignment`, and `ShardAssignmentEntry`.
+Automatic loading has a separate readiness barrier. The Proxy uses QueryCoord's
+`WaitCollectionReady` RPC, with a nonblocking check for the initial DQL fast path
+and an event-driven wait after a load has been submitted. Readiness does not
+reintroduce full shard-assignment publication. See
+[Collection Readiness](collection_readiness.md) for the complete expected-shard
+check, cancellation, shared waits, and release semantics.
 
 ## 6. Package Layout
 

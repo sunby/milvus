@@ -342,6 +342,40 @@ The stream manager registers only active vchannels. If a vchannel is removed or
 becomes inactive, the stream manager removes its TransformLog and notifies live
 subscriptions with `ErrTransformLogVChannelUnavailable`.
 
+### Live Notification Routing
+
+The stream manager indexes live streams by vchannel. A Delete append, a
+sync-up frontier advance, or vchannel removal wakes only streams with a live
+subscription to that vchannel. Re-registering the same active TransformLog
+does not change the subscription index.
+An explicit notification with an empty vchannel retains the broadcast behavior
+and marks every registered live vchannel pending.
+
+Each stream owns a deduplicated queue of pending vchannels and a buffered
+wakeup channel of capacity one. Repeated notifications coalesce; they do not discard
+Delete entries. When awakened, the stream drains only its pending vchannels,
+reading every retained entry after each subscription cursor before advancing
+that subscription's frontier. It never scans the PChannel's entire vchannel
+history to discover changes.
+The queue is drained directly and its keys are deleted from the deduplication
+index. A large earlier batch therefore does not force subsequent sparse drains
+to iterate over the retained capacity of a mostly empty map.
+
+The first live subscription for a vchannel registers the stream before an
+immediate read of that TransformLog. Updates before registration are included
+in that read; updates after registration leave a pending notification. Catch-up
+workers continue to read from their existing cursors. Bounded subscriptions
+finish in catch-up and do not register a live watch.
+
+The last live subscription closing, failing, or being replaced removes the
+stream from that vchannel's index and discards its pending notification. Stream
+shutdown removes all its watches. Wakeup channels are never closed by writers.
+
+The lock order is `TransformLog.mu -> StreamManager.streamMu ->
+streamNotifications.mu`. Notification draining releases its mutex before
+sorting, reading log entries, or invoking handlers; those operations never run
+under the manager mutex.
+
 ### Subscription Creation
 
 Each subscription requires:

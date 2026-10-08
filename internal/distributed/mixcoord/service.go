@@ -609,6 +609,10 @@ func (s *Server) OperatePrivilegeGroup(ctx context.Context, request *milvuspb.Op
 }
 
 // ShowCollections shows the collections in the QueryCoord.
+func (s *Server) WaitCollectionReady(ctx context.Context, req *querypb.WaitCollectionReadyRequest) (*commonpb.Status, error) {
+	return s.mixCoord.WaitCollectionReady(ctx, req)
+}
+
 func (s *Server) ShowLoadCollections(ctx context.Context, req *querypb.ShowCollectionsRequest) (*querypb.ShowCollectionsResponse, error) {
 	return s.mixCoord.ShowLoadCollections(ctx, req)
 }
