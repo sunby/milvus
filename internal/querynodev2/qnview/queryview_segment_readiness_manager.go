@@ -10,6 +10,7 @@ import (
 	"github.com/milvus-io/milvus/internal/views/qviews"
 	qvobserve "github.com/milvus-io/milvus/internal/views/qviews/observe"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/nodescheduler"
 )
 
@@ -105,6 +106,7 @@ type transformViewRef struct {
 }
 
 type transformSegmentState struct {
+	warmupEpoch   int64
 	state         transformSegmentLoadState
 	segment       TransformSegment
 	reg           TransformRegistration
@@ -129,6 +131,10 @@ type transformCatchupTask struct {
 }
 
 func (m *QueryViewSegmentReadinessManager) acquire(req AcquireSegments) {
+	if err := validateSyncWarmupRequirement(req.Meta); err != nil {
+		m.submitCallback(req.OnUnrecoverable)
+		return
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	view := qviews.NewQueryViewAtQueryNode(req.Meta, req.View).(*qviews.QueryViewAtQueryNode)
 	guard, err := m.buffer.Acquire(ctx, view)
@@ -176,11 +182,19 @@ func (m *QueryViewSegmentReadinessManager) continueAcquire(req AcquireSegments, 
 		return m.failAcquire(req, ref, cancel, err)
 	}
 
-	activation, startLoad := m.activatePhysicalAcquire(req, ref, collectionGuard)
-	if !activation.current {
+	activation, startLoad, err := m.activatePhysicalAcquire(req, ref, collectionGuard)
+	if err != nil || activation.blocked || !activation.current {
 		if collectionGuard != nil {
 			collectionGuard.Release()
 		}
+	}
+	if err != nil {
+		return m.failAcquire(req, ref, cancel, err)
+	}
+	if activation.blocked {
+		return nodescheduler.ErrDelay
+	}
+	if !activation.current {
 		cancel()
 		return nil
 	}
@@ -197,15 +211,15 @@ func (m *QueryViewSegmentReadinessManager) continueAcquire(req AcquireSegments, 
 	return nil
 }
 
-func (m *QueryViewSegmentReadinessManager) activatePhysicalAcquire(req AcquireSegments, ref *transformViewRef, collectionGuard CollectionRuntimeGuard) (transformAcquireActivation, func()) {
+func (m *QueryViewSegmentReadinessManager) activatePhysicalAcquire(req AcquireSegments, ref *transformViewRef, collectionGuard CollectionRuntimeGuard) (transformAcquireActivation, func(), error) {
 	// Register physical ownership under the same lock that detaches readiness
 	// refs. Release must not overtake this registration and leave an orphaned
 	// physical ref using an already released collection guard.
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	activation := m.activateAcquireLocked(req, ref, collectionGuard)
-	if !activation.current || len(activation.physicalRefSegments) == 0 {
-		return activation, nil
+	activation, err := m.activateAcquireLocked(req, ref, collectionGuard)
+	if err != nil || activation.blocked || !activation.current || len(activation.physicalRefSegments) == 0 {
+		return activation, nil, err
 	}
 	startLoad := m.physical.AcquireReferences(AcquirePhysicalSegments{
 		Key:        req.Key,
@@ -225,7 +239,7 @@ func (m *QueryViewSegmentReadinessManager) activatePhysicalAcquire(req AcquireSe
 			m.failView(req.Key, ref)
 		},
 	})
-	return activation, startLoad
+	return activation, startLoad, nil
 }
 
 func (m *QueryViewSegmentReadinessManager) failAcquire(req AcquireSegments, ref *transformViewRef, cancel context.CancelFunc, err error) error {
@@ -266,11 +280,17 @@ func (m *QueryViewSegmentReadinessManager) recordPendingAcquire(req AcquireSegme
 		state := m.segments[segmentID]
 		if state == nil {
 			state = &transformSegmentState{
-				state:   transformSegmentWaiting,
-				refs:    make(map[qviews.QueryViewKey]struct{}),
-				waiters: make(map[qviews.QueryViewKey]transformSegmentWaiter),
+				warmupEpoch: req.Meta.GetSyncWarmupEpoch(),
+				state:       transformSegmentWaiting,
+				refs:        make(map[qviews.QueryViewKey]struct{}),
+				waiters:     make(map[qviews.QueryViewKey]transformSegmentWaiter),
 			}
 			m.segments[segmentID] = state
+		}
+		// Do not pin an incompatible old lifecycle: old query refs must be able
+		// to drain while this view waits for a fresh physical segment.
+		if req.Meta.GetSyncWarmup() && state.warmupEpoch != req.Meta.GetSyncWarmupEpoch() {
+			continue
 		}
 		state.refs[req.Key] = struct{}{}
 		state.waiters[req.Key] = transformSegmentWaiter{
@@ -300,15 +320,30 @@ type transformAcquireActivation struct {
 	physicalStates      map[int64]*transformSegmentState
 	noAssignedSegments  bool
 	current             bool
+	blocked             bool
 }
 
-func (m *QueryViewSegmentReadinessManager) activateAcquireLocked(req AcquireSegments, ref *transformViewRef, collectionGuard CollectionRuntimeGuard) transformAcquireActivation {
+func (m *QueryViewSegmentReadinessManager) activateAcquireLocked(req AcquireSegments, ref *transformViewRef, collectionGuard CollectionRuntimeGuard) (transformAcquireActivation, error) {
 	if m.views[req.Key] != ref {
-		return transformAcquireActivation{}
+		return transformAcquireActivation{}, nil
 	}
 	activation := transformAcquireActivation{
 		current: true, noAssignedSegments: len(ref.segments) == 0,
 		physicalStates: make(map[int64]*transformSegmentState),
+	}
+	if req.Meta.GetSyncWarmup() {
+		for segmentID := range ref.segments {
+			state := m.segments[segmentID]
+			if state != nil && state.warmupEpoch != req.Meta.GetSyncWarmupEpoch() {
+				if len(state.refs) > 0 {
+					return activation, merr.WrapErrServiceInternalMsg("segment %d still belongs to query views from warmup epoch %d; cannot activate epoch %d", segmentID, state.warmupEpoch, req.Meta.GetSyncWarmupEpoch())
+				}
+				activation.blocked = true
+			}
+		}
+	}
+	if activation.blocked {
+		return activation, nil
 	}
 	ref.collectionGuard = collectionGuard
 	ref.onUnrecoverable = req.OnUnrecoverable
@@ -316,9 +351,10 @@ func (m *QueryViewSegmentReadinessManager) activateAcquireLocked(req AcquireSegm
 		state := m.segments[segmentID]
 		if state == nil {
 			state = &transformSegmentState{
-				state:   transformSegmentWaiting,
-				refs:    make(map[qviews.QueryViewKey]struct{}),
-				waiters: make(map[qviews.QueryViewKey]transformSegmentWaiter),
+				warmupEpoch: req.Meta.GetSyncWarmupEpoch(),
+				state:       transformSegmentWaiting,
+				refs:        make(map[qviews.QueryViewKey]struct{}),
+				waiters:     make(map[qviews.QueryViewKey]transformSegmentWaiter),
 			}
 			m.segments[segmentID] = state
 		}
@@ -330,7 +366,7 @@ func (m *QueryViewSegmentReadinessManager) activateAcquireLocked(req AcquireSegm
 			onReady:         req.OnReady,
 			onUnrecoverable: req.OnUnrecoverable,
 		}
-		if state.state == transformSegmentLoaded {
+		if state.state == transformSegmentLoaded && satisfiesSyncWarmup(state.segment, req.Meta.GetSyncWarmupEpoch()) {
 			activation.readyNow = append(activation.readyNow, waiter)
 			delete(state.waiters, req.Key)
 			continue
@@ -344,7 +380,7 @@ func (m *QueryViewSegmentReadinessManager) activateAcquireLocked(req AcquireSegm
 		}
 		state.waiters[req.Key] = waiter
 	}
-	return activation
+	return activation, nil
 }
 
 func invokeUnrecoverable(cb func()) {
@@ -384,7 +420,7 @@ func (m *QueryViewSegmentReadinessManager) markPhysicalLoaded(segment TransformS
 	defer m.mu.Unlock()
 
 	state := m.segments[segment.ID()]
-	if state == nil || state != expected || len(state.refs) == 0 {
+	if state == nil || state != expected || len(state.refs) == 0 || !satisfiesSyncWarmup(segment, state.warmupEpoch) {
 		return false, nil
 	}
 	if state.state == transformSegmentLoaded || state.state == transformSegmentCatchingUp {
@@ -438,7 +474,7 @@ func (m *QueryViewSegmentReadinessManager) markSegmentReady(segment TransformSeg
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state := m.segments[segment.ID()]
-	if state == nil || state.segment != segment || state.state != transformSegmentCatchingUp {
+	if state == nil || state.segment != segment || state.state != transformSegmentCatchingUp || !satisfiesSyncWarmup(segment, state.warmupEpoch) {
 		return nil
 	}
 	state.state = transformSegmentLoaded

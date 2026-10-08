@@ -27,10 +27,11 @@ type NodeChangedNotifier interface {
 // NodeInfo carries the QueryNode state provided by the coordinator-facing
 // node view. Dynamic per-shard load is computed by the builder.
 type NodeInfo struct {
-	NodeID        int64
-	Alive         bool
-	Stopping      bool
-	ResourceGroup string
+	NodeID         int64
+	Alive          bool
+	Stopping       bool
+	ResourceGroup  string
+	SyncLoadWarmup bool
 }
 
 // NodeSnapshot is a provider-owned immutable node view.

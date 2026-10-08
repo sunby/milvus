@@ -63,6 +63,7 @@ func (s *Server) dropLoadConfigV2AckCallback(ctx context.Context, result message
 	if err := s.qviewsRuntime.loadManager.ReleaseCollection(ctx, result.Message.Header()); err != nil {
 		return err
 	}
+	s.qviewsRuntime.syncWarmupTargets.Delete(result.Message.Header().GetCollectionId())
 	meta.GlobalFailedLoadCache.Remove(result.Message.Header().GetCollectionId())
 	return nil
 }

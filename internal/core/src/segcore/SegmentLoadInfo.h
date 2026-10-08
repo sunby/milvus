@@ -1059,6 +1059,7 @@ class SegmentLoadInfo {
         compact.set_use_take_for_output(info_.use_take_for_output());
         compact.set_estimated_bytes_per_row(info_.estimated_bytes_per_row());
         compact.set_commit_timestamp(info_.commit_timestamp());
+        compact.set_force_sync_warmup(info_.force_sync_warmup());
         info_.Swap(&compact);
         field_binlog_cache_.clear();
         decltype(converted_field_index_cache_)().swap(
@@ -1074,6 +1075,11 @@ class SegmentLoadInfo {
     }
 
     // ==================== LoadIndexInfo Conversion ====================
+
+    [[nodiscard]] bool
+    GetForceSyncWarmup() const {
+        return info_.force_sync_warmup();
+    }
 
     /**
      * @brief Convert a FieldIndexInfo to LoadIndexInfo

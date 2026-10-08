@@ -96,10 +96,11 @@ func (c *managerClientImpl) GetAllQueryNodes(ctx context.Context) (map[int64]*No
 	result := make(map[int64]*NodeInfo, len(state.State.Addresses))
 	for serverID, session := range state.Sessions() {
 		result[serverID] = &NodeInfo{
-			ServerID:     serverID,
-			Address:      session.Address,
-			Stopping:     session.Stopping,
-			ServerLabels: copyServerLabels(session.ServerLabels),
+			ServerID:       serverID,
+			Address:        session.Address,
+			Stopping:       session.Stopping,
+			ServerLabels:   copyServerLabels(session.ServerLabels),
+			SyncLoadWarmup: session.SyncLoadWarmup,
 		}
 	}
 	return result, nil

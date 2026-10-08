@@ -110,6 +110,8 @@ type PhysicalSegmentManager interface {
 }
 
 type PhysicalSegmentResetter interface {
+	// ResetSegment invalidates only the failed physical instance, never a
+	// replacement that happens to reuse its segment ID.
 	ResetSegment(segment TransformSegment)
 }
 
@@ -225,6 +227,7 @@ type SegmentLoadTask struct {
 	SegmentID                   int64
 	Collection                  CollectionRuntime
 	TransformStartAfterTimeTick uint64
+	SyncWarmupEpoch             int64
 	Snapshot                    SegmentLoadInfoSnapshot
 
 	OnLoaded        func(segment TransformSegment)

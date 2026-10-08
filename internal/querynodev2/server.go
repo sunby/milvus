@@ -172,6 +172,7 @@ func NewQueryNode(ctx context.Context, factory dependency.Factory) *QueryNode {
 func (node *QueryNode) initSession() error {
 	minimalIndexVersion, currentIndexVersion, maximumIndexVersion := getIndexEngineVersion()
 	node.session = sessionutil.NewSession(node.ctx,
+		sessionutil.WithSyncLoadWarmup(bool(C.SupportsSyncLoadWarmup())),
 		sessionutil.WithIndexEngineVersion(minimalIndexVersion, currentIndexVersion, maximumIndexVersion),
 		sessionutil.WithScalarIndexEngineVersion(
 			common.MinimalScalarIndexEngineVersion,

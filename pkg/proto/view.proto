@@ -116,6 +116,9 @@ message QueryViewMeta {
     // Inherited from DataViewOfShard at the time this query view was created.
     // TransformLog entries with timetick > this value need to be consumed for this shard.
     uint64 transform_start_after_timetick = 7;
+    // Immutable warmup requirement inherited from the desired load config.
+    bool sync_warmup = 8;
+    int64 sync_warmup_epoch = 9;
 }
 
 // QueryViewOfStreamingNode represents the streaming node's portion of a query view.

@@ -86,8 +86,10 @@ the resulting keyed tasks before returning.
 The Registry also maintains immutable per-shard stats and reverse indexes for
 Balancer scope resolution. The collection index supports resident-manager
 lookup by collection; the node index follows the latest placement stats.
-Managers remain resident until the Registry closes. Removing a Dropped
-QueryView state machine does not remove its owning manager.
+After the last QueryView completes durable removal, the Registry reclaims its
+manager and removes the shard's stats and collection/node index entries. The
+callback rechecks manager identity and emptiness before removal; a later
+`Ensure` can create a fresh manager.
 
 `Close` closes the flush scheduler before the QueryView runtime closes the
 underlying `ReliableSyncer`.
@@ -218,8 +220,10 @@ effects and handles its in-memory cross-view effects:
   it to Balancer's dirty-shard queue after persistence, without manager or
   registry locks. Synthetic failures from preemption/release do not notify.
 - **Dropping**: Wait for node callbacks.
-- **Dropped**: The final ETCD deletion effect is first moved into the manager's
-  pending persist slice, then the state machine is removed.
+- **Dropped**: Capture the final ETCD deletion effect and an after-persist
+  removal callback in the dirty event. The state machine remains registered
+  until `finalizeRemoval` runs after persistence succeeds; that callback also
+  releases its DataView reference and reclaims an empty manager.
 
 Effects are consumed only from state machines explicitly processed by the
 current operation. Untouched resident views are not scanned.
@@ -365,14 +369,15 @@ from submitting new sync work after the syncer has closed.
 9. **Deferred Dropping**: Unrecoverable remains stable until replacement or
    release logic advances it to Dropping.
 10. **Dropped Persistence**: A Dropped state machine is removed only after its
-    final ETCD deletion effect has been captured in an immutable dirty event.
+    final ETCD deletion succeeds and the event's after-persist callback runs.
 11. **Shard-Lane Serialization**: Old and new QueryView versions of one
     `ShardID` cannot be flushed by concurrent tasks.
 12. **Cross-Shard Parallelism**: Different `ShardID` lanes may execute in
     different NodeScheduler tasks concurrently.
-13. **Registry Residency**: A manager remains resident after its last QueryView
-    reaches Dropped. QueryView state transitions do not prune collection index
-    entries; node index entries follow the manager's current stats.
+13. **Registry Cleanup**: A manager remains registered until its last QueryView
+    completes durable removal. The empty-manager callback then removes the
+    manager, stats, and reverse indexes after rechecking its identity and
+    emptiness; node index entries also follow the manager's current stats.
 
 ## 8. Package Location
 

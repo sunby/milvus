@@ -105,10 +105,11 @@ func (s *BalancerSnapshot) ShardStatsMap() map[qviews.ShardID]*coordview.ShardSt
 // within-batch effects in a separate steady-state row map.
 type BalanceNode struct {
 	// Identity & health (Node Manager).
-	NodeID        int64
-	Alive         bool
-	Stopping      bool
-	ResourceGroup string
+	NodeID         int64
+	Alive          bool
+	Stopping       bool
+	ResourceGroup  string
+	SyncLoadWarmup bool
 
 	// UpRowCount is the sum of RowNum across all Up-view segments on this node,
 	// aggregated across all shards.

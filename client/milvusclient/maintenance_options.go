@@ -36,16 +36,21 @@ type loadCollectionOption struct {
 	skipLoadDynamicField bool
 	isRefresh            bool
 	resourceGroups       []string
+	syncWarmup           bool
 }
 
 func (opt *loadCollectionOption) Request() *milvuspb.LoadCollectionRequest {
-	return &milvuspb.LoadCollectionRequest{
+	req := &milvuspb.LoadCollectionRequest{
 		CollectionName:       opt.collectionName,
 		ReplicaNumber:        int32(opt.replicaNum),
 		LoadFields:           opt.loadFields,
 		SkipLoadDynamicField: opt.skipLoadDynamicField,
 		ResourceGroups:       opt.resourceGroups,
 	}
+	if opt.syncWarmup {
+		req.LoadParams = map[string]string{"warmup": "sync"}
+	}
+	return req
 }
 
 func (opt *loadCollectionOption) CheckInterval() time.Duration {
@@ -87,6 +92,15 @@ func NewLoadCollectionOption(collectionName string) *loadCollectionOption {
 		// replicaNum:     1, The default value of the replicaNum should be set on the server side
 		interval: time.Millisecond * 200,
 	}
+}
+
+// WithSyncWarmup requires synchronous cache warmup for resources selected by
+// this load and subsequent loads until ReleaseCollection. Await waits for load
+// readiness; warmed resources remain subject to the server's eviction policy.
+// An already loaded collection must be released before enabling this option.
+func (opt *loadCollectionOption) WithSyncWarmup() *loadCollectionOption {
+	opt.syncWarmup = true
+	return opt
 }
 
 type LoadPartitionsOption interface {

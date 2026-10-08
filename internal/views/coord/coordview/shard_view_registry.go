@@ -194,6 +194,30 @@ func (r *ShardViewRegistry) Get(shardID qviews.ShardID) *ShardViewManager {
 	return r.shards[shardID]
 }
 
+// HasUndrainedViews includes Dropping/Dropped views awaiting durable removal.
+// Callers fencing a new load must exclude concurrent AddPreparing operations
+// with the load-config collection guard. Do not hold registry.mu while taking
+// a manager lock: removal acquires those locks in the opposite order.
+func (r *ShardViewRegistry) HasUndrainedViews(collectionID int64) bool {
+	r.mu.RLock()
+	managers := make([]*ShardViewManager, 0, len(r.collectionShards[collectionID]))
+	for shardID := range r.collectionShards[collectionID] {
+		if manager := r.shards[shardID]; manager != nil {
+			managers = append(managers, manager)
+		}
+	}
+	r.mu.RUnlock()
+	for _, manager := range managers {
+		manager.mu.Lock()
+		pending := len(manager.views) != 0 || len(manager.pendingRemovals) != 0
+		manager.mu.Unlock()
+		if pending {
+			return true
+		}
+	}
+	return false
+}
+
 // AllShardsUp checks a complete expected shard set without allocating a snapshot.
 func (r *ShardViewRegistry) AllShardsUp(shards []qviews.ShardID) bool {
 	if len(shards) == 0 {

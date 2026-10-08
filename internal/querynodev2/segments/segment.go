@@ -213,6 +213,7 @@ func compactSegmentLoadInfoForRuntime(loadInfo *querypb.SegmentLoadInfo) *queryp
 		UseTakeForOutput:     loadInfo.GetUseTakeForOutput(),
 		CommitTimestamp:      loadInfo.GetCommitTimestamp(),
 		EstimatedBytesPerRow: loadInfo.GetEstimatedBytesPerRow(),
+		ForceSyncWarmup:      loadInfo.GetForceSyncWarmup(),
 	}
 }
 

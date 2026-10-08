@@ -504,6 +504,8 @@ proxy:
 
 # Related configuration of queryCoord, used to manage topology and load balancing for the query nodes, and handoff from growing segments to sealed segments.
 queryCoord:
+  # Enable only after the complete cluster supports synchronous load warmup.
+  enableLoadCollectionSyncWarmup: false
   enableSQNServeSegments: true
   autoRelease:
     enabled: false # Effective only with proxy.enableAutoLoad=true. Disabling either switch clears activity; enabling both starts a new idle TTL at the next scan.

@@ -24,6 +24,7 @@
 #include "index/Index.h"
 #include "index/Meta.h"
 #include "knowhere/version.h"
+#include "segcore/SegmentLoadInfo.h"
 #include "segcore/Types.h"
 #include "segcore/load_index_c.h"
 #include "storage/EntryStreamUtils.h"
@@ -652,4 +653,60 @@ TEST(IndexLoadWarmupTest, WarmupPolicyKeptInIndexParams) {
     loadIndexInfo.warmup_policy = "disable";
     ASSERT_EQ(loadIndexInfo.index_params["warmup"], "disable");
     ASSERT_EQ(loadIndexInfo.warmup_policy, "disable");
+}
+
+TEST(SyncLoadWarmupTest, ConvertsAllIndexPoliciesWithoutChangingMetadata) {
+    auto schema = std::make_shared<milvus::Schema>();
+    auto vector = schema->AddDebugField(
+        "vec", milvus::DataType::VECTOR_FLOAT, 4, knowhere::metric::L2);
+    auto text = schema->AddDebugField("text", milvus::DataType::VARCHAR);
+    auto json = schema->AddDebugField("json", milvus::DataType::JSON);
+    milvus::proto::segcore::FieldIndexInfo index;
+    index.set_fieldid(vector.get());
+    auto warmup = index.add_index_params();
+    warmup->set_key("warmup");
+    warmup->set_value("disable");
+    auto mmap = index.add_index_params();
+    mmap->set_key("mmap.enabled");
+    mmap->set_value("false");
+    milvus::proto::segcore::TextIndexStats text_stats;
+    text_stats.set_fieldid(text.get());
+    milvus::proto::segcore::JsonKeyStats json_stats;
+    json_stats.set_fieldid(json.get());
+
+    for (bool force : {false, true}) {
+        milvus::proto::segcore::SegmentLoadInfo proto;
+        proto.set_force_sync_warmup(force);
+        milvus::segcore::SegmentLoadInfo info(proto, schema);
+        auto converted = info.ConvertFieldIndexInfoToLoadIndexInfo(&index, 1);
+        ASSERT_EQ(converted.warmup_policy, force ? "sync" : "disable");
+        ASSERT_EQ(converted.index_params.at("warmup"),
+                  force ? "sync" : "disable");
+        ASSERT_FALSE(converted.enable_mmap);
+        auto converted_text =
+            info.ConvertTextIndexStatsToLoadTextIndexInfo(text_stats, text);
+        auto converted_json =
+            info.ConvertJsonKeyStatsToLoadJsonKeyIndexInfo(json_stats, json);
+        if (force) {
+            ASSERT_EQ(converted_text->warmup_policy(), "sync");
+            ASSERT_EQ(converted_json->warmup_policy(), "sync");
+        }
+        ASSERT_EQ(index.index_params(0).value(), "disable");
+        ASSERT_EQ(text_stats.fieldid(), text.get());
+    }
+}
+
+TEST(SyncLoadWarmupTest, ManifestCompactionAndCopyRetainPolicy) {
+    auto schema = std::make_shared<milvus::Schema>();
+    auto field = schema->AddDebugField("id", milvus::DataType::INT64);
+    milvus::proto::segcore::SegmentLoadInfo proto;
+    proto.set_manifest_path("manifest-not-read-by-this-test");
+    proto.set_force_sync_warmup(true);
+    proto.add_binlog_paths()->set_fieldid(field.get());
+    milvus::segcore::SegmentLoadInfo info(proto, schema);
+    info.CompactRuntimeInfoForManifest();
+    ASSERT_EQ(info.GetProto().binlog_paths_size(), 0);
+    ASSERT_TRUE(info.GetForceSyncWarmup());
+    auto copy = info;
+    ASSERT_TRUE(copy.GetForceSyncWarmup());
 }

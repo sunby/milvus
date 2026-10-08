@@ -77,7 +77,7 @@ func classifyShard(snap *BalancerSnapshot, shardID qviews.ShardID) actionKind {
 	}
 
 	// 5. Any node in the current Up view is unavailable?
-	if hasUnavailableNode(stats, snap.Nodes) {
+	if hasUnavailableNode(stats, snap.Nodes) || (desired.SyncWarmup && !syncWarmupPlacementValid(desired, stats, snap.Nodes)) {
 		return actionMust
 	}
 
@@ -88,6 +88,24 @@ func classifyShard(snap *BalancerSnapshot, shardID qviews.ShardID) actionKind {
 
 	// 7. Steady-state — candidate for balance optimization.
 	return actionMayOptimize
+}
+
+// Capability and completion identity are part of placement validity even when
+// the coordinator's in-memory load-info version happens to match after restart.
+func syncWarmupPlacementValid(desired *loadmgr.LoadConfig, stats *coordview.ShardStats, nodes map[int64]*BalanceNode) bool {
+	if !stats.UpSyncWarmup || stats.UpSyncWarmupEpoch != desired.SyncWarmupEpoch || desired.SyncWarmupEpoch <= 0 {
+		return false
+	}
+	for _, segment := range stats.Segments {
+		for nodeID, state := range segment.Nodes {
+			if state == coordview.SegmentStateUp {
+				if node := nodes[nodeID]; node == nil || !node.SyncLoadWarmup {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 // dataViewVersionAdvanced returns true if the shard's current Up view was

@@ -483,6 +483,7 @@ func convertToSegcoreSegmentLoadInfo(src *querypb.SegmentLoadInfo, origin packed
 		UseTakeForOutput:     src.GetUseTakeForOutput(),
 		EstimatedBytesPerRow: src.GetEstimatedBytesPerRow(),
 		CommitTimestamp:      src.GetCommitTimestamp(),
+		ForceSyncWarmup:      src.GetForceSyncWarmup(),
 	}, nil
 }
 
