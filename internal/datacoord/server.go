@@ -347,10 +347,6 @@ func (s *Server) initDataCoord() (initErr error) {
 
 	s.globalScheduler = task.NewGlobalTaskScheduler(s.ctx, s.cluster2)
 
-	s.importMeta, err = NewImportMeta(s.ctx, s.catalog, s.allocator, s.meta)
-	if err != nil {
-		return err
-	}
 	s.initCompaction()
 	mlog.Info(s.ctx, "init compaction done")
 
@@ -721,6 +717,15 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 		return err
 	}
 
+	var recoveredImports ImportMeta
+	if err := retry.Do(s.ctx, func() error {
+		var err error
+		recoveredImports, err = NewImportMeta(s.ctx, catalog, s.allocator, recoveredMeta)
+		return err
+	}, retry.Attempts(connMetaMaxRetryTime)); err != nil {
+		return err
+	}
+
 	collections := recoveredMeta.GetCollections()
 	collectionIDs := lo.Map(collections, func(c *collectionInfo, _ int) int64 { return c.ID })
 	collectionVChannels := lo.SliceToMap(collections, func(c *collectionInfo) (int64, []string) {
@@ -736,6 +741,9 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 			recoveredMeta.loadableProjection,
 			collectionIDs,
 			collectionVChannels,
+			dataview.WithFrontierProjector(func(ctx context.Context, collectionID int64) (map[string]uint64, error) {
+				return transformFrontierBounds(ctx, recoveredMeta, recoveredImports, collectionID)
+			}),
 		)
 		return err
 	}, retry.Attempts(connMetaMaxRetryTime)); err != nil {
@@ -746,6 +754,7 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 	recoveredMeta.queryViewLoadInfoNotifier = s.queryViewLoadInfoNotifier
 	recoveredMeta.dataViewManager = manager
 	s.meta = recoveredMeta
+	s.importMeta = recoveredImports
 	s.dataViewManager = manager
 	return nil
 }
