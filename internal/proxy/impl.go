@@ -1753,7 +1753,7 @@ func (node *Proxy) Prewarm(ctx context.Context, request *milvuspb.PrewarmRequest
 	method := "Prewarm"
 	tr := timerecord.NewTimeRecorder(method)
 	pt := &prewarmTask{
-		baseTask:       baseTask{metaCache: node.getMetaCache()},
+		baseTask:       baseTask{MetaCache: node.getMetaCache()},
 		ctx:            ctx,
 		Condition:      NewTaskCondition(ctx),
 		PrewarmRequest: request,
@@ -1762,7 +1762,7 @@ func (node *Proxy) Prewarm(ctx context.Context, request *milvuspb.PrewarmRequest
 
 	mlog.Debug(ctx, rpcReceived(method))
 
-	if err := node.sched.ddQueue.Enqueue(pt); err != nil {
+	if err := node.sched.DdQueue.Enqueue(pt); err != nil {
 		mlog.Warn(ctx,
 			rpcFailedToEnqueue(method),
 			mlog.Err(err))
@@ -2039,7 +2039,7 @@ func (node *Proxy) CreateNamespace(ctx context.Context, request *milvuspb.Create
 	method := "CreateNamespace"
 	tr := timerecord.NewTimeRecorder(method)
 	task := &createNamespaceTask{
-		baseTask:               baseTask{metaCache: node.getMetaCache()},
+		baseTask:               baseTask{MetaCache: node.getMetaCache()},
 		ctx:                    ctx,
 		Condition:              NewTaskCondition(ctx),
 		CreateNamespaceRequest: request,
@@ -2047,7 +2047,7 @@ func (node *Proxy) CreateNamespace(ctx context.Context, request *milvuspb.Create
 	}
 
 	mlog.Info(ctx, rpcReceived(method))
-	if err := node.sched.ddQueue.Enqueue(task); err != nil {
+	if err := node.sched.DdQueue.Enqueue(task); err != nil {
 		mlog.Warn(ctx, rpcFailedToEnqueue(method), mlog.Err(err))
 		return &milvuspb.CreateNamespaceResponse{Status: merr.Status(err)}, nil
 	}
@@ -2071,7 +2071,7 @@ func (node *Proxy) DescribeNamespace(ctx context.Context, request *milvuspb.Desc
 	method := "DescribeNamespace"
 	tr := timerecord.NewTimeRecorder(method)
 	task := &describeNamespaceTask{
-		baseTask:                 baseTask{metaCache: node.getMetaCache()},
+		baseTask:                 baseTask{MetaCache: node.getMetaCache()},
 		ctx:                      ctx,
 		Condition:                NewTaskCondition(ctx),
 		DescribeNamespaceRequest: request,
@@ -2079,7 +2079,7 @@ func (node *Proxy) DescribeNamespace(ctx context.Context, request *milvuspb.Desc
 	}
 
 	mlog.Debug(ctx, rpcReceived(method))
-	if err := node.sched.ddQueue.Enqueue(task); err != nil {
+	if err := node.sched.DdQueue.Enqueue(task); err != nil {
 		mlog.Warn(ctx, rpcFailedToEnqueue(method), mlog.Err(err))
 		return &milvuspb.DescribeNamespaceResponse{Status: merr.Status(err)}, nil
 	}
@@ -2103,7 +2103,7 @@ func (node *Proxy) ListNamespaces(ctx context.Context, request *milvuspb.ListNam
 	method := "ListNamespaces"
 	tr := timerecord.NewTimeRecorder(method)
 	task := &listNamespacesTask{
-		baseTask:              baseTask{metaCache: node.getMetaCache()},
+		baseTask:              baseTask{MetaCache: node.getMetaCache()},
 		ctx:                   ctx,
 		Condition:             NewTaskCondition(ctx),
 		ListNamespacesRequest: request,
@@ -2111,7 +2111,7 @@ func (node *Proxy) ListNamespaces(ctx context.Context, request *milvuspb.ListNam
 	}
 
 	mlog.Debug(ctx, rpcReceived(method))
-	if err := node.sched.ddQueue.Enqueue(task); err != nil {
+	if err := node.sched.DdQueue.Enqueue(task); err != nil {
 		mlog.Warn(ctx, rpcFailedToEnqueue(method), mlog.Err(err))
 		return &milvuspb.ListNamespacesResponse{Status: merr.Status(err)}, nil
 	}
@@ -2138,7 +2138,7 @@ func (node *Proxy) DropNamespace(ctx context.Context, request *milvuspb.DropName
 	method := "DropNamespace"
 	tr := timerecord.NewTimeRecorder(method)
 	task := &dropNamespaceTask{
-		baseTask:             baseTask{metaCache: node.getMetaCache()},
+		baseTask:             baseTask{MetaCache: node.getMetaCache()},
 		ctx:                  ctx,
 		Condition:            NewTaskCondition(ctx),
 		DropNamespaceRequest: request,
@@ -2146,7 +2146,7 @@ func (node *Proxy) DropNamespace(ctx context.Context, request *milvuspb.DropName
 	}
 
 	mlog.Info(ctx, rpcReceived(method))
-	if err := node.sched.ddQueue.Enqueue(task); err != nil {
+	if err := node.sched.DdQueue.Enqueue(task); err != nil {
 		mlog.Warn(ctx, rpcFailedToEnqueue(method), mlog.Err(err))
 		return &milvuspb.DropNamespaceResponse{Status: merr.Status(err)}, nil
 	}
@@ -2170,7 +2170,7 @@ func (node *Proxy) HasNamespace(ctx context.Context, request *milvuspb.HasNamesp
 	method := "HasNamespace"
 	tr := timerecord.NewTimeRecorder(method)
 	task := &hasNamespaceTask{
-		baseTask:            baseTask{metaCache: node.getMetaCache()},
+		baseTask:            baseTask{MetaCache: node.getMetaCache()},
 		ctx:                 ctx,
 		Condition:           NewTaskCondition(ctx),
 		HasNamespaceRequest: request,
@@ -2178,7 +2178,7 @@ func (node *Proxy) HasNamespace(ctx context.Context, request *milvuspb.HasNamesp
 	}
 
 	mlog.Debug(ctx, rpcReceived(method))
-	if err := node.sched.ddQueue.Enqueue(task); err != nil {
+	if err := node.sched.DdQueue.Enqueue(task); err != nil {
 		mlog.Warn(ctx, rpcFailedToEnqueue(method), mlog.Err(err))
 		return &milvuspb.HasNamespaceResponse{Status: merr.Status(err)}, nil
 	}
@@ -2202,7 +2202,7 @@ func (node *Proxy) GetNamespaceStats(ctx context.Context, request *milvuspb.GetN
 	method := "GetNamespaceStats"
 	tr := timerecord.NewTimeRecorder(method)
 	task := &getNamespaceStatsTask{
-		baseTask:                 baseTask{metaCache: node.getMetaCache()},
+		baseTask:                 baseTask{MetaCache: node.getMetaCache()},
 		ctx:                      ctx,
 		Condition:                NewTaskCondition(ctx),
 		GetNamespaceStatsRequest: request,
@@ -2210,7 +2210,7 @@ func (node *Proxy) GetNamespaceStats(ctx context.Context, request *milvuspb.GetN
 	}
 
 	mlog.Debug(ctx, rpcReceived(method))
-	if err := node.sched.ddQueue.Enqueue(task); err != nil {
+	if err := node.sched.DdQueue.Enqueue(task); err != nil {
 		mlog.Warn(ctx, rpcFailedToEnqueue(method), mlog.Err(err))
 		return &milvuspb.GetNamespaceStatsResponse{Status: merr.Status(err)}, nil
 	}

@@ -195,7 +195,9 @@ class ChunkedSegmentSealedImpl : public SegmentSealed {
     int64_t
     get_partition_id() const override {
         auto snapshot = CapturePublishedState();
-        return snapshot->load_info == nullptr ? -1 : snapshot->load_info->GetPartitionID();
+        return snapshot->load_info == nullptr
+                   ? -1
+                   : snapshot->load_info->GetPartitionID();
     }
 
     std::shared_ptr<SegmentReadLease>

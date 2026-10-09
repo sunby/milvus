@@ -699,7 +699,7 @@ func normalizeRecoveredViewMeta(
 			// Legacy recovery meta only persisted partition IDs and removed dropped
 			// partitions from the list, so an absent state means the partition is normal.
 			if partition.GetState() == streamingpb.PartitionState_PARTITION_STATE_UNKNOWN &&
-				partition.GetTombstoneTimeTick() == 0 {
+				partition.GetCheckpointTimeTick() == 0 {
 				partition.State = streamingpb.PartitionState_PARTITION_STATE_NORMAL
 			}
 		}

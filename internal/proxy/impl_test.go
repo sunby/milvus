@@ -1552,7 +1552,6 @@ func TestProxy_Delete(t *testing.T) {
 	collectionID := int64(111)
 	partitionName := "default"
 	partitionID := int64(222)
-	channels := []string{"test_vchannel"}
 	dbName := "test_1"
 	collSchema := &schemapb.CollectionSchema{
 		Name:        collectionName,

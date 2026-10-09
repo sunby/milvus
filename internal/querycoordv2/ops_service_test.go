@@ -764,13 +764,13 @@ func (suite *OpsServiceSuite) TestTransferSegmentToSQN() {
 			Address:  "localhost",
 			Hostname: "localhost",
 		}))
-		suite.meta.ResourceManager.HandleNodeUp(ctx, nodeID)
+		suite.meta.HandleNodeUp(ctx, nodeID)
 	}
 
 	collectionID := int64(1)
 	partitionID := int64(1)
 	replicaID := int64(1)
-	suite.meta.ReplicaManager.Put(ctx, meta.NewReplica(&querypb.Replica{
+	suite.meta.Put(ctx, meta.NewReplica(&querypb.Replica{
 		ID:            replicaID,
 		CollectionID:  collectionID,
 		Nodes:         []int64{1, 2},

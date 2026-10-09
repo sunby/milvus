@@ -1499,17 +1499,17 @@ func (suite *ServiceSuite) TestLoadBalanceWithNoDstNodeUseSQN() {
 	}()
 
 	collection := suite.collections[0]
-	replica := suite.meta.ReplicaManager.GetByCollection(ctx, collection)[0]
+	replica := suite.meta.GetByCollection(ctx, collection)[0]
 	mutableReplica := replica.CopyForWrite()
 	mutableReplica.AddRWSQNode(10001)
-	suite.meta.ReplicaManager.Put(ctx, mutableReplica.IntoReplica())
+	suite.meta.Put(ctx, mutableReplica.IntoReplica())
 
 	suite.nodeMgr.Add(session.NewNodeInfo(session.ImmutableNodeInfo{
 		NodeID:   10001,
 		Address:  "localhost",
 		Hostname: "localhost",
 	}))
-	suite.meta.ResourceManager.HandleNodeUp(ctx, 10001)
+	suite.meta.HandleNodeUp(ctx, 10001)
 
 	srcNode := replica.GetRWNodes()[0]
 	suite.updateCollectionStatus(ctx, collection, querypb.LoadStatus_Loaded)

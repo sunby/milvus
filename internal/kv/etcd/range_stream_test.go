@@ -19,13 +19,13 @@ package etcdkv
 import (
 	"bytes"
 	"context"
-	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"

@@ -19,10 +19,11 @@ package nodescheduler
 import (
 	"container/list"
 	"context"
-	"errors"
 	"math"
 	"sync"
 	"time"
+
+	"github.com/cockroachdb/errors"
 
 	"github.com/milvus-io/milvus/pkg/v3/config"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"

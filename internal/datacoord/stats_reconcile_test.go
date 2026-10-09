@@ -75,6 +75,7 @@ type discoveryTestCatalog struct {
 	metastore.DataCoordCatalog
 	mu                 sync.Mutex
 	tasks              map[int64]*indexpb.StatsTask
+	metadataErr        error
 	failSave, failDrop atomic.Bool
 }
 
@@ -131,11 +132,12 @@ func newDiscoveryFixture(t testing.TB, mode string) *discoveryFixture {
 	setDiscoveryTestParam(t, &Params.CommonCfg.EnabledJSONKeyStats, "true")
 	setDiscoveryTestParam(t, &Params.DataCoordCfg.JSONStatsTriggerCount, "10")
 	f := &discoveryFixture{
-		mt:        newTestMetaWithSegments(t, NewCachedSegmentsInfo(), nil),
+		mt:        &meta{ctx: context.Background(), segments: NewSegmentsInfo()},
 		alloc:     &discoveryTestAllocator{},
 		scheduler: &discoveryTestScheduler{},
 		catalog:   &discoveryTestCatalog{tasks: make(map[int64]*indexpb.StatsTask)},
 	}
+	f.mt.catalog = f.catalog
 	f.mt.collections = typeutil.NewConcurrentMap[int64, *collectionInfo]()
 	f.mt.AddCollection(&collectionInfo{ID: 1, Schema: &schemapb.CollectionSchema{Fields: []*schemapb.FieldSchema{
 		{FieldID: 101, DataType: schemapb.DataType_VarChar, TypeParams: []*commonpb.KeyValuePair{{Key: "enable_match", Value: "true"}}},
@@ -195,9 +197,7 @@ func TestStatsDiscoveryFlushSortAndDuplicate(t *testing.T) {
 	require.NoError(t, f.mt.SetState(context.Background(), 1, commonpb.SegmentState_Flushing))
 	require.Eventually(t, func() bool { return discoveryPending(f.si.discovery) == 0 }, time.Second, time.Millisecond)
 	require.Zero(t, f.scheduler.enqueued.Load(), "flushing but unsorted is not eligible")
-	require.NoError(t, f.mt.UpdateSegmentsInfo(context.Background(), map[int64][]MutateFunc{1: {
-		func(s *datapb.SegmentInfo) bool { s.IsSorted = true; return true },
-	}}))
+	require.NoError(t, f.mt.UpdateSegmentsInfo(context.Background(), func(p *updateSegmentPack) bool { p.Get(1).IsSorted = true; return true }))
 	f.waitTasks(t, 2)
 	for range 100 {
 		f.mt.notifyStatsSegments(1, 1)
@@ -321,31 +321,26 @@ func TestStatsDiscoveryMetadataPublication(t *testing.T) {
 	f := newDiscoveryFixture(t, "event")
 	q := f.si.discovery
 	segment := discoverySegment(1, false)
-	persist := f.mt.segmentPersist
-	f.mt.segmentPersist = &failingCommitSegmentPersist{base: persist, err: merr.WrapErrServiceInternalMsg("injected")}
+	f.catalog.metadataErr = merr.WrapErrServiceInternalMsg("injected")
 	require.Error(t, f.mt.AddSegment(context.Background(), segment))
 	require.Zero(t, discoveryPending(q), "failed persistence must not notify")
-	f.mt.segmentPersist = persist
+	f.catalog.metadataErr = nil
 	require.NoError(t, f.mt.AddSegment(context.Background(), segment))
 	require.Equal(t, 2, discoveryPending(q))
 	drainDiscovery(q)
-	require.NoError(t, f.mt.UpdateSegmentsInfo(context.Background(), map[int64][]MutateFunc{1: {
-		func(s *datapb.SegmentInfo) bool { s.NumOfRows++; return true },
-	}}))
+	require.NoError(t, f.mt.UpdateSegmentsInfo(context.Background(), func(p *updateSegmentPack) bool { p.Get(1).NumOfRows++; return true }))
 	require.Zero(t, discoveryPending(q), "unrelated statistics do not cause discovery")
-	f.mt.segmentPersist = &failingCommitSegmentPersist{base: persist, err: merr.WrapErrServiceInternalMsg("injected")}
+	f.catalog.metadataErr = merr.WrapErrServiceInternalMsg("injected")
 	require.Error(t, f.mt.SetState(context.Background(), 1, commonpb.SegmentState_Dropped))
 	require.Zero(t, discoveryPending(q))
-	f.mt.segmentPersist = persist
+	f.catalog.metadataErr = nil
 	require.NoError(t, f.mt.DropSegmentsOfPartition(context.Background(), []int64{2}))
 	require.Equal(t, 2, discoveryPending(q))
 	result, err := f.si.reconcileStats(statsReconcileKey{1, indexpb.StatsSubJob_TextIndexJob}, make(map[int64]statsFieldRules))
 	require.NoError(t, err)
 	require.Equal(t, statsNotNeeded, result)
-	_, version, _ := f.mt.segments.GetSegmentWithVersion(1)
-	require.NoError(t, f.mt.DropSegment(context.Background(), f.mt.GetSegment(context.Background(), 1)))
-	f.mt.segments.SetSegment(1, segment, version-1)
-	f.mt.notifyStatsChange(nil, segment) // late old event cannot bypass the tombstone.
+	require.NoError(t, f.mt.DropSegment(context.Background(), 1))
+	f.mt.notifyStatsChange(nil, segment) // late events reread the current metadata.
 	result, err = f.si.reconcileStats(statsReconcileKey{1, indexpb.StatsSubJob_TextIndexJob}, make(map[int64]statsFieldRules))
 	require.NoError(t, err)
 	require.Equal(t, statsNotNeeded, result)
@@ -375,17 +370,22 @@ func TestStatsDiscoveryShadowAndPoll(t *testing.T) {
 func TestStatsDiscoveryStreamingScan(t *testing.T) {
 	f := newDiscoveryFixture(t, "event")
 	for id := int64(1); id <= 1000; id++ {
-		f.mt.segments.SetSegment(id, discoverySegment(id, false), 1)
+		f.mt.segments.SetSegment(id, discoverySegment(id, false))
 	}
 	for id := int64(1); id <= 900; id++ {
-		f.mt.segments.DropSegment(id, 2)
+		f.mt.segments.DropSegment(id)
 	}
 	next, stop := iter.Pull2(f.mt.rangeStatsSegments(0))
 	_, _, ok := next()
 	require.True(t, ok)
 	// A suspended iterator must not hold a metadata lock needed by writers.
 	done := make(chan struct{})
-	go func() { f.mt.segments.SetSegment(2000, discoverySegment(2000, true), 1); close(done) }()
+	go func() {
+		f.mt.segMu.Lock()
+		f.mt.setSegmentAndNotifyStats(2000, discoverySegment(2000, true))
+		f.mt.segMu.Unlock()
+		close(done)
+	}()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -399,7 +399,7 @@ func TestStatsDiscoveryStreamingScan(t *testing.T) {
 	var cursors []*statsScanCursor
 	round := 0
 	f.si.advanceStatsScans(&cursors, &round)
-	require.Len(t, cursors, 1, "a large tombstone prefix must not be skipped in one step")
+	require.Len(t, cursors, 1, "a scan must stop after its configured batch budget")
 	require.LessOrEqual(t, discoveryPending(f.si.discovery), 6)
 	for _, cursor := range cursors {
 		cursor.stop()
@@ -479,7 +479,7 @@ func TestStatsDiscoveryEligibility(t *testing.T) {
 			}
 			segment := discoverySegment(1, true)
 			tc.change(segment.SegmentInfo)
-			f.mt.segments.SetSegment(1, segment, 1)
+			f.mt.segments.SetSegment(1, segment)
 			got, err := f.si.reconcileStats(statsReconcileKey{1, tc.job}, make(map[int64]statsFieldRules))
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
@@ -490,4 +490,20 @@ func TestStatsDiscoveryEligibility(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (c *discoveryTestCatalog) AddSegment(context.Context, *datapb.SegmentInfo) error {
+	return c.metadataErr
+}
+
+func (c *discoveryTestCatalog) AlterSegments(context.Context, []*datapb.SegmentInfo, ...metastore.BinlogsIncrement) error {
+	return c.metadataErr
+}
+
+func (c *discoveryTestCatalog) DropSegment(context.Context, *datapb.SegmentInfo) error {
+	return c.metadataErr
+}
+
+func (c *discoveryTestCatalog) SaveDroppedSegmentsInBatch(context.Context, []*datapb.SegmentInfo) error {
+	return c.metadataErr
 }

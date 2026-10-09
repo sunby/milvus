@@ -2703,7 +2703,8 @@ ChunkedSegmentSealedImpl::LoadColumnGroups(
              &committer]() mutable {
                 milvus::monitor::QueryStageTaskTimer task_timer(
                     milvus::monitor::QueryStage::LoadColumnGroupQueue,
-                    milvus::monitor::QueryStage::LoadColumnGroupRun, submitted);
+                    milvus::monitor::QueryStage::LoadColumnGroupRun,
+                    submitted);
                 CheckCancellation(
                     op_ctx,
                     id_,
@@ -9045,7 +9046,8 @@ ChunkedSegmentSealedImpl::LoadColumnGroups(
              &committer]() mutable {
                 milvus::monitor::QueryStageTaskTimer task_timer(
                     milvus::monitor::QueryStage::LoadColumnGroupQueue,
-                    milvus::monitor::QueryStage::LoadColumnGroupRun, submitted);
+                    milvus::monitor::QueryStage::LoadColumnGroupRun,
+                    submitted);
                 CheckCancellation(
                     op_ctx,
                     id_,

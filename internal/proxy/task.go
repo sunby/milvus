@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/cockroachdb/errors"
 	"google.golang.org/protobuf/proto"
@@ -3580,7 +3579,7 @@ func (t *prewarmTask) GetLoadPriority() commonpb.LoadPriority {
 }
 
 func (t *prewarmTask) Execute(ctx context.Context) error {
-	metaCache := t.getMetaCache()
+	metaCache := t.GetMetaCache()
 	collID, err := metaCache.GetCollectionID(ctx, t.GetDbName(), t.CollectionName)
 	if err != nil {
 		return err

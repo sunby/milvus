@@ -69,7 +69,7 @@ func BenchmarkCompactionPolicyNoCandidates(b *testing.B) {
 				m := &meta{
 					ctx:         context.Background(),
 					collections: typeutil.NewConcurrentMap[int64, *collectionInfo](),
-					segments:    NewCachedSegmentsInfo(),
+					segments:    NewSegmentsInfo(),
 				}
 				schema := newBumpSchemaVersionTestCollection(1, 2).Schema
 				for fieldID := int64(102); fieldID < 116; fieldID++ {
@@ -79,7 +79,7 @@ func BenchmarkCompactionPolicyNoCandidates(b *testing.B) {
 				}
 				for id := int64(1); id <= int64(collectionCount); id++ {
 					m.collections.Insert(id, &collectionInfo{ID: id, Schema: schema})
-					m.segments.SetSegment(id, newBumpSchemaVersionTestSegment(id, id, 2, storage.StorageV3, "manifest"), 1)
+					m.segments.SetSegment(id, newBumpSchemaVersionTestSegment(id, id, 2, storage.StorageV3, "manifest"))
 				}
 				alloc := &compactionCheckBenchmarkAllocator{}
 				handler := &ServerHandler{s: &Server{meta: m}}

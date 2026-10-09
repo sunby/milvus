@@ -46,7 +46,7 @@ func TestQuotaInfoAggregatePreservesControlData(t *testing.T) {
 	})
 	m := &meta{
 		collections: typeutil.NewConcurrentMap[int64, *collectionInfo](),
-		segments:    NewCachedSegmentsInfo(),
+		segments:    NewSegmentsInfo(),
 	}
 	for id, db := range map[int64]string{1: "db-a", 2: "db-a", 3: "db-b"} {
 		m.collections.Insert(id, &collectionInfo{
@@ -78,7 +78,7 @@ func TestQuotaInfoAggregatePreservesControlData(t *testing.T) {
 			InsertBinlogSize:  fixture.size,
 			InsertBinlogCount: fixture.files, DeleteNumRows: fixture.deletes,
 		}
-		m.segments.SetSegment(fixture.id, segment, 1)
+		m.segments.SetSegment(fixture.id, segment)
 	}
 	expected := &metricsinfo.DataCoordQuotaMetrics{
 		TotalBinlogSize:      510,
@@ -127,7 +127,7 @@ func TestQuotaInfoAggregatePreservesControlData(t *testing.T) {
 	require.Zero(t, testutil.CollectAndCount(metrics.DataCoordL0DeleteEntriesNum))
 	require.Equal(t, float64(0), testutil.ToFloat64(metrics.DataCoordSegmentBinLogFileCount.WithLabelValues(metrics.AllLabel)))
 	for _, segment := range m.segments.GetSegments() {
-		m.segments.DropSegment(segment.GetID(), 2)
+		m.segments.DropSegment(segment.GetID())
 	}
 	empty := m.GetQuotaInfo()
 	require.Zero(t, empty.TotalBinlogSize)
@@ -146,7 +146,7 @@ func BenchmarkQuotaInfoAggregate(b *testing.B) {
 	for _, collections := range []int{10000, 100000} {
 		m := &meta{
 			collections: typeutil.NewConcurrentMap[int64, *collectionInfo](),
-			segments:    NewCachedSegmentsInfo(),
+			segments:    NewSegmentsInfo(),
 		}
 		for i := range collections {
 			id := int64(i + 1)
@@ -154,7 +154,7 @@ func BenchmarkQuotaInfoAggregate(b *testing.B) {
 			segment := buildSegment(id, id, id, "channel")
 			segment.NumOfRows = 100
 			segment.Stats = &datapb.Statistics{InsertBinlogSize: 1024, InsertBinlogCount: 1}
-			m.segments.SetSegment(id, segment, 1)
+			m.segments.SetSegment(id, segment)
 		}
 		b.Run(strconv.Itoa(collections), func(b *testing.B) {
 			b.ReportAllocs()

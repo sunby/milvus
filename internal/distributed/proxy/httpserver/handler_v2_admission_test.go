@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/milvus-io/milvus/internal/json"
@@ -52,12 +53,12 @@ func TestDQLAdmissionRejectsBeforeDecode(t *testing.T) {
 	nodeID := strconv.FormatInt(paramtable.GetNodeID(), 10)
 	// admission runs outside restfulSizeMiddleware: a rejected request must
 	// not add its client-declared size to the restful byte accounting
-	receiveBytes := metrics.ProxyReceiveBytes.WithLabelValues("0", "", "", "")
+	receiveBytes := metrics.ProxyReceiveBytes.WithLabelValues("0", "")
 	receiveBytesBefore := testutil.ToFloat64(receiveBytes)
 	for _, action := range []string{QueryAction, GetAction, SearchAction, AdvancedSearchAction, HybridSearchAction} {
 		methodTag := routeToMethod[versionalV2(EntityCategory, action)]
-		total := metrics.ProxyFunctionCall.WithLabelValues(nodeID, methodTag, metrics.TotalLabel, metrics.CauseNA, "", "")
-		rejected := metrics.ProxyFunctionCall.WithLabelValues(nodeID, methodTag, metrics.RejectedLabel, metrics.CauseSystem, "", "")
+		total := metrics.ProxyFunctionCall.WithLabelValues(nodeID, methodTag, metrics.TotalLabel, metrics.CauseNA)
+		rejected := metrics.ProxyFunctionCall.WithLabelValues(nodeID, methodTag, metrics.RejectedLabel, metrics.CauseSystem)
 		totalBefore, rejectedBefore := testutil.ToFloat64(total), testutil.ToFloat64(rejected)
 
 		// "{" is not decodable JSON: a decoded request would fail with
@@ -115,15 +116,14 @@ func TestDQLAdmissionDisabled(t *testing.T) {
 	assert.Equal(t, merr.Code(merr.ErrIncorrectParameterFormat), returnBody.Code)
 }
 
-func TestDQLAdmissionDBLabelStaysEmpty(t *testing.T) {
+func TestDQLAdmissionIgnoresDBHeader(t *testing.T) {
 	// the DB-Name header is client-controlled and not authoritative (the body
 	// value wins after decode): it must neither mint a series nor shift
 	// rejection counts between databases
 	server := initHTTPServerV2(&dqlFullProxy{full: true}, false)
 	nodeID := strconv.FormatInt(paramtable.GetNodeID(), 10)
-	headerDB := metrics.ProxyFunctionCall.WithLabelValues(nodeID, "Search", metrics.RejectedLabel, metrics.CauseSystem, "my_db", "")
-	empty := metrics.ProxyFunctionCall.WithLabelValues(nodeID, "Search", metrics.RejectedLabel, metrics.CauseSystem, "", "")
-	headerDBBefore, emptyBefore := testutil.ToFloat64(headerDB), testutil.ToFloat64(empty)
+	rejected := metrics.ProxyFunctionCall.WithLabelValues(nodeID, "Search", metrics.RejectedLabel, metrics.CauseSystem)
+	before := testutil.ToFloat64(rejected)
 
 	req := httptest.NewRequest(http.MethodPost, versionalV2(EntityCategory, SearchAction), strings.NewReader("{"))
 	req.Header.Set("Content-Type", "application/json")
@@ -132,8 +132,12 @@ func TestDQLAdmissionDBLabelStaysEmpty(t *testing.T) {
 	server.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusTooManyRequests, w.Code)
-	assert.Equal(t, headerDBBefore, testutil.ToFloat64(headerDB), "header value must not become a label")
-	assert.Equal(t, emptyBefore+1, testutil.ToFloat64(empty))
+	assert.Equal(t, before+1, testutil.ToFloat64(rejected))
+	sample := &dto.Metric{}
+	assert.NoError(t, rejected.Write(sample))
+	for _, label := range sample.GetLabel() {
+		assert.NotEqual(t, "my_db", label.GetValue(), "header value must not become a label")
+	}
 }
 
 func TestDQLAdmissionWithoutProbe(t *testing.T) {

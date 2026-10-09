@@ -25,7 +25,6 @@ import (
 	"path"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -462,7 +461,6 @@ func (m *meta) reloadFromKV(ctx context.Context, collectionIDs []int64) error {
 		if err := conc.AwaitAll(futures...); err != nil {
 			return err
 		}
-
 	}
 
 	mlog.Info(ctx, "datacoord show segments done", mlog.Duration("dur", record.RecordSpan()))

@@ -325,7 +325,6 @@ func observeProxyCollection(nodeID, db, collection string) {
 		ProxyPathReplaceParentOperations.WithLabelValues(nodeID, db, collection, parentType).Add(1)
 	}
 	ProxyPathReplaceMergeLatency.WithLabelValues(nodeID, db, collection).Observe(1)
-	ProxyFunctionCall.WithLabelValues(nodeID, "x", SuccessLabel, CauseNA, db, collection).Add(1)
 	ProxyFunctionlatency.WithLabelValues(nodeID, db, collection, "x", "x", "x").Observe(1)
 }
 
@@ -555,22 +554,32 @@ func labelIdentifiers(t *testing.T) map[string]string {
 }
 
 // vecVariableLabels returns the variable label names of a
-// `prometheus.NewXxxVec(opts, []string{...})` expression. Identifiers are kept
+// Prometheus vector constructor or collection-cardinality wrapper. Identifiers are kept
 // as-is; string literals are resolved to their identifier via labelIdentByValue.
 func vecVariableLabels(expr ast.Expr, labelIdentByValue map[string]string) (map[string]struct{}, bool) {
 	call, ok := expr.(*ast.CallExpr)
 	if !ok || len(call.Args) == 0 {
 		return nil, false
 	}
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || !strings.HasSuffix(sel.Sel.Name, "Vec") {
+	switch fun := call.Fun.(type) {
+	case *ast.SelectorExpr:
+		pkg, ok := fun.X.(*ast.Ident)
+		if !ok || pkg.Name != "prometheus" || !strings.HasSuffix(fun.Sel.Name, "Vec") {
+			return nil, false
+		}
+	case *ast.Ident:
+		switch fun.Name {
+		case "newCollectionCounterVec", "newCollectionHistogramVec", "newCollectionGaugeVec", "newCollectionVChannelHistogramVec", "newCollectionVChannelGaugeVec":
+		default:
+			return nil, false
+		}
+	default:
 		return nil, false
 	}
-	pkg, ok := sel.X.(*ast.Ident)
-	if !ok || pkg.Name != "prometheus" {
+	if len(call.Args) < 2 {
 		return nil, false
 	}
-	lit, ok := call.Args[len(call.Args)-1].(*ast.CompositeLit)
+	lit, ok := call.Args[1].(*ast.CompositeLit)
 	if !ok {
 		return nil, false
 	}

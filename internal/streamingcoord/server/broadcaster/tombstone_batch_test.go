@@ -291,3 +291,25 @@ func TestDropTombstonesValidatesAndDeduplicatesIDs(t *testing.T) {
 	s.bm.lifetime.SetState(typeutil.LifetimeStateStopped)
 	require.Error(t, s.bm.DropTombstones(context.Background(), []uint64{2}))
 }
+
+func TestTombstoneGCBatchRetiresIdempotencyAfterDurableRemoval(t *testing.T) {
+	bm := newTombstoneGCTestManager()
+	task := newBroadcastTaskFromProto(createImportBroadcastTaskProto(1, "gc-key", streamingpb.BroadcastTaskState_BROADCAST_TASK_STATE_TOMBSTONE, []byte{1}), newBroadcasterMetrics(), nil)
+	task.SetLogger(mlog.With())
+	scope := task.IdempotencyScope()
+	bm.tasks[1] = task
+	bm.idempotencyIndex.Add(scope, 1)
+	meta := mock_metastore.NewMockStreamingCoordCataLog(t)
+	resource.InitForTest(resource.OptStreamingCatalog(meta))
+	meta.EXPECT().RemoveBroadcastTasks(mock.Anything, []uint64{1}).Return(context.DeadlineExceeded).Once()
+	require.ErrorIs(t, bm.DropTombstones(context.Background(), []uint64{1}), context.DeadlineExceeded)
+	id, found := bm.idempotencyIndex.Get(scope)
+	require.True(t, found)
+	require.Equal(t, uint64(1), id)
+	require.Same(t, task, bm.tasks[1])
+	meta.EXPECT().RemoveBroadcastTasks(mock.Anything, []uint64{1}).Return(nil).Once()
+	require.NoError(t, bm.DropTombstones(context.Background(), []uint64{1}))
+	_, found = bm.idempotencyIndex.Get(scope)
+	require.False(t, found)
+	require.Empty(t, bm.tasks)
+}

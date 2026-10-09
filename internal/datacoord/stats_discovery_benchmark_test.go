@@ -33,7 +33,7 @@ func BenchmarkStatsDiscoverySteady(b *testing.B) {
 				segment := discoverySegment(id, true)
 				segment.TextStatsLogs = map[int64]*datapb.TextIndexStats{101: {}}
 				segment.JsonKeyStats = map[int64]*datapb.JsonKeyStats{102: {JsonKeyStatsDataFormat: common.JSONStatsDataFormatVersion}}
-				f.mt.segments.SetSegment(id, segment, 1)
+				f.mt.segments.SetSegment(id, segment)
 			}
 			b.Run("poll_with_direct_field_check", func(b *testing.B) {
 				b.ReportAllocs()

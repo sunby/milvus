@@ -62,7 +62,7 @@ func (t *createNamespaceTask) OnEnqueue() error {
 }
 
 func (t *createNamespaceTask) PreExecute(ctx context.Context) error {
-	if err := validateNamespaceCollection(ctx, t.getMetaCache(), t.GetDbName(), t.GetCollectionName()); err != nil {
+	if err := validateNamespaceCollection(ctx, t.GetMetaCache(), t.GetDbName(), t.GetCollectionName()); err != nil {
 		return err
 	}
 	return validatePartitionTag(t.GetNamespaceName(), true)
@@ -73,7 +73,7 @@ func (t *createNamespaceTask) Execute(ctx context.Context) error {
 	if err = merr.CheckRPCCall(resp, err); err != nil {
 		return err
 	}
-	collectionID, err := t.getMetaCache().GetCollectionID(ctx, t.GetDbName(), t.GetCollectionName())
+	collectionID, err := t.GetMetaCache().GetCollectionID(ctx, t.GetDbName(), t.GetCollectionName())
 	if err != nil {
 		return err
 	}
@@ -124,7 +124,7 @@ func (t *describeNamespaceTask) OnEnqueue() error {
 }
 
 func (t *describeNamespaceTask) PreExecute(ctx context.Context) error {
-	if err := validateNamespaceCollection(ctx, t.getMetaCache(), t.GetDbName(), t.GetCollectionName()); err != nil {
+	if err := validateNamespaceCollection(ctx, t.GetMetaCache(), t.GetDbName(), t.GetCollectionName()); err != nil {
 		return err
 	}
 	return validatePartitionTag(t.GetNamespaceName(), true)
@@ -169,7 +169,7 @@ func (t *listNamespacesTask) OnEnqueue() error {
 }
 
 func (t *listNamespacesTask) PreExecute(ctx context.Context) error {
-	return validateNamespaceCollection(ctx, t.getMetaCache(), t.GetDbName(), t.GetCollectionName())
+	return validateNamespaceCollection(ctx, t.GetMetaCache(), t.GetDbName(), t.GetCollectionName())
 }
 
 func (t *listNamespacesTask) Execute(ctx context.Context) error {
@@ -211,13 +211,13 @@ func (t *dropNamespaceTask) OnEnqueue() error {
 }
 
 func (t *dropNamespaceTask) PreExecute(ctx context.Context) error {
-	if err := validateNamespaceCollection(ctx, t.getMetaCache(), t.GetDbName(), t.GetCollectionName()); err != nil {
+	if err := validateNamespaceCollection(ctx, t.GetMetaCache(), t.GetDbName(), t.GetCollectionName()); err != nil {
 		return err
 	}
 	if err := validatePartitionTag(t.GetNamespaceName(), true); err != nil {
 		return err
 	}
-	return checkNamespaceNotLoaded(ctx, t.getMetaCache(), t.mixCoord, t.GetDbName(), t.GetCollectionName(), t.GetNamespaceName())
+	return checkNamespaceNotLoaded(ctx, t.GetMetaCache(), t.mixCoord, t.GetDbName(), t.GetCollectionName(), t.GetNamespaceName())
 }
 
 func (t *dropNamespaceTask) Execute(ctx context.Context) error {
@@ -259,7 +259,7 @@ func (t *hasNamespaceTask) OnEnqueue() error {
 }
 
 func (t *hasNamespaceTask) PreExecute(ctx context.Context) error {
-	if err := validateNamespaceCollection(ctx, t.getMetaCache(), t.GetDbName(), t.GetCollectionName()); err != nil {
+	if err := validateNamespaceCollection(ctx, t.GetMetaCache(), t.GetDbName(), t.GetCollectionName()); err != nil {
 		return err
 	}
 	return validatePartitionTag(t.GetNamespaceName(), true)
@@ -307,14 +307,14 @@ func (t *getNamespaceStatsTask) PreExecute(ctx context.Context) error {
 	if t.GetExact() {
 		return merr.WrapErrParameterInvalidMsg("exact namespace stats are not supported yet")
 	}
-	if err := validateNamespaceCollection(ctx, t.getMetaCache(), t.GetDbName(), t.GetCollectionName()); err != nil {
+	if err := validateNamespaceCollection(ctx, t.GetMetaCache(), t.GetDbName(), t.GetCollectionName()); err != nil {
 		return err
 	}
 	return validatePartitionTag(t.GetNamespaceName(), true)
 }
 
 func (t *getNamespaceStatsTask) Execute(ctx context.Context) error {
-	metaCache := t.getMetaCache()
+	metaCache := t.GetMetaCache()
 	collectionID, err := metaCache.GetCollectionID(ctx, t.GetDbName(), t.GetCollectionName())
 	if err != nil {
 		return err

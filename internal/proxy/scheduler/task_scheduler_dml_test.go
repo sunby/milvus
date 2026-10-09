@@ -23,9 +23,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/milvus-io/milvus/internal/proxy/taskmodel"
 	"github.com/stretchr/testify/require"
 
+	"github.com/milvus-io/milvus/internal/proxy/taskmodel"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 

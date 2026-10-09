@@ -21,6 +21,7 @@ import (
 
 // mockCatalog records all persist calls, tracking per-call batches.
 type mockCatalog struct {
+	saveErr   error
 	mu        sync.Mutex
 	saved     []*viewpb.QueryViewOfShard   // accumulated across all calls
 	saveCalls [][]*viewpb.QueryViewOfShard // per-call batches
@@ -44,6 +45,9 @@ func (c *mockCatalog) ListQueryViews(ctx context.Context) ([]*viewpb.QueryViewOf
 func (c *mockCatalog) SaveQueryViews(ctx context.Context, views []*viewpb.QueryViewOfShard) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.saveErr != nil {
+		return c.saveErr
+	}
 	batch := make([]*viewpb.QueryViewOfShard, len(views))
 	for i, v := range views {
 		batch[i] = proto.Clone(v).(*viewpb.QueryViewOfShard)

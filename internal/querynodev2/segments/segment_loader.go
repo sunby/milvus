@@ -769,7 +769,6 @@ func (loader *segmentLoader) loadSingleBloomFilterSet(ctx context.Context, colle
 }
 
 func (loader *segmentLoader) LoadBloomFilterSet(ctx context.Context, collectionID int64, infos ...*querypb.SegmentLoadInfo) ([]*pkoracle.BloomFilterSet, error) {
-	startTs := time.Now()
 	segmentNum := len(infos)
 	if segmentNum == 0 {
 		mlog.Info(context.TODO(), "no segment to load")
@@ -813,50 +812,6 @@ func (loader *segmentLoader) LoadBloomFilterSet(ctx context.Context, collectionI
 
 	pkField := GetPkField(schema)
 	pkFieldID := pkField.GetFieldID()
-
-	if !isMilvusTableRealPK {
-		lazyCtx := context.WithoutCancel(ctx)
-		for i, info := range infos {
-			info := info
-			segmentID := info.GetSegmentID()
-			partitionID := info.GetPartitionID()
-			bfSets[i] = pkoracle.NewLazyBloomFilterSet(segmentID, partitionID, commonpb.SegmentState_Sealed, func(bfs *pkoracle.BloomFilterSet) error {
-				loadStart := time.Now()
-				resolveStart := time.Now()
-				pkStatsBinlogs, err := packed.NewStatsResolverFromLoadInfo(info).BloomFilterPaths(pkFieldID)
-				if err != nil {
-					return err
-				}
-				resolveDuration := time.Since(resolveStart)
-
-				readStart := time.Now()
-				err = loader.loadBloomFilter(lazyCtx, bfs.ID(), bfs, pkStatsBinlogs, loader.cm.MultiRead)
-				readDuration := time.Since(readStart)
-				if err != nil {
-					mlog.Warn(context.TODO(), "load remote segment bloom filter failed",
-						mlog.Int64("partitionID", bfs.Partition()),
-						mlog.Int64("segmentID", bfs.ID()),
-						mlog.Err(err),
-					)
-					return err
-				}
-				mlog.Info(context.TODO(), "lazy load bloom filter set segment done",
-					mlog.FieldCollectionID(collectionID),
-					mlog.FieldSegmentID(bfs.ID()),
-					mlog.Int("pathNum", len(pkStatsBinlogs)),
-					mlog.Duration("resolvePathsDuration", resolveDuration),
-					mlog.Duration("loadBloomFilterDuration", readDuration),
-					mlog.Duration("totalDuration", time.Since(loadStart)))
-				return nil
-			})
-		}
-
-		mlog.Info(context.TODO(), "create lazy bloom filter set done",
-			mlog.FieldCollectionID(collectionID),
-			mlog.Int("segmentNum", segmentNum),
-			mlog.Duration("totalDuration", time.Since(startTs)))
-		return bfSets, nil
-	}
 
 	// Calculate total memory size needed for bloom filters (PK stats)
 	var totalMemorySize int64

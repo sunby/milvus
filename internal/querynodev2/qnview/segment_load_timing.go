@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
-	"github.com/milvus-io/milvus/internal/storagev2"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
@@ -133,7 +132,6 @@ func recordSQNSegmentLoadTiming(ctx context.Context, sample segmentLoadTimingSam
 		return
 	}
 	logSQNSegmentLoadTiming(ctx, snapshot)
-	storagev2.PublishDefaultFilesystemMetrics()
 }
 
 // All stages have one observation per completed scheduler attempt, including

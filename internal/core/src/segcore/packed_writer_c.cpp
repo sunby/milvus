@@ -330,8 +330,7 @@ CloseWriterAndTell(CPackedWriter c_packed_writer,
         auto tell_result = (*packed_writer)->Tell();
         if (!tell_result.ok()) {
             delete packed_writer;
-            auto error =
-                milvus_storage::ToSegcoreError(tell_result.status());
+            auto error = milvus_storage::ToSegcoreError(tell_result.status());
             return milvus::FailureCStatus(&error);
         }
         auto positions = tell_result.ValueOrDie();

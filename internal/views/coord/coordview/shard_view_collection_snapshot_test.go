@@ -26,7 +26,7 @@ import (
 	"github.com/milvus-io/milvus/internal/views/qviews"
 )
 
-func TestRegistry_SnapshotForCollection(t *testing.T) {
+func TestRegistry_ScopedSnapshotIsolation(t *testing.T) {
 	reg := newTestRegistry(t, newMockCatalog(), newMockSyncer())
 	first := qviews.ShardID{ReplicaID: 1, VChannel: "by-dev-rootcoord-dml_100v0"}
 	second := qviews.ShardID{ReplicaID: 2, VChannel: "by-dev-rootcoord-dml_100v1"}
@@ -36,7 +36,7 @@ func TestRegistry_SnapshotForCollection(t *testing.T) {
 	}
 	resident := reg.Snapshot()
 	stats := shardStatsForNodes(map[int64][]int64{101: {1}})
-	reg.onShardStatsChanged(first, stats)
+	reg.onShardStatsChanged(first, reg.Get(first), stats)
 	scoped := reg.SnapshotForCollection(100)
 	assert.Same(t, resident, reg.snapshot)
 	assert.Equal(t, reg.version, scoped.Version())
@@ -46,7 +46,7 @@ func TestRegistry_SnapshotForCollection(t *testing.T) {
 	assert.NotContains(t, scoped.StatsMap(), other)
 	assert.Empty(t, reg.SnapshotForCollection(300).StatsMap())
 
-	reg.onShardStatsChanged(first, emptyShardStats())
+	reg.onShardStatsChanged(first, reg.Get(first), emptyShardStats())
 	assert.Same(t, stats, scoped.StatsMap()[first], "later updates must not change a captured snapshot")
 	delete(scoped.StatsMap(), second)
 	assert.Contains(t, reg.SnapshotForCollection(100).StatsMap(), second, "scoped snapshots own their outer maps")

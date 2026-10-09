@@ -345,8 +345,6 @@ func (node *Proxy) GetExportSnapshotState(
 		method,
 		metrics.TotalLabel,
 		metrics.CauseNA,
-		"",
-		"",
 	).Inc()
 	if req == nil || req.GetJobId() <= 0 {
 		err := merr.WrapErrParameterInvalidMsg("valid snapshot export job_id is required")
@@ -356,8 +354,6 @@ func (node *Proxy) GetExportSnapshotState(
 			method,
 			failStatus,
 			failCause,
-			"",
-			"",
 		).Inc()
 		return &milvuspb.GetExportSnapshotStateResponse{Status: merr.Status(err)}, nil
 	}
@@ -375,8 +371,6 @@ func (node *Proxy) GetExportSnapshotState(
 			method,
 			failStatus,
 			failCause,
-			"",
-			"",
 		).Inc()
 		return &milvuspb.GetExportSnapshotStateResponse{Status: merr.Status(err)}, nil
 	}
@@ -386,8 +380,6 @@ func (node *Proxy) GetExportSnapshotState(
 		method,
 		metrics.SuccessLabel,
 		metrics.CauseNA,
-		"",
-		"",
 	).Inc()
 	metrics.ProxyReqLatency.WithLabelValues(
 		strconv.FormatInt(paramtable.GetNodeID(), 10),

@@ -1425,12 +1425,11 @@ func (wb *writeBufferBase) createNewGrowingSegment(info CreateGrowingSegmentInfo
 		}
 		wb.metaCache.AddSegment(segmentInfo, func(_ *datapb.SegmentInfo) pkoracle.PkStat {
 			return pkoracle.NewBloomFilterSetWithBatchSize(wb.getEstBatchSize())
-		}, metacache.NewBM25StatsFactory, metacache.SegmentActions(actions...))
+		}, metacache.NewBM25StatsFactory, metacache.SetStartPosRecorded(false))
 		mlog.Info(context.TODO(), "add growing segment",
 			mlog.FieldSegmentID(info.SegmentID),
 			mlog.String("channel", wb.channelName),
-			mlog.Int64("storage version", storageVersion),
-			mlog.Bool("needAllocAtCoord", anchorCheckpoint && info.StartPos != nil))
+			mlog.Int64("storage version", storageVersion))
 
 		// Anchor the checkpoint at CreateSegment until the first payload is synced.
 		if anchorCheckpoint && info.StartPos != nil {

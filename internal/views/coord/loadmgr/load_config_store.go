@@ -43,13 +43,6 @@ type LoadConfigStore struct {
 	observers []func(collectionID int64, released bool)
 }
 
-// LoadConfigEntry captures an immutable config and its version in one read.
-// Config is nil and ConfigVersion is zero when the collection is absent.
-type LoadConfigEntry struct {
-	Config        *LoadConfig
-	ConfigVersion uint64
-}
-
 // LoadConfigEntry captures one immutable config and its versions in one read.
 // Config is nil and ConfigVersion is zero when the collection is absent.
 type LoadConfigEntry struct {
@@ -210,12 +203,6 @@ func (s *LoadConfigStore) notifyObservers(collectionID int64, released bool) {
 	for _, observer := range s.observers {
 		observer(collectionID, released)
 	}
-}
-
-// Get reads one collection and its version without materializing a snapshot.
-func (s *LoadConfigStore) Get(collectionID int64) LoadConfigEntry {
-	config, version := s.GetConfigWithVersion(collectionID)
-	return LoadConfigEntry{Config: config, ConfigVersion: version}
 }
 
 // Contains reports whether a collection has a live load config without

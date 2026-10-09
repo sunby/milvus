@@ -47,7 +47,7 @@ func newBroadcastAckModule(
 	runtime moduleapi.Runtime,
 	observers ...func(string, time.Duration),
 ) *broadcastAckModule {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // G118: cancellation ownership is transferred to broadcastAckModule.Close.
 	var observeDropCollectionStage func(string, time.Duration)
 	if len(observers) > 0 {
 		observeDropCollectionStage = observers[0]

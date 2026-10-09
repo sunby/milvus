@@ -264,9 +264,6 @@ func registerDropCollectionNoopCallbacks() {
 	registry.RegisterDropCollectionV1AckCallback(func(ctx context.Context, msg message.BroadcastResultDropCollectionMessageV1) error {
 		return nil
 	})
-	registry.RegisterDropCollectionV1AckOnceCallback(func(ctx context.Context, msg message.AckResultDropCollectionMessageV1) error {
-		return nil
-	})
 }
 
 func createNewBroadcastTask(broadcastID uint64, vchannels []string, rks ...message.ResourceKey) *streamingpb.BroadcastTask {

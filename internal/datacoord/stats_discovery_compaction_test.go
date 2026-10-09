@@ -43,7 +43,7 @@ func TestStatsDiscoveryCompactionPublication(t *testing.T) {
 			manifest := packed.MarshalManifestPath("/test/stats/1", 10)
 			input.StorageVersion = storage.StorageV3
 			input.ManifestPath = manifest
-			mt := newCompactionCreateTsTestMeta(t, input)
+			mt := newCompactionCreateTsTestMeta(input)
 			q := newStatsReconcileQueue(64, 4)
 			mt.statsDiscovery.Store(q)
 			task := &datapb.CompactionTask{

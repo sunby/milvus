@@ -203,5 +203,5 @@ func (t *storedIndexSizeTracker) deactivate(ctx context.Context, collectionID Un
 
 func setStoredIndexSizeMetric(collectionID UniqueID, size uint64) {
 	metrics.DataCoordStoredIndexFilesSize.WithLabelValues("", "",
-		strconv.FormatInt(int64(collectionID), 10)).Set(float64(size))
+		strconv.FormatInt(collectionID, 10)).Set(float64(size))
 }

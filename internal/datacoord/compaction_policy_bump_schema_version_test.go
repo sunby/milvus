@@ -231,7 +231,7 @@ func (s *BumpSchemaVersionPolicySuite) TestTriggerClonesSchemaOnlyForCandidates(
 			mockAlloc := newMockAllocator(s.T())
 			policy := newBumpSchemaVersionPolicy(&meta{
 				collections: typeutil.NewConcurrentMap[UniqueID, *collectionInfo](),
-				segments:    NewCachedSegmentsInfo(),
+				segments:    NewSegmentsInfo(),
 			}, mockAlloc, s.handler)
 			policy.meta.collections.Insert(collection.ID, collection)
 			segmentSchemaVersion := int32(2)
@@ -239,7 +239,7 @@ func (s *BumpSchemaVersionPolicySuite) TestTriggerClonesSchemaOnlyForCandidates(
 				segmentSchemaVersion = 1
 			}
 			for _, segmentID := range []int64{101, 102} {
-				policy.meta.segments.SetSegment(segmentID, newBumpSchemaVersionTestSegment(collection.ID, segmentID, segmentSchemaVersion, storage.StorageV3, "manifest"), 0)
+				policy.meta.segments.SetSegment(segmentID, newBumpSchemaVersionTestSegment(collection.ID, segmentID, segmentSchemaVersion, storage.StorageV3, "manifest"))
 			}
 
 			cloneCount := 0
@@ -273,9 +273,9 @@ func (s *BumpSchemaVersionPolicySuite) TestTriggerRetainsSchemaAcrossCacheReplac
 	collection := newBumpSchemaVersionTestCollection(100, 2)
 	policy := s.bumpSchemaVersionPolicy
 	policy.meta.collections.Insert(collection.ID, collection)
-	policy.meta.segments.SetSegment(101, newBumpSchemaVersionTestSegment(collection.ID, 101, 1, storage.StorageV3, "manifest"), 0)
+	policy.meta.segments.SetSegment(101, newBumpSchemaVersionTestSegment(collection.ID, 101, 1, storage.StorageV3, "manifest"))
 	// This segment only becomes stale at V3, after this scan's V2 snapshot.
-	policy.meta.segments.SetSegment(102, newBumpSchemaVersionTestSegment(collection.ID, 102, 2, storage.StorageV3, "manifest"), 0)
+	policy.meta.segments.SetSegment(102, newBumpSchemaVersionTestSegment(collection.ID, 102, 2, storage.StorageV3, "manifest"))
 
 	var selectSegments func(*bumpSchemaVersionPolicy, int64, int32) []*chanPartSegments
 	selectMock := mockey.Mock((*bumpSchemaVersionPolicy).staleFlushedSegments).To(

@@ -89,7 +89,7 @@ func TestQNHandler_DropCleanupDoesNotBlockNextPrepare(t *testing.T) {
 		},
 		release: func(req ReleaseSegments) { req.OnDropped() },
 	}
-	mgr := newTestQueryViewSegmentReadinessManager(t, physical, cleanupTestBuffer{}, 4)
+	mgr := newTestQueryViewSegmentReadinessManager(t, physical, cleanupTestBuffer{})
 	h := NewQNQueryViewHandler(mgr)
 	reports := make(chan qviews.QueryViewAtWorkNode, 8)
 	apply := func(view qviews.QueryViewAtWorkNode) {
@@ -160,7 +160,7 @@ func TestQueryViewCleanup_BoundedWorkersDoNotStarveLoads(t *testing.T) {
 		},
 		release: func(req ReleaseSegments) { req.OnDropped() },
 	}
-	mgr := newTestQueryViewSegmentReadinessManager(t, physical, cleanupTestBuffer{}, 4)
+	mgr := newTestQueryViewSegmentReadinessManager(t, physical, cleanupTestBuffer{})
 	drops := make([]<-chan struct{}, count)
 	for i := range segments {
 		key, ready := acquireCleanupView(t, mgr, int64(i+1), segments[i].ID())
@@ -259,7 +259,7 @@ func TestQueryViewCleanup_LateLoadCannotPopulateReplacementLifecycle(t *testing.
 		acquire: func(req AcquirePhysicalSegments) { requests <- req },
 		release: func(req ReleaseSegments) { req.OnDropped() },
 	}
-	mgr := newTestQueryViewSegmentReadinessManager(t, physical, cleanupTestBuffer{}, 4)
+	mgr := newTestQueryViewSegmentReadinessManager(t, physical, cleanupTestBuffer{})
 	key1, ready1 := acquireCleanupView(t, mgr, 1, 1000)
 	oldRequest := awaitCleanupEvent(t, requests)
 	awaitCleanupEvent(t, releaseCleanupView(mgr, key1))

@@ -78,7 +78,7 @@ func TestCreateNamespaceTaskPreExecuteModeValidation(t *testing.T) {
 				defer guard.UnPatch()
 
 				task := &createNamespaceTask{
-					baseTask: baseTask{metaCache: cache},
+					baseTask: baseTask{MetaCache: cache},
 					CreateNamespaceRequest: &milvuspb.CreateNamespaceRequest{
 						CollectionName: "coll",
 						NamespaceName:  "tenant_1",
@@ -107,7 +107,7 @@ func TestCreateNamespaceTaskPreExecuteRejectsInvalidName(t *testing.T) {
 		}), nil).Build()
 
 		task := &createNamespaceTask{
-			baseTask: baseTask{metaCache: cache},
+			baseTask: baseTask{MetaCache: cache},
 			CreateNamespaceRequest: &milvuspb.CreateNamespaceRequest{
 				CollectionName: "coll",
 				NamespaceName:  "bad name",
@@ -133,7 +133,7 @@ func TestDropNamespaceTaskPreExecuteRejectsLoadedNamespace(t *testing.T) {
 		mockey.Mock(isPartitionLoaded).Return(true, nil).Build()
 
 		task := &dropNamespaceTask{
-			baseTask: baseTask{metaCache: cache},
+			baseTask: baseTask{MetaCache: cache},
 			DropNamespaceRequest: &milvuspb.DropNamespaceRequest{
 				CollectionName: "coll",
 				NamespaceName:  "tenant_1",
@@ -159,7 +159,7 @@ func TestGetNamespaceStatsTaskExecuteRejectsDefaultPartition(t *testing.T) {
 		mockey.Mock((*MetaCache).GetPartitionID).Return(int64(200), nil).Build()
 
 		task := &getNamespaceStatsTask{
-			baseTask: baseTask{metaCache: cache},
+			baseTask: baseTask{MetaCache: cache},
 			GetNamespaceStatsRequest: &milvuspb.GetNamespaceStatsRequest{
 				CollectionName: "coll",
 				NamespaceName:  Params.CommonCfg.DefaultPartitionName.GetValue(),

@@ -18,9 +18,10 @@ package nodescheduler
 
 import (
 	"context"
-	"errors"
 	"reflect"
 	"time"
+
+	"github.com/cockroachdb/errors"
 
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 )

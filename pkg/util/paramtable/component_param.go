@@ -4534,12 +4534,6 @@ Set to 0 to disable the penalty period.`,
 		DefaultValue: "60",
 		Doc:          "Interval in seconds for periodic QueryView full reconciliation. Set to 0 to disable it.",
 		Export:       true,
-		Formatter: func(v string) string {
-			if getAsInt(v) < 1 {
-				return "1"
-			}
-			return v
-		},
 	}
 	p.QueryViewFullReconsileInterval.Init(base.mgr)
 

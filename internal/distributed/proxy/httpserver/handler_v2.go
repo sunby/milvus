@@ -97,15 +97,13 @@ func (h *HandlersV2) dqlAdmission(handler gin.HandlerFunc) gin.HandlerFunc {
 			err := merr.WrapErrTooManyRequests(int32(proxy.Params.ProxyCfg.MaxTaskNum.GetAsInt()))
 			// admission aborts before wrapperPost, the only ProxyFunctionCall
 			// site for v2 routes, so the rejection is recorded here. The
-			// method comes from the route; db and collection stay empty:
-			// neither authoritative value exists before decode, and a
-			// client-controlled header must not mint or shift per-database
-			// series.
+			// method comes from the route and uses the same bounded labels
+			// as requests that reach wrapperPost.
 			if methodTag, ok := routeToMethod[c.FullPath()]; ok {
 				nodeID := strconv.FormatInt(paramtable.GetNodeID(), 10)
-				metrics.ProxyFunctionCall.WithLabelValues(nodeID, methodTag, metrics.TotalLabel, metrics.CauseNA, "", "").Inc()
+				metrics.ProxyFunctionCall.WithLabelValues(nodeID, methodTag, metrics.TotalLabel, metrics.CauseNA).Inc()
 				label, cause := requestutil.ParseMetricLabel(nil, err)
-				metrics.ProxyFunctionCall.WithLabelValues(nodeID, methodTag, label, cause, "", "").Inc()
+				metrics.ProxyFunctionCall.WithLabelValues(nodeID, methodTag, label, cause).Inc()
 			}
 			c.Header("Retry-After", "1")
 			// Retry-After is not CORS-safelisted; expose it so browser
@@ -3348,7 +3346,7 @@ func (h *HandlersV2) prewarmNamespace(ctx context.Context, c *gin.Context, anyRe
 		DbName:         dbName,
 		CollectionName: httpReq.CollectionName,
 		Namespace:      &namespaceName,
-		TtlSeconds:     httpReq.TtlSeconds,
+		TtlSeconds:     httpReq.TTLSeconds,
 		Priority:       httpReq.Priority,
 	}
 	c.Set(ContextRequest, req)

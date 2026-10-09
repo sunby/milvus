@@ -313,7 +313,7 @@ func (s blockingCloseSubscription) Close() error {
 
 func TestBufferReleaseReferencesDetachesBeforeSubscriptionClose(t *testing.T) {
 	streams := newFakeStreamManager()
-	buffer := New(streams)
+	buffer := New(streams, 4)
 	// Keep the shared PChannel stream alive while one vchannel is replaced.
 	other, err := buffer.Acquire(context.Background(), newTestQueryView("p_2v0", 50))
 	require.NoError(t, err)

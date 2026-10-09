@@ -53,7 +53,7 @@ func TestStatsDiscoveryCollectionCacheMiss(t *testing.T) {
 	f := newDiscoveryFixture(t, "event")
 	col := f.mt.GetCollection(1)
 	f.mt.collections.Remove(1)
-	f.mt.segments.SetSegment(1, discoverySegment(1, true), 1)
+	f.mt.segments.SetSegment(1, discoverySegment(1, true))
 	key := statsReconcileKey{1, indexpb.StatsSubJob_TextIndexJob}
 	result, err := f.si.reconcileStats(key, make(map[int64]statsFieldRules))
 	require.NoError(t, err)
@@ -85,7 +85,7 @@ func TestStatsDiscoveryResourcesAndSchemaRace(t *testing.T) {
 	col := f.mt.GetClonedCollectionInfo(1)
 	col.Schema.FileResourceIds = []int64{7}
 	f.mt.AddCollection(col)
-	f.mt.segments.SetSegment(1, discoverySegment(1, true), 1)
+	f.mt.segments.SetSegment(1, discoverySegment(1, true))
 	key := statsReconcileKey{1, indexpb.StatsSubJob_TextIndexJob}
 	resource := &internalpb.FileResourceInfo{}
 	f.mt.broker = &discoveryTestBroker{get: func(context.Context, ...int64) ([]*internalpb.FileResourceInfo, error) {
@@ -124,7 +124,7 @@ func TestStatsDiscoveryResourcesAndSchemaRace(t *testing.T) {
 	}}
 	rules := make(map[int64]statsFieldRules)
 	for _, id := range []int64{2, 3} {
-		f.mt.segments.SetSegment(id, discoverySegment(id, true), 1)
+		f.mt.segments.SetSegment(id, discoverySegment(id, true))
 		result, err := f.si.reconcileStats(statsReconcileKey{id, key.subjob}, rules)
 		require.NoError(t, err)
 		require.Equal(t, statsSubmitted, result)
@@ -164,7 +164,7 @@ func TestStatsDiscoveryCancellationDuringDependency(t *testing.T) {
 
 func TestStatsDiscoveryConcurrentSubmission(t *testing.T) {
 	f := newDiscoveryFixture(t, "event")
-	f.mt.segments.SetSegment(1, discoverySegment(1, true), 1)
+	f.mt.segments.SetSegment(1, discoverySegment(1, true))
 	var wg sync.WaitGroup
 	errs := make(chan error, 16)
 	for range 16 {
@@ -185,7 +185,7 @@ func TestStatsDiscoveryConcurrentSubmission(t *testing.T) {
 
 func TestStatsDiscoveryRecoveryAfterPersistBeforeEnqueue(t *testing.T) {
 	f := newDiscoveryFixture(t, "event")
-	f.mt.segments.SetSegment(1, discoverySegment(1, true), 1)
+	f.mt.segments.SetSegment(1, discoverySegment(1, true))
 	// Simulate a process exit after persistence but before scheduler.Enqueue.
 	require.NoError(t, f.catalog.SaveStatsTask(context.Background(), &indexpb.StatsTask{
 		TaskID: 9000, CollectionID: 1, PartitionID: 2, SegmentID: 1, TargetSegmentID: 1,
@@ -216,9 +216,8 @@ func TestStatsDiscoveryBatchDeleteNotifications(t *testing.T) {
 			case "batch_delete":
 				require.NoError(t, f.mt.DropSegmentsOfPartition(context.Background(), []int64{2}))
 				drainDiscovery(f.si.discovery)
-				n, err := f.mt.DropSegments(context.Background(), []*SegmentInfo{f.mt.GetSegment(context.Background(), 1)})
+				err := f.mt.DropSegment(context.Background(), 1)
 				require.NoError(t, err)
-				require.Equal(t, 1, n)
 			}
 			require.Equal(t, 2, discoveryPending(f.si.discovery))
 			result, err := f.si.reconcileStats(statsReconcileKey{1, indexpb.StatsSubJob_TextIndexJob}, make(map[int64]statsFieldRules))

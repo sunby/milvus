@@ -3616,7 +3616,7 @@ func TestPrewarmTask_Execute(t *testing.T) {
 	}, nil).Once()
 
 	task := &prewarmTask{
-		baseTask: baseTask{metaCache: cache},
+		baseTask: baseTask{MetaCache: cache},
 		PrewarmRequest: &milvuspb.PrewarmRequest{
 			Base:                 commonpbutil.NewMsgBase(),
 			DbName:               dbName,

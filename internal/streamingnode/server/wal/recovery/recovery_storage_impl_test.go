@@ -616,7 +616,7 @@ func TestValidateRecoveredViewMetaRejectsUnknownPartitionWithTombstone(t *testin
 		CollectionInfo: &streamingpb.CollectionInfoOfVChannel{
 			CollectionId: 1,
 			Partitions: []*streamingpb.PartitionInfoOfVChannel{
-				{PartitionId: 10, TombstoneTimeTick: 1},
+				{PartitionId: 10, CheckpointTimeTick: 1},
 			},
 			Schemas: []*streamingpb.CollectionSchemaOfVChannel{
 				{

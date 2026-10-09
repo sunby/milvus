@@ -371,12 +371,14 @@ func (bm *broadcastTaskManager) DropTombstones(ctx context.Context, broadcastIDs
 	if err := resource.Resource().StreamingCatalog().RemoveBroadcastTasks(ctx, ids); err != nil {
 		return err
 	}
-	for _, task := range tasks {
+	scopes := make(map[uint64]string, len(tasks))
+	for id, task := range tasks {
 		task.markTombstoneDropped()
+		scopes[id] = task.IdempotencyScope()
 	}
 	bm.mu.Lock()
-	for id, task := range tasks {
-		bm.idempotencyIndex.Remove(task.IdempotencyScope(), id)
+	for id := range tasks {
+		bm.idempotencyIndex.Remove(scopes[id], id)
 		delete(bm.tasks, id)
 	}
 	bm.mu.Unlock()

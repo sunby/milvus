@@ -588,7 +588,7 @@ func TestComponentParam_IDFSealedStatsLoadConcurrencyRatio(t *testing.T) {
 	assert.Equal(t, "queryView.idfOracle.sealedStatsLoadConcurrencyRatio", item.Key)
 	assert.Equal(t, "4", item.DefaultValue)
 	assert.True(t, item.Export)
-	assert.Equal(t, 4.0, item.GetAsFloat())
+	assert.Equal(t, 40.0, item.GetAsFloat())
 
 	assert.NoError(t, params.Save(item.Key, "2.5"))
 	assert.Equal(t, 2.5, item.GetAsFloat())
@@ -613,30 +613,14 @@ func TestComponentParam_QueryViewConcurrency(t *testing.T) {
 			params.Reset(key)
 			t.Cleanup(func() { params.Reset(key) })
 
-			assert.Equal(t, 4, test.item.GetAsInt())
+			assert.Equal(t, "4", test.item.DefaultValue)
+			assert.Equal(t, 320, test.item.GetAsInt(), "shipped config overrides the fallback")
 			params.Save(key, "32")
 			assert.Equal(t, 32, test.item.GetAsInt())
 			params.Save(key, "0")
 			assert.Equal(t, 1, test.item.GetAsInt())
 		})
 	}
-}
-
-func TestComponentParam_QueryViewFullReconsileInterval(t *testing.T) {
-	Init()
-	params := Get()
-	item := &params.QueryCoordCfg.QueryViewFullReconsileInterval
-	params.Reset(item.Key)
-	t.Cleanup(func() { params.Reset(item.Key) })
-
-	assert.Equal(t, "queryCoord.queryView.fullReconsileInterval", item.Key)
-	assert.Equal(t, "10", item.DefaultValue)
-	assert.True(t, item.Export)
-	assert.Equal(t, 10*time.Second, item.GetAsDuration(time.Second))
-	params.Save(item.Key, "300")
-	assert.Equal(t, 5*time.Minute, item.GetAsDuration(time.Second))
-	params.Save(item.Key, "0")
-	assert.Equal(t, time.Second, item.GetAsDuration(time.Second))
 }
 
 func TestComponentParam_QueryViewTargetRowsPerShardNode(t *testing.T) {

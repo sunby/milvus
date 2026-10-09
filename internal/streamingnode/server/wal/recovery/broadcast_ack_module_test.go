@@ -220,7 +220,7 @@ func TestBroadcastAckObservesDropCollectionStages(t *testing.T) {
 		WithBroadcast([]string{"v1"}).
 		WithHeader(&message.DropCollectionMessageHeader{CollectionId: 1}).
 		WithBody(&msgpb.DropCollectionRequest{}))
-	tracker := messageack.NewTracker(utility.WALConsumeCheckpoint{}, nil)
+	tracker := messageack.NewTracker(utility.WALCheckpoint{}, nil, nil)
 	module.Accept(tracker.Track(msg))
 
 	require.NoError(t, scheduler.waitTask(t).Execute(context.Background()))
