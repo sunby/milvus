@@ -318,18 +318,18 @@ CloseWriterAndTell(CPackedWriter c_packed_writer,
     SCOPE_CGO_CALL_METRIC();
 
     try {
-        auto packed_writer = static_cast<
-            std::shared_ptr<milvus_storage::PackedRecordBatchWriter>*>(
-            c_packed_writer);
+        auto packed_writer = std::unique_ptr<
+            std::shared_ptr<milvus_storage::PackedRecordBatchWriter>>(
+            static_cast<
+                std::shared_ptr<milvus_storage::PackedRecordBatchWriter>*>(
+                c_packed_writer));
         auto status = (*packed_writer)->Close();
         if (!status.ok()) {
-            delete packed_writer;
             auto error = milvus_storage::ToSegcoreError(status);
             return milvus::FailureCStatus(&error);
         }
         auto tell_result = (*packed_writer)->Tell();
         if (!tell_result.ok()) {
-            delete packed_writer;
             auto error = milvus_storage::ToSegcoreError(tell_result.status());
             return milvus::FailureCStatus(&error);
         }
@@ -339,10 +339,12 @@ CloseWriterAndTell(CPackedWriter c_packed_writer,
              i++) {
             sizes[i] = static_cast<int64_t>(positions[i]);
         }
-        delete packed_writer;
         return milvus::SuccessCStatus();
     } catch (std::exception& e) {
         return milvus::FailureCStatus(&e);
+    } catch (...) {
+        return milvus::FailureCStatus(milvus::UnexpectedError,
+                                      "unknown exception");
     }
 }
 
@@ -422,7 +424,6 @@ GetFileSizeWithStorageConfig(const char* path,
     } catch (std::exception& e) {
         return milvus::FailureCStatus(&e);
     } catch (...) {
-        delete packed_writer;
         return milvus::FailureCStatus(milvus::UnexpectedError,
                                       "unknown exception");
     }

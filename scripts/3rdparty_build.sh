@@ -132,7 +132,8 @@ unset DYLD_INSERT_LIBRARIES
 
 # Enable parallel downloads for faster dependency resolution
 export CONAN_CPU_COUNT=${CONAN_CPU_COUNT:-$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)}
-export CXXFLAGS="-Wno-error=address -Wno-error=deprecated-declarations -include cstdint"
+# Older dependencies rely on transitive includes removed by newer libc++ versions.
+export CXXFLAGS="-Wno-error=address -Wno-error=deprecated-declarations -include cstdint -include cstdlib"
 export CFLAGS="-Wno-error=address -Wno-error=deprecated-declarations"
 # LLVM from Homebrew doesn't set TARGET_OS_OSX=1 (unlike Apple's clang), which causes
 # macOS SDK headers to exclude macOS-specific APIs (SecImportExport, SCPreferences, etc.).
