@@ -225,8 +225,8 @@ SegmentInternalInterface::FillSearchResultOutputFields(
     const std::vector<FieldId>& field_ids,
     SearchResult& results,
     milvus::OpContext* op_ctx) const {
-    const auto snapshot = results.read_snapshot_ ? results.read_snapshot_
-                                                 : CaptureReadSnapshot();
+    const auto snapshot =
+        results.read_snapshot_ ? results.read_snapshot_ : CaptureReadSnapshot();
     const auto size = results.seg_offsets_.size();
     auto fetch_one = [this, plan, snapshot, &results, size](
                          FieldId field_id, milvus::OpContext* field_ctx) {
@@ -238,13 +238,13 @@ SegmentInternalInterface::FillSearchResultOutputFields(
                 ? &plan->target_dynamic_fields_
                 : nullptr;
         return BulkSubscriptWithSnapshot(this,
-                                          snapshot,
-                                          field_ctx,
-                                          field_id,
-                                          field_meta,
-                                          results.seg_offsets_.data(),
-                                          size,
-                                          dynamic_field_names);
+                                         snapshot,
+                                         field_ctx,
+                                         field_id,
+                                         field_meta,
+                                         results.seg_offsets_.data(),
+                                         size,
+                                         dynamic_field_names);
     };
 
     auto fetched_fields =
@@ -680,8 +680,8 @@ SegmentInternalInterface::FillTargetEntry(
         }
     }
 
-    auto fetch_one = [this, plan, snapshot, offsets, size](FieldId field_id,
-                                                 milvus::OpContext* field_ctx) {
+    auto fetch_one = [this, plan, snapshot, offsets, size](
+                         FieldId field_id, milvus::OpContext* field_ctx) {
         if (SystemProperty::Instance().IsSystem(field_id)) {
             auto system_type =
                 SystemProperty::Instance().GetSystemFieldType(field_id);
