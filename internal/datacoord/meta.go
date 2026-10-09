@@ -3197,11 +3197,7 @@ func (m *meta) UpdateChannelCheckpoint(ctx context.Context, vChannel string, pos
 	m.channelSync.channelLocks.Lock(vChannel)
 	defer m.channelSync.channelLocks.Unlock(vChannel)
 
-	if err := m.metaStore.UpdateChannelCheckpoint(ctx, vChannel, pos); err != nil {
-		return err
-	}
-	m.recomputeDataView(ctx, funcutil.GetCollectionIDFromVChannel(vChannel))
-	return nil
+	return m.metaStore.UpdateChannelCheckpoint(ctx, vChannel, pos)
 }
 
 // MarkChannelCheckpointDropped writes the dropped-channel sentinel so no later
@@ -3252,9 +3248,7 @@ func (m *meta) UpdateChannelCheckpoints(ctx context.Context, positions []*msgpb.
 	if err := m.metaStore.UpdateChannelCheckpoints(ctx, positions); err != nil {
 		return err
 	}
-	for _, pos := range validPositions {
-		m.recomputeDataView(ctx, funcutil.GetCollectionIDFromVChannel(pos.GetChannelName()))
-	}
+
 	return nil
 }
 
