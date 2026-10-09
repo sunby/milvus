@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"golang.org/x/sync/errgroup"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1643,29 +1644,33 @@ func (s *mixCoordImpl) WatchQueryViewSegmentLoadInfo(stream querypb.QueryCoord_W
 }
 
 func (s *mixCoordImpl) initDataAndQueryCoord() error {
-	// DC must init first: its Init seeds the shared MetaStore with both the
-	// segments (newMeta -> LoadFromCatalog) and the collections
-	// (reloadCollectionsFromRootcoord) that QueryCoord then resolves against.
-	// MixCoord deliberately does not seed collections itself -- a second walk
-	// here would double RootCoord's boot load and could not degrade anyway,
-	// since DataCoord's copy is fatal on error.
+	// Recover DataViews before QueryViews acquire their exact-version references.
+	// Neither coordinator starts background GC/balancing until both have recovered.
 	s.datacoordServer.SetFileResourceObserver(s.fileResourceObserver)
 	if err := s.datacoordServer.Init(); err != nil {
-		mlog.Error(s.ctx, "dataCoord init failed", mlog.Err(err))
 		return err
 	}
-	if err := s.datacoordServer.Start(); err != nil {
-		mlog.Error(s.ctx, "dataCoord start failed", mlog.Err(err))
-		return err
-	}
-
 	s.queryCoordServer.SetFileResourceObserver(s.fileResourceObserver)
 	if err := s.queryCoordServer.Init(); err != nil {
-		mlog.Error(s.ctx, "queryCoord init failed", mlog.Err(err))
 		return err
 	}
-	if err := s.queryCoordServer.Start(); err != nil {
-		mlog.Error(s.ctx, "queryCoord start failed", mlog.Err(err))
+	g, _ := errgroup.WithContext(s.ctx)
+
+	g.Go(func() error {
+		if err := s.datacoordServer.Start(); err != nil {
+			mlog.Error(s.ctx, "dataCoord start failed", mlog.Err(err))
+			return err
+		}
+		return nil
+	})
+	g.Go(func() error {
+		if err := s.queryCoordServer.Start(); err != nil {
+			mlog.Error(s.ctx, "queryCoord start failed", mlog.Err(err))
+			return err
+		}
+		return nil
+	})
+	if err := g.Wait(); err != nil {
 		return err
 	}
 
