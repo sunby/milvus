@@ -469,7 +469,7 @@ func getManifestHandleWithTiming(
 	var cTransactionHandle C.LoonTransactionHandle
 	beginTimer := manifestBegin.Begin()
 	beginStartedAt := time.Now()
-	result := C.loon_transaction_open(cBasePath, cProperties, C.int64_t(version), C.int32_t(0) /* resolve_id */, C.uint32_t(1) /* retry_limit */, &cTransactionHandle)
+	result := C.loon_transaction_open(cBasePath, cProperties, C.int64_t(version), C.int64_t(-1) /* manifest_size */, C.int32_t(0) /* resolve_id */, C.uint32_t(1) /* retry_limit */, &cTransactionHandle)
 	if timing != nil {
 		timing.durations[manifestReadBegin] = time.Since(beginStartedAt)
 	}
