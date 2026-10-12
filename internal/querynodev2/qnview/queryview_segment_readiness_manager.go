@@ -2,6 +2,7 @@ package qnview
 
 import (
 	"context"
+	"slices"
 	"sync"
 
 	"github.com/cockroachdb/errors"
@@ -77,6 +78,10 @@ const (
 	transformSegmentLoading
 	transformSegmentCatchingUp
 	transformSegmentLoaded
+	// transformSegmentDraining keeps a segment only for the query refs left
+	// after its last view detached. It no longer follows the transform log, so
+	// a new view waits for it to be released and loads the segment again.
+	transformSegmentDraining
 )
 
 type transformViewRef struct {
@@ -86,6 +91,8 @@ type transformViewRef struct {
 	segments        map[int64]int64
 	onUnrecoverable func()
 	unrecoverable   bool
+	// draining lists the segments that blocked the last activation.
+	draining []int64
 }
 
 type transformSegmentState struct {
@@ -149,6 +156,9 @@ func (m *QueryViewSegmentReadinessManager) continueAcquire(ctx context.Context, 
 	if ctx.Err() != nil {
 		return nil
 	}
+	if m.waitsForDraining(ref) {
+		return nodescheduler.ErrDelay
+	}
 	collectionGuard, retryable, err := m.acquireCollectionRuntime(ctx, view)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -161,9 +171,12 @@ func (m *QueryViewSegmentReadinessManager) continueAcquire(ctx context.Context, 
 	}
 
 	activation, startLoad := m.activatePhysicalAcquire(req, ref, collectionGuard)
-	if !activation.current {
+	if activation.blocked || !activation.current {
 		if collectionGuard != nil {
 			collectionGuard.Release()
+		}
+		if activation.blocked {
+			return nodescheduler.ErrDelay
 		}
 		cancel()
 		return nil
@@ -188,7 +201,7 @@ func (m *QueryViewSegmentReadinessManager) activatePhysicalAcquire(req AcquireSe
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	activation := m.activateAcquireLocked(req, ref, collectionGuard)
-	if !activation.current || len(activation.physicalRefSegments) == 0 {
+	if activation.blocked || !activation.current || len(activation.physicalRefSegments) == 0 {
 		return activation, nil
 	}
 	startLoad := m.physical.AcquireReferences(AcquirePhysicalSegments{
@@ -256,6 +269,11 @@ func (m *QueryViewSegmentReadinessManager) recordPendingAcquire(req AcquireSegme
 			}
 			m.segments[segmentID] = state
 		}
+		// Pinning a draining segment would keep it alive; activation waits for
+		// its query refs to release it instead.
+		if state.state == transformSegmentDraining {
+			continue
+		}
 		state.refs[req.Key] = struct{}{}
 		state.waiters[req.Key] = transformSegmentWaiter{
 			key:             req.Key,
@@ -266,6 +284,19 @@ func (m *QueryViewSegmentReadinessManager) recordPendingAcquire(req AcquireSegme
 		}
 	}
 	return ref, true
+}
+
+// waitsForDraining reports whether a segment that blocked the last activation
+// of the view is still draining, so a retry need not pin the collection
+// runtime again before it is released.
+func (m *QueryViewSegmentReadinessManager) waitsForDraining(ref *transformViewRef) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ref.draining = slices.DeleteFunc(ref.draining, func(segmentID int64) bool {
+		state := m.segments[segmentID]
+		return state == nil || state.state != transformSegmentDraining
+	})
+	return len(ref.draining) > 0
 }
 
 func (m *QueryViewSegmentReadinessManager) detachViewIfCurrent(key qviews.QueryViewKey, ref *transformViewRef) (transformViewDetach, bool) {
@@ -284,6 +315,8 @@ type transformAcquireActivation struct {
 	physicalStates      map[int64]*transformSegmentState
 	noAssignedSegments  bool
 	current             bool
+	// blocked defers the activation until draining segments are released.
+	blocked bool
 }
 
 func (m *QueryViewSegmentReadinessManager) activateAcquireLocked(req AcquireSegments, ref *transformViewRef, collectionGuard CollectionRuntimeGuard) transformAcquireActivation {
@@ -293,6 +326,16 @@ func (m *QueryViewSegmentReadinessManager) activateAcquireLocked(req AcquireSegm
 	activation := transformAcquireActivation{
 		current: true, noAssignedSegments: len(ref.segments) == 0,
 		physicalStates: make(map[int64]*transformSegmentState),
+	}
+	ref.draining = ref.draining[:0]
+	for segmentID := range ref.segments {
+		if state := m.segments[segmentID]; state != nil && state.state == transformSegmentDraining {
+			ref.draining = append(ref.draining, segmentID)
+		}
+	}
+	if len(ref.draining) > 0 {
+		activation.blocked = true
+		return activation
 	}
 	ref.collectionGuard = collectionGuard
 	ref.onUnrecoverable = req.OnUnrecoverable
@@ -666,6 +709,7 @@ func (m *QueryViewSegmentReadinessManager) detachViewLocked(key qviews.QueryView
 			}
 			if state.segment != nil {
 				if state.queryRefs > 0 {
+					state.state = transformSegmentDraining
 					continue
 				}
 				detached.segments = append(detached.segments, state.segment)

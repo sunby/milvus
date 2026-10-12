@@ -483,6 +483,57 @@ func TestQueryViewSegmentReadinessManager_QueryHandleDefersSegmentRelease(t *tes
 	assert.True(t, segment.released)
 }
 
+func TestQueryViewSegmentReadinessManager_ReloadsDrainingSegment(t *testing.T) {
+	physical := make(chan AcquirePhysicalSegments, 2)
+	collections := &fakeQueryViewCollectionRuntimeManager{}
+	mgr := newTestQueryViewSegmentReadinessManager(t, fakePhysicalSegmentManager{
+		acquire: func(req AcquirePhysicalSegments) { physical <- req },
+		release: func(req ReleaseSegments) { req.OnDropped() },
+	}, cleanupTestBuffer{}, collections)
+	view := &viewpb.QueryViewOfQueryNode{
+		NodeId:     1,
+		Partitions: []*viewpb.QueryViewOfPartition{{PartitionId: 10, SegmentIds: []int64{1000}}},
+	}
+	acquire := func(version int64) (qviews.QueryViewKey, chan struct{}) {
+		meta := buildHandlerTestMeta(version)
+		key := qviews.NewQueryViewAtQueryNode(meta, view).QueryViewKey()
+		ready := make(chan struct{}, 1)
+		mgr.Acquire(AcquireSegments{
+			Key: key, Meta: meta, View: view,
+			OnReady:         func(map[int64][]int64) { ready <- struct{}{} },
+			OnUnrecoverable: func() { t.Error("unexpected unrecoverable") },
+		})
+		return key, ready
+	}
+	draining := &cleanupTestSegment{fakeTransformSegment: fakeTransformSegment{id: 1000, partitionID: 10}}
+	first, firstReady := acquire(1)
+	awaitCleanupEvent(t, physical).OnLoaded([]TransformSegment{draining})
+	awaitCleanupEvent(t, firstReady)
+	handles, err := mgr.AcquireSealedSegmentHandles(context.Background(), first, view)
+	require.NoError(t, err)
+	awaitCleanupEvent(t, releaseCleanupView(mgr, first))
+	require.Zero(t, draining.releases.Load())
+
+	// The segment no longer follows the transform log, so the next view waits
+	// for the query to release it instead of reusing it, and its retries do not
+	// acquire the collection runtime again.
+	_, secondReady := acquire(2)
+	select {
+	case <-physical:
+		t.Fatal("a draining segment must not be loaded again before its queries release it")
+	case <-secondReady:
+		t.Fatal("a draining segment must not become ready for a new view")
+	case <-time.After(300 * time.Millisecond):
+	}
+	collections.mu.Lock()
+	require.Equal(t, 2, collections.acquireCalls)
+	collections.mu.Unlock()
+	handles[0].Release()
+	require.EqualValues(t, 1, draining.releases.Load())
+	awaitCleanupEvent(t, physical).OnLoaded([]TransformSegment{&cleanupTestSegment{fakeTransformSegment: fakeTransformSegment{id: 1000, partitionID: 10}}})
+	awaitCleanupEvent(t, secondReady)
+}
+
 func TestQueryViewSegmentReadinessManager_ReleasesLateLoadedSegmentAfterViewRelease(t *testing.T) {
 	meta := buildHandlerTestMeta(1)
 	view := &viewpb.QueryViewOfQueryNode{
