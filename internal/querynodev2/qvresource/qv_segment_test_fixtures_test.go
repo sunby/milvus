@@ -4,6 +4,7 @@ package qvresource
 
 import (
 	"context"
+	"sync"
 
 	"github.com/stretchr/testify/assert"
 
@@ -71,6 +72,9 @@ func (m *fakeQVSegmentManager) Remove(_ context.Context, segmentID int64, scope 
 }
 
 type fakeQVLoader struct {
+	// mu guards the recorded calls: the PK candidate load runs concurrently
+	// with the segment load.
+	mu              sync.Mutex
 	collectionID    int64
 	version         int64
 	infos           []*querypb.SegmentLoadInfo
@@ -82,6 +86,9 @@ type fakeQVLoader struct {
 	deltaCalled     bool
 	pkCalled        bool
 	err             error
+	// Optional hooks that replace err for their call; invoked without mu held.
+	loadSegmentHook func(context.Context) error
+	pkCandidateHook func(context.Context) error
 }
 
 type fakeQVResourceLoader struct {
@@ -128,25 +135,37 @@ func (p *fakeQVLoadMetadataProvider) GetQueryViewLoadInfo(context.Context, int64
 }
 
 func (l *fakeQVLoader) NewSegment(_ context.Context, _ qnview.CollectionRuntime, info *querypb.SegmentLoadInfo) (qvLoadedSegment, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.newCalled = true
 	l.collectionID = info.GetCollectionID()
 	l.infos = []*querypb.SegmentLoadInfo{info}
 	return l.segment, l.err
 }
 
-func (l *fakeQVLoader) LoadSegment(_ context.Context, segment qvLoadedSegment, info *querypb.SegmentLoadInfo) error {
+func (l *fakeQVLoader) LoadSegment(ctx context.Context, segment qvLoadedSegment, info *querypb.SegmentLoadInfo) error {
+	l.mu.Lock()
 	l.loadCalled = true
 	l.infos = append(l.infos, info)
-	return l.err
+	hook, err := l.loadSegmentHook, l.err
+	l.mu.Unlock()
+	if hook != nil {
+		return hook(ctx)
+	}
+	return err
 }
 
 func (l *fakeQVLoader) ReopenSegment(_ context.Context, segment qvLoadedSegment, info *querypb.SegmentLoadInfo) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.reopenCalled = true
 	l.infos = append(l.infos, info)
 	return l.err
 }
 
 func (l *fakeQVLoader) LoadIndex(_ context.Context, segment qvLoadedSegment, info *querypb.SegmentLoadInfo, version int64) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.loadIndexCalled = true
 	l.version = version
 	l.infos = append(l.infos, info)
@@ -154,18 +173,28 @@ func (l *fakeQVLoader) LoadIndex(_ context.Context, segment qvLoadedSegment, inf
 }
 
 func (l *fakeQVLoader) LoadDeltaLogs(_ context.Context, segment qvLoadedSegment, info *querypb.SegmentLoadInfo) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.deltaCalled = true
 	l.infos = append(l.infos, info)
 	return l.err
 }
 
-func (l *fakeQVLoader) LoadPKCandidate(_ context.Context, segment qvLoadedSegment, info *querypb.SegmentLoadInfo) error {
+func (l *fakeQVLoader) LoadPKCandidate(ctx context.Context, segment qvLoadedSegment, info *querypb.SegmentLoadInfo) error {
+	l.mu.Lock()
 	l.pkCalled = true
 	l.infos = append(l.infos, info)
-	return l.err
+	hook, err := l.pkCandidateHook, l.err
+	l.mu.Unlock()
+	if hook != nil {
+		return hook(ctx)
+	}
+	return err
 }
 
 func (l *fakeQVLoader) Load(_ context.Context, collectionID int64, version int64, infos ...*querypb.SegmentLoadInfo) ([]qvLoadedSegment, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.collectionID = collectionID
 	l.version = version
 	l.infos = infos
@@ -181,6 +210,7 @@ type fakeQVSegment struct {
 	hits         []bool
 	released     bool
 	releaseCount int
+	onRelease    func()
 	err          error
 }
 
@@ -231,6 +261,9 @@ func (s *fakeQVSegment) Delete(_ context.Context, pks storage.PrimaryKeys, times
 }
 
 func (s *fakeQVSegment) Release(context.Context) error {
+	if s.onRelease != nil {
+		s.onRelease()
+	}
 	s.released = true
 	s.releaseCount++
 	return s.err
