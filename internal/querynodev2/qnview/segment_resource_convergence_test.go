@@ -47,6 +47,36 @@ func TestSegmentResourceWaitsForManifestAndCatchup(t *testing.T) {
 	})
 }
 
+func TestSegmentResourceSharesExternalBaseByManifestRevision(t *testing.T) {
+	mockey.PatchConvey("an external base is shared by every spelling of its manifest revision", t, func() {
+		f := setupResourceTest(t, nil)
+		f.dependencyMock.UnPatch()
+		mockey.Mock((*fakeQueryViewCollectionRuntimeManager).Acquire).To(func(*fakeQueryViewCollectionRuntimeManager, context.Context, *qviews.QueryViewAtQueryNode) (CollectionRuntimeGuard, bool, error) {
+			schema := &schemapb.CollectionSchema{Version: 1, Fields: []*schemapb.FieldSchema{{FieldID: 100, ExternalField: "id"}}}
+			return &fakeCollectionRuntimeGuard{schemaVersion: 1, schema: schema}, false, nil
+		}).Build()
+		req := f.acquire(1, 1, 1)
+		f.await(t, 1)
+		handler := <-f.handler
+		refresh := func(revision uint64, manifestPath string) {
+			require.NoError(t, handler.Handle(SegmentLoadInfoSnapshot{SegmentID: 1000, Revision: SegmentLoadInfoRevision{Revision: revision}, LoadInfo: &querypb.SegmentLoadInfo{SegmentID: 1000, PartitionID: 10, ManifestPath: manifestPath, NumOfRows: 10}}))
+			require.Eventually(t, func() bool {
+				f.manager.mu.Lock()
+				defer f.manager.mu.Unlock()
+				return f.manager.views[req.Key].bindings[1000].prepared.revision.Revision == revision
+			}, 5*time.Second, time.Millisecond)
+		}
+		refresh(2, packed.MarshalManifestPath("external/seg", 2))
+		require.EqualValues(t, 2, f.loads.Load(), "an external base requires the same manifest revision")
+		// C++ producers write the same revision with sorted keys.
+		refresh(3, `{"base_path":"external/seg","ver":2}`)
+		require.EqualValues(t, 2, f.loads.Load(), "a respelled pointer to the same revision shares the base")
+		refresh(4, packed.MarshalManifestPath("external/seg", 3))
+		require.EqualValues(t, 3, f.loads.Load())
+		f.drop(t, req)
+	})
+}
+
 func TestSegmentResourcePendingViewRetainsSubscription(t *testing.T) {
 	mockey.PatchConvey("a complete pending binding survives release of the previous View", t, func() {
 		f := setupResourceTest(t, nil)
