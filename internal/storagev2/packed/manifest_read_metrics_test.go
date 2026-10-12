@@ -55,7 +55,7 @@ func TestManifestReadMetricsRecordEveryPhaseOnError(t *testing.T) {
 
 func TestManifestResolverOriginsAndLocalCache(t *testing.T) {
 	cfg := manifestTestStorageConfig(t)
-	manifestPath, err := CommitManifestUpdates(path.Join(cfg.RootPath, "metrics/segment"), ManifestEarliest, cfg, &ManifestUpdates{
+	manifestPath, err := CommitManifestUpdates(MarshalManifestPath(path.Join(cfg.RootPath, "metrics/segment"), ManifestEarliest), cfg, &ManifestUpdates{
 		Stats: []StatEntry{{Key: "bloom_filter.100", Files: []string{path.Join(cfg.RootPath, "metrics/bf")}}},
 	})
 	require.NoError(t, err)

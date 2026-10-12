@@ -54,6 +54,14 @@ SegmentLoadInfo::GetColumnGroups() const {
     return column_groups_;
 }
 
+void
+SegmentLoadInfo::InheritCachedColumnGroupsFrom(const SegmentLoadInfo& source) {
+    if (source.HasManifestPath() &&
+        ::IsSameLoonManifestPath(source.GetManifestPath(), GetManifestPath())) {
+        column_groups_ = source.column_groups_;
+    }
+}
+
 // Looks up a storage column in the cached manifest column groups only.
 bool
 SegmentLoadInfo::HasManifestColumn(const std::string& column_name) const {
@@ -1018,7 +1026,10 @@ SegmentLoadInfo::ComputeDiff(SegmentLoadInfo& new_info,
     if (HasManifestPath()) {
         AssertInfo(new_info.HasManifestPath(),
                    "manifest could only be updated with other manifest");
-        if (GetManifestPath() != new_info.GetManifestPath()) {
+        // Compare revisions, not text: another spelling of the same manifest
+        // revision must not reload anything.
+        if (!::IsSameLoonManifestPath(GetManifestPath(),
+                                      new_info.GetManifestPath())) {
             diff.manifest_updated = true;
             diff.new_manifest_path = new_info.GetManifestPath();
         }
