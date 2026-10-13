@@ -1336,10 +1336,15 @@ func (s *statsTaskSuite) TestSetJobInfoJSONStatsResultManifestHandling() {
 				s.Equal(0, catalogWrites)
 			}
 			if testCase.expectNotify {
-				s.Equal([]queryViewLoadInfoNotification{{
-					collectionID: s.collID,
-					segmentIDs:   []int64{s.segID},
-				}}, recorder.segments())
+				// Manifest publication and stats completion can both invalidate the
+				// same snapshot; the watch deduplicates by content revision.
+				s.Require().NotEmpty(recorder.segments())
+				for _, notification := range recorder.segments() {
+					s.Equal(queryViewLoadInfoNotification{
+						collectionID: s.collID,
+						segmentIDs:   []int64{s.segID},
+					}, notification)
+				}
 			} else {
 				s.Empty(recorder.segments())
 			}
@@ -1468,10 +1473,15 @@ func (s *statsTaskSuite) TestSetJobInfoTextStatsResultManifestHandling() {
 				s.Equal(0, catalogWrites)
 			}
 			if testCase.expectNotify {
-				s.Equal([]queryViewLoadInfoNotification{{
-					collectionID: s.collID,
-					segmentIDs:   []int64{s.segID},
-				}}, recorder.segments())
+				// Manifest publication and stats completion can both invalidate the
+				// same snapshot; the watch deduplicates by content revision.
+				s.Require().NotEmpty(recorder.segments())
+				for _, notification := range recorder.segments() {
+					s.Equal(queryViewLoadInfoNotification{
+						collectionID: s.collID,
+						segmentIDs:   []int64{s.segID},
+					}, notification)
+				}
 			} else {
 				s.Empty(recorder.segments())
 			}
