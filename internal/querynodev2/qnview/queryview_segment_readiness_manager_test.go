@@ -4,6 +4,8 @@ package qnview
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -483,54 +485,91 @@ func TestQueryViewSegmentReadinessManager_QueryHandleDefersSegmentRelease(t *tes
 	assert.True(t, segment.released)
 }
 
+// gatedCollectionRuntimeManager parks the first Acquire after gated is set
+// until resume is closed.
+type gatedCollectionRuntimeManager struct {
+	fakeQueryViewCollectionRuntimeManager
+	gated   atomic.Bool
+	entered chan struct{}
+	resume  chan struct{}
+}
+
+func (m *gatedCollectionRuntimeManager) Acquire(ctx context.Context, view *qviews.QueryViewAtQueryNode) (CollectionRuntimeGuard, bool, error) {
+	if m.gated.CompareAndSwap(true, false) {
+		close(m.entered)
+		<-m.resume
+	}
+	return m.fakeQueryViewCollectionRuntimeManager.Acquire(ctx, view)
+}
+
 func TestQueryViewSegmentReadinessManager_ReloadsDrainingSegment(t *testing.T) {
 	physical := make(chan AcquirePhysicalSegments, 2)
-	collections := &fakeQueryViewCollectionRuntimeManager{}
+	resume := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(resume) })
+	collections := &gatedCollectionRuntimeManager{entered: make(chan struct{}), resume: resume}
 	mgr := newTestQueryViewSegmentReadinessManager(t, fakePhysicalSegmentManager{
 		acquire: func(req AcquirePhysicalSegments) { physical <- req },
 		release: func(req ReleaseSegments) { req.OnDropped() },
 	}, cleanupTestBuffer{}, collections)
+	t.Cleanup(unblock)
 	view := &viewpb.QueryViewOfQueryNode{
 		NodeId:     1,
 		Partitions: []*viewpb.QueryViewOfPartition{{PartitionId: 10, SegmentIds: []int64{1000}}},
 	}
-	acquire := func(version int64) (qviews.QueryViewKey, chan struct{}) {
-		meta := buildHandlerTestMeta(version)
-		key := qviews.NewQueryViewAtQueryNode(meta, view).QueryViewKey()
-		ready := make(chan struct{}, 1)
-		mgr.Acquire(AcquireSegments{
-			Key: key, Meta: meta, View: view,
-			OnReady:         func(map[int64][]int64) { ready <- struct{}{} },
-			OnUnrecoverable: func() { t.Error("unexpected unrecoverable") },
-		})
-		return key, ready
+	newSegment := func() *cleanupTestSegment {
+		return &cleanupTestSegment{fakeTransformSegment: fakeTransformSegment{id: 1000, partitionID: 10}}
 	}
-	draining := &cleanupTestSegment{fakeTransformSegment: fakeTransformSegment{id: 1000, partitionID: 10}}
-	first, firstReady := acquire(1)
-	awaitCleanupEvent(t, physical).OnLoaded([]TransformSegment{draining})
-	awaitCleanupEvent(t, firstReady)
-	handles, err := mgr.AcquireSealedSegmentHandles(context.Background(), first, view)
-	require.NoError(t, err)
+	// loadAndPin serves the view's load of the segment and pins it for a query.
+	loadAndPin := func(key qviews.QueryViewKey, ready <-chan map[int64][]int64, segment TransformSegment) SealedSegmentHandle {
+		awaitCleanupEvent(t, physical).OnLoaded([]TransformSegment{segment})
+		awaitCleanupEvent(t, ready)
+		handles, err := mgr.AcquireSealedSegmentHandles(context.Background(), key, view)
+		require.NoError(t, err)
+		return handles[0]
+	}
+	// requireWaiting asserts that the view neither loads the segment again nor
+	// becomes ready, and that the collection runtime was acquired acquireCalls
+	// times in total.
+	requireWaiting := func(ready <-chan map[int64][]int64, acquireCalls int) {
+		select {
+		case <-physical:
+			t.Fatal("a draining segment must not be loaded again before its queries release it")
+		case <-ready:
+			t.Fatal("a draining segment must not become ready for a new view")
+		case <-time.After(300 * time.Millisecond):
+		}
+		collections.mu.Lock()
+		defer collections.mu.Unlock()
+		require.Equal(t, acquireCalls, collections.acquireCalls)
+	}
+
+	draining := newSegment()
+	first, firstReady := acquireCleanupView(t, mgr, 1, 1000)
+	firstQuery := loadAndPin(first, firstReady, draining)
 	awaitCleanupEvent(t, releaseCleanupView(mgr, first))
 	require.Zero(t, draining.releases.Load())
 
 	// The segment no longer follows the transform log, so the next view waits
-	// for the query to release it instead of reusing it, and its retries do not
-	// acquire the collection runtime again.
-	_, secondReady := acquire(2)
-	select {
-	case <-physical:
-		t.Fatal("a draining segment must not be loaded again before its queries release it")
-	case <-secondReady:
-		t.Fatal("a draining segment must not become ready for a new view")
-	case <-time.After(300 * time.Millisecond):
-	}
-	collections.mu.Lock()
-	require.Equal(t, 2, collections.acquireCalls)
-	collections.mu.Unlock()
-	handles[0].Release()
+	// for the query to release it instead of reusing it, without acquiring the
+	// collection runtime meanwhile.
+	_, secondReady := acquireCleanupView(t, mgr, 2, 1000)
+	requireWaiting(secondReady, 1)
+
+	// While the second view acquires the collection runtime, a third view loads
+	// the released segment again and leaves it draining, so the activation of
+	// the second view still waits.
+	collections.gated.Store(true)
+	firstQuery.Release()
 	require.EqualValues(t, 1, draining.releases.Load())
-	awaitCleanupEvent(t, physical).OnLoaded([]TransformSegment{&cleanupTestSegment{fakeTransformSegment: fakeTransformSegment{id: 1000, partitionID: 10}}})
+	awaitCleanupEvent(t, collections.entered)
+	third, thirdReady := acquireCleanupView(t, mgr, 3, 1000)
+	thirdQuery := loadAndPin(third, thirdReady, newSegment())
+	awaitCleanupEvent(t, releaseCleanupView(mgr, third))
+	unblock()
+	requireWaiting(secondReady, 3)
+
+	thirdQuery.Release()
+	awaitCleanupEvent(t, physical).OnLoaded([]TransformSegment{newSegment()})
 	awaitCleanupEvent(t, secondReady)
 }
 

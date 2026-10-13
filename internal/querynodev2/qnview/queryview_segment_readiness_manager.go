@@ -2,7 +2,6 @@ package qnview
 
 import (
 	"context"
-	"slices"
 	"sync"
 
 	"github.com/cockroachdb/errors"
@@ -91,7 +90,8 @@ type transformViewRef struct {
 	segments        map[int64]int64
 	onUnrecoverable func()
 	unrecoverable   bool
-	// draining lists the segments that blocked the last activation.
+	// draining caches the draining segments the view waits for and drops
+	// released ones lazily. Activation re-checks every segment.
 	draining []int64
 }
 
@@ -201,7 +201,7 @@ func (m *QueryViewSegmentReadinessManager) activatePhysicalAcquire(req AcquireSe
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	activation := m.activateAcquireLocked(req, ref, collectionGuard)
-	if activation.blocked || !activation.current || len(activation.physicalRefSegments) == 0 {
+	if !activation.current || len(activation.physicalRefSegments) == 0 {
 		return activation, nil
 	}
 	startLoad := m.physical.AcquireReferences(AcquirePhysicalSegments{
@@ -272,6 +272,7 @@ func (m *QueryViewSegmentReadinessManager) recordPendingAcquire(req AcquireSegme
 		// Pinning a draining segment would keep it alive; activation waits for
 		// its query refs to release it instead.
 		if state.state == transformSegmentDraining {
+			ref.draining = append(ref.draining, segmentID)
 			continue
 		}
 		state.refs[req.Key] = struct{}{}
@@ -286,17 +287,21 @@ func (m *QueryViewSegmentReadinessManager) recordPendingAcquire(req AcquireSegme
 	return ref, true
 }
 
-// waitsForDraining reports whether a segment that blocked the last activation
-// of the view is still draining, so a retry need not pin the collection
-// runtime again before it is released.
+// waitsForDraining reports whether a segment the view waits for is still
+// draining, so the view does not pin the collection runtime before it is
+// released. It drops released segments from the tail, so a retry stops at the
+// first segment still draining instead of rescanning them all.
 func (m *QueryViewSegmentReadinessManager) waitsForDraining(ref *transformViewRef) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	ref.draining = slices.DeleteFunc(ref.draining, func(segmentID int64) bool {
-		state := m.segments[segmentID]
-		return state == nil || state.state != transformSegmentDraining
-	})
-	return len(ref.draining) > 0
+	for n := len(ref.draining); n > 0; n-- {
+		if state := m.segments[ref.draining[n-1]]; state != nil && state.state == transformSegmentDraining {
+			ref.draining = ref.draining[:n]
+			return true
+		}
+	}
+	ref.draining = nil
+	return false
 }
 
 func (m *QueryViewSegmentReadinessManager) detachViewIfCurrent(key qviews.QueryViewKey, ref *transformViewRef) (transformViewDetach, bool) {
@@ -327,6 +332,8 @@ func (m *QueryViewSegmentReadinessManager) activateAcquireLocked(req AcquireSegm
 		current: true, noAssignedSegments: len(ref.segments) == 0,
 		physicalStates: make(map[int64]*transformSegmentState),
 	}
+	// A skipped segment may have been loaded by another view and started
+	// draining again while the collection runtime was acquired without m.mu.
 	ref.draining = ref.draining[:0]
 	for segmentID := range ref.segments {
 		if state := m.segments[segmentID]; state != nil && state.state == transformSegmentDraining {
