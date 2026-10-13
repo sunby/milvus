@@ -440,14 +440,13 @@ func getManifestHandleWithTiming(
 	extfs ExternalSpecContext,
 	timing *manifestReadTiming,
 ) (loonManifestHandle *C.LoonManifest, err error) {
-	var cManifestHandle *C.LoonManifest
 	totalTimer := manifestTotal.Begin()
 	defer totalTimer.EndError(&err)
-	basePath, version, err := UnmarshalManifestPath(manifestPath)
+	manifest, err := ParseManifestPath(manifestPath)
 	if err != nil {
-		return cManifestHandle, err
+		return nil, merr.Wrap(err, "failed to parse manifest path")
 	}
-	mlog.Debug(context.TODO(), "GetManifest", mlog.String("manifestPath", manifestPath), mlog.String("basePath", basePath), mlog.Int64("version", version))
+	mlog.Debug(context.TODO(), "GetManifest", mlog.String("manifestPath", manifestPath), mlog.String("basePath", manifest.BasePath), mlog.Int64("version", manifest.ManifestVersion))
 
 	propertiesTimer := manifestProperties.Begin()
 	propertiesStartedAt := time.Now()
@@ -457,32 +456,29 @@ func getManifestHandleWithTiming(
 	}
 	propertiesTimer.End(err)
 	if err != nil {
-		return cManifestHandle, err
+		return nil, err
 	}
 	defer C.loon_properties_free(cProperties)
 	if err := injectExternalSpecProperties(cProperties, extfs.CollectionID, extfs.Source, extfs.Spec); err != nil {
-		return cManifestHandle, merr.Wrap(err, "inject extfs")
+		return nil, merr.Wrap(err, "inject extfs")
 	}
-	cBasePath := C.CString(basePath)
-	defer C.free(unsafe.Pointer(cBasePath))
 
-	var cTransactionHandle C.LoonTransactionHandle
 	beginTimer := manifestBegin.Begin()
 	beginStartedAt := time.Now()
-	result := C.loon_transaction_open(cBasePath, cProperties, C.int64_t(version), C.int64_t(-1), C.int32_t(0) /* resolve_id */, C.uint32_t(1) /* retry_limit */, &cTransactionHandle)
+	cTransactionHandle, err := openTransaction(manifest, cProperties, C.LOON_TRANSACTION_RESOLVE_FAIL, C.uint32_t(1) /* retry_limit */)
 	if timing != nil {
 		timing.durations[manifestReadBegin] = time.Since(beginStartedAt)
 	}
-	err = HandleLoonFFIResult(result)
 	beginTimer.End(err)
 	if err != nil {
-		return cManifestHandle, err
+		return nil, err
 	}
 	defer C.loon_transaction_destroy(cTransactionHandle)
 
 	getTimer := manifestGet.Begin()
 	getStartedAt := time.Now()
-	result = C.loon_transaction_get_manifest(cTransactionHandle, &cManifestHandle)
+	var cManifestHandle *C.LoonManifest
+	result := C.loon_transaction_get_manifest(cTransactionHandle, &cManifestHandle)
 	if timing != nil {
 		timing.durations[manifestReadGet] = time.Since(getStartedAt)
 	}
