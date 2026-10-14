@@ -2580,8 +2580,15 @@ ChunkedSegmentSealedImpl::LoadColumnGroups(
         field_ids.reserve(cg->columns.size());
         for (const auto& column : cg->columns) {
             const auto field_id = schema_snapshot->ResolveColumnFieldId(column);
-            if (!schema_snapshot->has_field(field_id)) {
+            if (!segment_load_info.HasFieldInSchema(field_id)) {
                 dropped_fields.push_back(field_id.get());
+                continue;
+            }
+            // An unchanged external manifest may be reopened to expand the
+            // schema/load scope. Keep columns already owned by this read state;
+            // only a changed manifest replaces the existing physical columns.
+            if (!is_replace &&
+                committer.runtime()->fields.count(field_id) != 0) {
                 continue;
             }
             field_ids.emplace_back(field_id);
