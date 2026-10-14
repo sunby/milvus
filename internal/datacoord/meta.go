@@ -98,6 +98,9 @@ type meta struct {
 	// metaStore is the shared MetaStore — the backbone for segments, collections,
 	// channel checkpoints, file resources, and catalog persistence.
 	metaStore metacache.MetaStore
+	// Installed by Coordinator before background planning starts. Standalone
+	// metadata users can continue using their supplied collection snapshots.
+	preparationSchema func(context.Context, int64, *schemapb.CollectionSchema) (*schemapb.CollectionSchema, error)
 
 	segMu    lock.RWMutex
 	segments *SegmentsInfo // segment id to segment info

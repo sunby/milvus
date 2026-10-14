@@ -385,7 +385,7 @@ func (dr *DeleteRunner) Init(ctx context.Context) error {
 	if err != nil {
 		return ErrWithLog(log, "Failed to get collection id", err)
 	}
-	colInfo, err := dr.GetMetaCache().GetCollectionInfo(ctx, dr.req.GetDbName(), collName, dr.collectionID)
+	colInfo, err := dr.GetMetaCache().GetCollectionWriteInfo(ctx, dr.req.GetDbName(), collName, dr.collectionID)
 	if err != nil {
 		return ErrWithLog(log, "Failed to get collection info", err)
 	}
@@ -782,6 +782,7 @@ func (dr *DeleteRunner) complexDeleteByQueryView(ctx context.Context, serialized
 			DbID:               dr.dbID,
 			CollectionID:       dr.collectionID,
 			PartitionIDs:       dr.partitionIDs,
+			SchemaVersion:      dr.schema.GetVersion(),
 			SerializedExprPlan: serializedPlan,
 			OutputFieldsId:     outputFieldIDs,
 			ConsistencyLevel:   dr.req.GetConsistencyLevel(),
