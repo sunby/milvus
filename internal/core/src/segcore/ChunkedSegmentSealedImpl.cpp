@@ -5530,7 +5530,8 @@ ChunkedSegmentSealedImpl::ChunkedSegmentSealedImpl(
 ChunkedSegmentSealedImpl::ChunkedSegmentSealedImpl(
     const ChunkedSegmentSealedImpl& source,
     std::shared_ptr<const PublishedSegmentState> state)
-    : deleted_record_(source.deleted_record_),
+    : read_state_fork_(true),
+      deleted_record_(source.deleted_record_),
       published_state_(std::move(state)),
       id_(source.id_),
       commit_ts_(published_state_->commit_ts),
@@ -5546,6 +5547,14 @@ ChunkedSegmentSealedImpl::PinReadState() const {
     // it neither duplicates segment data nor blocks future Reopen publication.
     return std::unique_ptr<ChunkedSegmentSealedImpl>(
         new ChunkedSegmentSealedImpl(*this, CapturePublishedState()));
+}
+
+void
+ChunkedSegmentSealedImpl::AdoptReadState(const ChunkedSegmentSealedImpl& read) {
+    std::lock_guard<std::mutex> reopen_guard(reopen_mutex_);
+    AssertInfo(id_ == read.id_ && read.read_state_fork_,
+               "adopting a read state requires a fork of the same segment");
+    PublishStateOnline(read.CapturePublishedState());
 }
 
 ChunkedSegmentSealedImpl::~ChunkedSegmentSealedImpl() {
@@ -8117,7 +8126,8 @@ ChunkedSegmentSealedImpl::PrepareSchemaForReopen(const SchemaPtr& sch) {
     }
 
     auto current_schema = CapturePublishedState()->schema;
-    if (sch->get_schema_version() <= current_schema->get_schema_version()) {
+    if (!read_state_fork_ &&
+        sch->get_schema_version() <= current_schema->get_schema_version()) {
         return;
     }
 
@@ -8450,10 +8460,22 @@ ChunkedSegmentSealedImpl::FinalizeLoadDiffForReopen(
         }
     }
     committer.Commit([&](RuntimeResourceState& runtime,
-                         PublishedSegmentState&) {
+                         PublishedSegmentState& staged_state) {
+        // Loaded/default columns may no longer appear in compacted load-info
+        // metadata. Reconcile the actual inventory as well as the file diff.
+        std::vector<FieldId> excluded;
+        for (const auto& [field_id, column] : runtime.fields) {
+            if (!segment_load_info.HasFieldInSchema(field_id)) {
+                excluded.push_back(field_id);
+            }
+        }
+        for (auto field_id : excluded) {
+            DropFieldData(field_id, schema_snapshot, &runtime);
+            DropFieldFromState(staged_state, field_id);
+        }
         for (const auto& entry : runtime.indexes.Entries()) {
             if (is_text_entry(entry) &&
-                !field_exists_in_schema(schema_snapshot, entry.key.field_id)) {
+                !segment_load_info.HasFieldInSchema(entry.key.field_id)) {
                 committer.RetireCacheIndexingLocked(
                     runtime.indexes.Drop(entry.key));
             }
@@ -8487,7 +8509,8 @@ ChunkedSegmentSealedImpl::ReopenSchemaLocked(milvus::OpContext* op_ctx,
 
     auto current = CapturePublishedState();
     auto current_schema = current->schema;
-    if (sch->get_schema_version() <= current_schema->get_schema_version()) {
+    if (!read_state_fork_ &&
+        sch->get_schema_version() <= current_schema->get_schema_version()) {
         return;
     }
 
@@ -8550,8 +8573,9 @@ ChunkedSegmentSealedImpl::Reopen(
 
     auto current = CapturePublishedState();
     auto current_schema = current->schema;
-    if (new_schema && new_schema->get_schema_version() <
-                          current_schema->get_schema_version()) {
+    if (!read_state_fork_ && new_schema &&
+        new_schema->get_schema_version() <
+            current_schema->get_schema_version()) {
         ThrowInfo(kCollectionSchemaVersionNotReady,
                   "stale reopen segment {}, current schema version {}, "
                   "incoming schema version {}",
@@ -8566,6 +8590,9 @@ ChunkedSegmentSealedImpl::Reopen(
 
     SegmentLoadInfo current_mutable(*current->load_info);
     SegmentLoadInfo new_local(new_load_info, target_schema);
+    if (read_state_fork_) {
+        new_local.RestrictToLoadFields();
+    }
     new_local.InheritCachedColumnGroupsFrom(*current->load_info);
     for (auto fid : current->load_info->GetCreatedTextIndexes()) {
         if (field_exists_in_schema(target_schema, fid)) {
