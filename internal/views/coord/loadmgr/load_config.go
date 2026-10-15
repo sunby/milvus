@@ -21,6 +21,7 @@ type LoadConfig struct {
 	LoadAllFields            *bool
 	SkipLoadDynamicField     bool
 	UserSpecifiedReplicaMode bool
+	WarmupEpoch              int64
 	Replicas                 []*ReplicaAssignment
 }
 
@@ -42,6 +43,7 @@ func (c *LoadConfig) Clone() *LoadConfig {
 		CollectionID:             c.CollectionID,
 		UserSpecifiedReplicaMode: c.UserSpecifiedReplicaMode,
 		SkipLoadDynamicField:     c.SkipLoadDynamicField,
+		WarmupEpoch:              c.WarmupEpoch,
 	}
 	if c.LoadAllFields != nil {
 		out.LoadAllFields = proto.Bool(*c.LoadAllFields)
@@ -85,6 +87,7 @@ func FromAlterLoadConfigMessage(msg *messagespb.AlterLoadConfigMessageHeader) *L
 		PartitionIDs:             append([]int64{}, msg.GetPartitionIds()...),
 		UserSpecifiedReplicaMode: msg.GetUserSpecifiedReplicaMode(),
 		SkipLoadDynamicField:     msg.GetSkipLoadDynamicField(),
+		WarmupEpoch:              msg.GetWarmupEpoch(),
 	}
 	if msg.LoadAllFields != nil {
 		cfg.LoadAllFields = proto.Bool(msg.GetLoadAllFields())
@@ -119,6 +122,7 @@ func buildFromPersisted(
 		CollectionID:             info.GetCollectionID(),
 		UserSpecifiedReplicaMode: info.GetUserSpecifiedReplicaMode(),
 		SkipLoadDynamicField:     info.GetSkipLoadDynamicField(),
+		WarmupEpoch:              info.GetWarmupEpoch(),
 	}
 
 	if info.LoadAllFields != nil {
@@ -167,6 +171,7 @@ func (c *LoadConfig) toCollectionLoadInfoProto() *querypb.CollectionLoadInfo {
 		Status:                   querypb.LoadStatus_Loaded,
 		UserSpecifiedReplicaMode: c.UserSpecifiedReplicaMode,
 		SkipLoadDynamicField:     c.SkipLoadDynamicField,
+		WarmupEpoch:              c.WarmupEpoch,
 	}
 	if c.LoadAllFields != nil {
 		info.LoadAllFields = proto.Bool(*c.LoadAllFields)
