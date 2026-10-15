@@ -38,6 +38,7 @@ import (
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/proxyutil"
 	"github.com/milvus-io/milvus/internal/util/quota"
+	"github.com/milvus-io/milvus/internal/util/quotasync"
 	rlinternal "github.com/milvus-io/milvus/internal/util/ratelimitutil"
 	"github.com/milvus-io/milvus/pkg/v3/common"
 	"github.com/milvus-io/milvus/pkg/v3/config"
@@ -136,8 +137,11 @@ type LimiterRange struct {
 //
 // If necessary, user can also manually force to deny RW requests.
 type QuotaCenter struct {
-	ctx    context.Context
-	cancel context.CancelFunc
+	publishedRules quotasync.Publisher
+	localQuota     *localQuotaState
+	versionedRates bool
+	ctx            context.Context
+	cancel         context.CancelFunc
 
 	// clients
 	proxies  proxyutil.ProxyClientManagerInterface
@@ -189,6 +193,7 @@ func NewQuotaCenter(proxies proxyutil.ProxyClientManagerInterface, mixCoord type
 	ctx, cancel := context.WithCancel(context.TODO()) //nolint:gosec // cancel is stored and called in stop()
 
 	q := &QuotaCenter{
+		versionedRates:       Params.QuotaConfig.VersionedRatesEnabled.GetAsBool(),
 		ctx:                  ctx,
 		cancel:               cancel,
 		proxies:              proxies,
@@ -352,11 +357,21 @@ func (q *QuotaCenter) run() {
 			err := q.collectMetrics()
 			if err != nil {
 				mlog.Warn(q.ctx, "quotaCenter collect metrics failed", mlog.Err(err))
+				if q.versionedRates {
+					if syncErr := q.reconcilePublishedRates(); syncErr != nil {
+						mlog.Warn(q.ctx, "quota reconciliation failed", mlog.Err(syncErr))
+					}
+				}
 				break
 			}
 			err = q.calculateRates()
 			if err != nil {
 				mlog.Warn(q.ctx, "quotaCenter calculate rates failed", mlog.Err(err))
+				if q.versionedRates {
+					if syncErr := q.reconcilePublishedRates(); syncErr != nil {
+						mlog.Warn(q.ctx, "quota reconciliation failed", mlog.Err(syncErr))
+					}
+				}
 				break
 			}
 			err = q.sendRatesToProxy()
@@ -384,10 +399,12 @@ func (q *QuotaCenter) clearMetrics() {
 	q.dataNodeMetrics = make(map[UniqueID]*metricsinfo.DataNodeQuotaMetrics, 0)
 	q.queryNodeMetrics = make(map[UniqueID]*metricsinfo.QueryNodeQuotaMetrics, 0)
 	q.proxyMetrics = make(map[UniqueID]*metricsinfo.ProxyQuotaMetrics, 0)
-	q.collectionIDToDBID = typeutil.NewConcurrentMap[int64, int64]()
-	q.collections = typeutil.NewConcurrentMap[string, int64]()
 	q.dbs = typeutil.NewConcurrentMap[string, int64]()
-	q.collectionProps = make(map[int64]map[string]string)
+	if q.localQuota == nil {
+		q.collectionIDToDBID = typeutil.NewConcurrentMap[int64, int64]()
+		q.collections = typeutil.NewConcurrentMap[string, int64]()
+		q.collectionProps = make(map[int64]map[string]string)
+	}
 }
 
 func updateNumEntitiesLoaded(current map[int64]int64, qn *metricsinfo.QueryNodeCollectionMetrics) map[int64]int64 {
@@ -415,6 +432,7 @@ func (q *QuotaCenter) collectMetrics() error {
 	q.lock.Lock()
 	defer q.lock.Unlock()
 
+	q.prepareLocalQuota()
 	oldDataNodes := typeutil.NewSet(lo.Keys(q.dataNodeMetrics)...)
 	oldQueryNodes := typeutil.NewSet(lo.Keys(q.queryNodeMetrics)...)
 	q.clearMetrics()
@@ -452,7 +470,7 @@ func (q *QuotaCenter) collectMetrics() error {
 		q.readableCollections = make(map[int64]map[int64][]int64, 0)
 		var rangeErr error
 		collections.Range(func(collectionID int64) bool {
-			coll, getErr := q.meta.GetCollectionByIDWithMaxTs(context.TODO(), collectionID)
+			coll, getErr := q.quotaCollection(ctx, collectionID)
 			if getErr != nil {
 				// skip limit check if the collection meta has been removed from rootcoord meta
 				return true
@@ -483,6 +501,9 @@ func (q *QuotaCenter) collectMetrics() error {
 	})
 	// get Data cluster metrics
 	group.Go(func() error {
+		if q.localQuota != nil {
+			return q.collectLocalQuotaData(ctx, oldDataNodes)
+		}
 		dataCoordTopology, err := getDataCoordTopology(ctx, q.mixCoord)
 		if err != nil {
 			return err
@@ -522,7 +543,7 @@ func (q *QuotaCenter) collectMetrics() error {
 		}
 		indexedEntitiesByKey := make(map[indexedEntitiesKey]int64)
 		collections.Range(func(collectionID int64) bool {
-			coll, getErr := q.meta.GetCollectionByIDWithMaxTs(context.TODO(), collectionID)
+			coll, getErr := q.quotaCollection(ctx, collectionID)
 			if getErr != nil {
 				// skip limit check if the collection meta has been removed from rootcoord meta
 				return true
@@ -588,7 +609,7 @@ func (q *QuotaCenter) collectMetrics() error {
 			if ok {
 				continue
 			}
-			coll, getErr := q.meta.GetCollectionByIDWithMaxTs(context.TODO(), collectionID)
+			coll, getErr := q.quotaCollection(ctx, collectionID)
 			if getErr != nil {
 				// skip limit check if the collection meta has been removed from rootcoord meta
 				continue
@@ -738,6 +759,7 @@ func (q *QuotaCenter) forceDenyWriting(errorCode commonpb.ErrorCode, cluster boo
 				mlog.FieldCollectionID(collectionID))
 			continue
 		}
+		q.recordLocalQuotaEffect(collectionID)
 		updateLimiter(collectionLimiter, GetEarliestLimiter(), &LimiterRange{
 			RateScope:        internalpb.RateScope_Collection,
 			OpType:           dml,
@@ -764,6 +786,7 @@ func (q *QuotaCenter) forceDenyWriting(errorCode commonpb.ErrorCode, cluster boo
 					mlog.FieldPartitionID(partitionID))
 				continue
 			}
+			q.recordLocalQuotaEffect(collectionID)
 			updateLimiter(partitionLimiter, GetEarliestLimiter(), &LimiterRange{
 				RateScope:        internalpb.RateScope_Partition,
 				OpType:           dml,
@@ -796,6 +819,7 @@ func (q *QuotaCenter) forceDenyReading(errorCode commonpb.ErrorCode, cluster boo
 		for dbID, collectionIDToPartIDs := range q.readableCollections {
 			for collectionID := range collectionIDToPartIDs {
 				collectionLimiter := q.rateLimiter.GetCollectionLimiters(dbID, collectionID)
+				q.recordLocalQuotaEffect(collectionID)
 				updateLimiter(collectionLimiter, GetEarliestLimiter(), &LimiterRange{
 					RateScope: internalpb.RateScope_Collection,
 					OpType:    dql,
@@ -861,7 +885,7 @@ func (q *QuotaCenter) guaranteeMinRate(minRate float64, rt internalpb.RateType, 
 
 func (q *QuotaCenter) getDenyReadingDBs() map[int64]struct{} {
 	dbIDs := make(map[int64]struct{})
-	for _, dbID := range lo.Uniq(q.collectionIDToDBID.Values()) {
+	for _, dbID := range q.quotaDatabaseIDs() {
 		if db, err := q.meta.GetDatabaseByID(q.ctx, dbID, typeutil.MaxTimestamp); err == nil {
 			if v := db.GetProperty(common.DatabaseForceDenyReadingKey); v != "" {
 				if dbForceDenyReadingEnabled, err := strconv.ParseBool(v); err == nil {
@@ -895,7 +919,7 @@ func (q *QuotaCenter) calculateReadRates() error {
 
 func (q *QuotaCenter) getDenyWritingDBs() map[int64]struct{} {
 	dbIDs := make(map[int64]struct{})
-	for _, dbID := range lo.Uniq(q.collectionIDToDBID.Values()) {
+	for _, dbID := range q.quotaDatabaseIDs() {
 		if db, err := q.meta.GetDatabaseByID(q.ctx, dbID, typeutil.MaxTimestamp); err == nil {
 			if v := db.GetProperty(common.DatabaseForceDenyWritingKey); v != "" {
 				if dbForceDenyWritingEnabled, err := strconv.ParseBool(v); err == nil {
@@ -986,6 +1010,7 @@ func (q *QuotaCenter) calculateWriteRates() error {
 		if collectionLimiter == nil {
 			return merr.WrapErrServiceInternalMsg("collection limiter not found: %d", collection)
 		}
+		q.recordLocalQuotaEffect(collection)
 
 		limiter := collectionLimiter.GetLimiters()
 		for _, rt := range []internalpb.RateType{
@@ -1367,7 +1392,7 @@ func (q *QuotaCenter) calculateRates() error {
 	q.calculateDBDDLRates()
 
 	// log.Debug("QuotaCenter calculates rate done", mlog.Any("rates", q.currentRates))
-	return nil
+	return q.finishLocalQuotaCalculation()
 }
 
 func (q *QuotaCenter) calculateEzStates() error {
@@ -1391,6 +1416,9 @@ func (q *QuotaCenter) calculateEzStates() error {
 }
 
 func (q *QuotaCenter) resetAllCurrentRates() error {
+	if q.localQuota != nil {
+		return q.resetLocalQuotaRates()
+	}
 	clusterRates := quotaRateValues(internalpb.RateScope_Cluster)
 	databaseRates := quotaRateValues(internalpb.RateScope_Database)
 	collectionRates := quotaRateValues(internalpb.RateScope_Collection)
@@ -1568,6 +1596,9 @@ func (q *QuotaCenter) quotaPartitionSnapshot(includePartitions bool) map[int64]m
 
 // checkDiskQuota checks if disk quota exceeded.
 func (q *QuotaCenter) checkDiskQuota(denyWritingDBs map[int64]struct{}) error {
+	if q.localQuota != nil {
+		return q.checkLocalDiskQuota(denyWritingDBs)
+	}
 	q.diskMu.Lock()
 	defer q.diskMu.Unlock()
 	if !Params.QuotaConfig.DiskProtectionEnabled.GetAsBool() {
@@ -1798,13 +1829,30 @@ func (q *QuotaCenter) toRatesRequest() *proxypb.SetRatesRequest {
 
 // sendRatesToProxy notifies Proxies to set rates for different rate types.
 func (q *QuotaCenter) sendRatesToProxy() error {
+	if q.versionedRates {
+		if err := q.publishQuotaRules(); err != nil {
+			return err
+		}
+		return q.reconcilePublishedRates()
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), SetRatesTimeout)
 	defer cancel()
-	return q.proxies.SetRates(ctx, q.toRatesRequest())
+	err := q.proxies.SetRates(ctx, q.toRatesRequest())
+	if q.localQuota != nil {
+		q.localQuota.proxyCount = q.proxies.GetProxyCount()
+		q.localQuota.dirty = make(map[int64]bool)
+		q.localQuota.deleted = make(map[quotasync.Key]bool)
+	}
+	return err
 }
 
 // recordMetrics records metrics of quota states.
 func (q *QuotaCenter) recordMetrics() {
+	if q.localQuota != nil {
+		q.recordLocalQuotaMetrics()
+		return
+	}
 	metrics.RootCoordQuotaStates.Reset()
 	dbIDs := make(map[int64]string, q.dbs.Len())
 	collectionIDs := make(map[int64]string, q.collections.Len())
