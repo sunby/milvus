@@ -35,7 +35,9 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/messagespb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v3/streaming/util/message"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
 // broadcastAlterLoadConfigCollectionV2ForLoadCollection is called when the load collection request is received.
@@ -129,6 +131,10 @@ func (s *Server) broadcastAlterLoadConfigCollectionV2ForLoadCollection(ctx conte
 	}
 
 	currentLoadConfig := s.qviewsRuntime.loadConfigStore.GetConfig(req.GetCollectionID())
+	warmupEpoch, err := s.admitLoadCollectionWarmupHint(ctx, req, coll, currentLoadConfig)
+	if err != nil {
+		return err
+	}
 	msg, err := s.generateAlterLoadConfigMessageForLoadCollection(ctx, coll, currentLoadConfig, qviewsExpectedLoadConfig{
 		PartitionIDs:             partitionIDs,
 		ReplicaNumber:            expectedReplicasNumber,
@@ -138,7 +144,7 @@ func (s *Server) broadcastAlterLoadConfigCollectionV2ForLoadCollection(ctx conte
 		SkipLoadDynamicField:     req.GetSkipLoadDynamicField(),
 		Priority:                 req.GetPriority(),
 		UserSpecifiedReplicaMode: userSpecifiedReplicaMode,
-		ForceSyncWarmup:          false,
+		WarmupEpoch:              warmupEpoch,
 	})
 	if err != nil {
 		return err
@@ -159,6 +165,36 @@ func (s *Server) broadcastAlterLoadConfigCollectionV2ForLoadCollection(ctx conte
 	}
 	recordLoadResourceDemand(requiredByRG)
 	return nil
+}
+
+// admitLoadCollectionWarmupHint returns the warmup epoch a load request leaves
+// in the load config. Every request with a warmup hint gets a newer epoch, so
+// QueryNodes warm the loaded segments again, including a collection that was
+// loaded without warmup; any other request keeps the current epoch.
+func (s *Server) admitLoadCollectionWarmupHint(
+	ctx context.Context,
+	req *querypb.LoadCollectionRequest,
+	coll *milvuspb.DescribeCollectionResponse,
+	current *loadmgr.LoadConfig,
+) (int64, error) {
+	if !req.GetWarmupHint() {
+		if current == nil {
+			return 0, nil
+		}
+		return current.WarmupEpoch, nil
+	}
+	if !paramtable.Get().QueryCoordCfg.EnableLoadCollectionWarmupHint.GetAsBool() {
+		return 0, merr.Wrap(merr.ErrServiceUnimplemented, "LoadCollection warmup hint requires queryCoord.enableLoadCollectionWarmupHint after a full-cluster upgrade")
+	}
+	if typeutil.IsExternalCollection(coll.GetSchema()) {
+		return 0, merr.WrapErrParameterInvalidMsg("load warmup hint is not supported for external collections")
+	}
+	epoch, err := s.idAllocator()
+	if err != nil {
+		return 0, merr.Wrap(err, "allocate warmup epoch")
+	}
+	mlog.Info(ctx, "accept load warmup hint", mlog.FieldCollectionID(req.GetCollectionID()), mlog.Int64("warmupEpoch", epoch))
+	return epoch, nil
 }
 
 // getLoadReplicaConfigForRequest resolves the replica configuration a load
@@ -229,7 +265,7 @@ type qviewsExpectedLoadConfig struct {
 	SkipLoadDynamicField     bool
 	Priority                 commonpb.LoadPriority
 	UserSpecifiedReplicaMode bool
-	ForceSyncWarmup          bool
+	WarmupEpoch              int64
 }
 
 func (s *Server) generateAlterLoadConfigMessageForLoadCollection(
@@ -251,7 +287,7 @@ func (s *Server) generateAlterLoadConfigMessageForLoadCollection(
 		SkipLoadDynamicField:     expected.SkipLoadDynamicField,
 		Replicas:                 replicas,
 		UserSpecifiedReplicaMode: expected.UserSpecifiedReplicaMode,
-		ForceSyncWarmup:          expected.ForceSyncWarmup,
+		WarmupEpoch:              expected.WarmupEpoch,
 	}
 	if header.LoadAllFields == nil && current != nil {
 		header.LoadAllFields, header.SkipLoadDynamicField = current.LoadAllFields, current.SkipLoadDynamicField
@@ -336,6 +372,7 @@ func loadConfigIntoAlterLoadConfigHeader(cfg *loadmgr.LoadConfig) *messagespb.Al
 		SkipLoadDynamicField:     cfg.SkipLoadDynamicField,
 		Replicas:                 replicas,
 		UserSpecifiedReplicaMode: cfg.UserSpecifiedReplicaMode,
+		WarmupEpoch:              cfg.WarmupEpoch,
 	}
 }
 
