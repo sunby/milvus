@@ -114,10 +114,6 @@ type meta struct {
 	segmentStoreOnce      sync.Once
 	segmentWriteLocks     *lock.KeyLock[int64]
 	segmentWriteLocksOnce sync.Once
-	// pubMu makes installing a multi-segment mutation into the cache atomic for
-	// readers that need a consistent cut of a collection (loadableProjection).
-	// It is held only around in-memory installs, never across store I/O.
-	pubMu sync.RWMutex
 	// compactingMu serializes the isCompacting check-and-set of segments.
 	compactingMu sync.Mutex
 	// segmentManifestLocks serializes the full StorageV3 manifest commit for a
@@ -146,6 +142,7 @@ type meta struct {
 	// Snapshot Meta
 	snapshotMeta   *snapshotMeta
 	quotaMetricsMu sync.Mutex
+	quotaDisplay   *quotaDisplayCache
 
 	// groupMu guards the segment change group tables below. A composite write
 	// of segments and groups takes it after the segment writer locks and holds
@@ -757,6 +754,9 @@ func (m *meta) reloadCollectionsFromRootcoord(ctx context.Context, broker broker
 
 func (m *meta) addCollectionToCache(collection *collectionInfo) {
 	m.collections.Insert(collection.ID, collection)
+	if m.segments != nil {
+		m.segments.invalidateQuotaCollection(collection.ID)
+	}
 }
 
 // AddCollection adds a collection into meta
@@ -776,6 +776,9 @@ func (m *meta) AddCollection(collection *collectionInfo) {
 func (m *meta) DropCollection(collectionID int64) {
 	mlog.Info(m.ctx, "meta update: drop collection", mlog.Int64("collectionID", collectionID))
 	if _, ok := m.collections.GetAndRemove(collectionID); ok {
+		if m.segments != nil {
+			m.segments.invalidateQuotaCollection(collectionID)
+		}
 		if q := m.statsDiscovery.Load(); q != nil {
 			q.requestScan(collectionID, true)
 		}
@@ -874,7 +877,7 @@ func getBinlogFileCount(s *datapb.SegmentInfo) int {
 	return cnt
 }
 
-func (m *meta) GetQuotaInfo() *metricsinfo.DataCoordQuotaMetrics {
+func (m *meta) getQuotaInfoByScan() *metricsinfo.DataCoordQuotaMetrics {
 	aggregateCollectionMetrics := metrics.IsCollectionLevelMetricsAggregateMode()
 	if aggregateCollectionMetrics {
 		m.quotaMetricsMu.Lock()
@@ -1014,7 +1017,7 @@ func (m *meta) GetQuotaInfo() *metricsinfo.DataCoordQuotaMetrics {
 	return info
 }
 
-func (m *meta) GetAllCollectionNumRows() map[int64]int64 {
+func (m *meta) getAllCollectionNumRowsByScan() map[int64]int64 {
 	ret := make(map[int64]int64, m.collections.Len())
 	segments := m.segments.GetSegments()
 	for _, segment := range segments {

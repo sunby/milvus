@@ -29,6 +29,10 @@ func NewSegmentsInfo() *SegmentsInfo {
 // channel, and compaction relationships. Collection, channel and
 // compaction_from of a segment never change, so the indexes only grow on
 // insert and shrink on drop, and a lookup never misses a live segment.
+//
+// Every accepted change of a quota input (state, rows, binlogs/stats, level,
+// importing flag) invalidates the per-collection quota statistics of the
+// segment (quota_cache.go). Runtime-only setters do not touch quota inputs.
 type CachedSegmentsInfo struct {
 	segments *Cache[UniqueID, *SegmentInfo]
 
@@ -39,6 +43,14 @@ type CachedSegmentsInfo struct {
 	// compactionToMu and replace the slice; readers are lock-free.
 	compactionToMu sync.Mutex
 	compactionTo   *typeutil.ConcurrentMap[UniqueID, []UniqueID]
+
+	// pubMu makes installing a multi-segment mutation atomic (PublishSegments)
+	// for readers that need a consistent cut of a collection (ReadConsistent,
+	// loadableProjection, quota refresh). It is held only around in-memory
+	// installs, never across store I/O. It and the quota state stay after the
+	// fields every lock-free reader loads.
+	pubMu sync.RWMutex
+	quota collectionQuotaCache
 }
 
 func NewCachedSegmentsInfo() *CachedSegmentsInfo {
@@ -169,6 +181,7 @@ func (s *CachedSegmentsInfo) SetSegment(segmentID UniqueID, segment *SegmentInfo
 	})
 	if applied {
 		s.reindex(old, existed, segment)
+		s.invalidateQuota(old, segment)
 	}
 	return old, existed
 }
@@ -204,7 +217,33 @@ func (s *CachedSegmentsInfo) PublishSegment(segmentID UniqueID, segment *Segment
 		return old, existed
 	}
 	s.reindex(old, existed, segment)
+	s.invalidateQuota(old, segment)
 	return old, existed
+}
+
+// PublishSegments installs the persisted values of one mutation through
+// PublishSegment and returns the live values they replaced. A multi-segment
+// mutation is installed under pubMu, so a consistent reader observes all of
+// it or none of it.
+func (s *CachedSegmentsInfo) PublishSegments(segments []*SegmentInfo, versions map[int64]int64) map[int64]*SegmentInfo {
+	if len(segments) > 1 {
+		s.pubMu.Lock()
+		defer s.pubMu.Unlock()
+	}
+	previous := make(map[int64]*SegmentInfo, len(segments))
+	for _, segment := range segments {
+		if old, existed := s.PublishSegment(segment.GetID(), segment, versions[segment.GetID()]); existed {
+			previous[segment.GetID()] = old
+		}
+	}
+	return previous
+}
+
+// ReadConsistent runs read without observing a half-installed PublishSegments.
+func (s *CachedSegmentsInfo) ReadConsistent(read func()) {
+	s.pubMu.RLock()
+	defer s.pubMu.RUnlock()
+	read()
 }
 
 // reindex updates the secondary indexes after old was replaced by segment.
@@ -231,6 +270,7 @@ func (s *CachedSegmentsInfo) DropSegment(segmentID UniqueID, version ...int64) {
 	if old := s.segments.Erase(segmentID, v); old != nil {
 		s.removeSecondaryIndex(old)
 		s.deleteCompactTo(old)
+		s.invalidateQuota(old, nil)
 	}
 	if v <= 0 {
 		s.segments.Prune(segmentID)
@@ -254,7 +294,9 @@ func versionArg(version []int64) int64 {
 // SetRowCount sets rowCount info for SegmentInfo with provided segmentID
 // if SegmentInfo not found, do nothing
 func (s *CachedSegmentsInfo) SetRowCount(segmentID UniqueID, rowCount int64) {
-	s.cloneSegment(segmentID, SetRowCount(rowCount))
+	if collectionID, ok := s.cloneSegment(segmentID, SetRowCount(rowCount)); ok {
+		s.invalidateQuotaCollection(collectionID)
+	}
 }
 
 // SetDmlPosition sets DmlPosition info (checkpoint for recovery) for SegmentInfo with provided segmentID
@@ -330,10 +372,13 @@ func (s *CachedSegmentsInfo) Len() int {
 
 // cloneSegment applies a local-only update to a deep clone (the option changes
 // the persisted proto, which readers of the previous value may still hold).
-func (s *CachedSegmentsInfo) cloneSegment(segmentID UniqueID, opt SegmentInfoOption) {
-	s.segments.Transform(segmentID, func(seg *SegmentInfo) (*SegmentInfo, bool) {
+// Returns the collection of the segment and whether it was updated.
+func (s *CachedSegmentsInfo) cloneSegment(segmentID UniqueID, opt SegmentInfoOption) (collectionID int64, updated bool) {
+	updated = s.segments.Transform(segmentID, func(seg *SegmentInfo) (*SegmentInfo, bool) {
+		collectionID = seg.GetCollectionID()
 		return seg.Clone(opt), true
 	})
+	return collectionID, updated
 }
 
 // shadowCloneSegment applies a local-only update of runtime fields, sharing
