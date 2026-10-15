@@ -11116,6 +11116,9 @@ ChunkedSegmentSealedImpl::prefetch_vector(milvus::OpContext* op_ctx,
     }
 }
 
+// Prewarm loads every cache cell of the given fields (all fields when empty):
+// field data, indexes (text indexes included) and JSON stats, plus the
+// segment-wide PK and timestamp indexes.
 void
 ChunkedSegmentSealedImpl::Prewarm(
     milvus::OpContext* op_ctx,
@@ -11130,8 +11133,11 @@ ChunkedSegmentSealedImpl::Prewarm(
         }
     }
 
+    PinPkIndex(runtime, op_ctx);
+    PinTimestampIndex(runtime, op_ctx);
     for (auto field_id : field_ids) {
         prefetch_chunks(op_ctx, field_id);
+        GetJsonStats(op_ctx, field_id);
         if (runtime == nullptr) {
             continue;
         }

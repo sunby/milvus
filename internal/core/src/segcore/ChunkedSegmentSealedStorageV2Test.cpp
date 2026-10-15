@@ -991,6 +991,55 @@ TEST_P(TestLazyManifest, LazyManifestPreservesInitialMultiFieldTask) {
         dropped_column_snapshot->runtime->fields.count(fields.at("int64")), 0);
 }
 
+TEST_P(TestLazyManifest, PrewarmLoadsLazyColumnsAndPkIndex) {
+    LazyColumnGroupGuard lazy_group_guard(true);
+    auto warmup_policies =
+        milvus::cachinglayer::TieredStorageConfig::GetInstance()
+            .warmup_policies();
+    warmup_policies.scalarFieldCacheWarmupPolicy =
+        CacheWarmupPolicy::CacheWarmupPolicy_Disable;
+    CacheWarmupPolicyGuard warmup_guard(warmup_policies);
+
+    const auto base_path =
+        UniqueManifestTestPath(std::string("lazy_manifest_prewarm_") +
+                               (GetParam() ? "varchar" : "int64"));
+    auto fs = milvus::segcore::GetDefaultArrowFileSystem();
+    StorageV2TempDirGuard dir_guard(fs, base_path);
+    milvus::test::V3SegmentTestData test_data(
+        schema_,
+        1,
+        64,
+        128,
+        TestLocalPath,
+        base_path,
+        LazyManifestTestGroupPattern(schema_));
+    auto manifest_segment =
+        CreateV3ManifestSegment(test_data, 3190 + (GetParam() ? 100 : 0));
+    auto* segment_impl =
+        dynamic_cast<ChunkedSegmentSealedImpl*>(manifest_segment.get());
+    ASSERT_NE(segment_impl, nullptr);
+    auto runtime = segment_impl->TestGetPublishedStateSnapshot()->runtime;
+    ASSERT_NE(runtime->pk_index_slot, nullptr);
+    EXPECT_FALSE(runtime->pk_index_slot->IsCached(0));
+    int64_t offset = 0;
+    for (const std::string name : {"int64", "string1"}) {
+        EXPECT_FALSE(
+            runtime->fields.at(fields.at(name))->CellsLoaded(&offset, 1))
+            << name;
+    }
+
+    segment_impl->Prewarm(nullptr, {});
+
+    for (const std::string name : {"int64", "string1", "string2"}) {
+        EXPECT_TRUE(
+            runtime->fields.at(fields.at(name))->CellsLoaded(&offset, 1))
+            << name;
+    }
+    EXPECT_TRUE(runtime->pk_index_slot->IsCached(0));
+    ASSERT_NE(runtime->timestamp_index_slot, nullptr);
+    EXPECT_TRUE(runtime->timestamp_index_slot->IsCached(0));
+}
+
 TEST_P(TestLazyManifest, LazyManifestDefersTextMatchAfterIndexCreation) {
     LazyColumnGroupGuard lazy_group_guard(true);
     auto warmup_policies =
