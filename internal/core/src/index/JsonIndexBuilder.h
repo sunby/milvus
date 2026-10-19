@@ -67,7 +67,8 @@ ConvertJsonToTypedFieldData(
     const proto::schema::FieldSchema& schema,
     const std::string& nested_path,
     const JsonCastType& cast_type,
-    JsonCastFunction cast_function);
+    JsonCastFunction cast_function,
+    bool finite_numbers_only = false);
 
 extern template JsonToTypedResult
 ConvertJsonToTypedFieldData<bool>(
@@ -75,7 +76,8 @@ ConvertJsonToTypedFieldData<bool>(
     const proto::schema::FieldSchema& schema,
     const std::string& nested_path,
     const JsonCastType& cast_type,
-    JsonCastFunction cast_function);
+    JsonCastFunction cast_function,
+    bool finite_numbers_only);
 
 extern template JsonToTypedResult
 ConvertJsonToTypedFieldData<int64_t>(
@@ -83,7 +85,8 @@ ConvertJsonToTypedFieldData<int64_t>(
     const proto::schema::FieldSchema& schema,
     const std::string& nested_path,
     const JsonCastType& cast_type,
-    JsonCastFunction cast_function);
+    JsonCastFunction cast_function,
+    bool finite_numbers_only);
 
 extern template JsonToTypedResult
 ConvertJsonToTypedFieldData<double>(
@@ -91,7 +94,8 @@ ConvertJsonToTypedFieldData<double>(
     const proto::schema::FieldSchema& schema,
     const std::string& nested_path,
     const JsonCastType& cast_type,
-    JsonCastFunction cast_function);
+    JsonCastFunction cast_function,
+    bool finite_numbers_only);
 
 extern template JsonToTypedResult
 ConvertJsonToTypedFieldData<std::string>(
@@ -99,7 +103,8 @@ ConvertJsonToTypedFieldData<std::string>(
     const proto::schema::FieldSchema& schema,
     const std::string& nested_path,
     const JsonCastType& cast_type,
-    JsonCastFunction cast_function);
+    JsonCastFunction cast_function,
+    bool finite_numbers_only);
 
 // A helper function for processing json data for building inverted index
 template <typename T>

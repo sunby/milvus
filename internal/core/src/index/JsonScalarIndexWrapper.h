@@ -30,6 +30,7 @@
 #include "common/Slice.h"
 #include "index/InvertedIndexTantivy.h"
 #include "index/JsonIndexBuilder.h"
+#include "index/JsonNullOffsets.h"
 #include "index/Meta.h"
 #include "index/Utils.h"
 #include "log/Log.h"
@@ -164,6 +165,11 @@ class JsonScalarIndexWrapper : public BaseIndex {
     void
     WriteEntries(storage::IndexEntryWriter* writer) override {
         BaseIndex::WriteEntries(writer);
+        if constexpr (kIsInverted) {
+            if (cast_type_.data_type() != JsonCastType::DataType::ARRAY) {
+                writer->PutMeta(kJsonNullOffsetsComplete, true);
+            }
+        }
 
         bool has_non_exist = !non_exist_offsets_.empty();
         writer->PutMeta("has_non_exist", has_non_exist);
@@ -178,6 +184,22 @@ class JsonScalarIndexWrapper : public BaseIndex {
     LoadEntries(storage::IndexEntryReader& reader,
                 const Config& config) override {
         BaseIndex::LoadEntries(reader, config);
+        if constexpr (kIsInverted) {
+            if (cast_type_.data_type() != JsonCastType::DataType::ARRAY &&
+                !reader.GetMeta<bool>(kJsonNullOffsetsComplete, false)) {
+                // Historical V3 artifacts may contain only whole-field
+                // nulls. Normalize once before publishing the sealed reader.
+                this->valid_bitmap_.reset();
+                auto comparable = QueryJsonComparableValues<T>(*this->wrapper_,
+                                                               this->Count());
+                if (comparable.all()) {
+                    comparable = TargetBitmap{};
+                }
+                this->valid_bitmap_ =
+                    std::make_shared<const TargetBitmap>(std::move(comparable));
+                this->ComputeByteSize();
+            }
+        }
 
         bool has_non_exist = reader.GetMeta<bool>("has_non_exist", false);
         if (has_non_exist) {
@@ -339,11 +361,13 @@ class JsonScalarIndexWrapper : public BaseIndex {
     BuildInvertedWithJsonFieldData(
         const std::vector<FieldDataPtr>& field_datas) {
         if (cast_type_.data_type() != JsonCastType::DataType::ARRAY) {
-            auto result = ConvertJsonToTypedFieldData<T>(field_datas,
-                                                         json_schema_,
-                                                         nested_path_,
-                                                         cast_type_,
-                                                         cast_function_);
+            auto result =
+                ConvertJsonToTypedFieldData<T>(field_datas,
+                                               json_schema_,
+                                               nested_path_,
+                                               cast_type_,
+                                               cast_function_,
+                                               /*finite_numbers_only=*/true);
             non_exist_offsets_ = std::move(result.non_exist_offsets);
             auto total_rows = result.field_data->get_num_rows();
             BaseIndex::BuildWithFieldData({result.field_data});

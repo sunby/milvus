@@ -21,6 +21,7 @@
 #include "common/JsonUtils.h"
 #include "folly/FBVector.h"
 #include "index/JsonIndexBuilder.h"
+#include "index/JsonNullOffsets.h"
 #include "pb/schema.pb.h"
 #include "simdjson/dom/array.h"
 #include "simdjson/dom/element.h"
@@ -184,7 +185,8 @@ ConvertJsonToTypedFieldData(
     const proto::schema::FieldSchema& schema,
     const std::string& nested_path,
     const JsonCastType& cast_type,
-    JsonCastFunction cast_function) {
+    JsonCastFunction cast_function,
+    bool finite_numbers_only) {
     int64_t total_rows = 0;
     for (const auto& data : json_field_datas) {
         total_rows += data->get_num_rows();
@@ -205,8 +207,10 @@ ConvertJsonToTypedFieldData(
         nested_path,
         cast_type,
         cast_function,
-        [&values, &valid_data](const T* data, int64_t size, int64_t offset) {
-            if (size > 0) {
+        [&values, &valid_data, finite_numbers_only](
+            const T* data, int64_t size, int64_t offset) {
+            if (size > 0 &&
+                (!finite_numbers_only || IsJsonComparableScalar(data[0]))) {
                 values[offset] = data[0];
                 valid_data[offset / 8] |= (1 << (offset % 8));
             }
@@ -235,7 +239,8 @@ ConvertJsonToTypedFieldData<bool>(
     const proto::schema::FieldSchema& schema,
     const std::string& nested_path,
     const JsonCastType& cast_type,
-    JsonCastFunction cast_function);
+    JsonCastFunction cast_function,
+    bool finite_numbers_only);
 
 // NOTE: int64_t instantiation is kept solely for ExprJsonIndexTest.cpp which
 // uses JsonIndexTestFixture parameterized over <bool, int64_t, double,
@@ -249,7 +254,8 @@ ConvertJsonToTypedFieldData<int64_t>(
     const proto::schema::FieldSchema& schema,
     const std::string& nested_path,
     const JsonCastType& cast_type,
-    JsonCastFunction cast_function);
+    JsonCastFunction cast_function,
+    bool finite_numbers_only);
 
 template JsonToTypedResult
 ConvertJsonToTypedFieldData<double>(
@@ -257,7 +263,8 @@ ConvertJsonToTypedFieldData<double>(
     const proto::schema::FieldSchema& schema,
     const std::string& nested_path,
     const JsonCastType& cast_type,
-    JsonCastFunction cast_function);
+    JsonCastFunction cast_function,
+    bool finite_numbers_only);
 
 template JsonToTypedResult
 ConvertJsonToTypedFieldData<std::string>(
@@ -265,7 +272,8 @@ ConvertJsonToTypedFieldData<std::string>(
     const proto::schema::FieldSchema& schema,
     const std::string& nested_path,
     const JsonCastType& cast_type,
-    JsonCastFunction cast_function);
+    JsonCastFunction cast_function,
+    bool finite_numbers_only);
 
 namespace json {
 
