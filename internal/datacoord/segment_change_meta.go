@@ -548,13 +548,13 @@ func (m *meta) updateSegmentsInfoAndChangeGroups(ctx context.Context, dataView *
 		}
 	}
 	// A conflict means another writer stored a segment since: the whole write
-	// is rebuilt once that writer published.
-	return m.retrySegmentWrite(ctx, func() error {
-		return m.updateSegmentsInfoAndChangeGroupsOnce(ctx, dataView, groupActions, operators)
+	// is rebuilt on the stored segments.
+	return m.retrySegmentWrite(ctx, func(r *segmentReader) error {
+		return m.updateSegmentsInfoAndChangeGroupsOnce(ctx, r, dataView, groupActions, operators)
 	})
 }
 
-func (m *meta) updateSegmentsInfoAndChangeGroupsOnce(ctx context.Context, dataView *viewpb.DataViewOfCollection, groupActions []metastore.UpdateAction, operators []UpdateOperator) error {
+func (m *meta) updateSegmentsInfoAndChangeGroupsOnce(ctx context.Context, r *segmentReader, dataView *viewpb.DataViewOfCollection, groupActions []metastore.UpdateAction, operators []UpdateOperator) error {
 	m.groupMu.Lock()
 	defer m.groupMu.Unlock()
 	m.ensureSegmentChangeGroupStoreLocked()
@@ -646,7 +646,7 @@ func (m *meta) updateSegmentsInfoAndChangeGroupsOnce(ctx context.Context, dataVi
 	}
 	groupActions = normalized
 
-	updatePack, err := m.runOperators(operators)
+	updatePack, err := m.runOperators(r, operators)
 	if err != nil {
 		return err
 	}
@@ -736,7 +736,7 @@ func (m *meta) updateSegmentsInfoAndChangeGroupsOnce(ctx context.Context, dataVi
 			// is already retired; nil (GC'd) and Dropped are both idempotent
 			// skips. Treating a GC'd parent as "not retired" would spuriously
 			// fail the publish.
-			if inMeta := m.segments.GetSegment(id); inMeta == nil || inMeta.GetState() == commonpb.SegmentState_Dropped {
+			if inMeta, _ := r.get(id); inMeta == nil || inMeta.GetState() == commonpb.SegmentState_Dropped {
 				continue // already retired or GC'd
 			}
 			segment, ok := updatePack.segments[id]
@@ -845,6 +845,9 @@ func (m *meta) updateSegmentsInfoAndChangeGroupsOnce(ctx context.Context, dataVi
 		actions = append(actions, action)
 	}
 
+	if err := r.failure(); err != nil {
+		return err
+	}
 	// The composite write must keep retrying: the store rewrites the same
 	// actions (a retry whose earlier attempt landed finds its own values), so
 	// an in-function retry converges to a durable COMMITTED group + visible

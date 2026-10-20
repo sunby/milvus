@@ -290,7 +290,7 @@ func (m *meta) CommitSegmentManifest(ctx context.Context, commit SegmentManifest
 	// changed unrelated fields during manifest I/O, so apply the catalog
 	// mutation to the latest clone rather than the I/O input. A writer that
 	// changes the segment before the store write makes it conflict, and the
-	// publication runs again once that writer published.
+	// publication runs again on the stored segment.
 	//
 	// deferredIndexMetric runs only once the publication is done. That closure
 	// takes indexMeta.fieldIndexLock for the stored-index-size gauge, and every
@@ -298,9 +298,12 @@ func (m *meta) CommitSegmentManifest(ctx context.Context, commit SegmentManifest
 	// that lock's write side across an etcd round trip. No lock is acquired
 	// inside the publication.
 	var deferredIndexMetrics []func()
-	if err := m.retrySegmentWrite(ctx, func() error {
+	if err := m.retrySegmentWrite(ctx, func(r *segmentReader) error {
 		base := segment
-		latest, version := m.segments.GetSegmentWithVersion(commit.SegmentID)
+		latest, version := r.getAt(segment.GetCollectionID(), segment.GetPartitionID(), commit.SegmentID)
+		if err := r.failure(); err != nil {
+			return err
+		}
 		if isNewSegment {
 			if latest != nil {
 				return staleSegmentManifestError(commit.SegmentID, "", latest.GetManifestPath())
@@ -610,8 +613,8 @@ func validatePreparedManifest(baseManifest, preparedManifest string) error {
 	return nil
 }
 
-// applySegmentCatalogMutation applies mutation to current; read is the cached
-// value current is built from (absent for a segment the commit creates).
+// applySegmentCatalogMutation applies mutation to current; read is the value
+// current is built from (absent for a segment the commit creates).
 func (m *meta) applySegmentCatalogMutation(current *SegmentInfo, read segmentRead, mutation SegmentCatalogMutation) (*SegmentInfo, *segMetricMutation, error) {
 	pack := &updateSegmentPack{
 		meta:       m,

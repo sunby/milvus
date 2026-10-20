@@ -34,8 +34,8 @@ import (
 //     built without a persist (unit tests).
 //
 // base maps every segment a write changes to the store version of the value
-// the write was built from (read with it, see GetSegmentWithVersion); a
-// segment absent from base must not exist yet.
+// the write was built from (read with it, see segmentReader); a segment absent
+// from base must not exist yet.
 type segmentStore interface {
 	// ListSegments lists every stored segment with its version. collectionIDs
 	// bounds the scan only for stores that cannot list globally.
@@ -52,6 +52,17 @@ type segmentStore interface {
 	SaveDroppedSegmentsInBatch(ctx context.Context, base map[int64]int64, segments []*datapb.SegmentInfo) (map[int64]int64, error)
 	// Update applies a composite write with the catalog's atomicity contract.
 	Update(ctx context.Context, base map[int64]int64, actions ...metastore.UpdateAction) (map[int64]int64, error)
+	// ReadSegment reads the stored value of a segment, located by its
+	// collection and partition, with its version; nil when it does not exist.
+	// cached, at version, is the value the caller holds: a record still at
+	// that version comes back as cached, binlogs included, without reading
+	// them, as a write of the binlogs of a segment rewrites its record in the
+	// same batch.
+	ReadSegment(ctx context.Context, collectionID, partitionID, segmentID int64, cached *SegmentInfo, version int64) (*SegmentInfo, int64, error)
+	// ScanSegments reads the stored segments of a collection with their
+	// versions. cached returns the value the caller holds of a segment and
+	// its version, as for ReadSegment.
+	ScanSegments(ctx context.Context, collectionID int64, cached func(segmentID int64) (*SegmentInfo, int64)) ([]*SegmentInfo, []int64, error)
 }
 
 // ============================================================
@@ -133,6 +144,17 @@ func (s *catalogSegmentStore) Update(ctx context.Context, _ map[int64]int64, act
 		return nil, err
 	}
 	return s.nextVersions(segmentsOfActions(actions)), nil
+}
+
+// ReadSegment is not supported: no write against the catalog conflicts, so
+// none reads the store back.
+func (s *catalogSegmentStore) ReadSegment(context.Context, int64, int64, int64, *SegmentInfo, int64) (*SegmentInfo, int64, error) {
+	return nil, 0, merr.WrapErrServiceInternalMsg("the catalog segment store does not read segments back")
+}
+
+// ScanSegments is not supported, see ReadSegment.
+func (s *catalogSegmentStore) ScanSegments(context.Context, int64, func(int64) (*SegmentInfo, int64)) ([]*SegmentInfo, []int64, error) {
+	return nil, nil, merr.WrapErrServiceInternalMsg("the catalog segment store does not read segments back")
 }
 
 func segmentsOfActions(actions []metastore.UpdateAction) []*datapb.SegmentInfo {
@@ -260,6 +282,61 @@ func (s *casSegmentStore) loadBinlogs(ctx context.Context, prefixes []string) ([
 	return binlogs, nil
 }
 
+func (s *casSegmentStore) ReadSegment(ctx context.Context, collectionID, partitionID, segmentID int64, cached *SegmentInfo, version int64) (*SegmentInfo, int64, error) {
+	key := s.join(datacoordkv.SegmentRecordKey(&datapb.SegmentInfo{ID: segmentID, CollectionID: collectionID, PartitionID: partitionID}))
+	stored, err := s.persist.Get(ctx, []string{key})
+	if err != nil {
+		return nil, 0, err
+	}
+	current, ok := stored[key]
+	if !ok {
+		return nil, 0, nil
+	}
+	segment, err := s.decode(ctx, current.Value, current.Version, cached, version)
+	if err != nil {
+		return nil, 0, err
+	}
+	return segment, current.Version, nil
+}
+
+func (s *casSegmentStore) ScanSegments(ctx context.Context, collectionID int64, cached func(segmentID int64) (*SegmentInfo, int64)) ([]*SegmentInfo, []int64, error) {
+	_, records, versions, err := s.persist.Scan(ctx, s.join(datacoordkv.SegmentRecordPrefixOf(collectionID)))
+	if err != nil {
+		return nil, nil, err
+	}
+	segments := make([]*SegmentInfo, len(records))
+	for i, record := range records {
+		value, version := cached(record.GetID())
+		if segments[i], err = s.decode(ctx, record, versions[i], value, version); err != nil {
+			return nil, nil, err
+		}
+	}
+	return segments, versions, nil
+}
+
+// decode returns the segment a record stored at version holds: cached when
+// it is the value of that version, otherwise the record stitched with its
+// binlog KVs.
+func (s *casSegmentStore) decode(ctx context.Context, record *datapb.SegmentInfo, version int64, cached *SegmentInfo, cachedVersion int64) (*SegmentInfo, error) {
+	if cached != nil && version == cachedVersion {
+		return cached, nil
+	}
+	if datacoordkv.HasInlineBinlogs(record) {
+		s.inline.Insert(record.GetID())
+	} else {
+		s.inline.Remove(record.GetID())
+	}
+	binlogs, err := s.loadBinlogs(ctx, datacoordkv.SegmentBinlogPrefixesOf(record.GetCollectionID(), record.GetPartitionID(), record.GetID()))
+	if err != nil {
+		return nil, err
+	}
+	s.codec.DecodeRecord(record)
+	if err := datacoordkv.FillSegmentBinlogs([]*datapb.SegmentInfo{record}, binlogs); err != nil {
+		return nil, err
+	}
+	return NewSegmentInfo(record), nil
+}
+
 func (s *casSegmentStore) AddSegment(ctx context.Context, segment *datapb.SegmentInfo) (int64, error) {
 	b := s.newTxn(ctx, nil)
 	if err := b.write(ctx, metastore.ActionAdd, metastore.SegmentEntry{Segment: segment}, false); err != nil {
@@ -319,6 +396,7 @@ func (s *casSegmentStore) AlterSegments(ctx context.Context, base map[int64]int6
 		if err != nil {
 			return nil, err
 		}
+		b.txn.Group()
 		for _, op := range ops {
 			b.raw(op)
 		}
@@ -383,6 +461,7 @@ func (s *casSegmentStore) composeRaw(ctx context.Context, b *segmentTxn, action 
 	if builder.Guarded() {
 		return merr.WrapErrServiceInternalMsg("segment store: conditional commit of %T is not supported", action.Entry)
 	}
+	b.txn.Group()
 	for _, op := range builder.Ops() {
 		b.raw(op)
 	}
@@ -408,16 +487,7 @@ func (s *casSegmentStore) newTxn(ctx context.Context, base map[int64]int64) *seg
 }
 
 func (b *segmentTxn) raw(op txn.Op) {
-	b.guardedRaw(op, "", 0)
-}
-
-// guardedRaw stages op so that it lands only while the record at guardKey is
-// still at version (see RawOp).
-func (b *segmentTxn) guardedRaw(op txn.Op, guardKey string, version int64) {
-	b.txn.Raw(RawOp{
-		Key: b.store.join(op.Key), Value: op.Value, Delete: op.Delete, DeletePrefix: op.DeletePrefix, Commit: op.Commit,
-		GuardKey: guardKey, GuardVersion: version,
-	})
+	b.txn.Raw(RawOp{Key: b.store.join(op.Key), Value: op.Value, Delete: op.Delete, DeletePrefix: op.DeletePrefix, Commit: op.Commit})
 	b.numOps++
 }
 
@@ -428,10 +498,12 @@ func (b *segmentTxn) track(segment *datapb.SegmentInfo, dropped bool) {
 	b.numOps++
 }
 
-// write stages a segment action in the catalog encoding. The binlog KVs go
-// before the versioned record, so on the ordered fallback a record never
-// lands ahead of its binlogs; they are guarded by the record's base version,
-// so they do not land once the record has moved before their batch commits.
+// write stages a segment action in the catalog encoding: the binlog KVs, then
+// the versioned record, as one group, so on the ordered fallback they land in
+// one batch and a record never lands ahead of its binlogs. A record still at
+// the version of a cached value thus has the binlogs of that value (see
+// segmentStore.ReadSegment). Only a segment whose ops exceed the batch limit
+// on their own is split; its batches are taken to land together.
 //
 // A segment whose persisted record still carries its binlogs gets every
 // binlog family written out (keeping the caller's field removals): the record
@@ -449,19 +521,20 @@ func (b *segmentTxn) write(ctx context.Context, t metastore.ActionType, e metast
 	if err != nil {
 		return err
 	}
-	recordKey := b.store.join(w.RecordKey)
-	version := b.base[e.Segment.GetID()]
+	b.txn.Group()
 	for _, op := range w.Ops {
-		b.guardedRaw(op, recordKey, version)
+		b.raw(op)
 	}
-	b.txn.PutIfVersion(recordKey, w.Record, version, commit)
+	b.txn.PutIfVersion(b.store.join(w.RecordKey), w.Record, b.base[e.Segment.GetID()], commit)
 	b.track(e.Segment, false)
 	return nil
 }
 
-// drop stages the removal of a segment: its versioned record first, then its
-// binlog KVs, so on the ordered fallback the record never outlives them.
+// drop stages the removal of a segment, as one group: its versioned record
+// first, then its binlog KVs, so on the ordered fallback the record never
+// outlives them.
 func (b *segmentTxn) drop(segment *datapb.SegmentInfo) {
+	b.txn.Group()
 	b.txn.DeleteIfVersion(b.store.join(datacoordkv.SegmentRecordKey(segment)), b.base[segment.GetID()])
 	b.track(segment, true)
 	for _, prefix := range datacoordkv.SegmentBinlogPrefixesOf(segment.GetCollectionID(), segment.GetPartitionID(), segment.GetID()) {
@@ -470,10 +543,10 @@ func (b *segmentTxn) drop(segment *datapb.SegmentInfo) {
 }
 
 // commit runs the transaction of b and maps the result of each segment record
-// to the segment's version. The store never reloads the cache: a write that
-// conflicts waits for the writer it conflicts with to publish. A transaction
-// split over the op limit that fails after its first batch reports the
-// segments it stored with the error (see partialWriteError).
+// to the segment's version. A write that conflicts is built again from the
+// stored values (see meta.retrySegmentWrite). A transaction split over the op
+// limit that fails after its first batch reports the segments it stored with
+// the error (see partialWriteError).
 func (s *casSegmentStore) commit(b *segmentTxn) (map[int64]int64, error) {
 	results, err := b.txn.Commit()
 	if err != nil {
