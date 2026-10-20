@@ -46,6 +46,7 @@ import (
 	"github.com/milvus-io/milvus/internal/metacache"
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/metastore/kv/datacoord"
+	kvstreamingnode "github.com/milvus-io/milvus/internal/metastore/kv/streamingnode"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/dependency"
@@ -535,14 +536,15 @@ func (s *Server) newChunkManagerFactory() (storage.ChunkManager, error) {
 
 func (s *Server) initGarbageCollection(cli storage.ChunkManager) {
 	s.garbageCollector = newGarbageCollector(s.meta, s.handler, GcOption{
-		cli:              cli,
-		broker:           s.broker,
-		enabled:          Params.DataCoordCfg.EnableGarbageCollection.GetAsBool(),
-		checkInterval:    Params.DataCoordCfg.GCInterval.GetAsDuration(time.Second),
-		scanInterval:     Params.DataCoordCfg.GCScanIntervalInHour.GetAsDuration(time.Hour),
-		missingTolerance: Params.DataCoordCfg.GCMissingTolerance.GetAsDuration(time.Second),
-		dropTolerance:    Params.DataCoordCfg.GCDropTolerance.GetAsDuration(time.Second),
-		dataViewGC:       s.dataViewManager,
+		streamingNodeCatalog: kvstreamingnode.NewCataLog(s.kv),
+		cli:                  cli,
+		broker:               s.broker,
+		enabled:              Params.DataCoordCfg.EnableGarbageCollection.GetAsBool(),
+		checkInterval:        Params.DataCoordCfg.GCInterval.GetAsDuration(time.Second),
+		scanInterval:         Params.DataCoordCfg.GCScanIntervalInHour.GetAsDuration(time.Hour),
+		missingTolerance:     Params.DataCoordCfg.GCMissingTolerance.GetAsDuration(time.Second),
+		dropTolerance:        Params.DataCoordCfg.GCDropTolerance.GetAsDuration(time.Second),
+		dataViewGC:           s.dataViewManager,
 		importJobAlive: func(ctx context.Context, jobID int64) bool {
 			return s.importMeta.GetJob(ctx, jobID) != nil
 		},
