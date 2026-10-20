@@ -1255,7 +1255,7 @@ func (suite *MetaBasicSuite) TestBatchSaveDropSegments_UsesCompositeUpdate() {
 		segments: NewSegmentsInfo(),
 	}
 
-	err := m.batchSaveDropSegments(context.TODO(), "ch-1", modSegments)
+	err := m.batchSaveDropSegments(context.TODO(), "ch-1", modSegments, nil)
 	suite.NoError(err)
 
 	// One UpdateSegment per dropped segment (2), then the channel tombstone.
@@ -4344,13 +4344,19 @@ func TestAddL0DeltalogsAndUpdateManifestOperatorCommitsManifestsConcurrently(t *
 	require.Empty(t, updated2.GetDeltalogs()[0].GetBinlogs()[0].GetLogPath())
 }
 
+// Two L0 manifest updates of one segment may both build on the manifest they
+// read. The store accepts one of them; the other runs again on the manifest
+// the first published, so neither update is lost.
 func TestAddL0DeltalogsAndUpdateManifestOperatorSerializesConcurrentUpdates(t *testing.T) {
 	basePath := "/tmp/milvus/insert_log/1/10/200"
 	oldManifest := packed.MarshalManifestPath(basePath, 7)
 	manifest8 := packed.MarshalManifestPath(basePath, 8)
 	manifest9 := packed.MarshalManifestPath(basePath, 9)
 
-	meta, err := newMemoryMeta(t)
+	brk := broker.NewMockBroker(t)
+	brk.EXPECT().ShowCollectionIDs(mock.Anything).Return(nil, nil)
+	persist := NewOptimisticTxnMemoryPersist[string, *datapb.SegmentInfo](&SegmentInfoMarshaler{})
+	meta, err := newMetaWithPersist(context.TODO(), datacoord.NewCatalog(NewMetaMemoryKV(), "", ""), nil, brk, persist, "")
 	require.NoError(t, err)
 	require.NoError(t, meta.AddSegment(context.TODO(), NewSegmentInfo(&datapb.SegmentInfo{
 		ID:           200,
@@ -4400,7 +4406,9 @@ func TestAddL0DeltalogsAndUpdateManifestOperatorSerializesConcurrentUpdates(t *t
 	for err := range errs {
 		require.NoError(t, err)
 	}
-	require.Equal(t, []string{oldManifest, manifest8}, calls)
+	// The last update built on a manifest the other one published.
+	require.Equal(t, oldManifest, calls[0])
+	require.NotEqual(t, oldManifest, calls[len(calls)-1])
 
 	updated := meta.GetSegment(context.TODO(), 200)
 	require.Equal(t, manifest9, updated.GetManifestPath())

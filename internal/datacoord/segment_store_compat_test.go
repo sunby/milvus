@@ -66,6 +66,16 @@ func recoverIntoCache(t *testing.T, store *casSegmentStore, cache *CachedSegment
 	return byID
 }
 
+// cachedVersions returns the cached version of each of segmentIDs: the base of
+// a write built from the cached values.
+func cachedVersions(cache *CachedSegmentsInfo, segmentIDs ...int64) map[int64]int64 {
+	versions := make(map[int64]int64, len(segmentIDs))
+	for _, id := range segmentIDs {
+		versions[id], _ = cache.Version(id)
+	}
+	return versions
+}
+
 // The store and the catalog read each other's writes, so a cluster can move
 // to this store and back: segments written by the catalog recover with their
 // binlogs, and what the store writes, the catalog lists.
@@ -103,7 +113,7 @@ func TestCASSegmentStoreSharesTheCatalogEncoding(t *testing.T) {
 	// A delete flush through the store writes only the deltalog family.
 	updated := proto.Clone(segment).(*datapb.SegmentInfo)
 	updated.Deltalogs[0].Binlogs = append(updated.Deltalogs[0].Binlogs, &datapb.Binlog{LogID: 1005, EntriesNum: 1})
-	versions, err := store.AlterSegments(ctx, []*datapb.SegmentInfo{updated}, metastore.BinlogsIncrement{
+	versions, err := store.AlterSegments(ctx, cachedVersions(cache, 100), []*datapb.SegmentInfo{updated}, metastore.BinlogsIncrement{
 		Segment: updated,
 		UpdateMask: metastore.BinlogsUpdateMask{
 			WithoutBinlogs:       true,
@@ -138,7 +148,7 @@ func TestCASSegmentStoreSharesTheCatalogEncoding(t *testing.T) {
 
 	// A drop removes the record and every binlog KV of the segment, and
 	// nothing of segment 1000.
-	require.NoError(t, store.DropSegments(ctx, []*datapb.SegmentInfo{cache.GetSegment(100).SegmentInfo}))
+	require.NoError(t, store.DropSegments(ctx, cachedVersions(cache, 100), []*datapb.SegmentInfo{cache.GetSegment(100).SegmentInfo}))
 	for _, family := range []string{"binlog", "deltalog", "statslog", "bm25log"} {
 		require.Zero(t, countKeys(t, cli, root+"/datacoord-meta/"+family+"/1/2/100/"), family)
 		require.Equal(t, int64(1), countKeys(t, cli, root+"/datacoord-meta/"+family+"/1/2/1000/"), family)
@@ -170,7 +180,7 @@ func TestCASSegmentStoreMovesInlineBinlogsOut(t *testing.T) {
 
 	updated := proto.Clone(recovered[7]).(*datapb.SegmentInfo)
 	updated.Deltalogs[0].Binlogs = append(updated.Deltalogs[0].Binlogs, &datapb.Binlog{LogID: 75})
-	_, err = store.AlterSegments(ctx, []*datapb.SegmentInfo{updated}, metastore.BinlogsIncrement{
+	_, err = store.AlterSegments(ctx, cachedVersions(cache, 7), []*datapb.SegmentInfo{updated}, metastore.BinlogsIncrement{
 		Segment:    updated,
 		UpdateMask: metastore.BinlogsUpdateMask{WithoutBinlogs: true, WithoutStatslogs: true, WithoutBm25Statslogs: true},
 	})
@@ -352,7 +362,7 @@ func TestCASSegmentStoreDropsWholeSegmentsPerTransaction(t *testing.T) {
 	}
 
 	persist.txns = 0
-	require.NoError(t, store.DropSegments(ctx, segments))
+	require.NoError(t, store.DropSegments(ctx, cachedVersions(cache, 1, 2, 3, 4, 5), segments))
 	require.Equal(t, 3, persist.txns, "two segments of five ops fit a limit of ten")
 	require.Zero(t, countKeys(t, cli, root+"/datacoord-meta/"))
 }

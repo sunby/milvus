@@ -2,32 +2,68 @@ package datacoord
 
 import (
 	"context"
+	"math/rand"
 	"slices"
+	"time"
 
+	"github.com/cockroachdb/errors"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus/internal/metastore"
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
-	"github.com/milvus-io/milvus/pkg/v3/util/lock"
 )
 
 // Segment writes on the optimistic segment store.
 //
-// Readers use the lock-free segment cache directly. A writer
-//  1. takes the writer locks of every segment it changes (lockSegments), so
-//     writers of one segment serialize while writers of different segments
-//     run in parallel;
-//  2. builds the new values from the cached ones;
-//  3. persists them through the segment store, which compares each written
+// Readers use the lock-free segment cache directly. A writer takes no lock of
+// the segments it changes; writers of different segments run in parallel. It
+//  1. builds the new values from the cached ones;
+//  2. persists them through the segment store, which compares each written
 //     segment against its cached version (casSegmentStore). A conflict means
-//     the store moved under the cache (another process wrote it): the cache is
-//     refreshed and the write fails, to be rebuilt by the caller;
+//     the store moved under the cache (another writer wrote one of the
+//     segments): the store refreshes their cached values and the write fails
+//     with ErrVersionConflict;
+//  3. runs again from step 1 on a conflict (retrySegmentWrite), building on
+//     the refreshed values, until it does not conflict or ctx ends;
 //  4. publishes the persisted values with their new versions
-//     (publishSegments) before releasing the locks.
+//     (publishSegments). Publications of concurrent writers may arrive out of
+//     order: the cache keeps the newer version.
 //
-// Lock order: segment manifest lock -> index keyLock(buildID) -> segment
-// writer locks -> groupMu -> segments.pubMu. While holding writer locks, never block on
-// another writer lock outside one lockSegments call.
+// Lock order: segment manifest lock -> index keyLock(buildID) -> groupMu ->
+// segments.pubMu.
+
+const (
+	// segmentWriteRetryMinBackoff and segmentWriteRetryMaxBackoff bound the
+	// wait before a write that conflicted runs again; it doubles, jittered.
+	segmentWriteRetryMinBackoff = time.Millisecond
+	segmentWriteRetryMaxBackoff = time.Second
+)
+
+// retrySegmentWrite runs write, which builds a segment write from the cached
+// segments and commits it, until it does not fail with a version conflict, or
+// ctx ends. A conflict refreshed the cached values of the segments the write
+// touched, so each run builds on what the store holds. Writes of one segment
+// rarely conflict, so there is no attempt limit.
+func (m *meta) retrySegmentWrite(ctx context.Context, write func() error) error {
+	backoff := segmentWriteRetryMinBackoff
+	for attempt := 1; ; attempt++ {
+		err := write()
+		if err == nil || !errors.Is(err, ErrVersionConflict) || ctx.Err() != nil {
+			return err
+		}
+		mlog.Info(ctx, "meta update: segment meta moved under the cache, rebuilding the write",
+			mlog.Int("attempt", attempt), mlog.Err(err))
+		timer := time.NewTimer(backoff/2 + time.Duration(rand.Int63n(int64(backoff/2)+1)))
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return err
+		}
+		backoff = min(2*backoff, segmentWriteRetryMaxBackoff)
+	}
+}
 
 // store returns the segment store, defaulting to the catalog for a meta built
 // without one (unit tests construct meta directly).
@@ -38,26 +74,6 @@ func (m *meta) store() segmentStore {
 		}
 	})
 	return m.segmentStore
-}
-
-func (m *meta) getSegmentWriteLocks() *lock.KeyLock[int64] {
-	m.segmentWriteLocksOnce.Do(func() {
-		if m.segmentWriteLocks == nil {
-			m.segmentWriteLocks = lock.NewKeyLock[int64]()
-		}
-	})
-	return m.segmentWriteLocks
-}
-
-// lockSegments takes the writer locks of segmentIDs in ascending order and
-// returns their release.
-func (m *meta) lockSegments(segmentIDs ...int64) func() {
-	ids := slices.Clone(segmentIDs)
-	slices.Sort(ids)
-	ids = slices.Compact(ids)
-	locks := m.getSegmentWriteLocks()
-	lock.LockManyOrdered(locks, ids)
-	return func() { locks.UnlockMany(ids) }
 }
 
 // publishSegment installs the persisted value of one segment.
@@ -90,41 +106,24 @@ func (m *meta) selectSegmentsConsistent(ctx context.Context, filters ...SegmentF
 	return segments
 }
 
-// lockOperatorSegments builds the update pack of operators under the writer
-// locks of every segment the operators touch. The touched set is discovered by
-// a run against the unlocked cache; when the locked run touches a segment the
-// discovery run did not (the cache changed in between), it releases and
-// retries. Operators only mutate the pack, so the extra runs have no effect.
-func (m *meta) lockOperatorSegments(operators []UpdateOperator) (*updateSegmentPack, func(), error) {
-	for {
-		discovery := m.newUpdateSegmentPack()
-		if err := discovery.run(operators); err != nil {
-			return nil, nil, err
-		}
-		locked := make(map[int64]struct{}, len(discovery.segments))
-		ids := make([]int64, 0, len(discovery.segments))
-		for id := range discovery.segments {
-			locked[id] = struct{}{}
-			ids = append(ids, id)
-		}
-		unlock := m.lockSegments(ids...)
-		pack := m.newUpdateSegmentPack()
-		if err := pack.run(operators); err != nil {
-			unlock()
-			return nil, nil, err
-		}
-		covered := true
-		for id := range pack.segments {
-			if _, ok := locked[id]; !ok {
-				covered = false
-				break
-			}
-		}
-		if covered {
-			return pack, unlock, nil
-		}
-		unlock()
+// withCachedVersions adds to base the cached version of each of segments, 0
+// for a segment the cache does not hold. It is the base of the segments a
+// write creates under IDs no other write uses: an earlier run of the write
+// may have stored them already.
+func (m *meta) withCachedVersions(base map[int64]int64, segments ...*SegmentInfo) map[int64]int64 {
+	for _, segment := range segments {
+		_, base[segment.GetID()] = m.segments.GetSegmentWithVersion(segment.GetID())
 	}
+	return base
+}
+
+// runOperators builds the update pack of operators from the cached segments.
+func (m *meta) runOperators(operators []UpdateOperator) (*updateSegmentPack, error) {
+	pack := m.newUpdateSegmentPack()
+	if err := pack.run(operators); err != nil {
+		return nil, err
+	}
+	return pack, nil
 }
 
 // MutateFunc modifies a *datapb.SegmentInfo in place. Returns true to proceed
@@ -175,7 +174,7 @@ func AddSegmentsOperator(segments ...*datapb.SegmentInfo) UpdateOperator {
 	return func(modPack *updateSegmentPack) bool {
 		added := false
 		for _, segment := range segments {
-			if modPack.meta.segments.GetSegment(segment.GetID()) != nil {
+			if modPack.Peek(segment.GetID()) != nil {
 				continue
 			}
 			info := NewSegmentInfo(segment)

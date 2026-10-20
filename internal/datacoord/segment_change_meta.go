@@ -37,7 +37,7 @@ import (
 // publication unit of batch segment changes. The in-memory table lives on
 // `meta` and is guarded by groupMu: the group record composes into the same
 // store txn as segment writes (see UpdateSegmentsInfoAndChangeGroups), which
-// takes groupMu after the writer locks of the segments it changes. This is the
+// holds groupMu while it validates and persists the group actions. This is the
 // layer that later batch pipelines
 // (import, compaction, copy, ...) call to stage and publish their outputs, and
 // that the DataView integration (PR #52537) extends by composing a DataView
@@ -547,24 +547,14 @@ func (m *meta) updateSegmentsInfoAndChangeGroups(ctx context.Context, dataView *
 				"UpdateSegmentsInfoAndChangeGroups only accepts segment change group actions, got %T", action.Entry)
 		}
 	}
-	for {
-		err := m.updateSegmentsInfoAndChangeGroupsOnce(ctx, dataView, groupActions, operators)
-		if err != nil && errors.Is(err, ErrVersionConflict) && ctx.Err() == nil {
-			// The store moved under the cache, which is refreshed by now:
-			// rebuild the whole write from it.
-			mlog.Warn(ctx, "meta update: segment meta moved under the cache, rebuilding the segment change group write", mlog.Err(err))
-			continue
-		}
-		return err
-	}
+	// A conflict means the store moved under the cache, which is refreshed by
+	// then: the whole write is rebuilt from it.
+	return m.retrySegmentWrite(ctx, func() error {
+		return m.updateSegmentsInfoAndChangeGroupsOnce(ctx, dataView, groupActions, operators)
+	})
 }
 
 func (m *meta) updateSegmentsInfoAndChangeGroupsOnce(ctx context.Context, dataView *viewpb.DataViewOfCollection, groupActions []metastore.UpdateAction, operators []UpdateOperator) error {
-	updatePack, unlock, err := m.lockOperatorSegments(operators)
-	if err != nil {
-		return err
-	}
-	defer unlock()
 	m.groupMu.Lock()
 	defer m.groupMu.Unlock()
 	m.ensureSegmentChangeGroupStoreLocked()
@@ -656,8 +646,10 @@ func (m *meta) updateSegmentsInfoAndChangeGroupsOnce(ctx context.Context, dataVi
 	}
 	groupActions = normalized
 
-	// The operators already ran against the cache under the writer locks of
-	// the segments they touch (lockOperatorSegments).
+	updatePack, err := m.runOperators(operators)
+	if err != nil {
+		return err
+	}
 	if err := commitL0ManifestUpdates(updatePack.l0ManifestUpdates); err != nil {
 		return err
 	}
@@ -864,7 +856,7 @@ func (m *meta) updateSegmentsInfoAndChangeGroupsOnce(ctx context.Context, dataVi
 	var versions map[int64]int64
 	if err := retry.Do(ctx, func() error {
 		var err error
-		versions, err = m.store().Update(ctx, actions...)
+		versions, err = m.store().Update(ctx, updatePack.versions(), actions...)
 		return err
 	}, retry.AttemptAlways(), retry.MaxSleepTime(10*time.Second),
 		retry.RetryErr(func(err error) bool { return !errors.Is(err, ErrVersionConflict) })); err != nil {

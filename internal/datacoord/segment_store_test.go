@@ -13,6 +13,8 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
+	"github.com/milvus-io/milvus-proto/go-api/v3/msgpb"
+	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/metastore/kv/datacoord"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
@@ -152,15 +154,15 @@ func TestCASSegmentStoreConflictRefreshesCache(t *testing.T) {
 	results, err := txn.Commit()
 	require.NoError(t, err)
 
-	err = m.UpdateSegmentsInfo(ctx, UpdateStatusOperator(100, commonpb.SegmentState_Dropped))
-	require.ErrorIs(t, err, ErrVersionConflict)
-
-	// The cache now holds the persisted value, so a rebuilt write succeeds.
-	refreshed, _ := m.segments.Version(100)
-	require.Equal(t, results[0].Version, refreshed)
-	require.EqualValues(t, 42, m.GetSegment(ctx, 100).GetNumOfRows())
+	// The write conflicts, the cache is refreshed with the persisted value, and
+	// the write runs again on it.
 	require.NoError(t, m.UpdateSegmentsInfo(ctx, UpdateStatusOperator(100, commonpb.SegmentState_Dropped)))
-	require.EqualValues(t, 42, persist.data[storedSegmentKey(100)].value.GetNumOfRows())
+	refreshed, _ := m.segments.Version(100)
+	require.Greater(t, refreshed, results[0].Version)
+	stored := persist.data[storedSegmentKey(100)].value
+	require.EqualValues(t, 42, stored.GetNumOfRows())
+	require.Equal(t, commonpb.SegmentState_Dropped, stored.GetState())
+	require.EqualValues(t, 42, m.GetSegment(ctx, 100).GetNumOfRows())
 }
 
 func newDroppedTestSegment(id int64) *SegmentInfo {
@@ -492,4 +494,209 @@ func TestOptimisticTxnEtcdOrderedBatches(t *testing.T) {
 	atomic.AtomicOnly()
 	_, err = atomic.Commit()
 	require.Error(t, err)
+}
+
+// A write built from a cached value that another writer changes before the
+// write commits must not overwrite that change: it conflicts and runs again on
+// the refreshed value.
+func TestSegmentWriteRebuildsAfterAConcurrentWriteOfTheSegment(t *testing.T) {
+	ctx := context.Background()
+	m, persist := newCASTestMeta(t)
+	require.NoError(t, m.AddSegment(ctx, newFlushedTestSegment(100)))
+
+	runs := 0
+	require.NoError(t, m.UpdateSegmentsInfo(ctx, func(pack *updateSegmentPack) bool {
+		runs++
+		segment := pack.Get(100)
+		if runs == 1 {
+			// Another writer changes the segment after this write read it.
+			require.NoError(t, m.UpdateSegment(100, SetMaxRowCount(42)))
+		}
+		segment.IsSorted = true
+		return true
+	}))
+	require.Equal(t, 2, runs, "the write runs again on the refreshed value")
+	for _, segment := range []*datapb.SegmentInfo{m.GetSegment(ctx, 100).SegmentInfo, persist.data[storedSegmentKey(100)].value} {
+		require.EqualValues(t, 42, segment.GetMaxRowNum())
+		require.True(t, segment.GetIsSorted())
+	}
+}
+
+// The first read of a segment pins it for the rest of a write: the value an
+// operator checked and the value the write is built on are the same, so a
+// change in between fails the write instead of publishing a value whose check
+// saw an older segment.
+func TestSegmentWritePinsTheFirstReadOfASegment(t *testing.T) {
+	ctx := context.Background()
+	m, persist := newCASTestMeta(t)
+	require.NoError(t, m.AddSegment(ctx, newFlushedTestSegment(100)))
+
+	var built []int64
+	require.NoError(t, m.UpdateSegmentsInfo(ctx, func(pack *updateSegmentPack) bool {
+		checked := pack.Peek(100).GetMaxRowNum()
+		if len(built) == 0 {
+			require.NoError(t, m.UpdateSegment(100, SetMaxRowCount(42)))
+		}
+		segment := pack.Get(100)
+		require.Equal(t, checked, segment.GetMaxRowNum(), "the write builds on the checked value")
+		built = append(built, segment.GetMaxRowNum())
+		segment.MaxRowNum++
+		return true
+	}))
+	require.Equal(t, []int64{0, 42}, built)
+	require.EqualValues(t, 43, persist.data[storedSegmentKey(100)].value.GetMaxRowNum())
+}
+
+// Concurrent writers of one segment run without a lock; every update lands.
+func TestSegmentWritesOfOneSegmentDoNotLoseUpdates(t *testing.T) {
+	paramtable.Init()
+	ctx := context.Background()
+	m, persist := newCASTestMeta(t)
+	require.NoError(t, m.AddSegment(ctx, newFlushedTestSegment(100)))
+	const writers, rounds = 8, 5
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for round := 0; round < rounds; round++ {
+				assert.NoError(t, m.UpdateSegmentsInfo(ctx, MutationsOperator(map[int64][]MutateFunc{
+					100: {func(seg *datapb.SegmentInfo) bool {
+						seg.MaxRowNum++
+						return true
+					}},
+				})))
+			}
+		}()
+	}
+	wg.Wait()
+	require.EqualValues(t, writers*rounds, m.GetSegment(ctx, 100).GetMaxRowNum())
+	require.EqualValues(t, writers*rounds, persist.data[storedSegmentKey(100)].value.GetMaxRowNum())
+}
+
+// hookPersist runs hook once, before the first commit after it is set.
+type hookPersist struct {
+	OptimisticTxnPersist[string, *datapb.SegmentInfo]
+	hook func()
+}
+
+func (p *hookPersist) Txn(ctx context.Context) Txn[string, *datapb.SegmentInfo] {
+	return &hookTxn{Txn: p.OptimisticTxnPersist.Txn(ctx), persist: p}
+}
+
+type hookTxn struct {
+	Txn[string, *datapb.SegmentInfo]
+	persist *hookPersist
+}
+
+func (t *hookTxn) Commit() ([]TxnResult[*datapb.SegmentInfo], error) {
+	if hook := t.persist.hook; hook != nil {
+		t.persist.hook = nil
+		hook()
+	}
+	return t.Txn.Commit()
+}
+
+// A truncate selects the segments of the channel before it writes them. A
+// clustering compaction that commits its outputs in between rewrites its
+// inputs, so the truncate conflicts and selects again, the outputs included.
+func TestTruncateConflictsWithAClusteringCompactionOfItsSegments(t *testing.T) {
+	ctx := context.Background()
+	m, persist := newCASTestMeta(t)
+	hooked := &hookPersist{OptimisticTxnPersist: persist}
+	m.segmentStore = newCASSegmentStore(hooked, m.catalog, testSegmentStoreRoot, m.segments)
+	input := newFlushedTestSegment(100)
+	input.DmlPosition = &msgpb.MsgPosition{ChannelName: "ch-1", Timestamp: 10}
+	require.NoError(t, m.AddSegment(ctx, input))
+
+	hooked.hook = func() {
+		_, _, err := m.CompleteCompactionMutation(ctx, &datapb.CompactionTask{
+			Type:          datapb.CompactionType_ClusteringCompaction,
+			Channel:       "ch-1",
+			InputSegments: []int64{100},
+		}, &datapb.CompactionPlanResult{Segments: []*datapb.CompactionSegment{{SegmentID: 200, NumOfRows: 10}}})
+		require.NoError(t, err)
+	}
+	require.NoError(t, m.TruncateChannelByTime(ctx, "ch-1", 20))
+	require.Nil(t, hooked.hook, "the compaction committed while the truncate was writing")
+	for _, id := range []int64{100, 200} {
+		require.Equal(t, commonpb.SegmentState_Dropped, m.GetSegment(ctx, id).GetState(), "segment %d", id)
+	}
+}
+
+// A mix compaction commit split over the transaction limit may land in part.
+// Its rerun retires the remaining inputs and rewrites the outputs that landed.
+func TestMixCompactionCompletesACommitThatLandedInPart(t *testing.T) {
+	ctx := context.Background()
+	m, persist := newCASTestMeta(t)
+	retired := newDroppedTestSegment(1)
+	retired.Compacted = true
+	require.NoError(t, m.AddSegment(ctx, retired))
+	require.NoError(t, m.AddSegment(ctx, newFlushedTestSegment(2)))
+	landed := newFlushedTestSegment(10)
+	landed.CompactionFrom = []int64{1, 2}
+	landed.CreatedByCompaction = true
+	require.NoError(t, m.AddSegment(ctx, landed))
+
+	outputs, _, err := m.CompleteCompactionMutation(ctx, &datapb.CompactionTask{
+		Type:          datapb.CompactionType_MixCompaction,
+		Channel:       "ch-1",
+		InputSegments: []int64{1, 2},
+		Schema:        &schemapb.CollectionSchema{},
+	}, &datapb.CompactionPlanResult{Segments: []*datapb.CompactionSegment{{SegmentID: 10, NumOfRows: 20}}})
+	require.NoError(t, err)
+	require.Len(t, outputs, 1)
+	input := persist.data[storedSegmentKey(2)].value
+	require.Equal(t, commonpb.SegmentState_Dropped, input.GetState())
+	require.True(t, input.GetCompacted())
+	output := m.GetSegment(ctx, 10)
+	require.Equal(t, []int64{1, 2}, output.GetCompactionFrom())
+	require.EqualValues(t, 20, output.GetNumOfRows())
+	require.EqualValues(t, 20, persist.data[storedSegmentKey(10)].value.GetNumOfRows())
+}
+
+// The binlog KVs an over-limit transaction writes in an earlier batch than
+// their record land only while the record is still at the version the write
+// was built from.
+func TestOptimisticTxnEtcdGuardsTheRawOpsOfAMovedRecord(t *testing.T) {
+	ctx := context.Background()
+	persist, cli, root := newTestEtcdPersist(t)
+	key := paramtable.Get().MetaStoreCfg.MaxEtcdTxnNum.Key
+	paramtable.Get().Save(key, "2")
+	defer paramtable.Get().Reset(key)
+
+	record := root + "/s/1"
+	write := func(rows, base int64) error {
+		txn := persist.Txn(ctx)
+		// Split into [b1 b2] [b3 record].
+		for i := 1; i <= 3; i++ {
+			txn.Raw(RawOp{Key: fmt.Sprintf("%s/binlog/%d", root, i), Value: fmt.Sprint(rows), GuardKey: record, GuardVersion: base})
+		}
+		txn.PutIfVersion(record, &datapb.SegmentInfo{ID: 1, NumOfRows: rows}, base, false)
+		_, err := txn.Commit()
+		return err
+	}
+	binlogs := func() map[string]string {
+		resp, err := cli.Get(ctx, root+"/binlog/", clientv3.WithPrefix())
+		require.NoError(t, err)
+		kvs := make(map[string]string)
+		for _, kv := range resp.Kvs {
+			kvs[string(kv.Key)] = string(kv.Value)
+		}
+		return kvs
+	}
+
+	require.NoError(t, write(1, 0))
+	current, err := persist.Get(ctx, []string{record})
+	require.NoError(t, err)
+	v1 := current[record].Version
+
+	// Another writer moves the record; a write still built from v1 lands
+	// nothing, not even its first batch.
+	require.NoError(t, write(2, v1))
+	require.ErrorIs(t, write(3, v1), ErrVersionConflict)
+	for _, value := range binlogs() {
+		require.Equal(t, "2", value)
+	}
+	require.Len(t, binlogs(), 3)
 }
