@@ -630,7 +630,6 @@ func (s *SegmentManager) CleanZeroSealedSegmentsOfChannel(ctx context.Context, c
 
 	sealed, ok := s.channel2Sealed.Get(channel)
 	if !ok {
-		mlog.Info(context.TODO(), "try remove empty sealed segment after channel cp updated failed to get channel", mlog.String("channel", channel))
 		return
 	}
 	for _, id := range sealed.Collect() {
