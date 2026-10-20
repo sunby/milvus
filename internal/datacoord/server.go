@@ -729,7 +729,7 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 	var recoveredImports ImportMeta
 	if err := retry.Do(s.ctx, func() error {
 		var err error
-		recoveredImports, err = NewImportMeta(s.ctx, catalog, s.allocator, recoveredMeta)
+		recoveredImports, err = NewImportMeta(s.ctx, s.catalog, s.allocator, recoveredMeta)
 		return err
 	}, retry.Attempts(connMetaMaxRetryTime)); err != nil {
 		return err
