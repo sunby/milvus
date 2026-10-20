@@ -290,7 +290,7 @@ func (m *meta) CommitSegmentManifest(ctx context.Context, commit SegmentManifest
 	// changed unrelated fields during manifest I/O, so apply the catalog
 	// mutation to the latest clone rather than the I/O input. A writer that
 	// changes the segment before the store write makes it conflict, and the
-	// publication runs again on the refreshed value.
+	// publication runs again once that writer published.
 	//
 	// deferredIndexMetric runs only once the publication is done. That closure
 	// takes indexMeta.fieldIndexLock for the stored-index-size gauge, and every

@@ -16,6 +16,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
+	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/metastore/kv/datacoord"
@@ -93,7 +94,7 @@ func TestCASSegmentStoreSharesTheCatalogEncoding(t *testing.T) {
 	require.NoError(t, catalog.AddSegment(ctx, compatTestSegment(1000)))
 
 	cache := NewSegmentsInfo()
-	store := newCASSegmentStore(persist, catalog, root, cache)
+	store := newCASSegmentStore(persist, catalog, root)
 	recovered := recoverIntoCache(t, store, cache)
 	require.Len(t, recovered, 2)
 	segment := recovered[100]
@@ -173,7 +174,7 @@ func TestCASSegmentStoreMovesInlineBinlogsOut(t *testing.T) {
 	require.NoError(t, err)
 
 	cache := NewSegmentsInfo()
-	store := newCASSegmentStore(persist, catalog, root, cache)
+	store := newCASSegmentStore(persist, catalog, root)
 	recovered := recoverIntoCache(t, store, cache)
 	require.Equal(t, []int64{71}, logIDs(recovered[7].GetBinlogs()))
 	require.True(t, store.inline.Contain(7))
@@ -200,11 +201,21 @@ func TestCASSegmentStoreMovesInlineBinlogsOut(t *testing.T) {
 }
 
 // lostResponseKV lets the first transaction land and then reports a transport
-// failure, or reports it without sending the transaction when drop is set.
+// failure, or reports it without sending the transaction when drop is set. Its
+// first getFailures reads fail too.
 type lostResponseKV struct {
 	clientv3.KV
-	drop   bool
-	failed bool
+	drop        bool
+	failed      bool
+	getFailures int
+}
+
+func (kv *lostResponseKV) Get(ctx context.Context, key string, opts ...clientv3.OpOption) (*clientv3.GetResponse, error) {
+	if kv.getFailures > 0 {
+		kv.getFailures--
+		return nil, status.Error(codes.Unavailable, "mock read failure")
+	}
+	return kv.KV.Get(ctx, key, opts...)
 }
 
 func (kv *lostResponseKV) Txn(ctx context.Context) clientv3.Txn {
@@ -260,6 +271,20 @@ func TestOptimisticTxnEtcdResolvesUnknownCommitOutcome(t *testing.T) {
 		txn.Raw(RawOp{Key: root + "/marker", Value: "m"})
 		results, err := txn.Commit()
 		require.NoError(t, err)
+		resp, err := cli.Get(ctx, root+"/s/1")
+		require.NoError(t, err)
+		require.Equal(t, resp.Kvs[0].ModRevision, results[0].Version)
+	})
+
+	t.Run("landed, read back after failed reads", func(t *testing.T) {
+		_, cli, root := newTestEtcdPersist(t)
+		faulty := clientv3.NewCtxClient(context.Background())
+		faulty.KV = &lostResponseKV{KV: cli.KV, getFailures: 2}
+		persist := NewOptimisticTxnEtcdPersist[string, *datapb.SegmentInfo](faulty, &SegmentInfoMarshaler{})
+		txn := persist.Txn(ctx)
+		txn.PutIfVersion(root+"/s/1", &datapb.SegmentInfo{ID: 1, NumOfRows: 3}, 0, false)
+		results, err := txn.Commit()
+		require.NoError(t, err, "the outcome is read back until the store answers")
 		resp, err := cli.Get(ctx, root+"/s/1")
 		require.NoError(t, err)
 		require.Equal(t, resp.Kvs[0].ModRevision, results[0].Version)
@@ -350,7 +375,7 @@ func TestCASSegmentStoreDropsWholeSegmentsPerTransaction(t *testing.T) {
 
 	persist := &countingPersist{OptimisticTxnPersist: inner}
 	cache := NewSegmentsInfo()
-	store := newCASSegmentStore(persist, datacoord.NewCatalog(etcdkv.NewEtcdKV(cli, root), "", root), root, cache)
+	store := newCASSegmentStore(persist, datacoord.NewCatalog(etcdkv.NewEtcdKV(cli, root), "", root), root)
 	var segments []*datapb.SegmentInfo
 	for id := int64(1); id <= 5; id++ {
 		segment := compatTestSegment(id)
@@ -365,4 +390,58 @@ func TestCASSegmentStoreDropsWholeSegmentsPerTransaction(t *testing.T) {
 	require.NoError(t, store.DropSegments(ctx, cachedVersions(cache, 1, 2, 3, 4, 5), segments))
 	require.Equal(t, 3, persist.txns, "two segments of five ops fit a limit of ten")
 	require.Zero(t, countKeys(t, cli, root+"/datacoord-meta/"))
+}
+
+// A compaction commit split into ordered batches whose last batch conflicts
+// publishes the batches that landed, so its rerun builds on them: nothing
+// else would bring the cache up to date with the store.
+func TestSegmentWritePublishesTheBatchesThatLanded(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	persist, cli, root := newTestEtcdPersist(t)
+	hooked := &hookPersist{OptimisticTxnPersist: persist}
+	m := &meta{
+		ctx:      context.Background(),
+		catalog:  datacoord.NewCatalog(etcdkv.NewEtcdKV(cli, root), "", root),
+		segments: NewSegmentsInfo(),
+	}
+	m.segmentStore = newCASSegmentStore(hooked, m.catalog, root)
+	for _, id := range []int64{100, 101} {
+		require.NoError(t, m.AddSegment(ctx, newFlushedTestSegment(id)))
+	}
+
+	// One op per batch: [output 200] [input 100] [input 101]. Another writer
+	// changes input 101 first, so the last batch conflicts.
+	key := paramtable.Get().MetaStoreCfg.MaxEtcdTxnNum.Key
+	paramtable.Get().Save(key, "1")
+	defer paramtable.Get().Reset(key)
+	hooked.hook = func() {
+		require.NoError(t, m.UpdateSegment(101, SetMaxRowCount(7)))
+	}
+	_, _, err := m.CompleteCompactionMutation(ctx, &datapb.CompactionTask{
+		Type:          datapb.CompactionType_MixCompaction,
+		Channel:       "ch-1",
+		InputSegments: []int64{100, 101},
+		Schema:        &schemapb.CollectionSchema{},
+	}, &datapb.CompactionPlanResult{Segments: []*datapb.CompactionSegment{{SegmentID: 200, NumOfRows: 20}}})
+	require.NoError(t, err)
+
+	require.Equal(t, commonpb.SegmentState_Flushed, m.GetSegment(ctx, 200).GetState())
+	for _, id := range []int64{100, 101} {
+		input := m.GetSegment(ctx, id)
+		require.Equal(t, commonpb.SegmentState_Dropped, input.GetState())
+		require.True(t, input.GetCompacted())
+	}
+	require.EqualValues(t, 7, m.GetSegment(ctx, 101).GetMaxRowNum())
+	listed, err := m.catalog.ListSegments(ctx, 1)
+	require.NoError(t, err)
+	states := make(map[int64]commonpb.SegmentState)
+	for _, segment := range listed {
+		states[segment.GetID()] = segment.GetState()
+	}
+	require.Equal(t, map[int64]commonpb.SegmentState{
+		100: commonpb.SegmentState_Dropped,
+		101: commonpb.SegmentState_Dropped,
+		200: commonpb.SegmentState_Flushed,
+	}, states)
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"sync/atomic"
 
-	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/proto"
@@ -166,15 +165,13 @@ type casSegmentStore struct {
 	// rootPath is the MetaKv root of the catalog keys; segment keys and the
 	// raw ops encoded by the catalog are joined under it.
 	rootPath string
-	// segments receives the refreshed values after a version conflict.
-	segments *CachedSegmentsInfo
 	// inline holds the segments whose persisted record still carries its
 	// binlogs: records written before this store kept the catalog encoding.
 	// Their next write moves every binlog family out of the record.
 	inline *typeutil.ConcurrentSet[int64]
 }
 
-func newCASSegmentStore(persist OptimisticTxnPersist[string, *datapb.SegmentInfo], catalog metastore.DataCoordCatalog, rootPath string, segments *CachedSegmentsInfo) *casSegmentStore {
+func newCASSegmentStore(persist OptimisticTxnPersist[string, *datapb.SegmentInfo], catalog metastore.DataCoordCatalog, rootPath string) *casSegmentStore {
 	encoder, _ := catalog.(catalogUpdateEncoder)
 	chunkManagerRootPath := ""
 	if kc, ok := catalog.(*datacoordkv.Catalog); ok {
@@ -188,7 +185,6 @@ func newCASSegmentStore(persist OptimisticTxnPersist[string, *datapb.SegmentInfo
 		// compatibility write of a dropped segment never applies.
 		codec:    datacoordkv.NewSegmentCodec(chunkManagerRootPath, nil),
 		rootPath: rootPath,
-		segments: segments,
 		inline:   typeutil.NewConcurrentSet[int64](),
 	}
 }
@@ -269,7 +265,7 @@ func (s *casSegmentStore) AddSegment(ctx context.Context, segment *datapb.Segmen
 	if err := b.write(ctx, metastore.ActionAdd, metastore.SegmentEntry{Segment: segment}, false); err != nil {
 		return 0, err
 	}
-	versions, err := s.commit(ctx, b)
+	versions, err := s.commit(b)
 	if err != nil {
 		return 0, err
 	}
@@ -294,7 +290,7 @@ func (s *casSegmentStore) DropSegments(ctx context.Context, base map[int64]int64
 		for _, segment := range chunk {
 			b.drop(segment)
 		}
-		if _, err := s.commit(ctx, b); err != nil {
+		if _, err := s.commit(b); err != nil {
 			return err
 		}
 	}
@@ -327,7 +323,7 @@ func (s *casSegmentStore) AlterSegments(ctx context.Context, base map[int64]int6
 			b.raw(op)
 		}
 	}
-	return s.commit(ctx, b)
+	return s.commit(b)
 }
 
 // SaveDroppedSegmentsInBatch rewrites the records alone, like the catalog.
@@ -341,7 +337,7 @@ func (s *casSegmentStore) SaveDroppedSegmentsInBatch(ctx context.Context, base m
 			return nil, err
 		}
 	}
-	return s.commit(ctx, b)
+	return s.commit(b)
 }
 
 // Update commits a composite write in one versioned transaction. Segment
@@ -372,7 +368,7 @@ func (s *casSegmentStore) Update(ctx context.Context, base map[int64]int64, acti
 		// retracts its artifact must land together.
 		b.txn.AtomicOnly()
 	}
-	return s.commit(ctx, b)
+	return s.commit(b)
 }
 
 // composeRaw appends the catalog encoding of a non-segment action to b.
@@ -403,6 +399,8 @@ type segmentTxn struct {
 	numOps    int
 	segments  []*datapb.SegmentInfo
 	positions []int
+	// dropped marks the segments the transaction removes.
+	dropped []bool
 }
 
 func (s *casSegmentStore) newTxn(ctx context.Context, base map[int64]int64) *segmentTxn {
@@ -423,9 +421,10 @@ func (b *segmentTxn) guardedRaw(op txn.Op, guardKey string, version int64) {
 	b.numOps++
 }
 
-func (b *segmentTxn) track(segment *datapb.SegmentInfo) {
+func (b *segmentTxn) track(segment *datapb.SegmentInfo, dropped bool) {
 	b.segments = append(b.segments, segment)
 	b.positions = append(b.positions, b.numOps)
+	b.dropped = append(b.dropped, dropped)
 	b.numOps++
 }
 
@@ -456,7 +455,7 @@ func (b *segmentTxn) write(ctx context.Context, t metastore.ActionType, e metast
 		b.guardedRaw(op, recordKey, version)
 	}
 	b.txn.PutIfVersion(recordKey, w.Record, version, commit)
-	b.track(e.Segment)
+	b.track(e.Segment, false)
 	return nil
 }
 
@@ -464,25 +463,34 @@ func (b *segmentTxn) write(ctx context.Context, t metastore.ActionType, e metast
 // binlog KVs, so on the ordered fallback the record never outlives them.
 func (b *segmentTxn) drop(segment *datapb.SegmentInfo) {
 	b.txn.DeleteIfVersion(b.store.join(datacoordkv.SegmentRecordKey(segment)), b.base[segment.GetID()])
-	b.track(segment)
+	b.track(segment, true)
 	for _, prefix := range datacoordkv.SegmentBinlogPrefixesOf(segment.GetCollectionID(), segment.GetPartitionID(), segment.GetID()) {
 		b.raw(txn.Op{Key: prefix, DeletePrefix: true})
 	}
 }
 
 // commit runs the transaction of b and maps the result of each segment record
-// to the segment's version. On a version conflict the cached values of the
-// written segments are refreshed from the store, so a rebuilt write starts
-// from the persisted state. Any other failure leaves the cache alone: a resend
-// compares against the same base versions and so recognizes a write that
-// landed.
-func (s *casSegmentStore) commit(ctx context.Context, b *segmentTxn) (map[int64]int64, error) {
+// to the segment's version. The store never reloads the cache: a write that
+// conflicts waits for the writer it conflicts with to publish. A transaction
+// split over the op limit that fails after its first batch reports the
+// segments it stored with the error (see partialWriteError).
+func (s *casSegmentStore) commit(b *segmentTxn) (map[int64]int64, error) {
 	results, err := b.txn.Commit()
 	if err != nil {
-		if errors.Is(err, ErrVersionConflict) {
-			s.refresh(ctx, b.segments)
+		if results == nil {
+			return nil, err
 		}
-		return nil, err
+		var landed []landedSegment
+		for i, segment := range b.segments {
+			if version := results[b.positions[i]].Version; version > 0 && !b.dropped[i] {
+				landed = append(landed, landedSegment{segment: segment, version: version})
+				s.inline.Remove(segment.GetID())
+			}
+		}
+		if len(landed) == 0 {
+			return nil, err
+		}
+		return nil, &partialWriteError{err: err, landed: landed}
 	}
 	versions := make(map[int64]int64, len(b.segments))
 	for i, segment := range b.segments {
@@ -492,49 +500,24 @@ func (s *casSegmentStore) commit(ctx context.Context, b *segmentTxn) (map[int64]
 	return versions, nil
 }
 
-// refresh reloads the persisted values of segments into the cache.
-func (s *casSegmentStore) refresh(ctx context.Context, segments []*datapb.SegmentInfo) {
-	keys := make([]string, 0, len(segments))
-	byKey := make(map[string]*datapb.SegmentInfo, len(segments))
-	for _, segment := range segments {
-		key := s.join(datacoordkv.SegmentRecordKey(segment))
-		keys = append(keys, key)
-		byKey[key] = segment
-	}
-	current, err := s.persist.Get(ctx, keys)
-	if err != nil {
-		mlog.Warn(ctx, "failed to refresh segments after a version conflict", mlog.Err(err))
-		return
-	}
-	for _, key := range keys {
-		segment := byKey[key]
-		value, ok := current[key]
-		if !ok {
-			if cached := s.segments.GetSegment(segment.GetID()); cached != nil {
-				mlog.Warn(ctx, "segment is gone from the store, dropping the cached copy", mlog.FieldSegmentID(segment.GetID()))
-				s.segments.DropSegment(segment.GetID())
-			}
-			s.inline.Remove(segment.GetID())
-			continue
-		}
-		record := value.Value
-		if datacoordkv.HasInlineBinlogs(record) {
-			s.inline.Insert(segment.GetID())
-		} else {
-			s.inline.Remove(segment.GetID())
-		}
-		binlogs, err := s.loadBinlogs(ctx, datacoordkv.SegmentBinlogPrefixesOf(segment.GetCollectionID(), segment.GetPartitionID(), segment.GetID()))
-		if err == nil {
-			s.codec.DecodeRecord(record)
-			err = datacoordkv.FillSegmentBinlogs([]*datapb.SegmentInfo{record}, binlogs)
-		}
-		if err != nil {
-			mlog.Warn(ctx, "failed to refresh a segment after a version conflict", mlog.FieldSegmentID(segment.GetID()), mlog.Err(err))
-			continue
-		}
-		s.segments.PublishSegment(segment.GetID(), NewSegmentInfo(record), value.Version)
-	}
+// partialWriteError reports a segment write that failed after part of it was
+// stored: a transaction split over the op limit landed some batches before
+// one failed. landed holds the segments those batches stored, with their new
+// versions, for the cache to catch up with (see meta.publishLanded).
+type partialWriteError struct {
+	err    error
+	landed []landedSegment
 }
+
+// landedSegment is a segment value a failed write stored, at version.
+type landedSegment struct {
+	segment *datapb.SegmentInfo
+	version int64
+}
+
+func (e *partialWriteError) Error() string { return e.err.Error() }
+
+func (e *partialWriteError) Unwrap() error { return e.err }
 
 // publishesSegmentDataVersion identifies a first Flush publication: the
 // segment carries the DataVersion of a DataView written by the same action set.

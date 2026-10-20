@@ -547,8 +547,8 @@ func (m *meta) updateSegmentsInfoAndChangeGroups(ctx context.Context, dataView *
 				"UpdateSegmentsInfoAndChangeGroups only accepts segment change group actions, got %T", action.Entry)
 		}
 	}
-	// A conflict means the store moved under the cache, which is refreshed by
-	// then: the whole write is rebuilt from it.
+	// A conflict means another writer stored a segment since: the whole write
+	// is rebuilt once that writer published.
 	return m.retrySegmentWrite(ctx, func() error {
 		return m.updateSegmentsInfoAndChangeGroupsOnce(ctx, dataView, groupActions, operators)
 	})
@@ -850,7 +850,7 @@ func (m *meta) updateSegmentsInfoAndChangeGroupsOnce(ctx context.Context, dataVi
 	// an in-function retry converges to a durable COMMITTED group + visible
 	// members without replaying caller-side effects — same as the flush
 	// semantics (UpdateSegmentsInfoAndDataView). A version conflict is not
-	// retried here: the caller rebuilds the write from the refreshed cache.
+	// retried here: the caller rebuilds the write.
 	// retry.Do short-circuits InputError-typed errors unless an explicit
 	// RetryErr predicate is supplied, so AttemptAlways alone is not enough.
 	var versions map[int64]int64

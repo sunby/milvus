@@ -20,6 +20,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/etcd"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
 
@@ -34,7 +35,7 @@ func newCASTestMeta(t *testing.T) (*meta, *memPersist[string, *datapb.SegmentInf
 		catalog:  datacoord.NewCatalog(NewMetaMemoryKV(), "", ""),
 		segments: NewSegmentsInfo(),
 	}
-	m.segmentStore = newCASSegmentStore(persist, m.catalog, testSegmentStoreRoot, m.segments)
+	m.segmentStore = newCASSegmentStore(persist, m.catalog, testSegmentStoreRoot)
 	return m, persist
 }
 
@@ -140,29 +141,38 @@ func TestCASSegmentStoreWritesCatalogEncodingAgainstCachedVersions(t *testing.T)
 	require.NotContains(t, persist.raw, binlogKey, "a drop removes the binlog KVs with the record")
 }
 
-func TestCASSegmentStoreConflictRefreshesCache(t *testing.T) {
+// A write that conflicts with a value another writer stored but has not
+// published yet runs again until that writer publishes, and then builds on it:
+// nothing reloads the cache from the store.
+func TestSegmentWriteWaitsForTheWriterItConflictsWith(t *testing.T) {
 	ctx := context.Background()
 	m, persist := newCASTestMeta(t)
+	hooked := &hookPersist{OptimisticTxnPersist: persist}
+	m.segmentStore = newCASSegmentStore(hooked, m.catalog, testSegmentStoreRoot)
 	require.NoError(t, m.AddSegment(ctx, newFlushedTestSegment(100)))
 
-	// Another writer moves the record under the cache.
-	external := newFlushedTestSegment(100)
-	external.NumOfRows = 42
-	cached, _ := m.segments.Version(100)
-	txn := persist.Txn(ctx)
-	txn.PutIfVersion(storedSegmentKey(100), external.SegmentInfo, cached, false)
-	results, err := txn.Commit()
-	require.NoError(t, err)
-
-	// The write conflicts, the cache is refreshed with the persisted value, and
-	// the write runs again on it.
-	require.NoError(t, m.UpdateSegmentsInfo(ctx, UpdateStatusOperator(100, commonpb.SegmentState_Dropped)))
-	refreshed, _ := m.segments.Version(100)
-	require.Greater(t, refreshed, results[0].Version)
-	stored := persist.data[storedSegmentKey(100)].value
-	require.EqualValues(t, 42, stored.GetNumOfRows())
-	require.Equal(t, commonpb.SegmentState_Dropped, stored.GetState())
-	require.EqualValues(t, 42, m.GetSegment(ctx, 100).GetNumOfRows())
+	second := make(chan error, 1)
+	hooked.afterCommit = func() {
+		// The first write is stored and not published yet.
+		go func() { second <- m.UpdateSegment(100, SetMaxRowCount(42)) }()
+		time.Sleep(50 * time.Millisecond)
+		select {
+		case err := <-second:
+			t.Errorf("the second write finished before the first one was published: %v", err)
+		default:
+		}
+	}
+	require.NoError(t, m.UpdateSegmentsInfo(ctx, MutationsOperator(map[int64][]MutateFunc{
+		100: {func(seg *datapb.SegmentInfo) bool {
+			seg.IsSorted = true
+			return true
+		}},
+	})))
+	require.NoError(t, <-second)
+	for _, segment := range []*datapb.SegmentInfo{m.GetSegment(ctx, 100).SegmentInfo, persist.data[storedSegmentKey(100)].value} {
+		require.True(t, segment.GetIsSorted())
+		require.EqualValues(t, 42, segment.GetMaxRowNum())
+	}
 }
 
 func newDroppedTestSegment(id int64) *SegmentInfo {
@@ -226,27 +236,27 @@ func TestMetaDropSegments(t *testing.T) {
 
 	t.Run("drops the unchanged siblings of a conflicting segment", func(t *testing.T) {
 		m, persist := newCASTestMeta(t)
+		hooked := &hookPersist{OptimisticTxnPersist: persist}
+		m.segmentStore = newCASSegmentStore(hooked, m.catalog, testSegmentStoreRoot)
 		for _, id := range []int64{1, 2, 3} {
 			require.NoError(t, m.AddSegment(ctx, newDroppedTestSegment(id)))
 		}
 		candidates := []*SegmentInfo{m.segments.GetSegment(1), m.segments.GetSegment(2), m.segments.GetSegment(3)}
 
-		// Another writer rewrites segment 2 and removes segment 3 under the cache.
-		external := newDroppedTestSegment(2)
-		external.NumOfRows = 42
-		cached, _ := m.segments.Version(2)
-		txn := persist.Txn(ctx)
-		txn.PutIfVersion(storedSegmentKey(2), external.SegmentInfo, cached, false)
-		txn.Delete(storedSegmentKey(3))
-		_, err := txn.Commit()
-		require.NoError(t, err)
-
+		// Another writer rewrites segment 2 after GC planned it.
+		hooked.hook = func() {
+			require.NoError(t, m.UpdateSegment(2, func(segment *SegmentInfo) bool {
+				segment.NumOfRows = 42
+				return true
+			}))
+		}
 		removed, err := m.DropSegments(ctx, candidates)
 		require.NoError(t, err)
 		require.Equal(t, 2, removed)
-		require.Nil(t, m.GetSegment(ctx, 1))
-		require.NotContains(t, persist.data, storedSegmentKey(1))
-		require.Nil(t, m.GetSegment(ctx, 3))
+		for _, id := range []int64{1, 3} {
+			require.Nil(t, m.GetSegment(ctx, id))
+			require.NotContains(t, persist.data, storedSegmentKey(id))
+		}
 		// The rewritten segment waits for the next GC cycle to plan it again.
 		require.EqualValues(t, 42, m.GetSegment(ctx, 2).GetNumOfRows())
 		require.Contains(t, persist.data, storedSegmentKey(2))
@@ -257,7 +267,7 @@ func TestMetaDropSegments(t *testing.T) {
 		require.NoError(t, m.AddSegment(ctx, newDroppedTestSegment(1)))
 		expected := errors.New("mock commit failure")
 		m.segmentStore = newCASSegmentStore(&failingCommitPersist{OptimisticTxnPersist: persist, err: expected},
-			m.catalog, testSegmentStoreRoot, m.segments)
+			m.catalog, testSegmentStoreRoot)
 
 		removed, err := m.DropSegments(ctx, []*SegmentInfo{m.segments.GetSegment(1)})
 		require.ErrorIs(t, err, expected)
@@ -574,10 +584,12 @@ func TestSegmentWritesOfOneSegmentDoNotLoseUpdates(t *testing.T) {
 	require.EqualValues(t, writers*rounds, persist.data[storedSegmentKey(100)].value.GetMaxRowNum())
 }
 
-// hookPersist runs hook once, before the first commit after it is set.
+// hookPersist runs hook once, before the first commit after it is set, and
+// afterCommit once, after the first commit that succeeds after it is set.
 type hookPersist struct {
 	OptimisticTxnPersist[string, *datapb.SegmentInfo]
-	hook func()
+	hook        func()
+	afterCommit func()
 }
 
 func (p *hookPersist) Txn(ctx context.Context) Txn[string, *datapb.SegmentInfo] {
@@ -594,7 +606,12 @@ func (t *hookTxn) Commit() ([]TxnResult[*datapb.SegmentInfo], error) {
 		t.persist.hook = nil
 		hook()
 	}
-	return t.Txn.Commit()
+	results, err := t.Txn.Commit()
+	if hook := t.persist.afterCommit; hook != nil && err == nil {
+		t.persist.afterCommit = nil
+		hook()
+	}
+	return results, err
 }
 
 // A truncate selects the segments of the channel before it writes them. A
@@ -604,7 +621,7 @@ func TestTruncateConflictsWithAClusteringCompactionOfItsSegments(t *testing.T) {
 	ctx := context.Background()
 	m, persist := newCASTestMeta(t)
 	hooked := &hookPersist{OptimisticTxnPersist: persist}
-	m.segmentStore = newCASSegmentStore(hooked, m.catalog, testSegmentStoreRoot, m.segments)
+	m.segmentStore = newCASSegmentStore(hooked, m.catalog, testSegmentStoreRoot)
 	input := newFlushedTestSegment(100)
 	input.DmlPosition = &msgpb.MsgPosition{ChannelName: "ch-1", Timestamp: 10}
 	require.NoError(t, m.AddSegment(ctx, input))
@@ -699,4 +716,91 @@ func TestOptimisticTxnEtcdGuardsTheRawOpsOfAMovedRecord(t *testing.T) {
 		require.Equal(t, "2", value)
 	}
 	require.Len(t, binlogs(), 3)
+}
+
+// A truncate that conflicts with a compaction of its segments, stored but not
+// published yet, runs again until the compaction is published, and then drops
+// the compaction outputs too.
+func TestTruncateWaitsForACompactionToPublish(t *testing.T) {
+	ctx := context.Background()
+	m, persist := newCASTestMeta(t)
+	hooked := &hookPersist{OptimisticTxnPersist: persist}
+	m.segmentStore = newCASSegmentStore(hooked, m.catalog, testSegmentStoreRoot)
+	for _, id := range []int64{100, 101} {
+		input := newFlushedTestSegment(id)
+		input.DmlPosition = &msgpb.MsgPosition{ChannelName: "ch-1", Timestamp: 10}
+		require.NoError(t, m.AddSegment(ctx, input))
+	}
+
+	truncated := make(chan error, 1)
+	hooked.afterCommit = func() {
+		// The compaction is stored and not published yet.
+		go func() { truncated <- m.TruncateChannelByTime(ctx, "ch-1", 20) }()
+		time.Sleep(50 * time.Millisecond)
+	}
+	_, _, err := m.CompleteCompactionMutation(ctx, &datapb.CompactionTask{
+		Type:          datapb.CompactionType_MixCompaction,
+		Channel:       "ch-1",
+		InputSegments: []int64{100, 101},
+		Schema:        &schemapb.CollectionSchema{},
+	}, &datapb.CompactionPlanResult{Segments: []*datapb.CompactionSegment{{SegmentID: 200, NumOfRows: 20}}})
+	require.NoError(t, err)
+	require.NoError(t, <-truncated)
+	require.Equal(t, commonpb.SegmentState_Dropped, m.GetSegment(ctx, 200).GetState())
+	require.Equal(t, commonpb.SegmentState_Dropped, persist.data[storedSegmentKey(200)].value.GetState())
+}
+
+// A compaction commit that stored its outputs before it failed, and finds an
+// input dropped by another writer when it runs again, drops those outputs: the
+// rows they copy were dropped with the input.
+func TestCompactionDropsItsStoredOutputsWhenAnInputWasDropped(t *testing.T) {
+	ctx := context.Background()
+	for _, compactionType := range []datapb.CompactionType{datapb.CompactionType_MixCompaction, datapb.CompactionType_ClusteringCompaction} {
+		t.Run(compactionType.String(), func(t *testing.T) {
+			m, persist := newCASTestMeta(t)
+			// A truncate dropped input 100; it is not compacted.
+			require.NoError(t, m.AddSegment(ctx, newDroppedTestSegment(100)))
+			require.NoError(t, m.AddSegment(ctx, newFlushedTestSegment(101)))
+			stored := newFlushedTestSegment(200)
+			stored.CompactionFrom = []int64{100, 101}
+			stored.CreatedByCompaction = true
+			require.NoError(t, m.AddSegment(ctx, stored))
+
+			_, _, err := m.CompleteCompactionMutation(ctx, &datapb.CompactionTask{
+				Type:          compactionType,
+				Channel:       "ch-1",
+				InputSegments: []int64{100, 101},
+				Schema:        &schemapb.CollectionSchema{},
+			}, &datapb.CompactionPlanResult{Segments: []*datapb.CompactionSegment{{SegmentID: 200, NumOfRows: 20}}})
+			require.ErrorIs(t, err, merr.ErrSegmentNotFound)
+			require.Equal(t, commonpb.SegmentState_Dropped, m.GetSegment(ctx, 200).GetState())
+			require.Equal(t, commonpb.SegmentState_Dropped, persist.data[storedSegmentKey(200)].value.GetState())
+			require.Equal(t, commonpb.SegmentState_Flushed, m.GetSegment(ctx, 101).GetState())
+		})
+	}
+}
+
+// A transaction split into ordered batches that fails after its first batch
+// reports the results of the batches that landed with the error.
+func TestOptimisticTxnEtcdReportsTheBatchesThatLanded(t *testing.T) {
+	ctx := context.Background()
+	persist, _, root := newTestEtcdPersist(t)
+	key := paramtable.Get().MetaStoreCfg.MaxEtcdTxnNum.Key
+	paramtable.Get().Save(key, "1")
+	defer paramtable.Get().Reset(key)
+
+	existing := persist.Txn(ctx)
+	existing.PutIfVersion(root+"/s/2", &datapb.SegmentInfo{ID: 2}, 0, false)
+	_, err := existing.Commit()
+	require.NoError(t, err)
+
+	// [s/1] lands, [s/2] expects a record that does not exist.
+	txn := persist.Txn(ctx)
+	txn.PutIfVersion(root+"/s/1", &datapb.SegmentInfo{ID: 1}, 0, false)
+	txn.PutIfVersion(root+"/s/2", &datapb.SegmentInfo{ID: 2, NumOfRows: 1}, 0, false)
+	results, err := txn.Commit()
+	require.ErrorIs(t, err, ErrVersionConflict)
+	require.Len(t, results, 2)
+	require.Positive(t, results[0].Version)
+	require.Zero(t, results[1].Version)
 }

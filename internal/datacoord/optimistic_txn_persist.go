@@ -35,8 +35,8 @@ var (
 	ErrKeyAlreadyExists = fmt.Errorf("key already exists")
 	ErrKeyNotFound      = fmt.Errorf("key not found")
 	// ErrVersionConflict reports that a versioned write (PutIfVersion /
-	// DeleteIfVersion) found a different version in the store: the caller's
-	// cached copy is stale and must be refreshed before the write is rebuilt.
+	// DeleteIfVersion) found a different version in the store: the value the
+	// write was built from is stale, and the write must be rebuilt.
 	ErrVersionConflict = errors.New("optimistic txn: version conflict")
 	// errCompareFailed reports that the read-modify-write compares of a batch
 	// failed: a key changed between the read and the commit.
@@ -89,6 +89,9 @@ type Txn[K comparable, V any] interface {
 	// Commit executes all operations atomically. Returns results in the order ops were added.
 	// On CAS failure of a read-modify-write op, retries automatically (re-reads and
 	// re-applies UpdateFuncs). A stale versioned op fails with ErrVersionConflict.
+	// When a transaction split into ordered batches fails after its first batch,
+	// the results come back with the error: the ops of the batches that landed
+	// carry their versions, the others version 0.
 	Commit() ([]TxnResult[V], error)
 }
 
@@ -424,9 +427,13 @@ func (t *etcdTxn[K, V]) Commit() ([]TxnResult[V], error) {
 	if err != nil {
 		return nil, retry.Unrecoverable(err)
 	}
-	for _, batch := range batches {
+	for i, batch := range batches {
 		if err := t.commitBatch(batch, results); err != nil {
-			return nil, err
+			if i == 0 {
+				return nil, err
+			}
+			// The batches before this one landed.
+			return results, err
 		}
 	}
 	return results, nil
@@ -604,9 +611,7 @@ func (t *etcdTxn[K, V]) commitBatch(batch []int, results []TxnResult[V]) error {
 				// The outcome is unknown: the request may have landed. Read it
 				// back, so a landed batch succeeds and one that did not land
 				// leaves the versions its resend compares against.
-				resolveCtx, cancel := t.persist.requestContext(context.WithoutCancel(t.ctx))
-				applied, resolveErr := t.resolveVersionedFailure(resolveCtx, batch, results, guards)
-				cancel()
+				applied, resolveErr := t.resolveUnknownOutcome(batch, results, guards)
 				if resolveErr == nil && applied {
 					return nil
 				}
@@ -642,6 +647,28 @@ func (t *etcdTxn[K, V]) commitBatch(batch []int, results []TxnResult[V]) error {
 		return merr.WrapErrServiceUnavailableErr(err, "optimistic txn batch kept failing its compares after %d attempts", maxCompareAttempts)
 	}
 	return storeErr(err)
+}
+
+// resolveUnknownOutcome reads a batch whose commit outcome is unknown back
+// until the store answers, or the transaction's context ends. A batch that
+// landed unseen would leave the cached versions of its segments behind the
+// store for good: nothing reloads them.
+func (t *etcdTxn[K, V]) resolveUnknownOutcome(batch []int, results []TxnResult[V], guards map[string]int64) (bool, error) {
+	backoff := 10 * time.Millisecond
+	for {
+		ctx, cancel := t.persist.requestContext(context.WithoutCancel(t.ctx))
+		applied, err := t.resolveVersionedFailure(ctx, batch, results, guards)
+		cancel()
+		if err == nil || errors.Is(err, ErrVersionConflict) {
+			return applied, err
+		}
+		select {
+		case <-time.After(backoff):
+		case <-t.ctx.Done():
+			return applied, err
+		}
+		backoff = min(2*backoff, time.Second)
+	}
 }
 
 // batchGuards returns the guards (see RawOp) of the raw ops of batch whose

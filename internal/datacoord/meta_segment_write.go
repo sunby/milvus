@@ -20,12 +20,13 @@ import (
 // the segments it changes; writers of different segments run in parallel. It
 //  1. builds the new values from the cached ones;
 //  2. persists them through the segment store, which compares each written
-//     segment against its cached version (casSegmentStore). A conflict means
-//     the store moved under the cache (another writer wrote one of the
-//     segments): the store refreshes their cached values and the write fails
-//     with ErrVersionConflict;
-//  3. runs again from step 1 on a conflict (retrySegmentWrite), building on
-//     the refreshed values, until it does not conflict or ctx ends;
+//     segment against the version it was read at (casSegmentStore). A
+//     conflict means another writer stored one of the segments since: the
+//     write fails with ErrVersionConflict;
+//  3. runs again from step 1 on a conflict (retrySegmentWrite), until it does
+//     not conflict or ctx ends. Nothing reloads the cache from the store: the
+//     writer it conflicted with publishes its values, and a write that stored
+//     part of itself before failing publishes that part (publishLanded);
 //  4. publishes the persisted values with their new versions
 //     (publishSegments). Publications of concurrent writers may arrive out of
 //     order: the cache keeps the newer version.
@@ -42,13 +43,17 @@ const (
 
 // retrySegmentWrite runs write, which builds a segment write from the cached
 // segments and commits it, until it does not fail with a version conflict, or
-// ctx ends. A conflict refreshed the cached values of the segments the write
-// touched, so each run builds on what the store holds. Writes of one segment
-// rarely conflict, so there is no attempt limit.
+// ctx ends. A run after a conflict builds on the values the conflicting writer
+// published in the meantime. Writes of one segment rarely conflict, so there
+// is no attempt limit.
 func (m *meta) retrySegmentWrite(ctx context.Context, write func() error) error {
 	backoff := segmentWriteRetryMinBackoff
 	for attempt := 1; ; attempt++ {
 		err := write()
+		var partial *partialWriteError
+		if errors.As(err, &partial) {
+			m.publishLanded(ctx, partial.landed)
+		}
 		if err == nil || !errors.Is(err, ErrVersionConflict) || ctx.Err() != nil {
 			return err
 		}
@@ -94,6 +99,27 @@ func (m *meta) publishSegments(segments []*SegmentInfo, versions map[int64]int64
 		m.notifyStatsChange(previous[segment.GetID()], segment)
 	}
 	return previous
+}
+
+// publishLanded installs the segments a failed write stored before it failed
+// (see partialWriteError), as a successful write publishes its own: the cache
+// keeps matching the store, so the rebuilt write, and every other writer of
+// those segments, builds on them.
+func (m *meta) publishLanded(ctx context.Context, landed []landedSegment) {
+	segments := make([]*SegmentInfo, 0, len(landed))
+	versions := make(map[int64]int64, len(landed))
+	for _, l := range landed {
+		segments = append(segments, NewSegmentInfo(proto.Clone(l.segment).(*datapb.SegmentInfo)))
+		versions[l.segment.GetID()] = l.version
+	}
+	previous := m.publishSegments(segments, versions)
+	var manifestUpdates []*SegmentInfo
+	for _, segment := range segments {
+		if prev := previous[segment.GetID()]; prev == nil || prev.GetManifestPath() != segment.GetManifestPath() {
+			manifestUpdates = append(manifestUpdates, segment)
+		}
+	}
+	m.notifyQueryViewSegmentUpdates(manifestUpdates)
 }
 
 // selectSegmentsConsistent is SelectSegments for readers that must not observe

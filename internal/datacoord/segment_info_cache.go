@@ -220,8 +220,7 @@ func (s *CachedSegmentsInfo) PublishSegment(segmentID UniqueID, segment *Segment
 		}
 	})
 	if !applied {
-		// The cache already holds this or a newer version: a later writer, or
-		// the refresh after a version conflict, installed it first.
+		// The cache already holds this or a newer version.
 		currentVersion, _ := s.segments.Version(segmentID)
 		mlog.Debug(context.TODO(), "stale segment publication ignored",
 			mlog.FieldSegmentID(segmentID), mlog.Int64("version", version), mlog.Int64("currentVersion", currentVersion))
