@@ -111,6 +111,15 @@ func (kc *Catalog) ListCollectionsForRecovery(
 	if err != nil {
 		return nil, err
 	}
+	if kc.reportRecoveredCollectionIDs != nil {
+		collectionIDs := make([]int64, 0, numCollections)
+		for _, collections := range collectionsByDB {
+			for _, collection := range collections {
+				collectionIDs = append(collectionIDs, collection.CollectionID)
+			}
+		}
+		kc.reportRecoveredCollectionIDs(collectionIDs)
+	}
 	if len(targets) > 0 {
 		if err := attachRecoveryChildMetadata(ctx, walker, targets, duplicates); err != nil {
 			return nil, err

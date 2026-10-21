@@ -225,6 +225,10 @@ func (s *mixCoordImpl) initInternal() error {
 		mlog.Duration("duration", time.Since(streamingCoordStart)))
 
 	s.rootcoordServer.SetFileResourceObserver(s.fileResourceObserver)
+	// DataCoord's metadata reads need RootCoord only for the collection IDs
+	// that split their key ranges: start them once RootCoord has read its
+	// collections, so they overlap the rest of RootCoord's recovery.
+	s.rootcoordServer.SetRecoveredCollectionIDsReporter(s.datacoordServer.StartMetaPrefetch)
 	rootCoordInitStart := time.Now()
 	if err := s.rootcoordServer.Init(); err != nil {
 		mlog.Error(s.ctx, "rootCoord init failed",

@@ -182,6 +182,11 @@ type Server struct {
 
 	// file resource
 	fileResourceObserver FileResourceObserver
+
+	// metaPrefetch holds the catalog reads StartMetaPrefetch started, until
+	// initMeta takes them.
+	metaPrefetch     atomic.Pointer[metaPrefetch]
+	metaPrefetchOnce sync.Once
 }
 
 type FileResourceObserver interface {
@@ -684,17 +689,41 @@ func (s *Server) initKV() error {
 	mlog.Info(s.ctx, "data coordinator connecting to metadata store", mlog.String("metaType", metaType))
 	switch metaType {
 	case util.MetaStoreTypeTiKV:
-		s.metaRootPath = Params.TiKVCfg.MetaRootPath.GetValue()
+		s.metaRootPath = metaStoreRootPath()
 		s.kv = tikv.NewTiKV(s.tikvCli, s.metaRootPath,
 			tikv.WithRequestTimeout(paramtable.Get().TiKVCfg.RequestTimeout.GetAsDuration(time.Millisecond)))
 	case util.MetaStoreTypeEtcd:
-		s.metaRootPath = Params.EtcdCfg.MetaRootPath.GetValue()
+		s.metaRootPath = metaStoreRootPath()
 		s.kv = etcdkv.NewEtcdKV(s.etcdCli, s.metaRootPath,
 			etcdkv.WithRequestTimeout(paramtable.Get().EtcdCfg.RequestTimeout.GetAsDuration(time.Millisecond)))
 	default:
 		return retry.Unrecoverable(merr.WrapErrServiceInternalMsg("unsupported meta store: %s", metaType))
 	}
 	mlog.Info(s.ctx, "data coordinator successfully connected to metadata store", mlog.String("metaType", metaType))
+	return nil
+}
+
+// metaStoreRootPath is the root of the metadata keys in the configured meta
+// store.
+func metaStoreRootPath() string {
+	if Params.MetaStoreCfg.MetaStoreType.GetValue() == util.MetaStoreTypeTiKV {
+		return Params.TiKVCfg.MetaRootPath.GetValue()
+	}
+	return Params.EtcdCfg.MetaRootPath.GetValue()
+}
+
+// newSegmentPersist returns the optimistic store segments are kept in as full
+// records next to the catalog keys, every segment write a compare-and-swap.
+// Without a meta store client (a server assembled by unit tests) it returns
+// nil, and segments stay in the catalog.
+func (s *Server) newSegmentPersist() OptimisticTxnPersist[string, *datapb.SegmentInfo] {
+	marshaler := &SegmentInfoMarshaler{}
+	switch {
+	case Params.MetaStoreCfg.MetaStoreType.GetValue() == util.MetaStoreTypeTiKV && s.tikvCli != nil:
+		return NewOptimisticTxnTiKVPersist[string, *datapb.SegmentInfo](s.tikvCli, marshaler)
+	case Params.MetaStoreCfg.MetaStoreType.GetValue() != util.MetaStoreTypeTiKV && s.etcdCli != nil:
+		return NewOptimisticTxnEtcdPersist[string, *datapb.SegmentInfo](s.etcdCli, marshaler)
+	}
 	return nil
 }
 
@@ -736,24 +765,17 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 		cancelList()
 		<-listed
 	}()
-	// Segments are kept as full records in an optimistic store next to the
-	// catalog keys; every segment write is a compare-and-swap. Without a
-	// meta store client (a server assembled by unit tests) segments stay in
-	// the catalog.
-	marshaler := &SegmentInfoMarshaler{}
-	var segmentPersist OptimisticTxnPersist[string, *datapb.SegmentInfo]
-	switch {
-	case Params.MetaStoreCfg.MetaStoreType.GetValue() == util.MetaStoreTypeTiKV && s.tikvCli != nil:
-		segmentPersist = NewOptimisticTxnTiKVPersist[string, *datapb.SegmentInfo](s.tikvCli, marshaler)
-	case Params.MetaStoreCfg.MetaStoreType.GetValue() != util.MetaStoreTypeTiKV && s.etcdCli != nil:
-		segmentPersist = NewOptimisticTxnEtcdPersist[string, *datapb.SegmentInfo](s.etcdCli, marshaler)
-	}
+	segmentPersist := s.newSegmentPersist()
+	// Only the first attempt uses the reads StartMetaPrefetch started; later
+	// attempts read the catalog themselves.
+	prefetched := s.metaPrefetch.Swap(nil)
 	var recoveredMeta *meta
 	reloadEtcdFn := func() error {
 		metaInitializationStart := time.Now()
-		mlog.Info(s.ctx, "datacoord metadata initialization attempt started")
+		mlog.Info(s.ctx, "datacoord metadata initialization attempt started", mlog.Bool("prefetched", prefetched != nil))
 		var err error
-		recoveredMeta, err = newMetaWithoutManifestIndexes(s.ctx, s.catalog, chunkManager, s.metaStore, s.broker, segmentPersist, s.metaRootPath)
+		recoveredMeta, err = newMetaWithoutManifestIndexes(s.ctx, s.catalog, chunkManager, s.metaStore, s.broker, segmentPersist, s.metaRootPath, prefetched)
+		prefetched = nil
 		if err != nil {
 			mlog.Warn(s.ctx, "datacoord metadata initialization attempt failed",
 				mlog.Duration("duration", time.Since(metaInitializationStart)),

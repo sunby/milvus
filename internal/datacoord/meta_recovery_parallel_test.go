@@ -258,7 +258,7 @@ func TestReloadFromKVScansCheckpointsAlongsideSegments(t *testing.T) {
 			return map[string]*msgpb.MsgPosition{"ch-1": {ChannelName: "ch-1", Timestamp: 7}}, nil
 		}).Once()
 		mt := newMeta(catalog)
-		require.NoError(t, mt.reloadFromKV(context.Background(), []int64{1}))
+		require.NoError(t, mt.reloadFromKV(context.Background(), []int64{1}, nil))
 		require.NotNil(t, mt.segments.GetSegment(3))
 		require.EqualValues(t, 7, mt.metaStore.GetChannelCheckpoint("ch-1").GetTimestamp())
 	})
@@ -268,7 +268,7 @@ func TestReloadFromKVScansCheckpointsAlongsideSegments(t *testing.T) {
 		segmentErr := errors.New("segment scan failed")
 		catalog.EXPECT().ListSegments(mock.Anything, int64(1)).Return(nil, segmentErr).Once()
 		catalog.EXPECT().ListChannelCheckpoint(mock.Anything).Return(nil, errors.New("checkpoint scan failed")).Maybe()
-		require.ErrorIs(t, newMeta(catalog).reloadFromKV(context.Background(), []int64{1}), segmentErr)
+		require.ErrorIs(t, newMeta(catalog).reloadFromKV(context.Background(), []int64{1}, nil), segmentErr)
 	})
 
 	t.Run("checkpoint error", func(t *testing.T) {
@@ -276,6 +276,6 @@ func TestReloadFromKVScansCheckpointsAlongsideSegments(t *testing.T) {
 		checkpointErr := errors.New("checkpoint scan failed")
 		catalog.EXPECT().ListSegments(mock.Anything, int64(1)).Return(nil, nil).Once()
 		catalog.EXPECT().ListChannelCheckpoint(mock.Anything).Return(nil, checkpointErr).Once()
-		require.ErrorIs(t, newMeta(catalog).reloadFromKV(context.Background(), []int64{1}), checkpointErr)
+		require.ErrorIs(t, newMeta(catalog).reloadFromKV(context.Background(), []int64{1}, nil), checkpointErr)
 	})
 }

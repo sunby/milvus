@@ -258,7 +258,7 @@ func newMeta(ctx context.Context, catalog metastore.DataCoordCatalog, chunkManag
 func newMetaWithPersist(ctx context.Context, catalog metastore.DataCoordCatalog, chunkManager storage.ChunkManager, metaStore metacache.MetaStore, broker broker.Broker,
 	segmentPersist OptimisticTxnPersist[string, *datapb.SegmentInfo], metaRootPath string,
 ) (*meta, error) {
-	mt, err := newMetaWithoutManifestIndexes(ctx, catalog, chunkManager, metaStore, broker, segmentPersist, metaRootPath)
+	mt, err := newMetaWithoutManifestIndexes(ctx, catalog, chunkManager, metaStore, broker, segmentPersist, metaRootPath, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -278,9 +278,11 @@ func newMetaWithPersist(ctx context.Context, catalog metastore.DataCoordCatalog,
 // newMetaWithoutManifestIndexes is newMetaWithPersist without recovering the
 // segment indexes recorded in segment manifests, which needs only the
 // segments and the index meta it recovers. The caller must run
-// reloadSegmentIndexesFromManifests before the meta is used.
+// reloadSegmentIndexesFromManifests before the meta is used. A non-nil
+// prefetched supplies the index meta, segment records and channel checkpoints
+// instead of reading them; it requires segmentPersist.
 func newMetaWithoutManifestIndexes(ctx context.Context, catalog metastore.DataCoordCatalog, chunkManager storage.ChunkManager, metaStore metacache.MetaStore, broker broker.Broker,
-	segmentPersist OptimisticTxnPersist[string, *datapb.SegmentInfo], metaRootPath string,
+	segmentPersist OptimisticTxnPersist[string, *datapb.SegmentInfo], metaRootPath string, prefetched *metaPrefetch,
 ) (*meta, error) {
 	metaRecoveryStart := time.Now()
 	mlog.Info(ctx, "datacoord meta recovery started")
@@ -329,6 +331,9 @@ func newMetaWithoutManifestIndexes(ctx context.Context, catalog metastore.DataCo
 	if segmentPersist != nil {
 		mt.segmentStore = newCASSegmentStore(segmentPersist, catalog, metaRootPath)
 	}
+	if prefetched != nil {
+		mt.segmentStore = prefetched.store
+	}
 
 	initialized := false
 	defer func() {
@@ -342,7 +347,11 @@ func newMetaWithoutManifestIndexes(ctx context.Context, catalog metastore.DataCo
 
 	g.Go(func() error {
 		var err error
-		im, err = recoverIndexMeta(ctx, catalog, collectionIDs)
+		if prefetched != nil {
+			im, err = prefetched.indexMeta.Await()
+		} else {
+			im, err = recoverIndexMeta(ctx, catalog, collectionIDs)
+		}
 		return err
 	})
 
@@ -404,7 +413,7 @@ func newMetaWithoutManifestIndexes(ctx context.Context, catalog metastore.DataCo
 
 	// reloadFromKV loads segments + channel checkpoints in parallel with sub-meta loading.
 	g.Go(func() error {
-		return mt.reloadFromKV(ctx, collectionIDs)
+		return mt.reloadFromKV(ctx, collectionIDs, prefetched)
 	})
 
 	if err := g.Wait(); err != nil {
@@ -530,7 +539,7 @@ func (a *segmentRecoveryMetricAggregates) ReplayFileHistogramsAsync() {
 // cache, normalized by segmentLoadNormalizer, and the channel checkpoints into
 // the shared store. newMeta then attaches the cache to the shared store as its
 // segment storage.
-func (m *meta) reloadFromKV(ctx context.Context, collectionIDs []int64) error {
+func (m *meta) reloadFromKV(ctx context.Context, collectionIDs []int64, prefetched *metaPrefetch) error {
 	record := timerecord.NewTimeRecorder("datacoord")
 
 	// The channel checkpoints do not depend on the segments: scan them
@@ -544,7 +553,11 @@ func (m *meta) reloadFromKV(ctx context.Context, collectionIDs []int64) error {
 		defer close(checkpointScanDone)
 		checkpointScanStart := time.Now()
 		mlog.Info(ctx, "datacoord channel checkpoint catalog scan started")
-		channelCPs, checkpointErr = m.catalog.ListChannelCheckpoint(checkpointCtx)
+		if prefetched != nil {
+			channelCPs, checkpointErr = prefetched.checkpoints.Await()
+		} else {
+			channelCPs, checkpointErr = m.catalog.ListChannelCheckpoint(checkpointCtx)
+		}
 		if checkpointErr == nil {
 			mlog.Info(ctx, "datacoord channel checkpoint catalog scan done",
 				mlog.Int("numChannelCheckpoints", len(channelCPs)),
@@ -552,7 +565,7 @@ func (m *meta) reloadFromKV(ctx context.Context, collectionIDs []int64) error {
 		}
 	}()
 
-	aggregates, numSegments, err := m.reloadSegments(ctx, collectionIDs)
+	aggregates, numSegments, err := m.reloadSegments(ctx, collectionIDs, prefetched)
 	if err != nil {
 		cancelCheckpointScan()
 		<-checkpointScanDone
@@ -577,11 +590,22 @@ func (m *meta) reloadFromKV(ctx context.Context, collectionIDs []int64) error {
 
 // reloadSegments loads the segments with their store versions into the
 // segment cache and publishes their counts.
-func (m *meta) reloadSegments(ctx context.Context, collectionIDs []int64) (*segmentRecoveryMetricAggregates, int, error) {
+func (m *meta) reloadSegments(ctx context.Context, collectionIDs []int64, prefetched *metaPrefetch) (*segmentRecoveryMetricAggregates, int, error) {
 	scanStart := time.Now()
 	mlog.Info(ctx, "datacoord segment catalog scan started",
-		mlog.Int("numCollections", len(collectionIDs)))
-	segments, versions, err := m.store().ListSegments(m.ctx, collectionIDs)
+		mlog.Int("numCollections", len(collectionIDs)), mlog.Bool("prefetched", prefetched != nil))
+	var (
+		segments []*datapb.SegmentInfo
+		versions []int64
+		err      error
+	)
+	if prefetched != nil {
+		var scan prefetchedSegments
+		scan, err = prefetched.segments.Await()
+		segments, versions = scan.records, scan.versions
+	} else {
+		segments, versions, err = m.store().ListSegments(m.ctx, collectionIDs)
+	}
 	if err != nil {
 		return nil, 0, err
 	}
