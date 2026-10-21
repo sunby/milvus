@@ -126,7 +126,6 @@ func (i *indexInspector) notifyPendingIndexSegments() {
 }
 
 func (i *indexInspector) Start() {
-	i.reloadFromMeta()
 	i.wg.Add(1)
 	go i.createIndexForSegmentLoop(i.ctx)
 }
@@ -138,9 +137,11 @@ func (i *indexInspector) Stop() {
 
 func (i *indexInspector) createIndexForSegmentLoop(ctx context.Context) {
 	defer i.wg.Done()
-	// Only this loop consumes the pending segments, so it queues the unindexed
-	// ones itself before its first round instead of holding DataCoord's
-	// startup on a scan of every segment.
+	// Only this loop creates index builds and consumes the pending segments,
+	// so it re-enqueues the unfinished builds and queues the unindexed segments
+	// itself before its first round, instead of holding DataCoord's startup on
+	// scans of every segment index and every segment.
+	i.reloadFromMeta()
 	i.requeueUnindexedTaskSegments(ctx)
 	mlog.Info(ctx, "start create index for segment loop...",
 		mlog.Int64("TaskCheckInterval", Params.DataCoordCfg.TaskCheckInterval.GetAsInt64()))
