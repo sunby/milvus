@@ -164,18 +164,15 @@ func TestLoadInfoRecoveryNormalizesExistingQueryCoordMetadata(t *testing.T) {
 		mockey.Mock(catalogkv.Catalog.GetCollections).Return([]*querypb.CollectionLoadInfo{{CollectionID: 1, LoadFields: []int64{100}}}, nil).Build()
 		mockey.Mock(catalogkv.Catalog.GetPartitions).Return(map[int64][]*querypb.PartitionLoadInfo{1: {{CollectionID: 1, PartitionID: 10}}}, nil).Build()
 		mockey.Mock(catalogkv.Catalog.GetReplicas).Return(nil, nil).Build()
-		mockey.Mock((*loadInfoTestCatalog).GetLoadInfo).Return(nil, nil).Build()
-		var saved *querypb.GetQueryViewLoadInfoResponse
-		mockey.Mock((*loadInfoTestCatalog).SaveLoadInfo).To(func(_ *loadInfoTestCatalog, _ context.Context, info *querypb.GetQueryViewLoadInfoResponse) error {
-			saved = proto.Clone(info).(*querypb.GetQueryViewLoadInfoResponse)
-			return nil
-		}).Build()
-		loadInfos := NewLoadInfoStore(&loadInfoTestCatalog{}, func(int64) []*indexpb.IndexInfo { return nil },
+		loadInfoCatalog := newMemLoadInfoCatalog()
+		loadInfos := NewLoadInfoStore(loadInfoCatalog, func(int64) []*indexpb.IndexInfo { return nil },
 			func(context.Context, int64) (*schemapb.CollectionSchema, error) {
 				return &schemapb.CollectionSchema{Fields: []*schemapb.FieldSchema{{FieldID: 100}, {FieldID: 101}}}, nil
 			})
 		store, err := RecoverLoadConfigStore(t.Context(), catalogkv.NewCatalog(nil), loadInfos)
 		require.NoError(t, err)
+		require.Len(t, loadInfoCatalog.durable, 1)
+		saved := loadInfoCatalog.durable[loadInfoKey{1, store.GetConfigVersion(1)}]
 		require.NotNil(t, saved)
 		require.Equal(t, []int64{10}, saved.PartitionIDs)
 		requireFieldConfigsEqual(t, []*messagespb.LoadFieldConfig{{FieldId: 100}, {FieldId: 101}}, saved.RequiredFields)

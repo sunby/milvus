@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 
+	"github.com/samber/lo"
+
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v3/util/lock"
@@ -109,10 +111,8 @@ func RecoverLoadConfigStore(ctx context.Context, catalog metastore.QueryCoordCat
 	}
 	if len(loadInfos) > 0 && loadInfos[0] != nil {
 		store.loadInfos = loadInfos[0]
-		for _, cfg := range configs {
-			if err := store.loadInfos.Ensure(ctx, cfg); err != nil {
-				return nil, err
-			}
+		if err := store.loadInfos.EnsureAll(ctx, lo.Values(configs)); err != nil {
+			return nil, err
 		}
 	}
 	return store, nil
