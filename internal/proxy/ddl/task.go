@@ -2958,6 +2958,7 @@ type LoadCollectionTask struct {
 	result   *commonpb.Status
 
 	collectionID UniqueID
+	warmupHint   bool
 }
 
 func (t *LoadCollectionTask) TraceCtx() context.Context {
@@ -3010,8 +3011,30 @@ func (t *LoadCollectionTask) PreExecute(ctx context.Context) error {
 	if err := validateCollectionName(collName); err != nil {
 		return err
 	}
+	warmupHint, err := loadWarmupHint(t.GetLoadParams())
+	if err != nil {
+		return err
+	}
+	t.warmupHint = warmupHint
+	if warmupHint && t.GetRefresh() {
+		return merr.WrapErrParameterInvalidMsg("load parameter %s cannot be used with refresh", common.WarmupHintKey)
+	}
 
 	return nil
+}
+
+// loadWarmupHint parses the optional load parameter that asks QueryNodes to
+// warm the loaded data in the background.
+func loadWarmupHint(params map[string]string) (bool, error) {
+	value, present := params[common.WarmupHintKey]
+	if !present {
+		return false, nil
+	}
+	warmupHint, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, merr.WrapErrParameterInvalidMsg("load parameter %s must be true or false, got %q", common.WarmupHintKey, value)
+	}
+	return warmupHint, nil
 }
 
 func (t *LoadCollectionTask) GetLoadPriority() commonpb.LoadPriority {
@@ -3102,6 +3125,7 @@ func (t *LoadCollectionTask) Execute(ctx context.Context) (err error) {
 		LoadAllFields:        proto.Bool(len(t.GetLoadFields()) == 0),
 		SkipLoadDynamicField: t.GetSkipLoadDynamicField(),
 		Priority:             t.GetLoadPriority(),
+		WarmupHint:           t.warmupHint,
 	}
 	log.Info(ctx, "send LoadCollectionRequest to query coordinator",
 		mlog.FieldSchema(request.Schema),

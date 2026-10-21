@@ -123,6 +123,7 @@ func allocate(p *planningContext, shardID qviews.ShardID, baseRows map[int64]int
 	builder.SetAssignments(assignments)
 	builder.SetLoadInfoVersion(p.ConfigVersion(desired.CollectionID))
 	builder.SetSchemaVersion(p.SchemaVersion(desired.CollectionID))
+	builder.SetWarmupEpoch(desired.WarmupEpoch)
 	return &allocationResult{builder: builder, assignments: ctx.assignments, rowsByNode: ctx.rows, more: more}
 }
 

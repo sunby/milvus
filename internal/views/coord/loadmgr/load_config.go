@@ -20,6 +20,7 @@ type LoadConfig struct {
 	LoadFields               []*messagespb.LoadFieldConfig // Preload hints; empty follows the target schema, not query scope.
 	RequiredFields           []*messagespb.LoadFieldConfig // Explicit internal query scope.
 	UserSpecifiedReplicaMode bool
+	WarmupEpoch              int64
 	Replicas                 []*ReplicaAssignment
 }
 
@@ -41,6 +42,7 @@ func (c *LoadConfig) Clone() *LoadConfig {
 		CollectionID:             c.CollectionID,
 		UserSpecifiedReplicaMode: c.UserSpecifiedReplicaMode,
 		RequiredFields:           cloneFieldConfigs(c.RequiredFields),
+		WarmupEpoch:              c.WarmupEpoch,
 	}
 	if len(c.PartitionIDs) > 0 {
 		out.PartitionIDs = append([]int64{}, c.PartitionIDs...)
@@ -81,6 +83,7 @@ func FromAlterLoadConfigMessage(msg *messagespb.AlterLoadConfigMessageHeader) *L
 		PartitionIDs:             append([]int64{}, msg.GetPartitionIds()...),
 		UserSpecifiedReplicaMode: msg.GetUserSpecifiedReplicaMode(),
 		RequiredFields:           cloneFieldConfigs(msg.GetRequiredFields()),
+		WarmupEpoch:              msg.GetWarmupEpoch(),
 	}
 	for _, f := range msg.GetLoadFields() {
 		cfg.LoadFields = append(cfg.LoadFields, &messagespb.LoadFieldConfig{
@@ -112,6 +115,7 @@ func buildFromPersisted(
 		CollectionID:             info.GetCollectionID(),
 		UserSpecifiedReplicaMode: info.GetUserSpecifiedReplicaMode(),
 		RequiredFields:           cloneFieldConfigs(info.GetRequiredFields()),
+		WarmupEpoch:              info.GetWarmupEpoch(),
 	}
 
 	// PartitionIDs: derived from PartitionLoadInfo list.
@@ -156,6 +160,7 @@ func (c *LoadConfig) toCollectionLoadInfoProto() *querypb.CollectionLoadInfo {
 		Status:                   querypb.LoadStatus_Loaded,
 		UserSpecifiedReplicaMode: c.UserSpecifiedReplicaMode,
 		RequiredFields:           cloneFieldConfigs(c.RequiredFields),
+		WarmupEpoch:              c.WarmupEpoch,
 	}
 	if len(c.LoadFields) > 0 {
 		info.LoadFields = make([]int64, 0, len(c.LoadFields))
