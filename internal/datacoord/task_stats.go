@@ -958,7 +958,7 @@ func queryViewTextLoadInfoChanged(result *workerpb.StatsResult) bool {
 
 func updateStatsResultIfManifestMatches(ctx context.Context, segmentID, taskID int64, result *workerpb.StatsResult) UpdateOperator {
 	return func(modPack *updateSegmentPack) bool {
-		current := modPack.meta.segments.GetSegment(segmentID)
+		current := modPack.Peek(segmentID)
 		if current == nil || !isSegmentHealthy(current) {
 			mlog.Warn(ctx, "discard stats result for missing or unhealthy segment",
 				mlog.FieldTaskID(taskID),
