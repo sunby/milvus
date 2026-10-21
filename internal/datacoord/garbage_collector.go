@@ -1063,25 +1063,35 @@ func (gc *garbageCollector) recycleDroppedSegments(ctx context.Context, signal <
 	}()
 
 	metadataScanStart := time.Now()
-	all := gc.meta.SelectSegments(ctx)
+	// The scan keeps only the dropped segments and the outputs they were
+	// compacted into: it does not assemble every segment of the meta.
+	totalSegments := 0
 	drops := make(map[int64]*SegmentInfo, 0)
-	compactTo := make(map[int64]*SegmentInfo)
+	compactToProtos := make(map[int64]*datapb.SegmentInfo)
 	channels := typeutil.NewSet[string]()
-	for _, segment := range all {
+	gc.meta.segments.RangeReused(func(segment *SegmentInfo) bool {
+		totalSegments++
 		if segment.GetState() == commonpb.SegmentState_Dropped {
-			drops[segment.GetID()] = segment
+			drops[segment.GetID()] = segment.ShadowClone()
 			channels.Insert(funcutil.ToPhysicalChannel(segment.GetInsertChannel()))
 			// continue
 			// A(indexed), B(indexed) -> C(no indexed), D(no indexed) -> E(no indexed), A, B can not be GC
 		}
 		for _, from := range segment.GetCompactionFrom() {
-			compactTo[from] = segment
+			compactToProtos[from] = segment.SegmentInfo
+		}
+		return true
+	})
+	compactTo := make(map[int64]*SegmentInfo, len(drops))
+	for id := range drops {
+		if to, ok := compactToProtos[id]; ok {
+			compactTo[id] = gc.meta.segments.assemble(to.GetID(), to)
 		}
 	}
 	log.Info(ctx, "recycleDroppedSegments metadata scan done",
-		mlog.Int("totalSegments", len(all)),
+		mlog.Int("totalSegments", totalSegments),
 		mlog.Int("droppedSegments", len(drops)),
-		mlog.Int("compactionSources", len(compactTo)),
+		mlog.Int("compactionSources", len(compactToProtos)),
 		mlog.Int("channels", channels.Len()),
 		mlog.Duration("timeCost", time.Since(metadataScanStart)))
 
