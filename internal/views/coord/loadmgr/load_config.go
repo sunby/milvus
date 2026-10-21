@@ -22,6 +22,7 @@ type LoadConfig struct {
 	LoadAllFields            *bool
 	SkipLoadDynamicField     bool
 	UserSpecifiedReplicaMode bool
+	WarmupEpoch              int64
 	Replicas                 []*ReplicaAssignment
 }
 
@@ -44,6 +45,7 @@ func (c *LoadConfig) Clone() *LoadConfig {
 		UserSpecifiedReplicaMode: c.UserSpecifiedReplicaMode,
 		SkipLoadDynamicField:     c.SkipLoadDynamicField,
 		RequiredFields:           cloneFieldConfigs(c.RequiredFields),
+		WarmupEpoch:              c.WarmupEpoch,
 	}
 	if c.LoadAllFields != nil {
 		out.LoadAllFields = proto.Bool(*c.LoadAllFields)
@@ -88,6 +90,7 @@ func FromAlterLoadConfigMessage(msg *messagespb.AlterLoadConfigMessageHeader) *L
 		UserSpecifiedReplicaMode: msg.GetUserSpecifiedReplicaMode(),
 		SkipLoadDynamicField:     msg.GetSkipLoadDynamicField(),
 		RequiredFields:           cloneFieldConfigs(msg.GetRequiredFields()),
+		WarmupEpoch:              msg.GetWarmupEpoch(),
 	}
 	if msg.LoadAllFields != nil {
 		cfg.LoadAllFields = proto.Bool(msg.GetLoadAllFields())
@@ -123,6 +126,7 @@ func buildFromPersisted(
 		UserSpecifiedReplicaMode: info.GetUserSpecifiedReplicaMode(),
 		SkipLoadDynamicField:     info.GetSkipLoadDynamicField(),
 		RequiredFields:           cloneFieldConfigs(info.GetRequiredFields()),
+		WarmupEpoch:              info.GetWarmupEpoch(),
 	}
 
 	if info.LoadAllFields != nil {
@@ -172,6 +176,7 @@ func (c *LoadConfig) toCollectionLoadInfoProto() *querypb.CollectionLoadInfo {
 		UserSpecifiedReplicaMode: c.UserSpecifiedReplicaMode,
 		SkipLoadDynamicField:     c.SkipLoadDynamicField,
 		RequiredFields:           cloneFieldConfigs(c.RequiredFields),
+		WarmupEpoch:              c.WarmupEpoch,
 	}
 	if c.LoadAllFields != nil {
 		info.LoadAllFields = proto.Bool(*c.LoadAllFields)

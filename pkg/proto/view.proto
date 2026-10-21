@@ -87,6 +87,8 @@ message QueryViewMeta {
     uint64 load_info_version = 6;
     uint64 transform_start_after_timetick = 7;
     int32 schema_version = 8; // Required logical collection schema revision.
+    // Warmup epoch of the load config this view was built from; 0 means none.
+    int64 warmup_epoch = 9;
 }
 
 // QueryViewOfStreamingNode is the StreamingNode-local part of a QueryView.

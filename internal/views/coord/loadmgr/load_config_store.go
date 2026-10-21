@@ -148,6 +148,13 @@ func (s *LoadConfigStore) putLocked(ctx context.Context, cfg *LoadConfig) error 
 	existing := s.configs[collectionID]
 	s.mu.RUnlock()
 
+	// Other DDL messages omit the warmup epoch, and epochs never decrease;
+	// only Remove clears it.
+	if existing != nil && existing.WarmupEpoch > cfg.WarmupEpoch {
+		cfg = cfg.Clone()
+		cfg.WarmupEpoch = existing.WarmupEpoch
+	}
+
 	// Delete orphans (items present in existing but absent from cfg) first,
 	// so stale ETCD keys do not linger after partition / replica removal.
 	if existing != nil {
