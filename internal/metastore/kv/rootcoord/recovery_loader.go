@@ -79,6 +79,13 @@ func (kc *Catalog) ListCollectionsForRecovery(
 		mlog.String("selectedMode", "batch"),
 		mlog.Int("numCollections", len(entries)),
 		mlog.Int("numExternalCollections", externalCollectionCount))
+	if kc.reportRecoveredCollectionIDs != nil {
+		collectionIDs := make([]int64, 0, len(entries))
+		for _, entry := range entries {
+			collectionIDs = append(collectionIDs, entry.meta.GetID())
+		}
+		kc.reportRecoveredCollectionIDs(collectionIDs)
+	}
 
 	if len(entries) == 0 {
 		return collectionsByDB, nil
