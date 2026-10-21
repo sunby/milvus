@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/samber/lo"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
@@ -61,24 +62,20 @@ type LoadConfigEntry struct {
 // in-memory state from ETCD via the catalog. It is the sole constructor:
 // the store is always fully recovered before any operation.
 func RecoverLoadConfigStore(ctx context.Context, catalog metastore.QueryCoordCatalog, loadInfos ...*LoadInfoStore) (*LoadConfigStore, error) {
-	collections, err := catalog.GetCollections(ctx)
+	// Replicas do not depend on the collection list, so read them meanwhile.
+	var replicas []*querypb.Replica
+	var replicasRead errgroup.Group
+	replicasRead.Go(func() (err error) {
+		replicas, err = catalog.GetReplicas(ctx)
+		return err
+	})
+	collections, partitions, err := recoverCollectionsAndPartitions(ctx, catalog)
+	replicasErr := replicasRead.Wait()
 	if err != nil {
 		return nil, err
 	}
-
-	collectionIDs := make([]int64, 0, len(collections))
-	for _, c := range collections {
-		collectionIDs = append(collectionIDs, c.GetCollectionID())
-	}
-
-	partitions, err := catalog.GetPartitions(ctx, collectionIDs)
-	if err != nil {
-		return nil, err
-	}
-
-	replicas, err := catalog.GetReplicas(ctx)
-	if err != nil {
-		return nil, err
+	if replicasErr != nil {
+		return nil, replicasErr
 	}
 
 	// Group replicas by collection for efficient lookup.
@@ -120,6 +117,22 @@ func RecoverLoadConfigStore(ctx context.Context, catalog metastore.QueryCoordCat
 		}
 	}
 	return store, nil
+}
+
+func recoverCollectionsAndPartitions(ctx context.Context, catalog metastore.QueryCoordCatalog) ([]*querypb.CollectionLoadInfo, map[int64][]*querypb.PartitionLoadInfo, error) {
+	collections, err := catalog.GetCollections(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	collectionIDs := make([]int64, 0, len(collections))
+	for _, c := range collections {
+		collectionIDs = append(collectionIDs, c.GetCollectionID())
+	}
+	partitions, err := catalog.GetPartitions(ctx, collectionIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	return collections, partitions, nil
 }
 
 // Put persists the full LoadConfig to ETCD and updates the live in-memory state.

@@ -15,6 +15,7 @@ import (
 	catalogkv "github.com/milvus-io/milvus/internal/metastore/kv/querycoord"
 	"github.com/milvus-io/milvus/pkg/v3/proto/messagespb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
 // expectCatalogCalls patches only persistence boundaries and verifies their use.
@@ -553,6 +554,35 @@ func TestRecoverLoadConfigStore_WithPersistedData(t *testing.T) {
 
 	assert.NotNil(t, snapshot.ReplicaToConfigMap()[1000])
 	assert.NotNil(t, snapshot.ReplicaToConfigMap()[1001])
+}
+
+// Replicas are read alongside collections and partitions; a failure is still
+// reported in the order the reads used to run.
+func TestRecoverLoadConfigStore_ReadErrorOrder(t *testing.T) {
+	collectionsErr := merr.WrapErrIoFailedReason("collections")
+	partitionsErr := merr.WrapErrIoFailedReason("partitions")
+	replicasErr := merr.WrapErrIoFailedReason("replicas")
+	for _, tc := range []struct {
+		name                                    string
+		collections, partitions, replicas, want error
+	}{
+		{name: "collections", collections: collectionsErr, replicas: replicasErr, want: collectionsErr},
+		{name: "partitions", partitions: partitionsErr, replicas: replicasErr, want: partitionsErr},
+		{name: "replicas", replicas: replicasErr, want: replicasErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			partitionReads := 0
+			if tc.collections == nil {
+				partitionReads = 1
+			}
+			expectCatalogCalls(t, mockey.Mock(catalogkv.Catalog.GetCollections).Return([]*querypb.CollectionLoadInfo{{CollectionID: 100}}, tc.collections), 1)
+			expectCatalogCalls(t, mockey.Mock(catalogkv.Catalog.GetPartitions).Return(map[int64][]*querypb.PartitionLoadInfo{}, tc.partitions), partitionReads)
+			expectCatalogCalls(t, mockey.Mock(catalogkv.Catalog.GetReplicas).Return(nil, tc.replicas), 1)
+			store, err := RecoverLoadConfigStore(context.Background(), catalogkv.NewCatalog(nil))
+			require.Equal(t, tc.want, err)
+			require.Nil(t, store)
+		})
+	}
 }
 
 func TestFromAlterLoadConfigMessage(t *testing.T) {
