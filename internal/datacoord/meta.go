@@ -238,6 +238,12 @@ func (m *meta) closeManifestCommitExecutor() {
 const (
 	collectionRecoveryProgressLogInterval   = 10000
 	segmentCacheRecoveryProgressLogInterval = 100000
+	// collectionCacheRecoveryConcurrency bounds the collections looked up at
+	// once while the collection cache is rebuilt. The lookups are in-process
+	// RootCoord tasks that RootCoord partly serializes (each one takes a
+	// collection-level KeyLock), so the speedup levels off after a few workers;
+	// the bound leaves headroom above that point.
+	collectionCacheRecoveryConcurrency = 16
 )
 
 // NewMeta creates meta from provided `kv.TxnKV`
@@ -724,75 +730,84 @@ func (m *meta) reloadCollectionsFromRootcoord(ctx context.Context, broker broker
 		mlog.Duration("showCollectionsRPCDuration", showCollectionsDuration),
 		mlog.Duration("duration", time.Since(recoveryStart)))
 
+	// The collections are looked up concurrently, so the RPC durations, which
+	// sum the call latencies, can exceed the wall-clock "duration"; their sum
+	// divided by it is the average number of lookups in flight.
 	collectionCacheBuildStart := time.Now()
-	describeCollectionRPCDuration := time.Duration(0)
-	showPartitionsRPCDuration := time.Duration(0)
-	slowestCollectionID := int64(0)
-	slowestCollectionDuration := time.Duration(0)
+	var (
+		failed atomic.Bool
+
+		mu                            sync.Mutex // guards the fields below
+		describeCollectionRPCDuration time.Duration
+		showPartitionsRPCDuration     time.Duration
+		completedCollections          int
+		slowestCollectionID           int64
+		slowestCollectionDuration     time.Duration // of the collection's two lookups
+		failedIndex                   = -1          // the lowest index of a failed lookup
+		failure                       collectionLookup
+	)
+	infos := make([]*collectionInfo, len(collectionIDs))
+	var g errgroup.Group
+	g.SetLimit(collectionCacheRecoveryConcurrency)
 	for index, collectionID := range collectionIDs {
-		collectionStart := time.Now()
-
-		describeStart := time.Now()
-		descResp, err := broker.DescribeCollectionInternal(ctx, collectionID)
-		describeDuration := time.Since(describeStart)
-		describeCollectionRPCDuration += describeDuration
-		if err != nil {
-			mlog.Warn(ctx, "datacoord collection cache recovery failed",
-				mlog.String("stage", "DescribeCollectionInternal"),
-				mlog.FieldCollectionID(collectionID),
-				mlog.Int("completedCollections", index),
-				mlog.Int("totalCollections", len(collectionIDs)),
-				mlog.Duration("callDuration", describeDuration),
-				mlog.Err(err))
-			return err
+		// Start no lookups after a failure; the running ones finish.
+		if failed.Load() {
+			break
 		}
-
-		showPartitionsStart := time.Now()
-		partitionIDs, err := broker.ShowPartitionsInternal(ctx, collectionID)
-		showPartitionsDuration := time.Since(showPartitionsStart)
-		showPartitionsRPCDuration += showPartitionsDuration
-		if err != nil {
-			mlog.Warn(ctx, "datacoord collection cache recovery failed",
-				mlog.String("stage", "ShowPartitionsInternal"),
-				mlog.FieldCollectionID(collectionID),
-				mlog.Int("completedCollections", index),
-				mlog.Int("totalCollections", len(collectionIDs)),
-				mlog.Duration("callDuration", showPartitionsDuration),
-				mlog.Err(err))
-			return err
-		}
-
-		m.addCollectionToCache(&collectionInfo{
-			ID:             collectionID,
-			Schema:         descResp.GetSchema(),
-			Partitions:     partitionIDs,
-			StartPositions: descResp.GetStartPositions(),
-			Properties:     funcutil.KeyValuePair2Map(descResp.GetProperties()),
-			CreatedAt:      descResp.GetCreatedTimestamp(),
-			DatabaseName:   descResp.GetDbName(),
-			DatabaseID:     descResp.GetDbId(),
-			VChannelNames:  descResp.GetVirtualChannelNames(),
+		g.Go(func() error {
+			lookup := lookupCollectionForCache(ctx, broker, collectionID)
+			mu.Lock()
+			defer mu.Unlock()
+			describeCollectionRPCDuration += lookup.describeDuration
+			showPartitionsRPCDuration += lookup.showPartitionsDuration
+			if lookup.err != nil {
+				if failedIndex < 0 || index < failedIndex {
+					failedIndex, failure = index, lookup
+				}
+				failed.Store(true)
+				return lookup.err
+			}
+			infos[index] = lookup.info
+			if collectionDuration := lookup.describeDuration + lookup.showPartitionsDuration; collectionDuration > slowestCollectionDuration {
+				slowestCollectionID = collectionID
+				slowestCollectionDuration = collectionDuration
+			}
+			completedCollections++
+			if completedCollections%collectionRecoveryProgressLogInterval == 0 && completedCollections < len(collectionIDs) {
+				mlog.Info(ctx, "datacoord collection cache recovery progress",
+					mlog.Int("completedCollections", completedCollections),
+					mlog.Int("totalCollections", len(collectionIDs)),
+					mlog.Duration("averageCollectionDuration", time.Since(collectionCacheBuildStart)/time.Duration(completedCollections)),
+					mlog.Duration("describeCollectionRPCDuration", describeCollectionRPCDuration),
+					mlog.Duration("showPartitionsRPCDuration", showPartitionsRPCDuration),
+					mlog.Int64("slowestCollectionID", slowestCollectionID),
+					mlog.Duration("slowestCollectionDuration", slowestCollectionDuration),
+					mlog.Duration("duration", time.Since(collectionCacheBuildStart)))
+			}
+			return nil
 		})
-
-		if collectionDuration := time.Since(collectionStart); collectionDuration > slowestCollectionDuration {
-			slowestCollectionID = collectionID
-			slowestCollectionDuration = collectionDuration
-		}
-		completedCollections := index + 1
-		if completedCollections%collectionRecoveryProgressLogInterval == 0 && completedCollections < len(collectionIDs) {
-			mlog.Info(ctx, "datacoord collection cache recovery progress",
-				mlog.Int("completedCollections", completedCollections),
-				mlog.Int("totalCollections", len(collectionIDs)),
-				mlog.Duration("averageCollectionDuration", time.Since(collectionCacheBuildStart)/time.Duration(completedCollections)),
-				mlog.Duration("describeCollectionRPCDuration", describeCollectionRPCDuration),
-				mlog.Duration("showPartitionsRPCDuration", showPartitionsRPCDuration),
-				mlog.Int64("slowestCollectionID", slowestCollectionID),
-				mlog.Duration("slowestCollectionDuration", slowestCollectionDuration),
-				mlog.Duration("duration", time.Since(collectionCacheBuildStart)))
-		}
+	}
+	if g.Wait() != nil {
+		// Return the first failure in list order, not the earliest in time:
+		// every collection listed before it was dispatched before it and has
+		// finished, so the outcome does not depend on scheduling.
+		mlog.Warn(ctx, "datacoord collection cache recovery failed",
+			mlog.String("stage", failure.stage),
+			mlog.FieldCollectionID(collectionIDs[failedIndex]),
+			mlog.Int("completedCollections", completedCollections),
+			mlog.Int("totalCollections", len(collectionIDs)),
+			mlog.Duration("callDuration", failure.callDuration),
+			mlog.Err(failure.err))
+		return failure.err
+	}
+	// Install in list order once every lookup succeeded; a failed attempt
+	// installs nothing.
+	for _, info := range infos {
+		m.addCollectionToCache(info)
 	}
 	mlog.Info(ctx, "datacoord collection cache recovery done",
 		mlog.Int("numCollections", len(collectionIDs)),
+		mlog.Int("concurrency", collectionCacheRecoveryConcurrency),
 		mlog.Duration("describeCollectionRPCDuration", describeCollectionRPCDuration),
 		mlog.Duration("showPartitionsRPCDuration", showPartitionsRPCDuration),
 		mlog.Int64("slowestCollectionID", slowestCollectionID),
@@ -800,6 +815,53 @@ func (m *meta) reloadCollectionsFromRootcoord(ctx context.Context, broker broker
 		mlog.Duration("duration", time.Since(collectionCacheBuildStart)),
 		mlog.Duration("totalDuration", time.Since(recoveryStart)))
 	return nil
+}
+
+// collectionLookup is the outcome of looking up one collection for the
+// collection cache.
+type collectionLookup struct {
+	info                   *collectionInfo
+	describeDuration       time.Duration
+	showPartitionsDuration time.Duration
+	// On failure: the failed call, its duration and its error.
+	stage        string
+	callDuration time.Duration
+	err          error
+}
+
+// lookupCollectionForCache describes a collection and lists its partitions
+// through RootCoord, building its collection cache entry. A failed describe
+// skips the partition listing.
+func lookupCollectionForCache(ctx context.Context, broker broker.Broker, collectionID int64) collectionLookup {
+	var lookup collectionLookup
+	describeStart := time.Now()
+	descResp, err := broker.DescribeCollectionInternal(ctx, collectionID)
+	lookup.describeDuration = time.Since(describeStart)
+	if err != nil {
+		lookup.stage, lookup.callDuration, lookup.err = "DescribeCollectionInternal", lookup.describeDuration, err
+		return lookup
+	}
+
+	showPartitionsStart := time.Now()
+	partitionIDs, err := broker.ShowPartitionsInternal(ctx, collectionID)
+	lookup.showPartitionsDuration = time.Since(showPartitionsStart)
+	if err != nil {
+		lookup.stage, lookup.callDuration, lookup.err = "ShowPartitionsInternal", lookup.showPartitionsDuration, err
+		return lookup
+	}
+
+	lookup.info = &collectionInfo{
+		ID:             collectionID,
+		Schema:         descResp.GetSchema(),
+		Partitions:     partitionIDs,
+		StartPositions: descResp.GetStartPositions(),
+		Properties:     funcutil.KeyValuePair2Map(descResp.GetProperties()),
+		CreatedAt:      descResp.GetCreatedTimestamp(),
+		DatabaseName:   descResp.GetDbName(),
+		DatabaseID:     descResp.GetDbId(),
+		VChannelNames:  descResp.GetVirtualChannelNames(),
+	}
+	return lookup
 }
 
 // addCollectionToCache puts a collection into MetaStore and invalidates its
