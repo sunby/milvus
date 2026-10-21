@@ -24,7 +24,6 @@ import (
 	"sort"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/errors"
@@ -112,10 +111,16 @@ func newIndexTaskStats(s *model.SegmentIndex) *metricsinfo.IndexTaskStats {
 	}
 }
 
+// buildIDShards splits the build table into maps of their own: recovery
+// installs every record from parallel workers, which would otherwise all
+// update the length counter of one map. shardOf gives a recovery worker whose
+// count divides it whole shards of its own.
+const buildIDShards = 64
+
 type segmentBuildInfo struct {
 	// buildID2Meta records the meta information of the segment
-	// buildID -> segmentIndex
-	buildID2SegmentIndex *typeutil.ConcurrentMap[UniqueID, *model.SegmentIndex]
+	// buildID -> segmentIndex, split by shardOf(buildID, buildIDShards)
+	buildID2SegmentIndex [buildIDShards]*typeutil.ConcurrentMap[UniqueID, *model.SegmentIndex]
 	// taskStats records the task stats of the segment
 	taskStats *expirable.LRU[UniqueID, *metricsinfo.IndexTaskStats]
 }
@@ -123,16 +128,24 @@ type segmentBuildInfo struct {
 const taskStatsLRUCapacity = 1024
 
 func newSegmentIndexBuildInfo() *segmentBuildInfo {
-	return &segmentBuildInfo{
-		// build ID -> segment index
-		buildID2SegmentIndex: typeutil.NewConcurrentMap[UniqueID, *model.SegmentIndex](),
+	info := &segmentBuildInfo{
 		// build ID -> task stats
 		taskStats: expirable.NewLRU[UniqueID, *metricsinfo.IndexTaskStats](taskStatsLRUCapacity, nil, time.Minute*30),
 	}
+	// build ID -> segment index
+	for i := range info.buildID2SegmentIndex {
+		info.buildID2SegmentIndex[i] = typeutil.NewConcurrentMap[UniqueID, *model.SegmentIndex]()
+	}
+	return info
+}
+
+// byBuildID returns the shard of the build table that holds buildID.
+func (m *segmentBuildInfo) byBuildID(buildID UniqueID) *typeutil.ConcurrentMap[UniqueID, *model.SegmentIndex] {
+	return m.buildID2SegmentIndex[shardOf(buildID, buildIDShards)]
 }
 
 func (m *segmentBuildInfo) Add(segIdx *model.SegmentIndex) {
-	m.buildID2SegmentIndex.Insert(segIdx.BuildID, segIdx)
+	m.byBuildID(segIdx.BuildID).Insert(segIdx.BuildID, segIdx)
 	m.taskStats.Add(segIdx.BuildID, newIndexTaskStats(segIdx))
 }
 
@@ -141,7 +154,7 @@ func (m *segmentBuildInfo) Add(segIdx *model.SegmentIndex) {
 // finished tasks are unlikely to be queried and the LRU write is expensive
 // during bulk recovery.
 func (m *segmentBuildInfo) AddForRecovery(segIdx *model.SegmentIndex) {
-	m.buildID2SegmentIndex.Insert(segIdx.BuildID, segIdx)
+	m.byBuildID(segIdx.BuildID).Insert(segIdx.BuildID, segIdx)
 	if m.taskStats.Len() >= taskStatsLRUCapacity && segIdx.IndexState == commonpb.IndexState_Finished {
 		return
 	}
@@ -166,25 +179,41 @@ func (m *segmentBuildInfo) replayRecoveryTaskStats(segmentIndexes []*model.Segme
 }
 
 func (m *segmentBuildInfo) Get(key UniqueID) (*model.SegmentIndex, bool) {
-	value, exists := m.buildID2SegmentIndex.Get(key)
+	value, exists := m.byBuildID(key).Get(key)
 	return value, exists
 }
 
 func (m *segmentBuildInfo) Remove(key UniqueID) {
-	m.buildID2SegmentIndex.Remove(key)
+	m.byBuildID(key).Remove(key)
 }
 
 func (m *segmentBuildInfo) List() []*model.SegmentIndex {
-	return m.buildID2SegmentIndex.Values()
+	n := 0
+	for _, shard := range m.buildID2SegmentIndex {
+		n += shard.Len()
+	}
+	indexes := make([]*model.SegmentIndex, 0, n)
+	m.Range(func(segmentIndex *model.SegmentIndex) bool {
+		indexes = append(indexes, segmentIndex)
+		return true
+	})
+	return indexes
 }
 
 // Range visits resident SegmentIndex entries without first materializing a
 // full slice. The callback observes sync.Map traversal semantics and may miss
 // concurrent updates; GC revalidates every candidate by buildID before acting.
 func (m *segmentBuildInfo) Range(f func(*model.SegmentIndex) bool) {
-	m.buildID2SegmentIndex.Range(func(_ UniqueID, segmentIndex *model.SegmentIndex) bool {
-		return f(segmentIndex)
-	})
+	next := true
+	for _, shard := range m.buildID2SegmentIndex {
+		shard.Range(func(_ UniqueID, segmentIndex *model.SegmentIndex) bool {
+			next = f(segmentIndex)
+			return next
+		})
+		if !next {
+			return
+		}
+	}
 }
 
 func (m *segmentBuildInfo) GetTaskStats() []*metricsinfo.IndexTaskStats {
@@ -361,14 +390,14 @@ func (m *indexMeta) rebuildSegmentIndexCache(segmentIndexes []*model.SegmentInde
 	})
 
 	unfinished := make([][]int, workers)
-	var rebuilt atomic.Int64
+	rebuilt := newRecoveryProgress(workers, segmentIndexCacheRecoveryProgressLogInterval)
 	_ = forEachInShards(len(segmentIndexes), workers, func(i int) int64 { return segmentIndexes[i].BuildID }, func(worker, i int) error {
 		segIdx := segmentIndexes[i]
-		m.segmentBuildInfo.buildID2SegmentIndex.Insert(segIdx.BuildID, segIdx)
+		m.segmentBuildInfo.byBuildID(segIdx.BuildID).Insert(segIdx.BuildID, segIdx)
 		if segIdx.IndexState != commonpb.IndexState_Finished {
 			unfinished[worker] = append(unfinished[worker], i)
 		}
-		if completed := int(rebuilt.Add(1)); completed%segmentIndexCacheRecoveryProgressLogInterval == 0 && completed < len(segmentIndexes) {
+		if completed, report := rebuilt.add(worker); report && completed < len(segmentIndexes) {
 			mlog.Info(m.ctx, "indexMeta segment index cache rebuild progress",
 				mlog.Int("completedSegmentIndexes", completed),
 				mlog.Int("totalSegmentIndexes", len(segmentIndexes)),

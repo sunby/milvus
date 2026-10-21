@@ -106,3 +106,41 @@ func forEachInShards(n, workers int, key func(i int) int64, fn func(worker, i in
 	}
 	return err
 }
+
+// recoveryProgressStep is how many finished items a worker counts on its own
+// before it adds them to the shared total of a recoveryProgress.
+const recoveryProgressStep = 1024
+
+// recoveryProgress counts the items the workers of forEachInShards finish, for
+// progress logs. A worker counts in a slot of its own and adds to the shared
+// total once per recoveryProgressStep items: one counter that every worker
+// writes for every item serializes them.
+type recoveryProgress struct {
+	every int64
+	total atomic.Int64
+	slots []recoveryProgressSlot
+}
+
+// recoveryProgressSlot fills a cache line so the slots of different workers do
+// not share one.
+type recoveryProgressSlot struct {
+	pending int64
+	_       [56]byte
+}
+
+func newRecoveryProgress(workers int, every int) *recoveryProgress {
+	return &recoveryProgress{every: int64(every), slots: make([]recoveryProgressSlot, max(1, min(workers, maxRecoveryWorkers)))}
+}
+
+// add counts one item finished by worker. It returns the shared total and
+// whether that total has just passed a multiple of every, to report then.
+func (p *recoveryProgress) add(worker int) (int, bool) {
+	slot := &p.slots[worker]
+	slot.pending++
+	if slot.pending < recoveryProgressStep {
+		return 0, false
+	}
+	slot.pending = 0
+	total := p.total.Add(recoveryProgressStep)
+	return int(total), total/p.every != (total-recoveryProgressStep)/p.every
+}
