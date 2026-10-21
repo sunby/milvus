@@ -391,6 +391,8 @@ message AlterLoadConfigMessageHeader {
     bool skip_load_dynamic_field = 10;
     bool use_local_replica_config = 7; // when true, use local cluster-level replica config instead of the replicas field above.
     bool force_sync_warmup = 11; // whether load should synchronously warm mmap/cache data.
+    // Epoch of the latest LoadCollection warmup hint; 0 means none.
+    int64 warmup_epoch = 12;
 }
 
 // AlterLoadConfigMessageBody is the body of alter load config message.

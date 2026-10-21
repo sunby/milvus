@@ -16,6 +16,7 @@ type QueryViewAtCoordBuilder struct {
 	transformStartAfterTimetick uint64
 	loadInfoVersion             uint64
 	schemaVersion               int32
+	warmupEpoch                 int64
 	assignments                 map[int64]map[int64][]int64
 	segmentTransformStarts      map[int64]uint64
 	segmentManifestVersions     map[int64]int64
@@ -76,6 +77,12 @@ func (b *QueryViewAtCoordBuilder) SetSchemaVersion(version int32) *QueryViewAtCo
 	return b
 }
 
+// SetWarmupEpoch binds the load config's warmup epoch to the view.
+func (b *QueryViewAtCoordBuilder) SetWarmupEpoch(epoch int64) *QueryViewAtCoordBuilder {
+	b.warmupEpoch = epoch
+	return b
+}
+
 func (b *QueryViewAtCoordBuilder) SetAssignments(assignments map[int64]map[int64][]int64) *QueryViewAtCoordBuilder {
 	b.assignments = assignments
 	return b
@@ -94,6 +101,7 @@ func (b *QueryViewAtCoordBuilder) Build() *viewpb.QueryViewOfShard {
 		TransformStartAfterTimetick: b.transformStartAfterTimetick,
 		LoadInfoVersion:             b.loadInfoVersion,
 		SchemaVersion:               b.schemaVersion,
+		WarmupEpoch:                 b.warmupEpoch,
 	}
 
 	nodeIDs := make([]int64, 0, len(b.assignments))

@@ -271,6 +271,8 @@ message LoadCollectionRequest {
     common.LoadPriority priority = 10;
     optional bool load_all_fields = 11;
     bool skip_load_dynamic_field = 12;
+    // Asks QueryNodes to warm the loaded data in the background until release.
+    bool warmup_hint = 13;
 }
 
 message ReleaseCollectionRequest {
@@ -911,6 +913,8 @@ message CollectionLoadInfo {
     optional bool load_all_fields = 12;
     bool skip_load_dynamic_field = 13;
     bool force_sync_warmup = 14;
+    // Epoch of the latest LoadCollection warmup hint; 0 means none.
+    int64 warmup_epoch = 15;
 }
 
 message PartitionLoadInfo {
