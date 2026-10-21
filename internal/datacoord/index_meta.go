@@ -534,10 +534,12 @@ func (m *indexMeta) putSegmentIndex(segIdx *model.SegmentIndex) {
 
 // manifestIndexRecovery installs the SegmentIndex records startup recovers from
 // segment manifests, millions of them on a large cluster. install updates the
-// resident maps and task counts exactly as updateSegmentIndex does. The task-stats
-// LRU and the stored-size aggregate, which updateSegmentIndex and
+// resident maps exactly as updateSegmentIndex does. The task counts, the
+// task-stats LRU and the stored-size aggregate, which updateSegmentIndex and
 // updateStoredIndexSizeMetric would update per record, are updated once by
 // finish into the state the per-record updates leave:
+//   - The task counts receive each index's summed records by state, as
+//     adjustTask adds them one at a time.
 //   - The stored-size tracker and gauge receive each collection's summed record
 //     sizes. A record only adds its size to an active index's total, and index
 //     DDL cannot run before the recovered meta is published.
@@ -545,17 +547,25 @@ func (m *indexMeta) putSegmentIndex(segIdx *model.SegmentIndex) {
 //     install order. The fresh indexMeta's LRU holds only resident build IDs,
 //     which install skips, so every installed build ID is new to the LRU and
 //     adding them all would have evicted each earlier one.
+//
+// Recoveries installing the records of disjoint segments on parallel
+// goroutines merge into one before it finishes.
 type manifestIndexRecovery struct {
 	meta *indexMeta
 	// sizes sums installed sizes by collectionID and indexID.
-	sizes     map[UniqueID]map[UniqueID]uint64
-	latest    [taskStatsLRUCapacity]*model.SegmentIndex
-	installed int
-	finished  bool
+	sizes map[UniqueID]map[UniqueID]uint64
+	// counts sums installed records by index and state slot (see
+	// taskCountSlot).
+	counts map[[2]int64]indexTaskStateCounts
+	// latest holds the last records of the latestCount it was given.
+	latest      [taskStatsLRUCapacity]*model.SegmentIndex
+	latestCount int
+	installed   int
+	finished    bool
 }
 
 func (m *indexMeta) newManifestIndexRecovery() *manifestIndexRecovery {
-	return &manifestIndexRecovery{meta: m, sizes: make(map[UniqueID]map[UniqueID]uint64)}
+	return &manifestIndexRecovery{meta: m, sizes: make(map[UniqueID]map[UniqueID]uint64), counts: make(map[[2]int64]indexTaskStateCounts)}
 }
 
 // install adds segIdx unless a catalog row or an earlier manifest already holds
@@ -565,16 +575,50 @@ func (r *manifestIndexRecovery) install(segIdx *model.SegmentIndex) {
 	if !m.segmentBuildInfo.insertIfAbsent(segIdx) {
 		return
 	}
-	m.taskCounts.replaceTask(nil, segIdx)
 	m.putSegmentIndex(segIdx)
+	if key, slot, ok := taskCountSlot(segIdx); ok {
+		counts := r.counts[key]
+		counts[slot]++
+		r.counts[key] = counts
+	}
 	sizes, ok := r.sizes[segIdx.CollectionID]
 	if !ok {
 		sizes = make(map[UniqueID]uint64)
 		r.sizes[segIdx.CollectionID] = sizes
 	}
 	sizes[segIdx.IndexID] += segIdx.IndexSerializedSize
-	r.latest[r.installed%taskStatsLRUCapacity] = segIdx
+	r.remember(segIdx)
 	r.installed++
+}
+
+func (r *manifestIndexRecovery) remember(segIdx *model.SegmentIndex) {
+	r.latest[r.latestCount%taskStatsLRUCapacity] = segIdx
+	r.latestCount++
+}
+
+// merge adds what other installed, after what r installed, to r.
+func (r *manifestIndexRecovery) merge(other *manifestIndexRecovery) {
+	for collectionID, sizes := range other.sizes {
+		merged, ok := r.sizes[collectionID]
+		if !ok {
+			r.sizes[collectionID] = sizes
+			continue
+		}
+		for indexID, size := range sizes {
+			merged[indexID] += size
+		}
+	}
+	for key, counts := range other.counts {
+		merged := r.counts[key]
+		for slot := range merged {
+			merged[slot] += counts[slot]
+		}
+		r.counts[key] = merged
+	}
+	for i := max(0, other.latestCount-taskStatsLRUCapacity); i < other.latestCount; i++ {
+		r.remember(other.latest[i%taskStatsLRUCapacity])
+	}
+	r.installed += other.installed
 }
 
 // finish applies the aggregates of the records installed so far. Later calls
@@ -585,6 +629,7 @@ func (r *manifestIndexRecovery) finish() {
 	}
 	r.finished = true
 	m := r.meta
+	m.taskCounts.addTasks(r.counts)
 	collectionLock := m.getCollectionLock()
 	for collectionID, sizes := range r.sizes {
 		// updateStoredIndexSizeMetric's locking, once per collection.
@@ -601,7 +646,7 @@ func (r *manifestIndexRecovery) finish() {
 		}
 		collectionLock.RUnlock(collectionID)
 	}
-	for i := max(0, r.installed-taskStatsLRUCapacity); i < r.installed; i++ {
+	for i := max(0, r.latestCount-taskStatsLRUCapacity); i < r.latestCount; i++ {
 		m.segmentBuildInfo.recordTaskStats(r.latest[i%taskStatsLRUCapacity])
 	}
 }
