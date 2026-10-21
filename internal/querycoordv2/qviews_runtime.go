@@ -40,6 +40,8 @@ import (
 	qvresource "github.com/milvus-io/milvus/internal/views/coord/resource"
 	"github.com/milvus-io/milvus/pkg/v3/kv"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
+	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
+	"github.com/milvus-io/milvus/pkg/v3/util/conc"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
@@ -224,8 +226,57 @@ func (r *qviewsRuntime) stop() {
 	})
 }
 
+// prefetchedQueryViewCatalog serves its first ListQueryViews from a listing
+// started at construction, so QueryCoord reads its QueryViews while other
+// metadata recovers. QueryCoord writes these keys only through this catalog,
+// from the flush scheduler that registry recovery creates after listing them;
+// any write through the catalog before that discards the early listing.
+type prefetchedQueryViewCatalog struct {
+	queryview.QueryViewCatalog
+	mu       sync.Mutex
+	prefetch *conc.Future[[]*viewpb.QueryViewOfShard]
+}
+
+func newPrefetchedQueryViewCatalog(ctx context.Context, catalog queryview.QueryViewCatalog) *prefetchedQueryViewCatalog {
+	return &prefetchedQueryViewCatalog{
+		QueryViewCatalog: catalog,
+		prefetch: conc.Go(func() ([]*viewpb.QueryViewOfShard, error) {
+			return catalog.ListQueryViews(ctx)
+		}),
+	}
+}
+
+func (c *prefetchedQueryViewCatalog) takePrefetch() *conc.Future[[]*viewpb.QueryViewOfShard] {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	prefetch := c.prefetch
+	c.prefetch = nil
+	return prefetch
+}
+
+// ListQueryViews reads again when the early listing failed, as a listing
+// started now would have been attempted.
+func (c *prefetchedQueryViewCatalog) ListQueryViews(ctx context.Context) ([]*viewpb.QueryViewOfShard, error) {
+	if prefetch := c.takePrefetch(); prefetch != nil {
+		select {
+		case <-prefetch.Inner():
+			if views, err := prefetch.Await(); err == nil {
+				return views, nil
+			}
+		case <-ctx.Done():
+		}
+	}
+	return c.QueryViewCatalog.ListQueryViews(ctx)
+}
+
+func (c *prefetchedQueryViewCatalog) SaveQueryViews(ctx context.Context, views []*viewpb.QueryViewOfShard) error {
+	c.takePrefetch()
+	return c.QueryViewCatalog.SaveQueryViews(ctx, views)
+}
+
 func newDefaultQViewsRuntimeDependencies(
 	metaKV kv.MetaKv,
+	queryViewCatalog queryview.QueryViewCatalog,
 	etcdCli *clientv3.Client,
 	queryCoordCatalog metastore.QueryCoordCatalog,
 	resourceGroupManager nodeview.ResourceGroupStatePublisher,
@@ -291,7 +342,7 @@ func newDefaultQViewsRuntimeDependencies(
 			return schema.GetVersion(), nil
 		},
 		queryCoordCatalog:           queryCoordCatalog,
-		queryViewCatalog:            queryview.NewQueryViewCatalog(metaKV, "coord"),
+		queryViewCatalog:            queryViewCatalog,
 		queryNodeClient:             queryNodeManager,
 		resourceGroupManager:        resourceGroupManager,
 		dataViewProvider:            dataViewProvider,
