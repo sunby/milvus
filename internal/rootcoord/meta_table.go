@@ -82,6 +82,23 @@ type collectionRecoveryCatalog interface {
 	) (map[int64][]*model.Collection, error)
 }
 
+// rlsPolicyRecoveryCatalog loads the RLS policies of all recovered collections
+// with one metadata scan; see kv Catalog.ListRLSPoliciesForRecovery.
+type rlsPolicyRecoveryCatalog interface {
+	ListRLSPoliciesForRecovery(
+		ctx context.Context,
+		isRecovered func(collectionID int64) bool,
+	) (map[int64][]*model.RLSPolicy, bool, error)
+}
+
+// recoveredRLSPolicies holds the RLS policies that one recovery scan loaded
+// for every recovered collection, keyed by collection ID. Collections without
+// policies are absent. A nil *recoveredRLSPolicies means no bulk scan was
+// possible, and each collection's policies are read from the catalog.
+type recoveredRLSPolicies struct {
+	byCollectionID map[int64][]*model.RLSPolicy
+}
+
 type MetaTableChecker interface {
 	RBACChecker
 
@@ -295,9 +312,20 @@ func (mt *MetaTable) reload() error {
 		mlog.Bool("created", defaultDatabaseCreated),
 		mlog.Duration("duration", time.Since(defaultDatabaseStart)))
 
-	collectionsByDB, recoveryLoaderUsed, err := mt.loadCollectionsForRecovery()
+	collectionsByDB, recoveredCollections, recoveryLoaderUsed, err := mt.loadCollectionsForRecovery()
 	if err != nil {
 		return err
+	}
+	var rlsPolicies *recoveredRLSPolicies
+	if recoveryLoaderUsed {
+		// Every recovered collection is indexed below; size the indexes once.
+		mt.collID2Meta = make(map[UniqueID]*model.Collection, recoveredCollections)
+		mt.partitionName2ID = make(map[int64]map[string]int64, recoveredCollections)
+
+		rlsPolicies, err = mt.loadRLSPoliciesForRecovery(collectionsByDB, recoveredCollections)
+		if err != nil {
+			return err
+		}
 	}
 
 	// in order to support backward compatibility with meta of the old version, it also
@@ -308,7 +336,7 @@ func (mt *MetaTable) reload() error {
 		oldCollections := collectionsByDB[util.NonDBID]
 		mlog.Info(mt.ctx, "rootcoord legacy collection recovery result ready",
 			mlog.Int("numCollections", len(oldCollections)))
-		if err := mt.reloadWithNonDatabaseCollections(oldCollections); err != nil {
+		if err := mt.reloadWithNonDatabaseCollections(oldCollections, rlsPolicies); err != nil {
 			return err
 		}
 	} else {
@@ -350,11 +378,12 @@ func (mt *MetaTable) reload() error {
 				mlog.Int("numCollections", len(collections)),
 				mlog.Duration("duration", time.Since(catalogScanStart)))
 		}
-		if err := mt.reloadCollectionsRLSMetadata(mt.ctx, collections); err != nil {
+		if err := mt.reloadCollectionsRLSMetadata(mt.ctx, collections, rlsPolicies); err != nil {
 			return err
 		}
 
 		cacheBuildStart := time.Now()
+		mt.names.reserve(dbName, len(collections))
 		for index, collection := range collections {
 			if collection.DBName != "" && collection.DBName != dbName {
 				mlog.Warn(mt.ctx,
@@ -369,7 +398,7 @@ func (mt *MetaTable) reload() error {
 			ensureCollectionMaxFieldIDProperty(collection)
 			mt.collID2Meta[collection.CollectionID] = collection
 			// Build partition name index
-			mt.partitionName2ID[collection.CollectionID] = make(map[string]int64)
+			mt.partitionName2ID[collection.CollectionID] = make(map[string]int64, len(collection.Partitions))
 			for _, partition := range collection.Partitions {
 				if partition.Available() {
 					mt.partitionName2ID[collection.CollectionID][partition.PartitionName] = partition.PartitionID
@@ -502,10 +531,13 @@ func (mt *MetaTable) reload() error {
 	return nil
 }
 
-func (mt *MetaTable) loadCollectionsForRecovery() (map[int64][]*model.Collection, bool, error) {
+// loadCollectionsForRecovery returns the recovered collections by database ID
+// and their total count. The bool result is false when the catalog has no
+// recovery loader.
+func (mt *MetaTable) loadCollectionsForRecovery() (map[int64][]*model.Collection, int, bool, error) {
 	recoveryCatalog, ok := mt.catalog.(collectionRecoveryCatalog)
 	if !ok {
-		return nil, false, nil
+		return nil, 0, false, nil
 	}
 
 	dbIDs := make([]int64, 0, len(mt.dbName2Meta)+1)
@@ -523,7 +555,7 @@ func (mt *MetaTable) loadCollectionsForRecovery() (map[int64][]*model.Collection
 		typeutil.MaxTimestamp,
 	)
 	if err != nil {
-		return nil, true, err
+		return nil, 0, true, err
 	}
 	totalCollections := 0
 	for _, collections := range collectionsByDB {
@@ -533,7 +565,41 @@ func (mt *MetaTable) loadCollectionsForRecovery() (map[int64][]*model.Collection
 		mlog.Int("numCollections", totalCollections),
 		mlog.Int("numDatabases", len(mt.dbName2Meta)),
 		mlog.Duration("duration", time.Since(start)))
-	return collectionsByDB, true, nil
+	return collectionsByDB, totalCollections, true, nil
+}
+
+// loadRLSPoliciesForRecovery loads the RLS policies of every recovered
+// collection with one catalog scan, or returns nil when the catalog has none.
+func (mt *MetaTable) loadRLSPoliciesForRecovery(
+	collectionsByDB map[int64][]*model.Collection,
+	recoveredCollections int,
+) (*recoveredRLSPolicies, error) {
+	recoveryCatalog, ok := mt.catalog.(rlsPolicyRecoveryCatalog)
+	if !ok {
+		return nil, nil
+	}
+	// Built at the first policy key, so a cluster without policies never
+	// indexes every recovered collection ID.
+	var recoveredIDs typeutil.UniqueSet
+	isRecovered := func(collectionID int64) bool {
+		if recoveredIDs == nil {
+			recoveredIDs = make(typeutil.UniqueSet, recoveredCollections)
+			for _, collections := range collectionsByDB {
+				for _, collection := range collections {
+					recoveredIDs.Insert(collection.CollectionID)
+				}
+			}
+		}
+		return recoveredIDs.Contain(collectionID)
+	}
+	policies, supported, err := recoveryCatalog.ListRLSPoliciesForRecovery(mt.ctx, isRecovered)
+	if err != nil {
+		return nil, merr.Wrap(err, "failed to reload RLS policies")
+	}
+	if !supported {
+		return nil, nil
+	}
+	return &recoveredRLSPolicies{byCollectionID: policies}, nil
 }
 
 // insert into default database if the collections doesn't inside some database
@@ -546,17 +612,18 @@ func (mt *MetaTable) reloadWithNonDatabase() error {
 	mlog.Info(mt.ctx, "rootcoord legacy collection catalog scan done",
 		mlog.Int("numCollections", len(oldCollections)),
 		mlog.Duration("duration", time.Since(collectionScanStart)))
-	return mt.reloadWithNonDatabaseCollections(oldCollections)
+	return mt.reloadWithNonDatabaseCollections(oldCollections, nil)
 }
 
-func (mt *MetaTable) reloadWithNonDatabaseCollections(oldCollections []*model.Collection) error {
-	if err := mt.reloadCollectionsRLSMetadata(mt.ctx, oldCollections); err != nil {
+func (mt *MetaTable) reloadWithNonDatabaseCollections(oldCollections []*model.Collection, rlsPolicies *recoveredRLSPolicies) error {
+	if err := mt.reloadCollectionsRLSMetadata(mt.ctx, oldCollections, rlsPolicies); err != nil {
 		return err
 	}
 	collectionNum := int64(0)
 	partitionNum := int64(0)
 
 	cacheBuildStart := time.Now()
+	mt.names.reserve(util.DefaultDBName, len(oldCollections))
 	for index, collection := range oldCollections {
 		ensureCollectionMaxFieldIDProperty(collection)
 		mt.collID2Meta[collection.CollectionID] = collection
@@ -2867,6 +2934,12 @@ func (mt *MetaTable) reloadCollectionRLSMetadata(ctx context.Context, collection
 	if err != nil {
 		return merr.Wrapf(err, "failed to reload RLS policies for collection %d", collection.CollectionID)
 	}
+	return setRecoveredRLSPolicies(collection, policies)
+}
+
+// setRecoveredRLSPolicies replaces the collection's policy map with clones of
+// its stored policies. A nil slice leaves a nil map.
+func setRecoveredRLSPolicies(collection *model.Collection, policies []*model.RLSPolicy) error {
 	var recovered map[string]*model.RLSPolicy
 	if policies != nil {
 		recovered = make(map[string]*model.RLSPolicy, len(policies))
@@ -2888,7 +2961,9 @@ func (mt *MetaTable) reloadCollectionRLSMetadata(ctx context.Context, collection
 	return nil
 }
 
-func (mt *MetaTable) reloadCollectionsRLSMetadata(ctx context.Context, collections []*model.Collection) error {
+// reloadCollectionsRLSMetadata restores the collections' RLS policies from
+// recovered, or from the catalog when recovered is nil.
+func (mt *MetaTable) reloadCollectionsRLSMetadata(ctx context.Context, collections []*model.Collection, recovered *recoveredRLSPolicies) error {
 	for _, collection := range collections {
 		if collection == nil {
 			continue
@@ -2896,6 +2971,24 @@ func (mt *MetaTable) reloadCollectionsRLSMetadata(ctx context.Context, collectio
 		if _, err := common.IsRLSEnabled(collection.Properties...); err != nil {
 			return merr.WrapErrDataIntegrity(err, "invalid RLS properties for collection %d", collection.CollectionID)
 		}
+	}
+
+	if recovered != nil {
+		for _, collection := range collections {
+			if collection == nil {
+				continue
+			}
+			policies, ok := recovered.byCollectionID[collection.CollectionID]
+			if !ok {
+				// ListRLSPolicies returns an empty, non-nil slice for a
+				// collection without policies.
+				policies = []*model.RLSPolicy{}
+			}
+			if err := setRecoveredRLSPolicies(collection, policies); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 
 	group, groupCtx := errgroup.WithContext(ctx)
