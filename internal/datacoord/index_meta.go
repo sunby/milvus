@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/errors"
@@ -147,6 +148,23 @@ func (m *segmentBuildInfo) AddForRecovery(segIdx *model.SegmentIndex) {
 	m.taskStats.Add(segIdx.BuildID, newIndexTaskStats(segIdx))
 }
 
+// replayRecoveryTaskStats fills the task-stats LRU with the recovered segment
+// indexes, in scan order, that AddForRecovery adds over one pass in that
+// order: every one until the LRU is full, then the unfinished ones.
+// unfinished holds the positions of the unfinished ones, in any order.
+func (m *segmentBuildInfo) replayRecoveryTaskStats(segmentIndexes []*model.SegmentIndex, unfinished []int) {
+	next := 0
+	for ; next < len(segmentIndexes) && m.taskStats.Len() < taskStatsLRUCapacity; next++ {
+		m.taskStats.Add(segmentIndexes[next].BuildID, newIndexTaskStats(segmentIndexes[next]))
+	}
+	slices.Sort(unfinished)
+	for _, i := range unfinished {
+		if i >= next {
+			m.taskStats.Add(segmentIndexes[i].BuildID, newIndexTaskStats(segmentIndexes[i]))
+		}
+	}
+}
+
 func (m *segmentBuildInfo) Get(key UniqueID) (*model.SegmentIndex, bool) {
 	value, exists := m.buildID2SegmentIndex.Get(key)
 	return value, exists
@@ -175,6 +193,14 @@ func (m *segmentBuildInfo) GetTaskStats() []*metricsinfo.IndexTaskStats {
 
 // NewMeta creates meta from provided `kv.TxnKV`
 func newIndexMeta(ctx context.Context, catalog metastore.DataCoordCatalog) (*indexMeta, error) {
+	return recoverIndexMeta(ctx, catalog, nil)
+}
+
+// recoverIndexMeta creates the index meta like newIndexMeta. collectionIDs, the
+// collections recovery knows, split the scans of a catalog that reads key
+// ranges into parallel ranges; the indexes of other collections are read all
+// the same.
+func recoverIndexMeta(ctx context.Context, catalog metastore.DataCoordCatalog, collectionIDs []int64) (*indexMeta, error) {
 	mt := &indexMeta{
 		ctx:              ctx,
 		catalog:          catalog,
@@ -183,7 +209,7 @@ func newIndexMeta(ctx context.Context, catalog metastore.DataCoordCatalog) (*ind
 		segmentBuildInfo: newSegmentIndexBuildInfo(),
 		segmentIndexes:   typeutil.NewConcurrentMap[UniqueID, *typeutil.ConcurrentMap[UniqueID, *model.SegmentIndex]](),
 	}
-	err := mt.reloadFromKV()
+	err := mt.reloadFromKV(collectionIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +224,25 @@ type allSegmentIndexRecoveryCatalog interface {
 	ListAllSegmentIndexes(ctx context.Context) ([]*model.SegmentIndex, error)
 }
 
-func (m *indexMeta) listAllSegmentIndexes() ([]*model.SegmentIndex, error) {
+// rangedIndexRecoveryCatalog reads the index prefixes as parallel key ranges
+// split at the given collections, returning what ListIndexes and
+// ListAllSegmentIndexes return.
+type rangedIndexRecoveryCatalog interface {
+	ListIndexesForRecovery(ctx context.Context, collectionIDs []int64) ([]*model.Index, error)
+	ListAllSegmentIndexesForRecovery(ctx context.Context, collectionIDs []int64) ([]*model.SegmentIndex, error)
+}
+
+func (m *indexMeta) listIndexes(collectionIDs []int64) ([]*model.Index, error) {
+	if catalog, ok := m.catalog.(rangedIndexRecoveryCatalog); ok {
+		return catalog.ListIndexesForRecovery(m.ctx, collectionIDs)
+	}
+	return m.catalog.ListIndexes(m.ctx)
+}
+
+func (m *indexMeta) listAllSegmentIndexes(collectionIDs []int64) ([]*model.SegmentIndex, error) {
+	if catalog, ok := m.catalog.(rangedIndexRecoveryCatalog); ok {
+		return catalog.ListAllSegmentIndexesForRecovery(m.ctx, collectionIDs)
+	}
 	if catalog, ok := m.catalog.(allSegmentIndexRecoveryCatalog); ok {
 		return catalog.ListAllSegmentIndexes(m.ctx)
 	}
@@ -208,16 +252,16 @@ func (m *indexMeta) listAllSegmentIndexes() ([]*model.SegmentIndex, error) {
 }
 
 // reloadFromKV loads meta from KV storage
-func (m *indexMeta) reloadFromKV() error {
+func (m *indexMeta) reloadFromKV(collectionIDs []int64) error {
 	record := timerecord.NewTimeRecorder("indexMeta-reloadFromKV")
 
 	var segmentIndexes []*model.SegmentIndex
-	recoveredIndexSizes := make(map[UniqueID]map[UniqueID]uint64)
+	var recoveredIndexSizes map[UniqueID]map[UniqueID]uint64
 	g, _ := errgroup.WithContext(m.ctx)
 	g.Go(func() error {
 		fieldIndexScanStart := time.Now()
 		mlog.Info(m.ctx, "indexMeta field index catalog scan started")
-		fieldIndexes, err := m.catalog.ListIndexes(m.ctx)
+		fieldIndexes, err := m.listIndexes(collectionIDs)
 		if err != nil {
 			mlog.Error(m.ctx, "indexMeta reloadFromKV load field indexes fail",
 				mlog.Duration("duration", time.Since(fieldIndexScanStart)),
@@ -240,7 +284,7 @@ func (m *indexMeta) reloadFromKV() error {
 		scanStart := time.Now()
 		mlog.Info(m.ctx, "indexMeta global segment index catalog scan started")
 		var err error
-		segmentIndexes, err = m.listAllSegmentIndexes()
+		segmentIndexes, err = m.listAllSegmentIndexes(collectionIDs)
 		if err != nil {
 			mlog.Warn(m.ctx, "indexMeta global segment index catalog scan failed", mlog.Err(err))
 			return err
@@ -250,36 +294,7 @@ func (m *indexMeta) reloadFromKV() error {
 			mlog.Duration("duration", time.Since(scanStart)))
 
 		cacheBuildStart := time.Now()
-		for recoveredSegmentIndexes, segIdx := range segmentIndexes {
-			indexSizes, ok := recoveredIndexSizes[segIdx.CollectionID]
-			if !ok {
-				indexSizes = make(map[UniqueID]uint64)
-				recoveredIndexSizes[segIdx.CollectionID] = indexSizes
-			}
-			indexSizes[segIdx.IndexID] += segIdx.IndexSerializedSize
-
-			if segIdx.IndexMemSize == 0 {
-				segIdx.IndexMemSize = segIdx.IndexSerializedSize * paramtable.Get().DataCoordCfg.IndexMemSizeEstimateMultiplier.GetAsUint64()
-			}
-			indexes, ok := m.segmentIndexes.Get(segIdx.SegmentID)
-			if ok {
-				indexes.Insert(segIdx.IndexID, segIdx)
-			} else {
-				indexes = typeutil.NewConcurrentMap[UniqueID, *model.SegmentIndex]()
-				indexes.Insert(segIdx.IndexID, segIdx)
-				m.segmentIndexes.Insert(segIdx.SegmentID, indexes)
-			}
-			old, _ := m.segmentBuildInfo.Get(segIdx.BuildID)
-			m.taskCounts.replaceTask(old, segIdx)
-			m.segmentBuildInfo.AddForRecovery(segIdx)
-			completed := recoveredSegmentIndexes + 1
-			if completed%segmentIndexCacheRecoveryProgressLogInterval == 0 && completed < len(segmentIndexes) {
-				mlog.Info(m.ctx, "indexMeta segment index cache rebuild progress",
-					mlog.Int("completedSegmentIndexes", completed),
-					mlog.Int("totalSegmentIndexes", len(segmentIndexes)),
-					mlog.Duration("duration", time.Since(cacheBuildStart)))
-			}
-		}
+		recoveredIndexSizes = m.rebuildSegmentIndexCache(segmentIndexes)
 		mlog.Info(m.ctx, "indexMeta segment index cache rebuild done",
 			mlog.Int("numSegmentIndexes", len(segmentIndexes)),
 			mlog.Duration("duration", time.Since(cacheBuildStart)))
@@ -305,6 +320,104 @@ func (m *indexMeta) reloadFromKV() error {
 
 	mlog.Info(m.ctx, "indexMeta reloadFromKV done", mlog.Duration("duration", record.ElapseSpan()))
 	return nil
+}
+
+// rebuildSegmentIndexCache installs the recovered segment indexes, in scan
+// order, the way one pass over them in that order does, and returns their
+// stored sizes by collection and index. It runs on recovery workers: sharded
+// by segment ID for the per-segment index maps and the sizes, then by build ID
+// for the build table, so the records of one key are installed in scan order,
+// then by index for the task counts. The task-stats LRU, whose content depends
+// on the order of every record, is then filled with the records such a pass
+// adds to it, in that order.
+func (m *indexMeta) rebuildSegmentIndexCache(segmentIndexes []*model.SegmentIndex) map[UniqueID]map[UniqueID]uint64 {
+	start := time.Now()
+	workers := recoveryWorkers()
+	memSizeMultiplier := paramtable.Get().DataCoordCfg.IndexMemSizeEstimateMultiplier.GetAsUint64()
+
+	sizes := make([]map[UniqueID]map[UniqueID]uint64, workers)
+	for worker := range sizes {
+		sizes[worker] = make(map[UniqueID]map[UniqueID]uint64)
+	}
+	_ = forEachInShards(len(segmentIndexes), workers, func(i int) int64 { return segmentIndexes[i].SegmentID }, func(worker, i int) error {
+		segIdx := segmentIndexes[i]
+		indexSizes, ok := sizes[worker][segIdx.CollectionID]
+		if !ok {
+			indexSizes = make(map[UniqueID]uint64)
+			sizes[worker][segIdx.CollectionID] = indexSizes
+		}
+		indexSizes[segIdx.IndexID] += segIdx.IndexSerializedSize
+
+		if segIdx.IndexMemSize == 0 {
+			segIdx.IndexMemSize = segIdx.IndexSerializedSize * memSizeMultiplier
+		}
+		indexes, ok := m.segmentIndexes.Get(segIdx.SegmentID)
+		if !ok {
+			indexes = typeutil.NewConcurrentMap[UniqueID, *model.SegmentIndex]()
+			m.segmentIndexes.Insert(segIdx.SegmentID, indexes)
+		}
+		indexes.Insert(segIdx.IndexID, segIdx)
+		return nil
+	})
+
+	unfinished := make([][]int, workers)
+	var rebuilt atomic.Int64
+	_ = forEachInShards(len(segmentIndexes), workers, func(i int) int64 { return segmentIndexes[i].BuildID }, func(worker, i int) error {
+		segIdx := segmentIndexes[i]
+		m.segmentBuildInfo.buildID2SegmentIndex.Insert(segIdx.BuildID, segIdx)
+		if segIdx.IndexState != commonpb.IndexState_Finished {
+			unfinished[worker] = append(unfinished[worker], i)
+		}
+		if completed := int(rebuilt.Add(1)); completed%segmentIndexCacheRecoveryProgressLogInterval == 0 && completed < len(segmentIndexes) {
+			mlog.Info(m.ctx, "indexMeta segment index cache rebuild progress",
+				mlog.Int("completedSegmentIndexes", completed),
+				mlog.Int("totalSegmentIndexes", len(segmentIndexes)),
+				mlog.Duration("duration", time.Since(start)))
+		}
+		return nil
+	})
+
+	// Replacing the task of a build by each of its records in turn
+	// (replaceTask) leaves the count of its last record, the one the build
+	// table holds: count those, sharded by index so the workers count
+	// disjoint indexes.
+	counts := make([]map[[2]int64]indexTaskStateCounts, workers)
+	for worker := range counts {
+		counts[worker] = make(map[[2]int64]indexTaskStateCounts)
+	}
+	_ = forEachInShards(len(segmentIndexes), workers, func(i int) int64 {
+		return segmentIndexes[i].CollectionID*1000003 + segmentIndexes[i].IndexID
+	}, func(worker, i int) error {
+		segIdx := segmentIndexes[i]
+		if last, _ := m.segmentBuildInfo.Get(segIdx.BuildID); last != segIdx {
+			return nil
+		}
+		if key, slot, ok := taskCountSlot(segIdx); ok {
+			taskCounts := counts[worker][key]
+			taskCounts[slot]++
+			counts[worker][key] = taskCounts
+		}
+		return nil
+	})
+	for _, workerCounts := range counts {
+		m.taskCounts.addTasks(workerCounts)
+	}
+	m.segmentBuildInfo.replayRecoveryTaskStats(segmentIndexes, slices.Concat(unfinished...))
+
+	recoveredIndexSizes := sizes[0]
+	for _, workerSizes := range sizes[1:] {
+		for collectionID, indexSizes := range workerSizes {
+			merged, ok := recoveredIndexSizes[collectionID]
+			if !ok {
+				recoveredIndexSizes[collectionID] = indexSizes
+				continue
+			}
+			for indexID, size := range indexSizes {
+				merged[indexID] += size
+			}
+		}
+	}
+	return recoveredIndexSizes
 }
 
 func (m *indexMeta) updateCollectionIndex(index *model.Index) {
