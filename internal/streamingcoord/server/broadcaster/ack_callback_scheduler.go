@@ -295,9 +295,7 @@ func (s *ackCallbackScheduler) executeAckCallback(bt *broadcastTask, g *lockGuar
 	}
 	bt.ObserveAckWaitDone()
 	logger.Debug(ctx, "all vchannels are acked")
-	bt.mu.Lock()
-	bt.schemaTargetEligible = true
-	bt.mu.Unlock()
+	bt.markSchemaTargetEligible()
 
 	msg, result := bt.BroadcastResult()
 	makeMap := make(map[string]*message.AppendResult, len(result))
