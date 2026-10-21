@@ -388,6 +388,62 @@ func (kc *Catalog) scanRecoveryFunctions(
 	return err
 }
 
+// ListRLSPoliciesForRecovery returns, for every collection isRecovered accepts,
+// exactly what ListRLSPolicies returns, using one walk of the policy prefix.
+// Keys of other collections are not decoded, and collections without policies
+// are absent. The bool result is false when the store cannot walk prefixes.
+func (kc *Catalog) ListRLSPoliciesForRecovery(
+	ctx context.Context,
+	isRecovered func(collectionID int64) bool,
+) (map[int64][]*model.RLSPolicy, bool, error) {
+	if kc.metaKV == nil {
+		return nil, false, nil
+	}
+	prefix := RLSPolicyMetaPrefix + "/"
+	fullPrefix := kc.metaKV.GetPath(prefix)
+	policiesByCollectionID := make(map[int64][]*model.RLSPolicy)
+	err := kc.walkRecoveryPrefix(ctx, prefix, func(key, value []byte) error {
+		collectionID, ok := rlsPolicyKeyCollectionID(fullPrefix, key)
+		if !ok || !isRecovered(collectionID) {
+			return nil
+		}
+		policy, err := unmarshalRLSPolicy(value)
+		if err != nil {
+			return merr.Wrapf(err, "RLS policy key %s of collection %d", key, collectionID)
+		}
+		policiesByCollectionID[collectionID] = append(policiesByCollectionID[collectionID], policy)
+		return nil
+	})
+	if err != nil {
+		return nil, true, err
+	}
+	for _, policies := range policiesByCollectionID {
+		sortRLSPolicies(policies)
+	}
+	return policiesByCollectionID, true, nil
+}
+
+// rlsPolicyKeyCollectionID returns the collection whose BuildRLSPolicyPrefix
+// covers key: the path segment after fullPrefix, in the decimal form that
+// BuildRLSPolicyPrefix formats, followed by a slash. Unlike recoveryKeyFirstID
+// it accepts a key equal to that prefix and rejects IDs such as "+20" or "020",
+// as a LoadWithPrefix of BuildRLSPolicyPrefix does.
+func rlsPolicyKeyCollectionID(fullPrefix string, key []byte) (int64, bool) {
+	suffix, ok := strings.CutPrefix(string(key), fullPrefix)
+	if !ok {
+		return 0, false
+	}
+	idPart, _, found := strings.Cut(suffix, "/")
+	if !found {
+		return 0, false
+	}
+	collectionID, err := strconv.ParseInt(idPart, 10, 64)
+	if err != nil || strconv.FormatInt(collectionID, 10) != idPart {
+		return 0, false
+	}
+	return collectionID, true
+}
+
 func (kc *Catalog) walkRecoveryPrefix(
 	ctx context.Context,
 	prefix string,

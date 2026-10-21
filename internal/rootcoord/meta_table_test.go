@@ -18,6 +18,7 @@ package rootcoord
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"strconv"
 	"sync"
@@ -26,15 +27,18 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
+	memkv "github.com/milvus-io/milvus/internal/kv/mem"
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/metastore/kv/rootcoord"
 	"github.com/milvus-io/milvus/internal/metastore/mocks"
@@ -384,7 +388,7 @@ func TestReloadCollectionsRLSMetadataRestoresDisabledCollection(t *testing.T) {
 				CollectionID: 20, PolicyID: 100, PolicyName: "tenant", UsingExpr: `dept == "sales"`,
 			}}, nil).Once()
 
-			require.NoError(t, meta.reloadCollectionsRLSMetadata(context.Background(), []*model.Collection{collection}))
+			require.NoError(t, meta.reloadCollectionsRLSMetadata(context.Background(), []*model.Collection{collection}, nil))
 			require.Len(t, collection.RLSPolicies, 1)
 			require.Equal(t, int64(100), collection.RLSPolicies["tenant"].PolicyID)
 			require.ErrorContains(t, validateRLSNoReferencedFieldDropped(collection, []int64{101}), "tenant")
@@ -403,7 +407,7 @@ func TestReloadCollectionsRLSMetadataRejectsInvalidProperty(t *testing.T) {
 		},
 	}
 
-	err := meta.reloadCollectionsRLSMetadata(context.Background(), []*model.Collection{collection})
+	err := meta.reloadCollectionsRLSMetadata(context.Background(), []*model.Collection{collection}, nil)
 	require.ErrorIs(t, err, merr.ErrDataIntegrity)
 }
 
@@ -416,7 +420,7 @@ func TestReloadDisabledCollectionRLSMetadataPropagatesCatalogError(t *testing.T)
 	catalog.EXPECT().ListRLSPolicies(mock.Anything, int64(20)).Return(
 		nil, merr.WrapErrServiceUnavailableMsg("catalog unavailable")).Once()
 
-	err := meta.reloadCollectionsRLSMetadata(context.Background(), []*model.Collection{collection})
+	err := meta.reloadCollectionsRLSMetadata(context.Background(), []*model.Collection{collection}, nil)
 	require.ErrorIs(t, err, merr.ErrServiceUnavailable)
 	require.Same(t, policy, collection.RLSPolicies["tenant"])
 }
@@ -597,7 +601,7 @@ func TestReloadCollectionsRLSMetadataQueriesAllCollections(t *testing.T) {
 		catalog.EXPECT().ListRLSPolicies(mock.Anything, id).Return(nil, nil).Once()
 	}
 
-	require.NoError(t, meta.reloadCollectionsRLSMetadata(context.Background(), collections))
+	require.NoError(t, meta.reloadCollectionsRLSMetadata(context.Background(), collections, nil))
 }
 
 func TestReloadCollectionsRLSMetadataUsesBoundedConcurrency(t *testing.T) {
@@ -638,7 +642,7 @@ func TestReloadCollectionsRLSMetadataUsesBoundedConcurrency(t *testing.T) {
 	done := make(chan struct{})
 	var reloadErr error
 	go func() {
-		reloadErr = meta.reloadCollectionsRLSMetadata(context.Background(), collections)
+		reloadErr = meta.reloadCollectionsRLSMetadata(context.Background(), collections, nil)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -657,6 +661,79 @@ func TestReloadCollectionsRLSMetadataUsesBoundedConcurrency(t *testing.T) {
 	<-done
 	require.NoError(t, reloadErr)
 	assert.LessOrEqual(t, maxInFlight.Load(), int32(rlsRecoveryConcurrency))
+}
+
+func TestReloadCollectionsRLSMetadataUsesRecoveredPolicies(t *testing.T) {
+	// No ListRLSPolicies expectation: a per-collection read fails the test.
+	meta := &MetaTable{catalog: mocks.NewRootCoordCatalog(t)}
+	stored := []*model.RLSPolicy{
+		{DBID: 99, CollectionID: 20, PolicyID: 100, PolicyName: "a", Actions: []rlsutil.PolicyAction{rlsutil.PolicyActionQuery}},
+		{DBID: 99, CollectionID: 20, PolicyID: 101, PolicyName: "b"},
+	}
+	recovered := &recoveredRLSPolicies{byCollectionID: map[int64][]*model.RLSPolicy{20: stored}}
+	inDatabase := &model.Collection{
+		DBID:         11,
+		CollectionID: 20,
+		Properties:   []*commonpb.KeyValuePair{{Key: common.RLSEnabledKey, Value: "true"}},
+	}
+	// A migrated legacy collection is recovered in two buckets as two objects.
+	legacy := &model.Collection{DBID: util.DefaultDBID, CollectionID: 20}
+	withoutPolicies := &model.Collection{
+		CollectionID: 30,
+		RLSPolicies:  map[string]*model.RLSPolicy{"stale": {PolicyName: "stale"}},
+	}
+
+	require.NoError(t, meta.reloadCollectionsRLSMetadata(context.Background(),
+		[]*model.Collection{nil, inDatabase, legacy, withoutPolicies}, recovered))
+
+	require.Len(t, inDatabase.RLSPolicies, 2)
+	require.Len(t, legacy.RLSPolicies, 2)
+	for name, policy := range inDatabase.RLSPolicies {
+		assert.Equal(t, int64(11), policy.DBID)
+		assert.Equal(t, util.DefaultDBID, legacy.RLSPolicies[name].DBID)
+		assert.NotSame(t, policy, legacy.RLSPolicies[name])
+	}
+	assert.Equal(t, int64(100), inDatabase.RLSPolicies["a"].PolicyID)
+	inDatabase.RLSPolicies["a"].Actions[0] = rlsutil.PolicyActionInsert
+	assert.Equal(t, rlsutil.PolicyActionQuery, stored[0].Actions[0])
+	assert.Equal(t, int64(99), stored[0].DBID)
+	require.NotNil(t, withoutPolicies.RLSPolicies, "same non-nil empty map as an empty ListRLSPolicies result")
+	assert.Empty(t, withoutPolicies.RLSPolicies)
+}
+
+func TestReloadCollectionsRLSMetadataRecoveredPoliciesKeepValidation(t *testing.T) {
+	meta := &MetaTable{catalog: mocks.NewRootCoordCatalog(t)}
+	existing := &model.RLSPolicy{CollectionID: 20, PolicyID: 99, PolicyName: "existing"}
+	collection := &model.Collection{CollectionID: 20, RLSPolicies: map[string]*model.RLSPolicy{"existing": existing}}
+	duplicates := &recoveredRLSPolicies{byCollectionID: map[int64][]*model.RLSPolicy{20: {
+		{CollectionID: 20, PolicyID: 100, PolicyName: "tenant"},
+		{CollectionID: 20, PolicyID: 101, PolicyName: "tenant"},
+	}}}
+
+	err := meta.reloadCollectionsRLSMetadata(context.Background(), []*model.Collection{collection}, duplicates)
+	require.ErrorIs(t, err, merr.ErrDataIntegrity)
+	require.ErrorContains(t, err, "duplicate RLS policy name")
+	require.Same(t, existing, collection.RLSPolicies["existing"])
+
+	collection.Properties = []*commonpb.KeyValuePair{{Key: common.RLSEnabledKey, Value: "invalid"}}
+	err = meta.reloadCollectionsRLSMetadata(context.Background(), []*model.Collection{collection}, &recoveredRLSPolicies{})
+	require.ErrorIs(t, err, merr.ErrDataIntegrity)
+	require.Same(t, existing, collection.RLSPolicies["existing"])
+}
+
+func TestLoadRLSPoliciesForRecoveryFallsBackWithoutBulkScan(t *testing.T) {
+	collectionsByDB := map[int64][]*model.Collection{util.DefaultDBID: {{CollectionID: 20}}}
+
+	meta := &MetaTable{ctx: context.Background(), catalog: mocks.NewRootCoordCatalog(t)}
+	recovered, err := meta.loadRLSPoliciesForRecovery(collectionsByDB, 1)
+	require.NoError(t, err)
+	assert.Nil(t, recovered)
+
+	kvCatalog := rootcoord.NewCatalog(memkv.NewMemoryKV())
+	meta = &MetaTable{ctx: context.Background(), catalog: kvCatalog}
+	recovered, err = meta.loadRLSPoliciesForRecovery(collectionsByDB, 1)
+	require.NoError(t, err)
+	assert.Nil(t, recovered, "a store without prefix walks keeps per-collection reads")
 }
 
 func buildAlterUserMessage(credInfo *internalpb.CredentialInfo, timetick uint64) message.BroadcastResultAlterUserMessageV2 {
@@ -5464,4 +5541,104 @@ func TestMetaTableReloadNormalizesMaxFieldIDProperty(t *testing.T) {
 	require.NoError(t, err)
 	props := common.CloneKeyValuePairs(coll.Properties).ToMap()
 	require.Equal(t, "105", props[common.MaxFieldIDKey])
+}
+
+// rlsReadCountingCatalog counts per-collection policy reads; the embedded
+// catalog keeps its recovery scans.
+type rlsReadCountingCatalog struct {
+	*rootcoord.Catalog
+	perCollectionReads atomic.Int32
+}
+
+func (c *rlsReadCountingCatalog) ListRLSPolicies(ctx context.Context, collectionID int64) ([]*model.RLSPolicy, error) {
+	c.perCollectionReads.Add(1)
+	return c.Catalog.ListRLSPolicies(ctx, collectionID)
+}
+
+func TestMetaTableReloadRecoversRLSPoliciesWithOneScan(t *testing.T) {
+	ctx := context.Background()
+	channel.ResetStaticPChannelStatsManager()
+	kv, _ := kvfactory.GetEtcdAndPath()
+	catalogKV := etcdkv.NewEtcdKV(kv, funcutil.RandomString(10)+"/meta")
+	catalog := &rlsReadCountingCatalog{Catalog: rootcoord.NewCatalog(catalogKV).(*rootcoord.Catalog)}
+	allocator := mocktso.NewAllocator(t)
+	allocator.EXPECT().GenerateTSO(mock.Anything).Return(1000, nil)
+
+	meta, err := NewMetaTable(ctx, catalog, allocator)
+	require.NoError(t, err)
+	for _, collectionID := range []int64{1, 2} {
+		vchannel := fmt.Sprintf("vchannel-%d", collectionID)
+		require.NoError(t, meta.AddCollection(ctx, &model.Collection{
+			CollectionID:         collectionID,
+			DBID:                 util.DefaultDBID,
+			DBName:               util.DefaultDBName,
+			Name:                 fmt.Sprintf("rls_recovery_%d", collectionID),
+			PhysicalChannelNames: []string{"pchannel"},
+			VirtualChannelNames:  []string{vchannel},
+			State:                pb.CollectionState_CollectionCreated,
+			Fields:               []*model.Field{{FieldID: 100, Name: "pk", DataType: schemapb.DataType_Int64}},
+			ShardInfos:           map[string]*model.ShardInfo{vchannel: {VChannelName: vchannel, PChannelName: "pchannel"}},
+		}))
+	}
+	// A collection without a database is recovered by the legacy call site.
+	legacy, err := proto.Marshal(&pb.CollectionInfo{
+		ID:     3,
+		DbId:   util.NonDBID,
+		Schema: &schemapb.CollectionSchema{Name: "rls_recovery_legacy"},
+		State:  pb.CollectionState_CollectionCreated,
+	})
+	require.NoError(t, err)
+	require.NoError(t, catalogKV.Save(ctx, rootcoord.BuildCollectionKey(util.NonDBID, 3), string(legacy)))
+
+	for _, policy := range []*model.RLSPolicy{
+		{DBID: 77, CollectionID: 1, PolicyID: 11, PolicyName: "tenant", UsingExpr: "true"},
+		{DBID: 77, CollectionID: 1, PolicyID: 12, PolicyName: "owner", CheckExpr: "true"},
+		{DBID: 77, CollectionID: 3, PolicyID: 31, PolicyName: "legacy"},
+		{DBID: 77, CollectionID: 999, PolicyID: 991, PolicyName: "orphan"},
+	} {
+		require.NoError(t, catalog.SaveRLSPolicy(ctx, policy))
+	}
+	// Collection 999 was never recovered, so its corrupt record is never decoded.
+	require.NoError(t, catalogKV.Save(ctx, rootcoord.BuildRLSPolicyKey(999, 992), "corrupt-policy"))
+
+	reload := func() (*MetaTable, error) {
+		channel.ResetStaticPChannelStatsManager()
+		catalog.perCollectionReads.Store(0)
+		return NewMetaTable(ctx, catalog, allocator)
+	}
+
+	meta, err = reload()
+	require.NoError(t, err)
+	assert.Zero(t, catalog.perCollectionReads.Load(), "both call sites use the single scan")
+	require.ElementsMatch(t, []string{"owner", "tenant"}, lo.Keys(meta.collID2Meta[1].RLSPolicies))
+	require.Len(t, meta.collID2Meta[3].RLSPolicies, 1)
+	require.NotNil(t, meta.collID2Meta[2].RLSPolicies)
+	assert.Empty(t, meta.collID2Meta[2].RLSPolicies)
+	for _, collectionID := range []int64{1, 2, 3} {
+		recovered := meta.collID2Meta[collectionID]
+		perCollection := &model.Collection{CollectionID: collectionID, DBID: recovered.DBID}
+		require.NoError(t, meta.reloadCollectionRLSMetadata(ctx, perCollection))
+		assert.Equal(t, perCollection.RLSPolicies, recovered.RLSPolicies, "collection %d", collectionID)
+	}
+	assert.Equal(t, util.DefaultDBID, meta.collID2Meta[1].RLSPolicies["tenant"].DBID)
+
+	// Duplicate policy names of a recovered collection still fail recovery.
+	require.NoError(t, catalog.SaveRLSPolicy(ctx, &model.RLSPolicy{CollectionID: 2, PolicyID: 21, PolicyName: "dup"}))
+	require.NoError(t, catalog.SaveRLSPolicy(ctx, &model.RLSPolicy{CollectionID: 2, PolicyID: 22, PolicyName: "dup"}))
+	meta, err = reload()
+	require.ErrorIs(t, err, merr.ErrDataIntegrity)
+	require.ErrorContains(t, err, "duplicate RLS policy name")
+	require.Nil(t, meta)
+	require.NoError(t, catalog.DropRLSPolicy(ctx, 2, 22))
+
+	// So does a corrupt policy record of a recovered collection.
+	require.NoError(t, catalogKV.Save(ctx, rootcoord.BuildRLSPolicyKey(1, 13), "corrupt-policy"))
+	meta, err = reload()
+	require.ErrorIs(t, err, merr.ErrDataIntegrity)
+	require.Nil(t, meta)
+	require.NoError(t, catalog.DropRLSPolicy(ctx, 1, 13))
+
+	meta, err = reload()
+	require.NoError(t, err)
+	require.Len(t, meta.collID2Meta[2].RLSPolicies, 1)
 }

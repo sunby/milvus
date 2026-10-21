@@ -2388,19 +2388,32 @@ func (kc *Catalog) ListRLSPolicies(ctx context.Context, collectionID int64) ([]*
 	}
 	policies := make([]*model.RLSPolicy, 0, len(values))
 	for _, value := range values {
-		info := &rootcoordpb.RLSPolicyInfo{}
-		if err := proto.Unmarshal([]byte(value), info); err != nil {
-			return nil, merr.WrapErrDataIntegrity(err, "unmarshal RLS policy info")
+		policy, err := unmarshalRLSPolicy([]byte(value))
+		if err != nil {
+			return nil, err
 		}
-		policies = append(policies, model.UnmarshalRLSPolicyModel(info))
+		policies = append(policies, policy)
 	}
+	sortRLSPolicies(policies)
+	return policies, nil
+}
+
+func unmarshalRLSPolicy(value []byte) (*model.RLSPolicy, error) {
+	info := &rootcoordpb.RLSPolicyInfo{}
+	if err := proto.Unmarshal(value, info); err != nil {
+		return nil, merr.WrapErrDataIntegrity(err, "unmarshal RLS policy info")
+	}
+	return model.UnmarshalRLSPolicyModel(info), nil
+}
+
+// sortRLSPolicies orders one collection's policies by name, then policy ID.
+func sortRLSPolicies(policies []*model.RLSPolicy) {
 	sort.Slice(policies, func(i, j int) bool {
 		if policies[i].PolicyName == policies[j].PolicyName {
 			return policies[i].PolicyID < policies[j].PolicyID
 		}
 		return policies[i].PolicyName < policies[j].PolicyName
 	})
-	return policies, nil
 }
 
 func buildRLSPrincipalKey(collectionID int64, principalName string) string {
