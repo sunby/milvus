@@ -258,6 +258,30 @@ func newMeta(ctx context.Context, catalog metastore.DataCoordCatalog, chunkManag
 func newMetaWithPersist(ctx context.Context, catalog metastore.DataCoordCatalog, chunkManager storage.ChunkManager, metaStore metacache.MetaStore, broker broker.Broker,
 	segmentPersist OptimisticTxnPersist[string, *datapb.SegmentInfo], metaRootPath string,
 ) (*meta, error) {
+	mt, err := newMetaWithoutManifestIndexes(ctx, catalog, chunkManager, metaStore, broker, segmentPersist, metaRootPath)
+	if err != nil {
+		return nil, err
+	}
+	// Recovery follows the durable storage location, not the current write
+	// mode. A segment marked manifest_has_index may contain records published
+	// while the switch was previously on, so it must still be loaded after the
+	// switch is turned off. Unmarked clusters perform no manifest reads.
+	if err := mt.reloadSegmentIndexesFromManifests(ctx); err != nil {
+		mt.closeManifestCommitExecutor()
+		// Object-store reads have already retried per segment. Re-entering
+		// initMeta's metastore retry would reread every successful manifest.
+		return nil, retry.Unrecoverable(err)
+	}
+	return mt, nil
+}
+
+// newMetaWithoutManifestIndexes is newMetaWithPersist without recovering the
+// segment indexes recorded in segment manifests, which needs only the
+// segments and the index meta it recovers. The caller must run
+// reloadSegmentIndexesFromManifests before the meta is used.
+func newMetaWithoutManifestIndexes(ctx context.Context, catalog metastore.DataCoordCatalog, chunkManager storage.ChunkManager, metaStore metacache.MetaStore, broker broker.Broker,
+	segmentPersist OptimisticTxnPersist[string, *datapb.SegmentInfo], metaRootPath string,
+) (*meta, error) {
 	metaRecoveryStart := time.Now()
 	mlog.Info(ctx, "datacoord meta recovery started")
 
@@ -401,16 +425,6 @@ func newMetaWithPersist(ctx context.Context, catalog metastore.DataCoordCatalog,
 	mt.statsTaskMeta = stm
 	mt.externalCollectionRefreshMeta = ecrm
 	mt.snapshotMeta = spm
-
-	// Recovery follows the durable storage location, not the current write
-	// mode. A segment marked manifest_has_index may contain records published
-	// while the switch was previously on, so it must still be loaded after the
-	// switch is turned off. Unmarked clusters perform no manifest reads.
-	if err := mt.reloadSegmentIndexesFromManifests(ctx); err != nil {
-		// Object-store reads have already retried per segment. Re-entering
-		// initMeta's metastore retry would reread every successful manifest.
-		return nil, retry.Unrecoverable(err)
-	}
 
 	// Segment change groups load AFTER segments are in memory: the recovery
 	// index build exempts L0 superseded parents, which requires segment levels
