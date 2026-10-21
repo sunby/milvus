@@ -77,7 +77,7 @@ not skip its observation.
 |---|---|---|
 | Tracker Owner | `Tracker.Track` | BroadcastAck releases ordinary messages immediately or broadcast messages after Coordinator Ack. |
 | Dispatch Retained | `Owner.Clone` | RecoveryStorage releases after synchronous manager dispatch. |
-| VChannel dispatch Retained | Manager clones for each routed VChannel | Manager releases after synchronous VChannel observation. |
+| VChannel dispatch Retained | Manager clones for each routed VChannel, except for a VChannel that a TimeTick only advances in time | Manager releases after synchronous VChannel observation. |
 | Segment Retained | Segment exposes concrete async work | Object/lifecycle work succeeds after recovery metadata is installed and dirty. |
 | WALSummary | Copies records without retaining a handle | `LastAcked()` independently bounds checkpoint publication. |
 | WALMaterializer | Clones Delete/Txn and explicit Flush/lifecycle requests | Covered L0 output succeeds and recovery metadata is installed and dirty. Durable VChannel cursor separately controls GC. |

@@ -62,10 +62,14 @@ materialized/observed positions; a metadata no-op must not suppress its Delete
 observation.
 
 For a PChannel-scoped message, the manager gives every affected VChannel an
-independent dispatch clone. Every SegmentView exposing asynchronous work clones
-again before VChannel observation returns. WALMaterializer clones Delete/Txn
-and explicit Flush/lifecycle messages until L0 completion and installation of
-dirty metadata.
+independent dispatch clone. A TimeTick, or an MVCCBarrier sent in its place,
+only advances a VChannel without a pending Drop or a query resource, and does
+nothing to a closing one: such a VChannel takes it under its lock without a
+clone or a dirty mark, so a TimeTick stays cheap on PChannels with many
+VChannels. Every SegmentView
+exposing asynchronous work clones again before VChannel observation returns.
+WALMaterializer clones Delete/Txn and explicit Flush/lifecycle messages until
+L0 completion and installation of dirty metadata.
 
 ## 3. VChannel Metadata State
 

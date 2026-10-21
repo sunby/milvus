@@ -242,6 +242,15 @@ func (info *VChannelView) IsTombstoned() bool {
 	return info.meta.GetState() == streamingpb.VChannelState_VCHANNEL_STATE_TOMBSTONED
 }
 
+// IsClosingOrTombstoned reports a vchannel that ignores later messages. It is
+// on the per-TimeTick path of every module, so it unlocks without defer.
+func (info *VChannelView) IsClosingOrTombstoned() bool {
+	info.mu.Lock()
+	ignored := info.closingLocked(0) || info.meta.GetState() == streamingpb.VChannelState_VCHANNEL_STATE_TOMBSTONED
+	info.mu.Unlock()
+	return ignored
+}
+
 type existingCreateCollectionDecision int
 
 const (
