@@ -1311,11 +1311,6 @@ func (m *meta) GetSegment(ctx context.Context, segID UniqueID) *SegmentInfo {
 	return m.segments.GetSegment(segID)
 }
 
-// GetAllSegmentsUnsafe returns all segments
-func (m *meta) GetAllSegmentsUnsafe() []*SegmentInfo {
-	return m.segments.GetSegments()
-}
-
 func (m *meta) GetSegmentsTotalNumRows(segmentIDs []UniqueID) int64 {
 	var sum int64 = 0
 	for _, segmentID := range segmentIDs {
