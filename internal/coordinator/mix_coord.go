@@ -1720,6 +1720,9 @@ func (s *mixCoordImpl) WatchQueryViewSegmentLoadInfo(stream querypb.QueryCoord_W
 func (s *mixCoordImpl) initDataAndQueryCoord() error {
 	// Recover DataViews before QueryViews acquire their exact-version references.
 	// Neither coordinator starts background GC/balancing until both have recovered.
+	// QueryCoord's metadata reads need nothing DataCoord recovers: start them
+	// now so their cold etcd reads overlap DataCoord recovery.
+	s.queryCoordServer.StartMetaPrefetch()
 	dataCoordRecoveryStart := time.Now()
 	mlog.Info(s.ctx, "dataCoord recovery started")
 	s.datacoordServer.SetFileResourceObserver(s.fileResourceObserver)
