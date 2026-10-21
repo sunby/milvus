@@ -624,7 +624,7 @@ func (m *meta) installRecoveredSegments(ctx context.Context, segments []*datapb.
 		aggregates[worker] = newSegmentRecoveryMetricAggregates()
 		compactToChanges[worker] = make([][]compactToChange, workers)
 	}
-	var installed atomic.Int64
+	installed := newRecoveryProgress(workers, segmentCacheRecoveryProgressLogInterval)
 	err := forEachInShards(len(segments), workers, func(i int) int64 { return segments[i].GetID() }, func(worker, i int) error {
 		normalized, err := normalize(segments[i])
 		if err != nil {
@@ -635,7 +635,7 @@ func (m *meta) installRecoveredSegments(ctx context.Context, segments []*datapb.
 			appendCompactToChanges(compactToChanges[worker], i, old, normalized)
 		}
 		aggregates[worker].Add(info)
-		if done := int(installed.Add(1)); done%segmentCacheRecoveryProgressLogInterval == 0 && done < len(segments) {
+		if done, report := installed.add(worker); report && done < len(segments) {
 			mlog.Info(ctx, "datacoord segment cache rebuild progress",
 				mlog.Int("completedSegments", done),
 				mlog.Int("totalSegments", len(segments)),
