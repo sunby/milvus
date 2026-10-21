@@ -242,7 +242,11 @@ func (s *casSegmentStore) ListSegments(ctx context.Context, collectionIDs []int6
 		return nil, nil, err
 	}
 
-	if err := datacoordkv.FillSegmentBinlogs(records, binlogs); err != nil {
+	// Records sharing a segment ID share its binlogs: shard by segment ID.
+	err := forEachInShards(len(records), recoveryWorkers(), func(i int) int64 { return records[i].GetID() }, func(_, i int) error {
+		return datacoordkv.FillSegmentBinlog(records[i], binlogs)
+	})
+	if err != nil {
 		return nil, nil, err
 	}
 	if inline > 0 {
