@@ -312,7 +312,7 @@ func newMetaWithPersist(ctx context.Context, catalog metastore.DataCoordCatalog,
 
 	g.Go(func() error {
 		var err error
-		im, err = newIndexMeta(ctx, catalog)
+		im, err = recoverIndexMeta(ctx, catalog, collectionIDs)
 		return err
 	})
 
