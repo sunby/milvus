@@ -204,3 +204,42 @@ func TestStartManifestReadPrefetch(t *testing.T) {
 		require.Nil(t, startManifestReadPrefetch(ctx, records))
 	})
 }
+
+// Parallel workers installing every prefetched read leave the state the
+// regular reads leave, but for which records the task-stats LRU keeps, which
+// the install order decides.
+func TestManifestIndexRecoveryAppliesPrefetchedReadsInParallel(t *testing.T) {
+	ctx := context.Background()
+	fixture := newManifestRecoveryFixture(t, 260, false, false)
+	reads := mockManifestRecoveryReads(t, fixture.reads, true)
+
+	want := fixture.boot(t)
+	require.NoError(t, want.reloadSegmentIndexesFromManifests(ctx))
+	wantState := snapshotRecoveredIndexState(t, want)
+	require.Len(t, reads(), len(fixture.reads))
+
+	got := fixture.boot(t)
+	rootPath := got.chunkManager.RootPath()
+	results := make(chan manifestIndexReadResult, len(fixture.segments))
+	for _, record := range fixture.segments {
+		segment := &SegmentInfo{SegmentInfo: proto.Clone(record).(*datapb.SegmentInfo)}
+		read := fixture.reads[record.GetManifestPath()]
+		result := manifestIndexReadResult{request: manifestIndexReadRequest{segment: segment}, err: read.err}
+		if read.err == nil {
+			result.indexes, result.invalid = projectManifestIndexes(rootPath, segment, read.entries)
+		}
+		results <- result
+	}
+	close(results)
+	got.manifestReadPrefetch = conc.Go(func() (*manifestReadPrefetch, error) {
+		return &manifestReadPrefetch{rootPath: rootPath, results: results}, nil
+	})
+	require.NoError(t, got.reloadSegmentIndexesFromManifests(ctx))
+	gotState := snapshotRecoveredIndexState(t, got)
+
+	// Only the dropped segment whose manifest is gone failed to read.
+	require.Len(t, reads(), len(fixture.reads)+1)
+	require.Len(t, gotState.LRUKeys, taskStatsLRUCapacity)
+	wantState.LRUKeys, wantState.LRUValues, gotState.LRUKeys, gotState.LRUValues = nil, nil, nil, nil
+	require.Equal(t, wantState, gotState)
+}

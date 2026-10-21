@@ -20,6 +20,7 @@ import (
 	"context"
 	"path"
 	"sort"
+	"sync"
 
 	"golang.org/x/sync/semaphore"
 
@@ -359,18 +360,24 @@ func (m *meta) reloadSegmentIndexesFromManifests(ctx context.Context) error {
 		}
 		return m.UpdateSegmentsInfo(ctx, markers...)
 	}
-	apply := func(result *manifestIndexReadResult) error {
+	addMarker := func(marker UpdateOperator) error {
+		emptyMarkers = append(emptyMarkers, marker)
+		if len(emptyMarkers) == concurrency {
+			if err := flushMarkers(emptyMarkers); err != nil {
+				return merr.Wrap(err, "persist empty manifest index markers")
+			}
+			emptyMarkers = nil
+		}
+		return nil
+	}
+	apply := func(result *manifestIndexReadResult, recovery *manifestIndexRecovery, addMarker func(UpdateOperator) error) error {
 		indexes, removed, err := m.recoverManifestIndexes(ctx, result)
 		if err != nil {
 			return merr.Wrap(err, "recover segment indexes from manifests")
 		}
 		if len(indexes) == 0 && !removed {
-			emptyMarkers = append(emptyMarkers, clearEmptyManifestIndexMarker(result.request.segment.GetID(), result.request.segment.GetManifestPath()))
-			if len(emptyMarkers) == concurrency {
-				if err := flushMarkers(emptyMarkers); err != nil {
-					return merr.Wrap(err, "persist empty manifest index markers")
-				}
-				emptyMarkers = nil
+			if err := addMarker(clearEmptyManifestIndexMarker(result.request.segment.GetID(), result.request.segment.GetManifestPath())); err != nil {
+				return err
 			}
 		}
 		for _, segIdx := range indexes {
@@ -378,9 +385,14 @@ func (m *meta) reloadSegmentIndexesFromManifests(ctx context.Context) error {
 		}
 		return nil
 	}
-	remaining, prefetched, err := m.applyPrefetchedManifestReads(ctx, segments, rootPath, apply)
+	remaining, prefetched, markers, err := m.applyPrefetchedManifestReads(ctx, segments, rootPath, recovery, apply)
 	if err != nil {
 		return err
+	}
+	for _, marker := range markers {
+		if err := addMarker(marker); err != nil {
+			return err
+		}
 	}
 	if len(remaining) > 0 {
 		reader := m.newManifestIndexReader(ctx, remaining, min(len(remaining), concurrency), storageConfig, rootPath)
@@ -393,7 +405,7 @@ func (m *meta) reloadSegmentIndexesFromManifests(ctx context.Context) error {
 			if result == nil {
 				break
 			}
-			if err := apply(result); err != nil {
+			if err := apply(result, recovery, addMarker); err != nil {
 				return err
 			}
 		}
@@ -419,39 +431,88 @@ func manifestIndexRecoveryCandidate(segment *SegmentInfo) bool {
 
 // applyPrefetchedManifestReads applies, through apply, the prefetched read of
 // every segment whose installed manifest path is the one read, and returns the
-// segments it did not apply and how many it applied. A read that failed is not
-// applied: the regular read retries it and interprets the failure.
-func (m *meta) applyPrefetchedManifestReads(ctx context.Context, segments []*SegmentInfo, rootPath string, apply func(*manifestIndexReadResult) error) ([]*SegmentInfo, int, error) {
+// segments it did not apply, how many it applied, and the empty-manifest
+// markers to persist. A read that failed is not applied: the regular read
+// retries it and interprets the failure. Workers apply the reads of disjoint
+// segments, as one segment's indexes share its index map, each into a
+// recovery of its own that recovery then merges.
+func (m *meta) applyPrefetchedManifestReads(ctx context.Context, segments []*SegmentInfo, rootPath string, recovery *manifestIndexRecovery,
+	apply func(*manifestIndexReadResult, *manifestIndexRecovery, func(UpdateOperator) error) error,
+) ([]*SegmentInfo, int, []UpdateOperator, error) {
 	prefetch := m.takeManifestReadPrefetch()
 	if prefetch == nil || prefetch.rootPath != rootPath {
-		return segments, 0, nil
+		return segments, 0, nil, nil
 	}
 	pending := make(map[int64]*SegmentInfo, len(segments))
 	for _, segment := range segments {
 		pending[segment.GetID()] = segment
 	}
+	type worker struct {
+		results  chan manifestIndexReadResult
+		recovery *manifestIndexRecovery
+		markers  []UpdateOperator
+		err      error
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	workers := make([]*worker, recoveryWorkers())
+	var wg sync.WaitGroup
+	for i := range workers {
+		w := &worker{results: make(chan manifestIndexReadResult, segmentIndexManifestReadConcurrency()), recovery: m.indexMeta.newManifestIndexRecovery()}
+		workers[i] = w
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			addMarker := func(marker UpdateOperator) error {
+				w.markers = append(w.markers, marker)
+				return nil
+			}
+			for result := range w.results {
+				if w.err != nil {
+					continue
+				}
+				if w.err = apply(&result, w.recovery, addMarker); w.err != nil {
+					cancel()
+				}
+			}
+		}()
+	}
 	applied := 0
+	var err error
+dispatch:
 	for {
-		var result manifestIndexReadResult
-		var ok bool
 		select {
 		case <-ctx.Done():
-			return nil, applied, ctx.Err()
-		case result, ok = <-prefetch.results:
+			err = ctx.Err()
+			break dispatch
+		case result, ok := <-prefetch.results:
+			if !ok {
+				break dispatch
+			}
+			segment, found := pending[result.request.segment.GetID()]
+			if !found || result.err != nil || segment.GetManifestPath() != result.request.segment.GetManifestPath() {
+				continue
+			}
+			delete(pending, segment.GetID())
+			result.request.segment = segment
+			workers[shardOf(segment.GetID(), len(workers))].results <- result
+			applied++
 		}
-		if !ok {
-			break
+	}
+	for _, w := range workers {
+		close(w.results)
+	}
+	wg.Wait()
+	var markers []UpdateOperator
+	for _, w := range workers {
+		recovery.merge(w.recovery)
+		markers = append(markers, w.markers...)
+		if w.err != nil {
+			err = w.err
 		}
-		segment, found := pending[result.request.segment.GetID()]
-		if !found || result.err != nil || segment.GetManifestPath() != result.request.segment.GetManifestPath() {
-			continue
-		}
-		delete(pending, segment.GetID())
-		result.request.segment = segment
-		if err := apply(&result); err != nil {
-			return nil, applied, err
-		}
-		applied++
+	}
+	if err != nil {
+		return nil, applied, nil, err
 	}
 	remaining := make([]*SegmentInfo, 0, len(pending))
 	for _, segment := range segments {
@@ -459,7 +520,7 @@ func (m *meta) applyPrefetchedManifestReads(ctx context.Context, segments []*Seg
 			remaining = append(remaining, segment)
 		}
 	}
-	return remaining, applied, nil
+	return remaining, applied, markers, nil
 }
 
 // takeManifestReadPrefetch returns the manifest reads prefetched for this
