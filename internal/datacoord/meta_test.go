@@ -474,7 +474,9 @@ func (suite *MetaBasicSuite) TestCollection() {
 func (suite *MetaBasicSuite) TestCompleteCompactionMutation() {
 	ms := metacache.NewMetaStore(nil)
 	getLatestSegments := func() *SegmentsInfo {
-		latestSegments := NewSegmentsInfo(ms)
+		// A fresh store each time: a store keeps the versions its segments were
+		// published at, which would reject the next run's publications.
+		latestSegments := NewSegmentsInfo(metacache.NewMetaStore(nil))
 		for segID, segment := range map[UniqueID]*SegmentInfo{
 			1: {SegmentInfo: &datapb.SegmentInfo{
 				ID:           1,
@@ -794,7 +796,7 @@ func (suite *MetaBasicSuite) TestCompleteCompactionMutation() {
 
 	suite.Run("test L2 sort", func() {
 		getLatestSegments := func() *SegmentsInfo {
-			latestSegments := NewSegmentsInfo(ms)
+			latestSegments := NewSegmentsInfo(metacache.NewMetaStore(nil))
 			for segID, segment := range map[UniqueID]*SegmentInfo{
 				1: {SegmentInfo: &datapb.SegmentInfo{
 					ID:           1,
@@ -3512,7 +3514,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 		// Binlogs/Deltalogs come back empty, and Stats is the only durable
 		// record of the segment's footprint. Two successive materializations
 		// must both land on top of it.
-		segs := NewSegmentsInfo(ms)
+		segs := NewSegmentsInfo(metacache.NewMetaStore(nil))
 		segs.SetSegment(1, &SegmentInfo{SegmentInfo: &datapb.SegmentInfo{
 			ID:             1,
 			CollectionID:   100,
