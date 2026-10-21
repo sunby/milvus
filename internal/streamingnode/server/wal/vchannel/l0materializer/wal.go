@@ -53,6 +53,9 @@ type WALConfig struct {
 // DataCoord. This makes the global recovery checkpoint safe for legacy queries.
 // TODO: Remove after enabling queryview and reconnect the Summary materializer.
 // Materialization waits for earlier L1 final commits across all partitions.
+// observed advances with this vchannel's own messages but not with every
+// pchannel TimeTick, which is enough: it only filters and caps this vchannel's
+// own later messages.
 type WALMaterializer struct {
 	earlierSegmentsFlushed func(uint64) bool
 	mu                     sync.Mutex

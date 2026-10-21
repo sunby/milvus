@@ -45,6 +45,9 @@ only timestamps for future QueryView integration.
 
 Snapshot replay filters against the materialized cursor, independently of the
 VChannel metadata checkpoint. Observed positions suppress duplicate pending work.
+A pchannel-level TimeTick does not advance the observed position of a VChannel
+that it only advances in time (see the VChannel view module): the position only
+filters and caps this VChannel's own later messages.
 
 ## 3. Triggers
 

@@ -249,6 +249,20 @@ func (m *Manager) Close() {
 	m.releasing.Wait()
 }
 
+// Idle reports that the manager holds no reference, runtime or build task, so
+// VChannel events, which only feed a runtime or retry a deferred build, leave
+// it unchanged. It is on the per-TimeTick path of every module, so it unlocks
+// without defer.
+func (m *Manager) Idle() bool {
+	if m == nil {
+		return true
+	}
+	m.mu.Lock()
+	idle := len(m.refs) == 0 && m.runtime == nil && m.task == nil
+	m.mu.Unlock()
+	return idle
+}
+
 func (m *Manager) ObserveEvent(ctx context.Context, event walview.VChannelResourceEvent) {
 	m.mu.Lock()
 	runtime := m.runtime

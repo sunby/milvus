@@ -827,3 +827,19 @@ func TestManagerReleaseCancelsQueuedBuild(t *testing.T) {
 	manager.Close()
 	require.Equal(t, int32(2), closes.Load())
 }
+
+func TestManagerIdle(t *testing.T) {
+	var absent *Manager
+	require.True(t, absent.Idle())
+
+	manager := NewManager(Config{})
+	require.True(t, manager.Idle())
+	manager.refs = map[qviews.QueryViewKey]queryViewRef{{}: {}}
+	require.False(t, manager.Idle(), "a reference may retry a deferred build")
+	manager.refs = nil
+	manager.task = &scheduledBuild{}
+	require.False(t, manager.Idle(), "a build task installs a runtime")
+	manager.task = nil
+	manager.runtime = &QueryRuntime{}
+	require.False(t, manager.Idle(), "a runtime consumes VChannel events")
+}

@@ -22,7 +22,6 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
-	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
 type PChannelManagerConfig struct {
@@ -52,7 +51,7 @@ type PChannelRecoveryManager struct {
 	queryTransformLogStream *walsummary.Stream
 
 	pchannel string
-	modules  *typeutil.ConcurrentMap[string, *VChannelRecoveryModule]
+	modules  *moduleIndex
 
 	segmentsByVChannel map[string]map[int64]*streamingpb.SegmentAssignmentMeta
 	dirtyMu            sync.Mutex
@@ -74,7 +73,7 @@ func NewPChannelRecoveryManager(config PChannelManagerConfig) (*PChannelRecovery
 		pchannel:                config.PChannel,
 		queryDispatcher:         queryresource.NewDispatcher(paramtable.Get().StreamingCfg.QueryViewLiveEventDispatchConcurrencyPerPChannel.GetAsInt()),
 		queryTransformLogStream: walsummary.NewStream(config.SummaryManager),
-		modules:                 typeutil.NewConcurrentMap[string, *VChannelRecoveryModule](),
+		modules:                 newModuleIndex(),
 		segmentsByVChannel:      segmentsByVChannel,
 		dirtyModules:            make(map[string]*VChannelRecoveryModule),
 		config:                  config,
@@ -86,7 +85,7 @@ func NewPChannelRecoveryManager(config PChannelManagerConfig) (*PChannelRecovery
 			manager.Close()
 			return nil, err
 		}
-		manager.modules.Insert(vchannel, module)
+		manager.modules.GetOrInsert(module)
 	}
 	if config.SummaryManager != nil {
 		config.SummaryManager.RestoreTransformGCTimeTicks(config.VChannelMetas)
@@ -170,12 +169,11 @@ func (m *PChannelRecoveryManager) RecoverySnapshot() *moduleapi.WritePathRecover
 	if m == nil {
 		return snapshot
 	}
-	m.modules.Range(func(_ string, module *VChannelRecoveryModule) bool {
+	for _, module := range m.modules.List() {
 		moduleSnapshot := module.RecoverySnapshot()
 		maps.Copy(snapshot.VChannels, moduleSnapshot.VChannels)
 		maps.Copy(snapshot.GrowingSegments, moduleSnapshot.GrowingSegments)
-		return true
-	})
+	}
 	return snapshot
 }
 
@@ -249,10 +247,9 @@ func (m *PChannelRecoveryManager) Start() {
 				return
 			case now := <-ticker.C:
 				maxAge := paramtable.Get().DataNodeCfg.SyncPeriod.GetAsDuration(time.Second)
-				m.modules.Range(func(_ string, module *VChannelRecoveryModule) bool {
+				for _, module := range m.modules.List() {
 					module.l0Materializer.FlushStale(now, maxAge)
-					return true
-				})
+				}
 			}
 		}
 	}()
@@ -260,7 +257,9 @@ func (m *PChannelRecoveryManager) Start() {
 
 func (m *PChannelRecoveryManager) Close() {
 	m.closeOnce.Do(func() {
-		m.modules.Range(func(_ string, module *VChannelRecoveryModule) bool { module.CloseQueryResources(); return true })
+		for _, module := range m.modules.List() {
+			module.CloseQueryResources()
+		}
 		_ = m.queryTransformLogStream.Close()
 		m.queryDispatcher.Close()
 		close(m.closeCh)
@@ -272,19 +271,29 @@ func (m *PChannelRecoveryManager) shouldBroadcast(msg message.ImmutableMessage) 
 	return msg.VChannel() == "" || msg.IsPChannelLevel()
 }
 
+// observeBroadcastMessage dispatches a pchannel-level message to every module.
+// TimeTicks and the MVCCBarriers sent in their place reach every module, so
+// modules that one only advances in time take it without a message handle or
+// a dirty mark.
 func (m *PChannelRecoveryManager) observeBroadcastMessage(
 	ctx context.Context,
 	retained message.RetainedImmutableMessage,
 ) {
-	m.modules.Range(func(_ string, module *VChannelRecoveryModule) bool {
+	msg := retained.Message()
+	msgType := msg.MessageType()
+	advancesTime := msgType == message.MessageTypeTimeTick || msgType == message.MessageTypeMVCCBarrier
+	timeTick := msg.TimeTick()
+	for _, module := range m.modules.List() {
+		if advancesTime && module.observeIdleTimeTick(timeTick) {
+			continue
+		}
 		dispatch := retained.Clone()
 		observed := module.ObserveMessage(ctx, dispatch)
 		dispatch.Release()
 		if observed {
 			m.markModuleUpdated(module)
 		}
-		return true
-	})
+	}
 }
 
 func (m *PChannelRecoveryManager) moduleForMessage(
@@ -304,7 +313,7 @@ func (m *PChannelRecoveryManager) moduleForMessage(
 	if err != nil {
 		return nil
 	}
-	module, _ = m.modules.GetOrInsert(vchannel, module)
+	module, _ = m.modules.GetOrInsert(module)
 	return module
 }
 
@@ -353,11 +362,9 @@ func (m *PChannelRecoveryManager) removeModule(module *VChannelRecoveryModule) {
 	if module == nil {
 		return
 	}
-	current, ok := m.modules.Get(module.vchannel)
-	if !ok || current != module {
+	if !m.modules.Remove(module) {
 		return
 	}
-	m.modules.Remove(module.vchannel)
 	m.dirtyMu.Lock()
 	if m.dirtyModules[module.vchannel] == module {
 		delete(m.dirtyModules, module.vchannel)
