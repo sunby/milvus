@@ -2,12 +2,16 @@ package queryview
 
 import (
 	"context"
+	"maps"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus/pkg/v3/kv"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/messagespb"
@@ -131,4 +135,147 @@ func TestLoadInfoCatalogSplitsLargeBatchesBySize(t *testing.T) {
 	for i := range infos {
 		require.True(t, proto.Equal(infos[i], got[i]))
 	}
+}
+
+// recordingTxnKV records each transaction and the peak number in flight.
+type recordingTxnKV struct {
+	kv.MetaKv
+	maxOps   int
+	delay    time.Duration
+	fail     func(call int) error // nil, or the error of a call
+	mu       sync.Mutex
+	batches  []map[string]string
+	calls    int
+	inflight atomic.Int32
+	peak     atomic.Int32
+}
+
+func (s *recordingTxnKV) MaxTxnOps() int { return s.maxOps }
+
+func (s *recordingTxnKV) MultiSave(_ context.Context, kvs map[string]string) error {
+	n := s.inflight.Add(1)
+	defer s.inflight.Add(-1)
+	for peak := s.peak.Load(); n > peak && !s.peak.CompareAndSwap(peak, n); peak = s.peak.Load() {
+	}
+	time.Sleep(s.delay)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	if s.fail != nil {
+		if err := s.fail(s.calls); err != nil {
+			return err
+		}
+	}
+	s.batches = append(s.batches, maps.Clone(kvs))
+	return nil
+}
+
+// serialLoadInfoBatches are the transactions of the former batch-by-batch
+// write, in order.
+func serialLoadInfoBatches(t *testing.T, infos []*querypb.GetQueryViewLoadInfoResponse, maxOps int) []map[string]string {
+	var batches []map[string]string
+	kvs := make(map[string]string)
+	size := 0
+	for _, info := range infos {
+		value, err := proto.Marshal(info)
+		require.NoError(t, err)
+		key := loadInfoKey(info.GetCollectionID(), info.GetVersion())
+		if (len(kvs) >= maxOps || size+len(key)+len(value) > maxLoadInfoTxnBytes) && len(kvs) > 0 {
+			batches = append(batches, kvs)
+			kvs, size = make(map[string]string), 0
+		}
+		kvs[key] = string(value)
+		size += len(key) + len(value)
+	}
+	if len(kvs) > 0 {
+		batches = append(batches, kvs)
+	}
+	return batches
+}
+
+// testLoadInfos has every seventh snapshot large enough that the byte budget,
+// not the op limit, closes some batches.
+func testLoadInfos(n int) []*querypb.GetQueryViewLoadInfoResponse {
+	infos := make([]*querypb.GetQueryViewLoadInfoResponse, 0, n)
+	for i := 0; i < n; i++ {
+		partitions := []int64{int64(i)}
+		if i%7 == 0 {
+			partitions = make([]int64, 20000)
+			for p := range partitions {
+				partitions[p] = 469710000000000000 + int64(p)
+			}
+		}
+		infos = append(infos, &querypb.GetQueryViewLoadInfoResponse{Status: merr.Success(), CollectionID: int64(i + 1), Version: uint64(1<<63) | uint64(i), PartitionIDs: partitions, RequiredFields: []*messagespb.LoadFieldConfig{{FieldId: 100}}})
+	}
+	return infos
+}
+
+func TestLoadInfoCatalogSavesSerialBatchesConcurrently(t *testing.T) {
+	ctx := context.Background()
+	infos := testLoadInfos(400)
+	storage := &recordingTxnKV{maxOps: 16, delay: 20 * time.Millisecond}
+	require.NoError(t, NewLoadInfoCatalog(storage).SaveLoadInfos(ctx, infos))
+
+	want := serialLoadInfoBatches(t, infos, 16)
+	require.Greater(t, len(want), 400/16, "the byte budget closes some batches")
+	require.ElementsMatch(t, want, storage.batches)
+	written := make(map[string]int)
+	for _, batch := range storage.batches {
+		require.LessOrEqual(t, len(batch), 16)
+		size := 0
+		for key, value := range batch {
+			written[key]++
+			size += len(key) + len(value)
+		}
+		require.True(t, size <= maxLoadInfoTxnBytes || len(batch) == 1)
+	}
+	require.Len(t, written, len(infos))
+	for _, info := range infos {
+		require.Equal(t, 1, written[loadInfoKey(info.GetCollectionID(), info.GetVersion())])
+	}
+	require.Greater(t, storage.peak.Load(), int32(1))
+	require.LessOrEqual(t, storage.peak.Load(), int32(saveLoadInfoConcurrency))
+}
+
+func TestLoadInfoCatalogWritesRepeatedSnapshotsInOrder(t *testing.T) {
+	ctx := context.Background()
+	infos := testLoadInfos(100)
+	repeated := proto.Clone(infos[3]).(*querypb.GetQueryViewLoadInfoResponse)
+	repeated.PartitionIDs = []int64{7}
+	infos = append(infos, repeated)
+	storage := &recordingTxnKV{maxOps: 16, delay: time.Millisecond}
+	require.NoError(t, NewLoadInfoCatalog(storage).SaveLoadInfos(ctx, infos))
+	require.Equal(t, serialLoadInfoBatches(t, infos, 16), storage.batches)
+	require.EqualValues(t, 1, storage.peak.Load())
+
+	// No batch starts after one has failed.
+	cancelCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	failing := &recordingTxnKV{maxOps: 16, fail: func(call int) error {
+		if call == 2 {
+			cancel()
+			return context.Canceled
+		}
+		return nil
+	}}
+	require.ErrorIs(t, NewLoadInfoCatalog(failing).SaveLoadInfos(cancelCtx, infos), context.Canceled)
+	require.Equal(t, 2, failing.calls)
+	require.Equal(t, serialLoadInfoBatches(t, infos, 16)[:1], failing.batches)
+}
+
+func TestLoadInfoCatalogEncodingFailureWritesEarlierBatches(t *testing.T) {
+	ctx := context.Background()
+	infos := testLoadInfos(100)
+	const broken = 50
+	infos[broken].Status = &commonpb.Status{Reason: "\xff"}
+	_, err := proto.Marshal(infos[broken])
+	require.Error(t, err)
+
+	storage := &recordingTxnKV{maxOps: 16}
+	err = NewLoadInfoCatalog(storage).SaveLoadInfos(ctx, infos)
+	require.ErrorContains(t, err, "encode query view load snapshot")
+	// A batch-by-batch write had written every batch closed before the
+	// broken snapshot, but not the open one.
+	closed := serialLoadInfoBatches(t, infos[:broken], 16)
+	require.ElementsMatch(t, closed[:len(closed)-1], storage.batches)
 }
