@@ -21,6 +21,7 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -28,10 +29,12 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/metastore/model"
+	"github.com/milvus-io/milvus/pkg/v3/kv"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	pb "github.com/milvus-io/milvus/pkg/v3/proto/etcdpb"
 	"github.com/milvus-io/milvus/pkg/v3/util"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
@@ -226,18 +229,26 @@ func (kc *Catalog) buildBatchRecoveryCollections(
 		return collectionsByDB, nil
 	}
 
+	targets := &recoveryTargets{
+		byCollectionID:           targetsByCollectionID,
+		duplicatesByCollectionID: duplicateTargetsByCollectionID,
+		collectionIDs:            make([]int64, 0, len(targetsByCollectionID)),
+	}
+	for collectionID := range targetsByCollectionID {
+		targets.collectionIDs = append(targets.collectionIDs, collectionID)
+	}
 	g, gCtx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		return kc.scanRecoveryPartitions(gCtx, targetsByCollectionID, duplicateTargetsByCollectionID)
+		return scanRecoveryChildren(gCtx, kc, recoveryPartitions, targets)
 	})
 	g.Go(func() error {
-		return kc.scanRecoveryFields(gCtx, targetsByCollectionID, duplicateTargetsByCollectionID)
+		return scanRecoveryChildren(gCtx, kc, recoveryFields, targets)
 	})
 	g.Go(func() error {
-		return kc.scanRecoveryStructArrayFields(gCtx, targetsByCollectionID, duplicateTargetsByCollectionID)
+		return scanRecoveryChildren(gCtx, kc, recoveryStructArrayFields, targets)
 	})
 	g.Go(func() error {
-		return kc.scanRecoveryFunctions(gCtx, targetsByCollectionID, duplicateTargetsByCollectionID)
+		return scanRecoveryChildren(gCtx, kc, recoveryFunctions, targets)
 	})
 	if err := g.Wait(); err != nil {
 		return nil, err
@@ -252,140 +263,139 @@ func initializeExternalCollectionMetadata(collection *model.Collection) {
 	collection.Functions = make([]*model.Function, 0)
 }
 
-func (kc *Catalog) scanRecoveryPartitions(
-	ctx context.Context,
-	targetsByCollectionID map[int64]*model.Collection,
-	duplicateTargetsByCollectionID map[int64][]*model.Collection,
-) error {
-	prefix := PartitionMetaPrefix + "/"
-	fullPrefix := kc.metaKV.GetPath(prefix)
-	err := kc.walkRecoveryPrefix(ctx, prefix, func(key, value []byte) error {
-		if isRecoveryTombstone(value) {
-			return nil
-		}
-		collectionID, err := recoveryKeyFirstID(fullPrefix, key)
-		if err != nil {
-			logSkippedRecoveryKey(ctx, prefix, key, err)
-			return nil
-		}
-		target, ok := targetsByCollectionID[collectionID]
-		if !ok {
-			return nil
-		}
-		partitionMeta := &pb.PartitionInfo{}
-		if err := proto.Unmarshal(value, partitionMeta); err != nil {
-			return merr.WrapErrDataIntegrity(err, "unmarshal partition metadata during recovery")
-		}
-		partition := model.UnmarshalPartitionModel(partitionMeta)
-		target.Partitions = append(target.Partitions, partition)
-		for _, duplicateTarget := range duplicateTargetsByCollectionID[collectionID] {
-			duplicateTarget.Partitions = append(duplicateTarget.Partitions, partition.Clone())
-		}
-		return nil
-	})
-	return err
+// recoveryTargets are the collections whose child metadata recovery reads
+// from the child prefixes; duplicates are other copies of a collection (the
+// legacy and the database-scoped one) that get clones of its children.
+type recoveryTargets struct {
+	byCollectionID           map[int64]*model.Collection
+	duplicatesByCollectionID map[int64][]*model.Collection
+	collectionIDs            []int64
 }
 
-func (kc *Catalog) scanRecoveryFields(
-	ctx context.Context,
-	targetsByCollectionID map[int64]*model.Collection,
-	duplicateTargetsByCollectionID map[int64][]*model.Collection,
-) error {
-	prefix := FieldMetaPrefix + "/"
-	fullPrefix := kc.metaKV.GetPath(prefix)
-	err := kc.walkRecoveryPrefix(ctx, prefix, func(key, value []byte) error {
-		if isRecoveryTombstone(value) {
-			return nil
-		}
-		collectionID, err := recoveryKeyFirstID(fullPrefix, key)
-		if err != nil {
-			logSkippedRecoveryKey(ctx, prefix, key, err)
-			return nil
-		}
-		target, ok := targetsByCollectionID[collectionID]
-		if !ok {
-			return nil
-		}
-		fieldMeta := &schemapb.FieldSchema{}
-		if err := proto.Unmarshal(value, fieldMeta); err != nil {
-			return merr.WrapErrDataIntegrity(err, "unmarshal field metadata during recovery")
-		}
-		field := model.UnmarshalFieldModel(fieldMeta)
-		target.Fields = append(target.Fields, field)
-		for _, duplicateTarget := range duplicateTargetsByCollectionID[collectionID] {
-			duplicateTarget.Fields = append(duplicateTarget.Fields, field.Clone())
-		}
-		return nil
-	})
-	return err
+// recoveryChildKind is one kind of child metadata a collection keeps under
+// <prefix><collectionID>/.
+type recoveryChildKind[M any] struct {
+	prefix string
+	decode func(value []byte) (M, error)
+	clone  func(M) M
+	add    func(collection *model.Collection, children []M)
 }
 
-func (kc *Catalog) scanRecoveryStructArrayFields(
-	ctx context.Context,
-	targetsByCollectionID map[int64]*model.Collection,
-	duplicateTargetsByCollectionID map[int64][]*model.Collection,
-) error {
-	prefix := StructArrayFieldMetaPrefix + "/"
-	fullPrefix := kc.metaKV.GetPath(prefix)
-	err := kc.walkRecoveryPrefix(ctx, prefix, func(key, value []byte) error {
-		if isRecoveryTombstone(value) {
-			return nil
-		}
-		collectionID, err := recoveryKeyFirstID(fullPrefix, key)
-		if err != nil {
-			logSkippedRecoveryKey(ctx, prefix, key, err)
-			return nil
-		}
-		target, ok := targetsByCollectionID[collectionID]
-		if !ok {
-			return nil
-		}
-		fieldMeta := &schemapb.StructArrayFieldSchema{}
-		if err := proto.Unmarshal(value, fieldMeta); err != nil {
-			return merr.WrapErrDataIntegrity(err, "unmarshal struct array field metadata during recovery")
-		}
-		field := model.UnmarshalStructArrayFieldModel(fieldMeta)
-		target.StructArrayFields = append(target.StructArrayFields, field)
-		for _, duplicateTarget := range duplicateTargetsByCollectionID[collectionID] {
-			duplicateTarget.StructArrayFields = append(duplicateTarget.StructArrayFields, field.Clone())
-		}
-		return nil
-	})
-	return err
+var (
+	recoveryPartitions = recoveryChildKind[*model.Partition]{
+		prefix: PartitionMetaPrefix + "/",
+		decode: func(value []byte) (*model.Partition, error) {
+			partitionMeta := &pb.PartitionInfo{}
+			if err := proto.Unmarshal(value, partitionMeta); err != nil {
+				return nil, merr.WrapErrDataIntegrity(err, "unmarshal partition metadata during recovery")
+			}
+			return model.UnmarshalPartitionModel(partitionMeta), nil
+		},
+		clone: (*model.Partition).Clone,
+		add: func(collection *model.Collection, partitions []*model.Partition) {
+			collection.Partitions = append(collection.Partitions, partitions...)
+		},
+	}
+	recoveryFields = recoveryChildKind[*model.Field]{
+		prefix: FieldMetaPrefix + "/",
+		decode: func(value []byte) (*model.Field, error) {
+			fieldMeta := &schemapb.FieldSchema{}
+			if err := proto.Unmarshal(value, fieldMeta); err != nil {
+				return nil, merr.WrapErrDataIntegrity(err, "unmarshal field metadata during recovery")
+			}
+			return model.UnmarshalFieldModel(fieldMeta), nil
+		},
+		clone: (*model.Field).Clone,
+		add: func(collection *model.Collection, fields []*model.Field) {
+			collection.Fields = append(collection.Fields, fields...)
+		},
+	}
+	recoveryStructArrayFields = recoveryChildKind[*model.StructArrayField]{
+		prefix: StructArrayFieldMetaPrefix + "/",
+		decode: func(value []byte) (*model.StructArrayField, error) {
+			fieldMeta := &schemapb.StructArrayFieldSchema{}
+			if err := proto.Unmarshal(value, fieldMeta); err != nil {
+				return nil, merr.WrapErrDataIntegrity(err, "unmarshal struct array field metadata during recovery")
+			}
+			return model.UnmarshalStructArrayFieldModel(fieldMeta), nil
+		},
+		clone: (*model.StructArrayField).Clone,
+		add: func(collection *model.Collection, fields []*model.StructArrayField) {
+			collection.StructArrayFields = append(collection.StructArrayFields, fields...)
+		},
+	}
+	recoveryFunctions = recoveryChildKind[*model.Function]{
+		prefix: FunctionMetaPrefix + "/",
+		decode: func(value []byte) (*model.Function, error) {
+			functionMeta := &schemapb.FunctionSchema{}
+			if err := proto.Unmarshal(value, functionMeta); err != nil {
+				return nil, merr.WrapErrDataIntegrity(err, "unmarshal function metadata during recovery")
+			}
+			return model.UnmarshalFunctionModel(functionMeta), nil
+		},
+		clone: (*model.Function).Clone,
+		add: func(collection *model.Collection, functions []*model.Function) {
+			collection.Functions = append(collection.Functions, functions...)
+		},
+	}
+)
+
+// recoveryChildRun is a run of consecutive child keys of one collection.
+type recoveryChildRun[M any] struct {
+	collectionID int64
+	children     []M
 }
 
-func (kc *Catalog) scanRecoveryFunctions(
-	ctx context.Context,
-	targetsByCollectionID map[int64]*model.Collection,
-	duplicateTargetsByCollectionID map[int64][]*model.Collection,
-) error {
-	prefix := FunctionMetaPrefix + "/"
-	fullPrefix := kc.metaKV.GetPath(prefix)
-	err := kc.walkRecoveryPrefix(ctx, prefix, func(key, value []byte) error {
+// scanRecoveryChildren reads the children of kind of the target collections.
+// The prefix is read as metastore.parallelScanRanges key ranges split at the
+// targets, decoded in the goroutine of their range. The children are then
+// added to their collections range after range in key order, so every
+// collection gets its children in the order of their keys, as when they are
+// added while one walk reads them.
+func scanRecoveryChildren[M any](ctx context.Context, kc *Catalog, kind recoveryChildKind[M], targets *recoveryTargets) error {
+	fullPrefix := kc.metaKV.GetPath(kind.prefix)
+	bounds := kv.RangeBounds(kind.prefix, targets.collectionIDs, paramtable.Get().MetaStoreCfg.ParallelScanRanges.GetAsInt())
+	runs := make([][]recoveryChildRun[M], len(bounds)+1)
+	err := kc.walkRecoveryPrefixInRanges(ctx, kind.prefix, bounds, func(rangeIndex int, key, value []byte) error {
 		if isRecoveryTombstone(value) {
 			return nil
 		}
 		collectionID, err := recoveryKeyFirstID(fullPrefix, key)
 		if err != nil {
-			logSkippedRecoveryKey(ctx, prefix, key, err)
+			logSkippedRecoveryKey(ctx, kind.prefix, key, err)
 			return nil
 		}
-		target, ok := targetsByCollectionID[collectionID]
-		if !ok {
+		if _, ok := targets.byCollectionID[collectionID]; !ok {
 			return nil
 		}
-		functionMeta := &schemapb.FunctionSchema{}
-		if err := proto.Unmarshal(value, functionMeta); err != nil {
-			return merr.WrapErrDataIntegrity(err, "unmarshal function metadata during recovery")
+		child, err := kind.decode(value)
+		if err != nil {
+			return err
 		}
-		function := model.UnmarshalFunctionModel(functionMeta)
-		target.Functions = append(target.Functions, function)
-		for _, duplicateTarget := range duplicateTargetsByCollectionID[collectionID] {
-			duplicateTarget.Functions = append(duplicateTarget.Functions, function.Clone())
+		rangeRuns := runs[rangeIndex]
+		if last := len(rangeRuns) - 1; last >= 0 && rangeRuns[last].collectionID == collectionID {
+			rangeRuns[last].children = append(rangeRuns[last].children, child)
+			return nil
 		}
+		runs[rangeIndex] = append(rangeRuns, recoveryChildRun[M]{collectionID: collectionID, children: []M{child}})
 		return nil
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	for _, rangeRuns := range runs {
+		for _, run := range rangeRuns {
+			kind.add(targets.byCollectionID[run.collectionID], run.children)
+			for _, duplicate := range targets.duplicatesByCollectionID[run.collectionID] {
+				clones := make([]M, len(run.children))
+				for i, child := range run.children {
+					clones[i] = kind.clone(child)
+				}
+				kind.add(duplicate, clones)
+			}
+		}
+	}
+	return nil
 }
 
 // ListRLSPoliciesForRecovery returns, for every collection isRecovered accepts,
@@ -449,32 +459,45 @@ func (kc *Catalog) walkRecoveryPrefix(
 	prefix string,
 	fn func(key, value []byte) error,
 ) error {
+	return kc.walkRecoveryPrefixInRanges(ctx, prefix, nil, func(_ int, key, value []byte) error {
+		return fn(key, value)
+	})
+}
+
+// walkRecoveryPrefixInRanges walks prefix as the key ranges bounds split it
+// into, in parallel when the kv supports it (see kv.WalkWithPrefixInRanges).
+func (kc *Catalog) walkRecoveryPrefixInRanges(
+	ctx context.Context,
+	prefix string,
+	bounds []string,
+	fn func(rangeIndex int, key, value []byte) error,
+) error {
 	if err := ctx.Err(); err != nil {
 		return merr.Wrapf(err, "scan rootcoord metadata prefix %s", prefix)
 	}
 	pageSize := rootCoordRecoveryDefaultPageSize
 	start := time.Now()
-	scanned := 0
-	err := kc.metaKV.WalkWithPrefix(ctx, prefix, pageSize, func(key, value []byte) error {
+	var scanned atomic.Int64
+	err := kv.WalkWithPrefixInRanges(ctx, kc.metaKV, prefix, bounds, pageSize, func(rangeIndex int, key, value []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		scanned++
-		if scanned%rootCoordRecoveryLogInterval == 0 {
+		if numScanned := scanned.Add(1); numScanned%rootCoordRecoveryLogInterval == 0 {
 			mlog.RatedInfo(ctx, 1.0, "rootcoord metadata batch scan progress",
 				mlog.String("prefix", prefix),
-				mlog.Int("numScanned", scanned),
+				mlog.Int64("numScanned", numScanned),
 				mlog.Duration("duration", time.Since(start)))
 		}
-		return fn(key, value)
+		return fn(rangeIndex, key, value)
 	})
 	if err != nil {
 		return merr.Wrapf(err, "scan rootcoord metadata prefix %s", prefix)
 	}
 	mlog.Info(ctx, "rootcoord metadata batch scan done",
 		mlog.String("prefix", prefix),
-		mlog.Int("numScanned", scanned),
+		mlog.Int64("numScanned", scanned.Load()),
 		mlog.Int("pageSize", pageSize),
+		mlog.Int("numRanges", len(bounds)+1),
 		mlog.Duration("duration", time.Since(start)))
 	return nil
 }
