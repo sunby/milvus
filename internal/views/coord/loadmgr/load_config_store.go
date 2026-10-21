@@ -87,19 +87,23 @@ func RecoverLoadConfigStore(ctx context.Context, catalog metastore.QueryCoordCat
 		replicasByColl[r.GetCollectionID()] = append(replicasByColl[r.GetCollectionID()], r)
 	}
 
-	configs := make(map[int64]*LoadConfig, len(collections))
-	versions := make(map[int64]uint64, len(collections))
+	cfgs := make([]*LoadConfig, 0, len(collections))
 	for _, info := range collections {
 		collID := info.GetCollectionID()
-		cfg := buildFromPersisted(info, partitions[collID], replicasByColl[collID])
-		if len(loadInfos) > 0 && loadInfos[0] != nil {
-			cfg, err = loadInfos[0].normalize(ctx, cfg)
-			if err != nil {
-				return nil, err
-			}
+		cfgs = append(cfgs, buildFromPersisted(info, partitions[collID], replicasByColl[collID]))
+	}
+	if len(loadInfos) > 0 && loadInfos[0] != nil {
+		// A config without persisted required fields resolves its schema, which
+		// is one DescribeCollection per loaded collection.
+		if err := loadInfos[0].normalizeAll(ctx, cfgs); err != nil {
+			return nil, err
 		}
-		configs[collID] = cfg
-		versions[collID] = loadInfoVersion(cfg)
+	}
+	configs := make(map[int64]*LoadConfig, len(cfgs))
+	versions := make(map[int64]uint64, len(cfgs))
+	for _, cfg := range cfgs {
+		configs[cfg.CollectionID] = cfg
+		versions[cfg.CollectionID] = loadInfoVersion(cfg)
 	}
 
 	store := &LoadConfigStore{

@@ -2,19 +2,26 @@ package loadmgr
 
 import (
 	"context"
+	"slices"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/bytedance/mockey"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/metastore/kv/querycoord"
 	"github.com/milvus-io/milvus/internal/metastore/kv/queryview"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/messagespb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
+	"github.com/milvus-io/milvus/pkg/v3/util/hardware"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
 // memLoadInfoCatalog is an in-memory LoadInfoCatalog that counts calls.
@@ -202,4 +209,118 @@ func TestRecoverLoadConfigStoreBatchesLoadInfos(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, loadInfos.batchGets)
 	require.Equal(t, 1, loadInfos.batchSaves, "a restart with retained snapshots writes nothing")
+}
+
+// normalizeTestConfigs mixes persisted required fields, which need no schema,
+// with full-load and hinted configs that resolve one.
+func normalizeTestConfigs(n int) []*LoadConfig {
+	cfgs := make([]*LoadConfig, 0, n)
+	for i := 0; i < n; i++ {
+		id := int64((i*7919)%n + 1)
+		cfg := &LoadConfig{CollectionID: id, PartitionIDs: []int64{id * 10}, Replicas: []*ReplicaAssignment{{ReplicaID: id * 100, ResourceGroup: "rg1"}}}
+		switch i % 4 {
+		case 0:
+			cfg.RequiredFields = []*messagespb.LoadFieldConfig{{FieldId: 100}, {FieldId: 101}}
+		case 1:
+			cfg.LoadAllFields = proto.Bool(true)
+			cfg.LoadFields = []*messagespb.LoadFieldConfig{{FieldId: 101}}
+		case 2:
+			cfg.LoadFields = []*messagespb.LoadFieldConfig{{FieldId: 102, IndexId: 7}}
+		}
+		cfgs = append(cfgs, cfg)
+	}
+	return cfgs
+}
+
+// normalizeTestSchema derives a schema from the collection ID, records the
+// peak number of concurrent calls, and fails the collections in fail.
+func normalizeTestSchema(fail map[int64]time.Duration, peak *atomic.Int32) func(context.Context, int64) (*schemapb.CollectionSchema, error) {
+	var inflight atomic.Int32
+	return func(_ context.Context, id int64) (*schemapb.CollectionSchema, error) {
+		n := inflight.Add(1)
+		defer inflight.Add(-1)
+		for old := peak.Load(); n > old && !peak.CompareAndSwap(old, n); old = peak.Load() {
+		}
+		if delay, ok := fail[id]; ok {
+			time.Sleep(delay)
+			return nil, merr.WrapErrCollectionNotFound(id)
+		}
+		time.Sleep(time.Duration(id%3) * 20 * time.Microsecond)
+		fields := []*schemapb.FieldSchema{{FieldID: 0}, {FieldID: 1}, {FieldID: 100}}
+		for f := int64(0); f < id%3; f++ {
+			fields = append(fields, &schemapb.FieldSchema{FieldID: 101 + f})
+		}
+		return &schemapb.CollectionSchema{Fields: fields}, nil
+	}
+}
+
+func requireSameConfig(t *testing.T, want, got *LoadConfig) {
+	t.Helper()
+	require.True(t, proto.Equal(want.toCollectionLoadInfoProto(), got.toCollectionLoadInfoProto()), "collection %d", want.CollectionID)
+	require.Equal(t, want.PartitionIDs, got.PartitionIDs)
+	require.Equal(t, want.Replicas, got.Replicas)
+	require.Equal(t, loadInfoVersion(want), loadInfoVersion(got))
+}
+
+func TestLoadInfoStoreNormalizeAllMatchesSerialNormalize(t *testing.T) {
+	ctx := context.Background()
+	var peak atomic.Int32
+	store := NewLoadInfoStore(newMemLoadInfoCatalog(), noIndexes, normalizeTestSchema(nil, &peak))
+	cfgs := normalizeTestConfigs(2000)
+	inputs := make([]*LoadConfig, len(cfgs))
+	serial := make([]*LoadConfig, len(cfgs))
+	for i, cfg := range cfgs {
+		inputs[i] = cfg.Clone()
+		var err error
+		serial[i], err = store.normalize(ctx, cfg)
+		require.NoError(t, err)
+	}
+
+	peak.Store(0)
+	parallel := slices.Clone(cfgs)
+	require.NoError(t, store.normalizeAll(ctx, parallel))
+	for i := range cfgs {
+		requireSameConfig(t, serial[i], parallel[i])
+		requireSameConfig(t, inputs[i], cfgs[i]) // Inputs are cloned, never mutated.
+	}
+	require.LessOrEqual(t, int(peak.Load()), hardware.GetCPUNum())
+	if hardware.GetCPUNum() > 1 {
+		require.Greater(t, peak.Load(), int32(1), "schemas are resolved concurrently")
+	}
+	require.NoError(t, store.normalizeAll(ctx, nil))
+}
+
+func TestRecoverLoadConfigStoreReturnsFirstNormalizeErrorInOrder(t *testing.T) {
+	cfgs := normalizeTestConfigs(2000)
+	collections := make([]*querypb.CollectionLoadInfo, 0, len(cfgs))
+	for _, cfg := range cfgs {
+		collections = append(collections, cfg.toCollectionLoadInfoProto())
+	}
+	patches := []*mockey.Mocker{
+		mockey.Mock((*querycoord.Catalog).GetCollections).To(func(*querycoord.Catalog, context.Context) ([]*querypb.CollectionLoadInfo, error) {
+			return collections, nil
+		}).Build(),
+		mockey.Mock((*querycoord.Catalog).GetPartitions).To(func(*querycoord.Catalog, context.Context, []int64) (map[int64][]*querypb.PartitionLoadInfo, error) {
+			return nil, nil
+		}).Build(),
+		mockey.Mock((*querycoord.Catalog).GetReplicas).To(func(*querycoord.Catalog, context.Context) ([]*querypb.Replica, error) { return nil, nil }).Build(),
+	}
+	defer func() {
+		for _, patch := range patches {
+			patch.UnPatch()
+		}
+	}()
+
+	// The first failing collection in recovery order resolves slowest, so a
+	// later failure is observed first.
+	first, later := cfgs[405].CollectionID, cfgs[1203].CollectionID
+	fail := map[int64]time.Duration{first: 5 * time.Millisecond, later: 0, cfgs[1801].CollectionID: 0}
+	for round := 0; round < 5; round++ {
+		var peak atomic.Int32
+		loadInfos := newMemLoadInfoCatalog()
+		_, err := RecoverLoadConfigStore(t.Context(), querycoord.NewCatalog(nil), NewLoadInfoStore(loadInfos, noIndexes, normalizeTestSchema(fail, &peak)))
+		require.ErrorIs(t, err, merr.ErrCollectionNotFound)
+		require.ErrorContains(t, err, strconv.FormatInt(first, 10))
+		require.Zero(t, loadInfos.batchGets, "a failed normalization persists nothing")
+	}
 }
