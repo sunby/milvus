@@ -459,6 +459,23 @@ func (a *segmentRecoveryMetricAggregates) Add(info *SegmentInfo) {
 	a.deleteFileCountFrequency[stats.GetDeltaBinlogCount()]++
 }
 
+// merge adds the aggregates of other.
+func (a *segmentRecoveryMetricAggregates) merge(other *segmentRecoveryMetricAggregates) {
+	for labels, count := range other.segmentCounts {
+		a.segmentCounts[labels] += count
+	}
+	for fileCount, frequency := range other.insertFileCountFrequency {
+		a.insertFileCountFrequency[fileCount] += frequency
+	}
+	for fileCount, frequency := range other.statFileCountFrequency {
+		a.statFileCountFrequency[fileCount] += frequency
+	}
+	for fileCount, frequency := range other.deleteFileCountFrequency {
+		a.deleteFileCountFrequency[fileCount] += frequency
+	}
+	a.numStoredRows += other.numStoredRows
+}
+
 func (a *segmentRecoveryMetricAggregates) PublishSegmentCounts() {
 	metrics.DataCoordNumSegments.Reset()
 	for labels, count := range a.segmentCounts {
@@ -496,12 +513,57 @@ func (a *segmentRecoveryMetricAggregates) ReplayFileHistogramsAsync() {
 func (m *meta) reloadFromKV(ctx context.Context, collectionIDs []int64) error {
 	record := timerecord.NewTimeRecorder("datacoord")
 
+	// The channel checkpoints do not depend on the segments: scan them
+	// meanwhile. A segment error still takes precedence.
+	checkpointCtx, cancelCheckpointScan := context.WithCancel(m.ctx)
+	defer cancelCheckpointScan()
+	var channelCPs map[string]*msgpb.MsgPosition
+	var checkpointErr error
+	checkpointScanDone := make(chan struct{})
+	go func() {
+		defer close(checkpointScanDone)
+		checkpointScanStart := time.Now()
+		mlog.Info(ctx, "datacoord channel checkpoint catalog scan started")
+		channelCPs, checkpointErr = m.catalog.ListChannelCheckpoint(checkpointCtx)
+		if checkpointErr == nil {
+			mlog.Info(ctx, "datacoord channel checkpoint catalog scan done",
+				mlog.Int("numChannelCheckpoints", len(channelCPs)),
+				mlog.Duration("duration", time.Since(checkpointScanStart)))
+		}
+	}()
+
+	aggregates, numSegments, err := m.reloadSegments(ctx, collectionIDs)
+	if err != nil {
+		cancelCheckpointScan()
+		<-checkpointScanDone
+		return err
+	}
+	<-checkpointScanDone
+	if checkpointErr != nil {
+		return checkpointErr
+	}
+	checkpointCacheBuildStart := time.Now()
+	m.metaStore.ReplaceChannelCheckpoints(channelCPs)
+	mlog.Info(ctx, "datacoord channel checkpoint cache rebuild done",
+		mlog.Int("numChannelCheckpoints", len(channelCPs)),
+		mlog.Duration("duration", time.Since(checkpointCacheBuildStart)))
+	aggregates.ReplayFileHistogramsAsync()
+
+	mlog.Info(ctx, "DataCoord meta reloadFromKV done",
+		mlog.Int("numSegments", numSegments),
+		mlog.Duration("duration", record.ElapseSpan()))
+	return nil
+}
+
+// reloadSegments loads the segments with their store versions into the
+// segment cache and publishes their counts.
+func (m *meta) reloadSegments(ctx context.Context, collectionIDs []int64) (*segmentRecoveryMetricAggregates, int, error) {
 	scanStart := time.Now()
 	mlog.Info(ctx, "datacoord segment catalog scan started",
 		mlog.Int("numCollections", len(collectionIDs)))
 	segments, versions, err := m.store().ListSegments(m.ctx, collectionIDs)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
 	numSegments := len(segments)
 	mlog.Info(ctx, "datacoord segment catalog scan done",
@@ -514,50 +576,61 @@ func (m *meta) reloadFromKV(ctx context.Context, collectionIDs []int64) error {
 	// count the segments; the counts of all of them are published at once,
 	// replacing any left by an earlier recovery attempt.
 	m.segments.store.ClearSegments()
-	aggregates := newSegmentRecoveryMetricAggregates()
-	normalize := m.segmentLoadNormalizer()
-	for i, segment := range segments {
-		normalized, err := normalize(segment)
-		if err != nil {
-			return err
-		}
-		info := NewSegmentInfo(normalized)
-		m.segments.LoadSegment(normalized.GetID(), info, versions[i])
-		aggregates.Add(info)
-		recoveredSegments := i + 1
-		if recoveredSegments%segmentCacheRecoveryProgressLogInterval == 0 && recoveredSegments < numSegments {
-			mlog.Info(ctx, "datacoord segment cache rebuild progress",
-				mlog.Int("completedSegments", recoveredSegments),
-				mlog.Int("totalSegments", numSegments),
-				mlog.Duration("duration", time.Since(segmentCacheBuildStart)))
-		}
+	aggregates, err := m.installRecoveredSegments(ctx, segments, versions)
+	if err != nil {
+		return nil, 0, err
 	}
 	aggregates.PublishSegmentCounts()
 	mlog.Info(ctx, "datacoord segment cache rebuild done",
 		mlog.Int("numSegments", numSegments),
 		mlog.Int64("numStoredRows", aggregates.numStoredRows),
 		mlog.Duration("duration", time.Since(segmentCacheBuildStart)))
+	return aggregates, numSegments, nil
+}
 
-	checkpointScanStart := time.Now()
-	mlog.Info(ctx, "datacoord channel checkpoint catalog scan started")
-	channelCPs, err := m.catalog.ListChannelCheckpoint(m.ctx)
-	if err != nil {
-		return err
+// installRecoveredSegments normalizes the recovered segments and installs them
+// at their versions into the segment cache, on recovery workers sharded by
+// segment ID: the records of one segment ID are installed in scan order, as
+// one pass over them in order would. The compaction relations, keyed by the
+// segments compacted from, are replayed afterwards sharded by those, in scan
+// order too. A normalization error is the one such a pass would stop at.
+func (m *meta) installRecoveredSegments(ctx context.Context, segments []*datapb.SegmentInfo, versions []int64) (*segmentRecoveryMetricAggregates, error) {
+	start := time.Now()
+	workers := recoveryWorkers()
+	normalize := m.segmentLoadNormalizer()
+	aggregates := make([]*segmentRecoveryMetricAggregates, workers)
+	compactToChanges := make([][][]compactToChange, workers)
+	for worker := range workers {
+		aggregates[worker] = newSegmentRecoveryMetricAggregates()
+		compactToChanges[worker] = make([][]compactToChange, workers)
 	}
-	mlog.Info(ctx, "datacoord channel checkpoint catalog scan done",
-		mlog.Int("numChannelCheckpoints", len(channelCPs)),
-		mlog.Duration("duration", time.Since(checkpointScanStart)))
-	checkpointCacheBuildStart := time.Now()
-	m.metaStore.ReplaceChannelCheckpoints(channelCPs)
-	mlog.Info(ctx, "datacoord channel checkpoint cache rebuild done",
-		mlog.Int("numChannelCheckpoints", len(channelCPs)),
-		mlog.Duration("duration", time.Since(checkpointCacheBuildStart)))
-	aggregates.ReplayFileHistogramsAsync()
-
-	mlog.Info(ctx, "DataCoord meta reloadFromKV done",
-		mlog.Int("numSegments", numSegments),
-		mlog.Duration("duration", record.ElapseSpan()))
-	return nil
+	var installed atomic.Int64
+	err := forEachInShards(len(segments), workers, func(i int) int64 { return segments[i].GetID() }, func(worker, i int) error {
+		normalized, err := normalize(segments[i])
+		if err != nil {
+			return err
+		}
+		info := NewSegmentInfo(normalized)
+		if old, applied := m.segments.loadRecovered(normalized.GetID(), info, versions[i]); applied {
+			appendCompactToChanges(compactToChanges[worker], i, old, normalized)
+		}
+		aggregates[worker].Add(info)
+		if done := int(installed.Add(1)); done%segmentCacheRecoveryProgressLogInterval == 0 && done < len(segments) {
+			mlog.Info(ctx, "datacoord segment cache rebuild progress",
+				mlog.Int("completedSegments", done),
+				mlog.Int("totalSegments", len(segments)),
+				mlog.Duration("duration", time.Since(start)))
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	m.segments.replayCompactTo(compactToChanges)
+	for _, other := range aggregates[1:] {
+		aggregates[0].merge(other)
+	}
+	return aggregates[0], nil
 }
 
 // segmentLoadNormalizer prepares each segment read back from the catalog
@@ -3538,7 +3611,6 @@ func (m *meta) dropLandedOutputs(r *segmentReader, input *SegmentInfo, result *d
 }
 
 func (m *meta) ValidateSegmentStateBeforeCompleteCompactionMutation(t *datapb.CompactionTask) error {
-
 	// Snapshot compaction protection exists to keep the sealed-segment list stable during
 	// backfill — if an L1/L2 segment gets merged away mid-backfill, the backfill breaks.
 	// L0 segments are transient delete-log carriers, not part of that stable list, and
@@ -3811,7 +3883,6 @@ func isSegmentHealthy(segment *SegmentInfo) bool {
 }
 
 func (m *meta) HasSegments(segIDs []UniqueID) (bool, error) {
-
 	for _, segID := range segIDs {
 		if m.segments.GetSegment(segID) == nil {
 			return false, merr.WrapErrServiceInternalMsg("segment is not exist with ID = %d", segID)
@@ -3822,7 +3893,6 @@ func (m *meta) HasSegments(segIDs []UniqueID) (bool, error) {
 
 // GetCompactionTo returns the segment info of the segment to be compacted to.
 func (m *meta) GetCompactionTo(segmentID int64) ([]*SegmentInfo, bool) {
-
 	return m.segments.GetCompactionTo(segmentID)
 }
 
