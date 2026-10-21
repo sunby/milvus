@@ -71,6 +71,22 @@ type manifestIndexReader struct {
 }
 
 func (m *meta) newManifestIndexReader(ctx context.Context, segments []*SegmentInfo, concurrency int, config *indexpb.StorageConfig, rootPath string) *manifestIndexReader {
+	return newManifestIndexReaderWith(ctx, segments, concurrency, config, rootPath, m.admitManifestIndexRead)
+}
+
+// manifestReadAdmission submits a read through submit, holding whatever read
+// budget it shares from admission until the read completes.
+type manifestReadAdmission func(ctx context.Context, complete func([]packed.ManifestIndexInfo, error), submit func(func([]packed.ManifestIndexInfo, error)) error) error
+
+// admitManifestReadDirectly shares no read budget: the reader's own IO
+// context bounds its reads.
+func admitManifestReadDirectly(_ context.Context, complete func([]packed.ManifestIndexInfo, error), submit func(func([]packed.ManifestIndexInfo, error)) error) error {
+	return submit(complete)
+}
+
+// newManifestIndexReaderWith is newManifestIndexReader with the reads admitted
+// by admit.
+func newManifestIndexReaderWith(ctx context.Context, segments []*SegmentInfo, concurrency int, config *indexpb.StorageConfig, rootPath string, admit manifestReadAdmission) *manifestIndexReader {
 	ctx, cancel := context.WithCancel(ctx)
 	limit := max(1, concurrency)
 	io := packed.NewManifestIOContext(limit)
@@ -80,7 +96,9 @@ func (m *meta) newManifestIndexReader(ctx context.Context, segments []*SegmentIn
 		ctx: ctx, cancel: cancel, remaining: segments, limit: limit, io: io, rootPath: rootPath,
 		results: make(chan manifestIndexReadResult, limit), timer: timer,
 		submitRead: func(ctx context.Context, segment *SegmentInfo, complete func([]packed.ManifestIndexInfo, error)) error {
-			return m.submitManifestIndexRead(ctx, io, segment.GetManifestPath(), config, complete)
+			return admit(ctx, complete, func(complete func([]packed.ManifestIndexInfo, error)) error {
+				return packed.SubmitManifestIndexInfos(ctx, io, segment.GetManifestPath(), config, complete)
+			})
 		},
 	}
 	// Build the read properties once rather than per read. Should that fail,
@@ -88,7 +106,9 @@ func (m *meta) newManifestIndexReader(ctx context.Context, segments []*SegmentIn
 	if properties, err := packed.NewManifestReadProperties(config); err == nil {
 		reader.properties = properties
 		reader.submitRead = func(ctx context.Context, segment *SegmentInfo, complete func([]packed.ManifestIndexInfo, error)) error {
-			return m.submitManifestIndexReadWithProperties(ctx, io, segment.GetManifestPath(), properties, complete)
+			return admit(ctx, complete, func(complete func([]packed.ManifestIndexInfo, error)) error {
+				return packed.SubmitManifestIndexInfosWithProperties(ctx, io, segment.GetManifestPath(), properties, complete)
+			})
 		}
 	}
 	return reader

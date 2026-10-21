@@ -40,6 +40,9 @@ type metaPrefetch struct {
 	indexMeta   *conc.Future[*indexMeta]
 	segments    *conc.Future[prefetchedSegments]
 	checkpoints *conc.Future[map[string]*msgpb.MsgPosition]
+	// manifests reads the segment manifests that index recovery reads, from
+	// the scanned segment records, while the index meta is still recovering.
+	manifests *conc.Future[*manifestReadPrefetch]
 }
 
 type prefetchedSegments struct {
@@ -50,24 +53,85 @@ type prefetchedSegments struct {
 func startMetaPrefetch(ctx context.Context, catalog metastore.DataCoordCatalog, segmentPersist OptimisticTxnPersist[string, *datapb.SegmentInfo], metaRootPath string, collectionIDs []int64) *metaPrefetch {
 	mlog.Info(ctx, "datacoord meta prefetch started", mlog.Int("numCollections", len(collectionIDs)))
 	store := newCASSegmentStore(segmentPersist, catalog, metaRootPath)
+	segments := conc.Go(func() (prefetchedSegments, error) {
+		start := time.Now()
+		records, versions, err := store.ListSegments(ctx, collectionIDs)
+		if err == nil {
+			mlog.Info(ctx, "datacoord segment catalog prefetch done",
+				mlog.Int("numSegments", len(records)), mlog.Duration("duration", time.Since(start)))
+		}
+		return prefetchedSegments{records: records, versions: versions}, err
+	})
 	return &metaPrefetch{
 		store: store,
 		indexMeta: conc.Go(func() (*indexMeta, error) {
 			return recoverIndexMeta(ctx, catalog, collectionIDs)
 		}),
-		segments: conc.Go(func() (prefetchedSegments, error) {
-			start := time.Now()
-			records, versions, err := store.ListSegments(ctx, collectionIDs)
-			if err == nil {
-				mlog.Info(ctx, "datacoord segment catalog prefetch done",
-					mlog.Int("numSegments", len(records)), mlog.Duration("duration", time.Since(start)))
-			}
-			return prefetchedSegments{records: records, versions: versions}, err
-		}),
+		segments: segments,
 		checkpoints: conc.Go(func() (map[string]*msgpb.MsgPosition, error) {
 			return catalog.ListChannelCheckpoint(ctx)
 		}),
+		manifests: conc.Go(func() (*manifestReadPrefetch, error) {
+			scan, err := segments.Await()
+			if err != nil {
+				return nil, err
+			}
+			return startManifestReadPrefetch(ctx, scan.records), nil
+		}),
 	}
+}
+
+// manifestReadPrefetch reads ahead the segment manifests that index recovery
+// reads. A manifest path names one immutable manifest version, so a read of a
+// scanned record serves recovery for the installed segment with that manifest
+// path; recovery reads the other segments itself.
+type manifestReadPrefetch struct {
+	rootPath string
+	// results receives the final result of every prefetched read, then closes.
+	results chan manifestIndexReadResult
+}
+
+// startManifestReadPrefetch starts reading the manifests of the records that
+// are index recovery candidates. It reads nothing on local storage, where meta
+// recovery rewrites manifest paths.
+func startManifestReadPrefetch(ctx context.Context, records []*datapb.SegmentInfo) *manifestReadPrefetch {
+	config := createStorageConfig()
+	if config.GetStorageType() == "local" {
+		return nil
+	}
+	var segments []*SegmentInfo
+	for _, record := range records {
+		// A bare wrapper: NewSegmentInfo fills in the record's stats, which
+		// meta recovery reads meanwhile.
+		segment := &SegmentInfo{SegmentInfo: record}
+		if manifestIndexRecoveryCandidate(segment) && segment.GetManifestPath() != "" {
+			segments = append(segments, segment)
+		}
+	}
+	prefetch := &manifestReadPrefetch{rootPath: config.GetRootPath(), results: make(chan manifestIndexReadResult, len(segments))}
+	if len(segments) == 0 {
+		close(prefetch.results)
+		return prefetch
+	}
+	start := time.Now()
+	reader := newManifestIndexReaderWith(ctx, segments, min(len(segments), segmentIndexManifestReadConcurrency()), config, prefetch.rootPath, admitManifestReadDirectly)
+	go func() {
+		defer close(prefetch.results)
+		defer reader.close()
+		for {
+			result, err := reader.next()
+			if err != nil || result == nil {
+				mlog.Info(ctx, "segment manifest prefetch done", mlog.Int("numManifests", len(segments)),
+					mlog.Duration("duration", time.Since(start)), mlog.Bool("complete", err == nil))
+				return
+			}
+			// The projected indexes are all recovery takes from a read; the
+			// entries would stay alive in the buffer until it installs them.
+			result.entries = nil
+			prefetch.results <- *result
+		}
+	}()
+	return prefetch
 }
 
 // StartMetaPrefetch starts reading the catalog data of meta recovery for the

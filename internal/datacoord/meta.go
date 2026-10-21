@@ -55,6 +55,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/rootcoordpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
+	"github.com/milvus-io/milvus/pkg/v3/util/conc"
 	"github.com/milvus-io/milvus/pkg/v3/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/v3/util/lock"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
@@ -158,6 +159,10 @@ type meta struct {
 	segmentChangeGroups      map[int64]*model.SegmentChangeGroup
 	stagedSegmentToGroup     map[int64]int64
 	supersededSegmentToGroup map[int64]int64
+
+	// manifestReadPrefetch, when set, holds manifest reads started ahead of
+	// recovery; reloadSegmentIndexesFromManifests takes it.
+	manifestReadPrefetch *conc.Future[*manifestReadPrefetch]
 }
 
 func (m *meta) GetIndexMeta() *indexMeta {
@@ -333,6 +338,7 @@ func newMetaWithoutManifestIndexes(ctx context.Context, catalog metastore.DataCo
 	}
 	if prefetched != nil {
 		mt.segmentStore = prefetched.store
+		mt.manifestReadPrefetch = prefetched.manifests
 	}
 
 	initialized := false

@@ -226,14 +226,6 @@ func (m *meta) submitManifestIndexRead(ctx context.Context, io *packed.ManifestI
 	})
 }
 
-// submitManifestIndexReadWithProperties is submitManifestIndexRead with the
-// storage properties prebuilt for a series of reads.
-func (m *meta) submitManifestIndexReadWithProperties(ctx context.Context, io *packed.ManifestIOContext, manifestPath string, properties *packed.ManifestReadProperties, complete func([]packed.ManifestIndexInfo, error)) error {
-	return m.admitManifestIndexRead(ctx, complete, func(complete func([]packed.ManifestIndexInfo, error)) error {
-		return packed.SubmitManifestIndexInfosWithProperties(ctx, io, manifestPath, properties, complete)
-	})
-}
-
 // admitManifestIndexRead holds one unit of the shared read budget from
 // admission until the read that submit starts completes, or until submit
 // rejects it.
@@ -338,11 +330,7 @@ func (r *backgroundManifestIndexRecovery) abort() {
 // Failing to start is recoverable; that is not.
 func (m *meta) reloadSegmentIndexesFromManifests(ctx context.Context) error {
 	record := timerecord.NewTimeRecorder("indexMeta-reloadFromManifests")
-	segments := m.SelectSegments(ctx, SegmentFilterFunc(func(segment *SegmentInfo) bool {
-		return (isSegmentHealthy(segment) || segment.GetState() == commonpb.SegmentState_Dropped) &&
-			segment.GetStorageVersion() >= storage.StorageV3 &&
-			segment.GetManifestHasIndex() && segment.GetLevel() != datapb.SegmentLevel_L0
-	}))
+	segments := m.SelectSegments(ctx, SegmentFilterFunc(manifestIndexRecoveryCandidate))
 	for _, segment := range segments {
 		if segment.GetManifestPath() == "" {
 			return merr.Wrapf(merr.ErrDataIntegrity,
@@ -360,8 +348,6 @@ func (m *meta) reloadSegmentIndexesFromManifests(ctx context.Context) error {
 		rootPath = m.chunkManager.RootPath()
 	}
 	concurrency := min(len(segments), segmentIndexManifestReadConcurrency())
-	reader := m.newManifestIndexReader(ctx, segments, concurrency, storageConfig, rootPath)
-	defer reader.close()
 	recovery := m.indexMeta.newManifestIndexRecovery()
 	// Per-record installs published their aggregates immediately; publish them
 	// on every return too, including when a later manifest fails startup.
@@ -373,21 +359,14 @@ func (m *meta) reloadSegmentIndexesFromManifests(ctx context.Context) error {
 		}
 		return m.UpdateSegmentsInfo(ctx, markers...)
 	}
-	for {
-		result, err := reader.next()
-		if err != nil {
-			return merr.Wrap(err, "recover segment indexes from manifests")
-		}
-		if result == nil {
-			break
-		}
+	apply := func(result *manifestIndexReadResult) error {
 		indexes, removed, err := m.recoverManifestIndexes(ctx, result)
 		if err != nil {
 			return merr.Wrap(err, "recover segment indexes from manifests")
 		}
 		if len(indexes) == 0 && !removed {
 			emptyMarkers = append(emptyMarkers, clearEmptyManifestIndexMarker(result.request.segment.GetID(), result.request.segment.GetManifestPath()))
-			if len(emptyMarkers) == reader.limit {
+			if len(emptyMarkers) == concurrency {
 				if err := flushMarkers(emptyMarkers); err != nil {
 					return merr.Wrap(err, "persist empty manifest index markers")
 				}
@@ -397,6 +376,27 @@ func (m *meta) reloadSegmentIndexesFromManifests(ctx context.Context) error {
 		for _, segIdx := range indexes {
 			recovery.install(segIdx)
 		}
+		return nil
+	}
+	remaining, prefetched, err := m.applyPrefetchedManifestReads(ctx, segments, rootPath, apply)
+	if err != nil {
+		return err
+	}
+	if len(remaining) > 0 {
+		reader := m.newManifestIndexReader(ctx, remaining, min(len(remaining), concurrency), storageConfig, rootPath)
+		defer reader.close()
+		for {
+			result, err := reader.next()
+			if err != nil {
+				return merr.Wrap(err, "recover segment indexes from manifests")
+			}
+			if result == nil {
+				break
+			}
+			if err := apply(result); err != nil {
+				return err
+			}
+		}
 	}
 	if err := flushMarkers(emptyMarkers); err != nil {
 		return merr.Wrap(err, "persist empty manifest index markers")
@@ -404,9 +404,77 @@ func (m *meta) reloadSegmentIndexesFromManifests(ctx context.Context) error {
 	recovery.finish()
 
 	mlog.Info(ctx, "recovered segment indexes from manifests",
-		mlog.Int("manifestsRead", len(segments)), mlog.Int("recoveredIndexes", recovery.installed),
-		mlog.Duration("duration", record.ElapseSpan()))
+		mlog.Int("manifestsRead", len(segments)), mlog.Int("prefetchedManifests", prefetched),
+		mlog.Int("recoveredIndexes", recovery.installed), mlog.Duration("duration", record.ElapseSpan()))
 	return nil
+}
+
+// manifestIndexRecoveryCandidate reports whether startup recovers the
+// segment's indexes from its manifest.
+func manifestIndexRecoveryCandidate(segment *SegmentInfo) bool {
+	return (isSegmentHealthy(segment) || segment.GetState() == commonpb.SegmentState_Dropped) &&
+		segment.GetStorageVersion() >= storage.StorageV3 &&
+		segment.GetManifestHasIndex() && segment.GetLevel() != datapb.SegmentLevel_L0
+}
+
+// applyPrefetchedManifestReads applies, through apply, the prefetched read of
+// every segment whose installed manifest path is the one read, and returns the
+// segments it did not apply and how many it applied. A read that failed is not
+// applied: the regular read retries it and interprets the failure.
+func (m *meta) applyPrefetchedManifestReads(ctx context.Context, segments []*SegmentInfo, rootPath string, apply func(*manifestIndexReadResult) error) ([]*SegmentInfo, int, error) {
+	prefetch := m.takeManifestReadPrefetch()
+	if prefetch == nil || prefetch.rootPath != rootPath {
+		return segments, 0, nil
+	}
+	pending := make(map[int64]*SegmentInfo, len(segments))
+	for _, segment := range segments {
+		pending[segment.GetID()] = segment
+	}
+	applied := 0
+	for {
+		var result manifestIndexReadResult
+		var ok bool
+		select {
+		case <-ctx.Done():
+			return nil, applied, ctx.Err()
+		case result, ok = <-prefetch.results:
+		}
+		if !ok {
+			break
+		}
+		segment, found := pending[result.request.segment.GetID()]
+		if !found || result.err != nil || segment.GetManifestPath() != result.request.segment.GetManifestPath() {
+			continue
+		}
+		delete(pending, segment.GetID())
+		result.request.segment = segment
+		if err := apply(&result); err != nil {
+			return nil, applied, err
+		}
+		applied++
+	}
+	remaining := make([]*SegmentInfo, 0, len(pending))
+	for _, segment := range segments {
+		if _, ok := pending[segment.GetID()]; ok {
+			remaining = append(remaining, segment)
+		}
+	}
+	return remaining, applied, nil
+}
+
+// takeManifestReadPrefetch returns the manifest reads prefetched for this
+// meta, at most once.
+func (m *meta) takeManifestReadPrefetch() *manifestReadPrefetch {
+	future := m.manifestReadPrefetch
+	m.manifestReadPrefetch = nil
+	if future == nil {
+		return nil
+	}
+	prefetch, err := future.Await()
+	if err != nil {
+		return nil
+	}
+	return prefetch
 }
 
 // recoverManifestIndexes interprets a completed read; the reader has already
