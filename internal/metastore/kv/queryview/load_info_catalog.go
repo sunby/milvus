@@ -105,33 +105,70 @@ func (c *loadInfoCatalog) GetLoadInfos(ctx context.Context, ids []LoadInfoID) ([
 // would retry an oversized request forever.
 const maxLoadInfoTxnBytes = 512 << 10
 
+// saveLoadInfoConcurrency bounds the snapshot transactions in flight, and so
+// their bytes to 4 MiB. It is a write bound, independent of
+// metastore.readConcurrency.
+const saveLoadInfoConcurrency = 8
+
+// SaveLoadInfos writes the transactions of a batch-by-batch write, up to
+// saveLoadInfoConcurrency at a time. A batch closes before the snapshot that
+// would exceed MaxTxnOps keys or maxLoadInfoTxnBytes. Distinct snapshots have
+// disjoint keys, so the stored result does not depend on the order of the
+// transactions; repeated snapshots are written one transaction at a time, in
+// order. No transaction starts after one has failed, and an encoding failure
+// is reported after the transactions closed before that snapshot complete.
 func (c *loadInfoCatalog) SaveLoadInfos(ctx context.Context, infos []*querypb.GetQueryViewLoadInfoResponse) error {
+	g, gctx := errgroup.WithContext(ctx)
+	if repeatsLoadInfo(infos) {
+		g.SetLimit(1)
+	} else {
+		g.SetLimit(saveLoadInfoConcurrency)
+	}
 	maxOps := max(c.storage.MaxTxnOps(), 1)
 	kvs := make(map[string]string)
 	size := 0
-	flush := func() error {
+	flush := func() {
 		if len(kvs) == 0 {
-			return nil
+			return
 		}
-		err := c.storage.MultiSave(ctx, kvs)
+		batch := kvs
+		g.Go(func() error {
+			if err := gctx.Err(); err != nil {
+				return err
+			}
+			return c.storage.MultiSave(gctx, batch)
+		})
 		kvs, size = make(map[string]string), 0
-		return err
 	}
 	for _, info := range infos {
 		value, err := proto.Marshal(info)
 		if err != nil {
+			if err := g.Wait(); err != nil {
+				return err
+			}
 			return merr.Wrap(err, "encode query view load snapshot")
 		}
 		key := loadInfoKey(info.GetCollectionID(), info.GetVersion())
 		if len(kvs) >= maxOps || size+len(key)+len(value) > maxLoadInfoTxnBytes {
-			if err := flush(); err != nil {
-				return err
-			}
+			flush()
 		}
 		kvs[key] = string(value)
 		size += len(key) + len(value)
 	}
-	return flush()
+	flush()
+	return g.Wait()
+}
+
+func repeatsLoadInfo(infos []*querypb.GetQueryViewLoadInfoResponse) bool {
+	seen := make(map[LoadInfoID]struct{}, len(infos))
+	for _, info := range infos {
+		id := LoadInfoID{info.GetCollectionID(), info.GetVersion()}
+		if _, ok := seen[id]; ok {
+			return true
+		}
+		seen[id] = struct{}{}
+	}
+	return false
 }
 
 func decodeLoadInfo(value string, id LoadInfoID) (*querypb.GetQueryViewLoadInfoResponse, error) {
