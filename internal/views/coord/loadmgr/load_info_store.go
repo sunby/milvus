@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"google.golang.org/protobuf/proto"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/messagespb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
+	"github.com/milvus-io/milvus/pkg/v3/util/hardware"
 	"github.com/milvus-io/milvus/pkg/v3/util/lock"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
@@ -172,6 +174,43 @@ func (s *LoadInfoStore) withCurrentIndexes(stored *querypb.GetQueryViewLoadInfoR
 		}
 	}
 	return info
+}
+
+// normalizeAll normalizes cfgs in place on up to hardware.GetCPUNum()
+// goroutines. Like normalizing them in order, it returns the error of the first
+// failing config: indexes are claimed in order, a failure stops further claims
+// and every claimed index completes, so every earlier config was normalized.
+func (s *LoadInfoStore) normalizeAll(ctx context.Context, cfgs []*LoadConfig) error {
+	errs := make([]error, len(cfgs))
+	var next atomic.Int64
+	var failed atomic.Bool
+	var wg sync.WaitGroup
+	for range min(hardware.GetCPUNum(), len(cfgs)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for !failed.Load() {
+				i := int(next.Add(1) - 1)
+				if i >= len(cfgs) {
+					return
+				}
+				cfg, err := s.normalize(ctx, cfgs[i])
+				if err != nil {
+					errs[i] = err
+					failed.Store(true)
+					return
+				}
+				cfgs[i] = cfg
+			}
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // normalize materializes legacy required scopes before desired state publication.
