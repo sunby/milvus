@@ -78,8 +78,6 @@ func TestManifestPublicationNotifiesQueryViews(t *testing.T) {
 				notifications++
 				require.EqualValues(t, 1, collectionID)
 				require.Equal(t, []int64{10}, ids)
-				require.True(t, m.getSegmentWriteLocks().TryLock(10), "notification must run outside the segment writer lock")
-				m.getSegmentWriteLocks().Unlock(10)
 				require.True(t, m.getSegmentManifestLocks().TryLock(10), "notification must run outside manifest lock")
 				m.getSegmentManifestLocks().Unlock(10)
 				require.Equal(t, newManifest, m.GetSegment(context.Background(), 10).GetManifestPath())

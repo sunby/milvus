@@ -1255,7 +1255,7 @@ func (suite *MetaBasicSuite) TestBatchSaveDropSegments_UsesCompositeUpdate() {
 		segments: NewSegmentsInfo(),
 	}
 
-	err := m.batchSaveDropSegments(context.TODO(), "ch-1", modSegments)
+	err := m.batchSaveDropSegments(context.TODO(), "ch-1", modSegments, nil)
 	suite.NoError(err)
 
 	// One UpdateSegment per dropped segment (2), then the channel tombstone.
@@ -2078,7 +2078,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 				{SegmentID: 1},
 			},
 		}
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.Error(err)
 		suite.Nil(infos)
 		suite.Nil(mutation)
@@ -2099,7 +2099,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 				{SegmentID: 2}, // two results — should error
 			},
 		}
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.Error(err)
 		suite.Nil(infos)
 		suite.Nil(mutation)
@@ -2120,7 +2120,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 				{SegmentID: 99},
 			},
 		}
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.Error(err)
 		suite.ErrorIs(err, merr.ErrSegmentNotFound)
 		suite.Nil(infos)
@@ -2141,7 +2141,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 				{SegmentID: 1},
 			},
 		}
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.Error(err)
 		suite.ErrorIs(err, merr.ErrSegmentNotFound)
 		suite.Nil(infos)
@@ -2176,7 +2176,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 				},
 			},
 		}
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.NoError(err)
 		suite.NotNil(mutation)
 		suite.Require().Len(infos, 1)
@@ -2224,7 +2224,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 				},
 			},
 		}
-		infos, _, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, _, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.NoError(err)
 		suite.Require().Len(infos, 1)
 		suite.Require().NotNil(infos[0].GetStats())
@@ -2277,7 +2277,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 				},
 			},
 		}
-		infos, _, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, _, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.NoError(err)
 		suite.Require().Len(infos, 1)
 
@@ -2328,7 +2328,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 				},
 			},
 		}
-		infos, _, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, _, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.NoError(err)
 		suite.Require().Len(infos, 1)
 
@@ -2368,7 +2368,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 				Stats:          &datapb.Statistics{InsertBinlogSize: 768, InsertBinlogCount: 2},
 			}},
 		}
-		infos, _, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, _, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.NoError(err)
 		suite.Require().Len(infos, 1)
 		suite.Equal(currentManifest, infos[0].GetManifestPath())
@@ -2433,7 +2433,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 				},
 			},
 		}
-		infos, _, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, _, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.NoError(err)
 		suite.Require().Len(infos, 1)
 		// The pre-existing group survives and both newly appended groups are
@@ -2454,7 +2454,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 		// Replay: the segment now sits at resultManifest, so this is the
 		// idempotent-adoption branch. The merge must not duplicate either new
 		// group, and the manifest-gated increment must not be accumulated twice.
-		replayed, _, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		replayed, _, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.NoError(err)
 		suite.Require().Len(replayed, 1)
 		suite.Require().Len(replayed[0].GetBinlogs(), 3)
@@ -2502,7 +2502,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 				},
 			},
 		}
-		_, _, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		_, _, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.NoError(err)
 
 		updated := m.segments.GetSegment(1)
@@ -2562,7 +2562,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 				},
 			},
 		}
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.Error(err)
 		suite.ErrorIs(err, merr.ErrIllegalCompactionPlan)
 		suite.Nil(infos)
@@ -2607,7 +2607,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 						},
 					},
 				}
-				infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+				infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 				suite.Error(err)
 				suite.ErrorIs(err, merr.ErrIllegalCompactionPlan)
 				suite.Nil(infos)
@@ -2648,7 +2648,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 				},
 			},
 		}
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.NoError(err)
 		suite.NotNil(mutation)
 		suite.Require().Len(infos, 1)
@@ -2674,7 +2674,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 				},
 			},
 		}
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.Error(err)
 		suite.Nil(infos)
 		suite.Nil(mutation)
@@ -2717,7 +2717,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.NoError(err)
 		suite.NotNil(mutation)
 		suite.Require().Len(infos, 1)
@@ -2766,7 +2766,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.NoError(err)
 		suite.NotNil(mutation)
 		suite.Require().Len(infos, 1)
@@ -2827,7 +2827,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 					},
 				}
 
-				infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+				infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 				suite.NoError(err)
 				suite.NotNil(mutation)
 				suite.Require().Len(infos, 1)
@@ -2867,7 +2867,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.NoError(err)
 		suite.NotNil(mutation)
 		suite.Require().Len(infos, 1)
@@ -2901,7 +2901,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.ErrorIs(err, merr.ErrIllegalCompactionPlan)
 		suite.Nil(infos)
 		suite.Nil(mutation)
@@ -2932,7 +2932,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.ErrorIs(err, merr.ErrIllegalCompactionPlan)
 		suite.Nil(infos)
 		suite.Nil(mutation)
@@ -2960,7 +2960,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.Error(err)
 		suite.Nil(infos)
 		suite.Nil(mutation)
@@ -2989,7 +2989,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.Error(err)
 		suite.Nil(infos)
 		suite.Nil(mutation)
@@ -3026,7 +3026,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 				},
 			},
 		}
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.Error(err)
 		suite.Nil(infos)
 		suite.Nil(mutation)
@@ -3051,7 +3051,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 				},
 			},
 		}
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.Error(err)
 		suite.Nil(infos)
 		suite.Nil(mutation)
@@ -3094,7 +3094,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 				},
 			},
 		}
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.NoError(err)
 		suite.NotNil(mutation)
 		suite.Require().Len(infos, 1)
@@ -3142,7 +3142,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.NoError(err)
 		suite.NotNil(mutation)
 		suite.Require().Len(infos, 1)
@@ -3186,7 +3186,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.NoError(err)
 		suite.NotNil(mutation)
 		suite.Require().Len(infos, 1)
@@ -3223,7 +3223,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.NoError(err)
 		suite.NotNil(mutation)
 		suite.Require().Len(infos, 1)
@@ -3256,7 +3256,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.ErrorIs(err, merr.ErrIllegalCompactionPlan)
 		suite.Nil(infos)
 		suite.Nil(mutation)
@@ -3285,7 +3285,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.NoError(err)
 		suite.NotNil(mutation)
 		suite.Require().Len(infos, 1)
@@ -3325,7 +3325,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.ErrorIs(err, catalogErr)
 		suite.Nil(infos)
 		suite.Nil(mutation)
@@ -3362,7 +3362,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.ErrorIs(err, catalogErr)
 		suite.Nil(infos)
 		suite.Nil(mutation)
@@ -3396,7 +3396,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.ErrorIs(err, merr.ErrIllegalCompactionPlan)
 		suite.Nil(infos)
 		suite.Nil(mutation)
@@ -3431,7 +3431,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.ErrorIs(err, merr.ErrIllegalCompactionPlan)
 		suite.Nil(infos)
 		suite.Nil(mutation)
@@ -3466,7 +3466,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.ErrorIs(err, merr.ErrIllegalCompactionPlan)
 		suite.Nil(infos)
 		suite.Nil(mutation)
@@ -3500,7 +3500,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.ErrorIs(err, merr.ErrIllegalCompactionPlan)
 		suite.Nil(infos)
 		suite.Nil(mutation)
@@ -3534,7 +3534,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 			},
 		}
 
-		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+		infos, mutation, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 		suite.ErrorIs(err, merr.ErrIllegalCompactionPlan)
 		suite.Nil(infos)
 		suite.Nil(mutation)
@@ -3595,7 +3595,7 @@ func (suite *MetaBasicSuite) TestCompleteBumpSchemaVersionCompactionMutation() {
 					},
 				},
 			}
-			_, _, err := m.completeBumpSchemaVersionCompactionMutation(task, result)
+			_, _, err := m.completeBumpSchemaVersionCompactionMutation(cacheReads(m), task, result)
 			suite.NoError(err)
 		}
 
@@ -4344,13 +4344,19 @@ func TestAddL0DeltalogsAndUpdateManifestOperatorCommitsManifestsConcurrently(t *
 	require.Empty(t, updated2.GetDeltalogs()[0].GetBinlogs()[0].GetLogPath())
 }
 
+// Two L0 manifest updates of one segment may both build on the manifest they
+// read. The store accepts one of them; the other runs again on the manifest
+// the first published, so neither update is lost.
 func TestAddL0DeltalogsAndUpdateManifestOperatorSerializesConcurrentUpdates(t *testing.T) {
 	basePath := "/tmp/milvus/insert_log/1/10/200"
 	oldManifest := packed.MarshalManifestPath(basePath, 7)
 	manifest8 := packed.MarshalManifestPath(basePath, 8)
 	manifest9 := packed.MarshalManifestPath(basePath, 9)
 
-	meta, err := newMemoryMeta(t)
+	brk := broker.NewMockBroker(t)
+	brk.EXPECT().ShowCollectionIDs(mock.Anything).Return(nil, nil)
+	persist := NewOptimisticTxnMemoryPersist[string, *datapb.SegmentInfo](&SegmentInfoMarshaler{})
+	meta, err := newMetaWithPersist(context.TODO(), datacoord.NewCatalog(NewMetaMemoryKV(), "", ""), nil, brk, persist, "")
 	require.NoError(t, err)
 	require.NoError(t, meta.AddSegment(context.TODO(), NewSegmentInfo(&datapb.SegmentInfo{
 		ID:           200,
@@ -4400,7 +4406,9 @@ func TestAddL0DeltalogsAndUpdateManifestOperatorSerializesConcurrentUpdates(t *t
 	for err := range errs {
 		require.NoError(t, err)
 	}
-	require.Equal(t, []string{oldManifest, manifest8}, calls)
+	// The last update built on a manifest the other one published.
+	require.Equal(t, oldManifest, calls[0])
+	require.NotEqual(t, oldManifest, calls[len(calls)-1])
 
 	updated := meta.GetSegment(context.TODO(), 200)
 	require.Equal(t, manifest9, updated.GetManifestPath())
