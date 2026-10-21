@@ -29,6 +29,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/config"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
+	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
@@ -84,19 +85,17 @@ type statsScanCursor struct {
 func (m *meta) rangeStatsSegments(collectionID int64) iter.Seq2[int64, int64] {
 	return func(yield func(int64, int64) bool) {
 		if collectionID == 0 {
-			// Visit tombstones too: hiding them inside Cache.Range would allow
-			// one next() to walk an unbounded number of deleted entries.
-			m.segments.segments.entries.Range(func(id int64, entry *cacheEntry[*SegmentInfo]) bool {
-				if entry.deleted {
+			// Visit tombstones too: skipping them inside the store's range would
+			// allow one next() to walk an unbounded number of deleted entries.
+			m.segments.store.RangeSegmentEntries(func(id int64, segment *datapb.SegmentInfo) bool {
+				if segment == nil {
 					return yield(0, 0)
 				}
-				return yield(entry.value.GetCollectionID(), id)
+				return yield(segment.GetCollectionID(), id)
 			})
 			return
 		}
-		if ids, ok := m.segments.coll2Segments.Get(collectionID); ok {
-			ids.Range(func(id int64, _ struct{}) bool { return yield(collectionID, id) })
-		}
+		m.segments.store.RangeCollectionSegmentIDs(collectionID, func(id int64) bool { return yield(collectionID, id) })
 	}
 }
 
