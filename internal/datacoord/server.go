@@ -753,7 +753,7 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 		metaInitializationStart := time.Now()
 		mlog.Info(s.ctx, "datacoord metadata initialization attempt started")
 		var err error
-		recoveredMeta, err = newMetaWithPersist(s.ctx, s.catalog, chunkManager, s.metaStore, s.broker, segmentPersist, s.metaRootPath)
+		recoveredMeta, err = newMetaWithoutManifestIndexes(s.ctx, s.catalog, chunkManager, s.metaStore, s.broker, segmentPersist, s.metaRootPath)
 		if err != nil {
 			mlog.Warn(s.ctx, "datacoord metadata initialization attempt failed",
 				mlog.Duration("duration", time.Since(metaInitializationStart)),
@@ -773,8 +773,15 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 			recoveredMeta.closeManifestCommitExecutor()
 		}
 	}()
+	// Recover the segment indexes recorded in segment manifests while the
+	// collection, import and DataView phases below run: it needs only the
+	// recovered segments and index meta, and none of those phases reads the
+	// index meta or the manifest markers it clears. Publication waits for it.
+	// Declared after the executor cleanup so that it is joined first.
+	manifestIndexes := startManifestIndexRecovery(s.ctx, recoveredMeta)
+	defer manifestIndexes.abort()
 	// Retry each recovery phase independently: a later metadata error must
-	// not repeat newMeta's successful object-storage manifest scan.
+	// not repeat the successful object-storage manifest scan.
 	if err := retry.Do(s.ctx, func() error {
 		return recoveredMeta.reloadCollectionsFromRootcoord(s.ctx, s.broker)
 	}, retry.Attempts(connMetaMaxRetryTime)); err != nil {
@@ -839,6 +846,11 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 	mlog.Info(s.ctx, "datacoord DataView recovery done",
 		mlog.Int("totalCollections", len(collectionIDs)),
 		mlog.Duration("duration", time.Since(dataViewRecoveryStart)))
+	if err := manifestIndexes.wait(); err != nil {
+		// Object-store reads have already retried per segment. Retrying
+		// initMeta would reread every successful manifest.
+		return retry.Unrecoverable(err)
+	}
 	// Publish only fully recovered metadata. A failed later phase must not
 	// make a subsequent initMeta call return early with partial state.
 	recoveredMeta.queryViewLoadInfoNotifier = s.queryViewLoadInfoNotifier
