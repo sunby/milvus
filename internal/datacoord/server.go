@@ -703,6 +703,26 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 	if !ok {
 		return merr.WrapErrServiceInternalMsg("datacoord catalog does not support DataView persistence")
 	}
+	// List the persisted DataViews while the phases below recover SegmentMeta,
+	// Collections and Imports. No DataView key can change before RecoverManager:
+	// every writer goes through the DataViewManager it builds, the DDL callbacks
+	// that reach the manager are registered only after recovery, and external
+	// RPCs wait for the recovery barrier. A failed RecoverManager attempt may
+	// have dropped or written keys, so only the first attempt uses this listing.
+	listCtx, cancelList := context.WithCancel(s.ctx)
+	var (
+		listed      = make(chan struct{})
+		listedErr   error
+		listedViews []*viewpb.DataViewOfCollection
+	)
+	go func() {
+		defer close(listed)
+		listedViews, listedErr = catalog.ListAllDataViews(listCtx)
+	}()
+	defer func() {
+		cancelList()
+		<-listed
+	}()
 	// Segments are kept as full records in an optimistic store next to the
 	// catalog keys; every segment write is a compare-and-swap. Without a
 	// meta store client (a server assembled by unit tests) segments stay in
@@ -766,7 +786,26 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 	dataViewRecoveryStart := time.Now()
 	mlog.Info(s.ctx, "datacoord DataView recovery started",
 		mlog.Int("totalCollections", len(collectionIDs)))
+	firstAttempt := true
 	if err := retry.Do(s.ctx, func() error {
+		options := []dataview.Option{
+			dataview.WithFrontierProjector(func(ctx context.Context, collectionID int64) (map[string]uint64, error) {
+				return transformFrontierBounds(ctx, recoveredMeta, recoveredImports, collectionID)
+			}),
+			dataview.WithPendingTransformProjector(func(ctx context.Context, view *viewpb.DataViewOfCollection) (map[string]uint64, error) {
+				return pendingTransformBounds(ctx, recoveredMeta, recoveredImports, view)
+			}),
+			dataview.WithRecoveryConcurrency(paramtable.Get().MetaStoreCfg.ReadConcurrency.GetAsInt()),
+		}
+		if firstAttempt {
+			firstAttempt = false
+			<-listed
+			if listedErr != nil {
+				return listedErr
+			}
+			options = append(options, dataview.WithListedDataViews(listedViews))
+			listedViews = nil
+		}
 		var err error
 		manager, err = dataview.RecoverManager(
 			s.ctx,
@@ -775,12 +814,7 @@ func (s *Server) initMeta(chunkManager storage.ChunkManager) error {
 			recoveredMeta.loadableProjection,
 			collectionIDs,
 			collectionVChannels,
-			dataview.WithFrontierProjector(func(ctx context.Context, collectionID int64) (map[string]uint64, error) {
-				return transformFrontierBounds(ctx, recoveredMeta, recoveredImports, collectionID)
-			}),
-			dataview.WithPendingTransformProjector(func(ctx context.Context, view *viewpb.DataViewOfCollection) (map[string]uint64, error) {
-				return pendingTransformBounds(ctx, recoveredMeta, recoveredImports, view)
-			}),
+			options...,
 		)
 		return err
 	}, retry.Attempts(connMetaMaxRetryTime)); err != nil {
