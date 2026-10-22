@@ -119,7 +119,7 @@ func TestRLSMetadataIndependentOfEnforcement(t *testing.T) {
 	// Recovery restores metadata even while enforcement is disabled.
 	coll = coll.Clone()
 	coll.RLSPolicies = nil
-	require.NoError(t, meta.reloadCollectionsRLSMetadata(ctx, []*model.Collection{coll}))
+	require.NoError(t, meta.reloadCollectionsRLSMetadata(ctx, []*model.Collection{coll}, nil))
 	require.Len(t, coll.RLSPolicies, 1)
 	meta.ddLock.Lock()
 	meta.collID2Meta[id] = coll.Clone()
@@ -143,7 +143,7 @@ func TestRLSMetadataIndependentOfEnforcement(t *testing.T) {
 	require.NoError(t, merr.CheckRPCCall(status, err))
 	coll, err = meta.GetCollectionByName(ctx, db, name, typeutil.MaxTimestamp, false)
 	require.NoError(t, err)
-	require.NoError(t, meta.reloadCollectionsRLSMetadata(ctx, []*model.Collection{coll}))
+	require.NoError(t, meta.reloadCollectionsRLSMetadata(ctx, []*model.Collection{coll}, nil))
 	meta.ddLock.Lock()
 	meta.collID2Meta[id] = coll
 	meta.ddLock.Unlock()

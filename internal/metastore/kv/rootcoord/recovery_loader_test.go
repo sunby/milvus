@@ -18,11 +18,13 @@ package rootcoord
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -31,9 +33,11 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/kv/mocks"
 	"github.com/milvus-io/milvus/internal/metastore/model"
+	"github.com/milvus-io/milvus/internal/util/rlsutil"
 	pb "github.com/milvus-io/milvus/pkg/v3/proto/etcdpb"
 	"github.com/milvus-io/milvus/pkg/v3/util"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	"github.com/milvus-io/milvus/pkg/v3/util/typeutil"
 )
 
 type recoveryWalkRecorder struct {
@@ -245,6 +249,40 @@ func TestCatalogListCollectionsForRecoverySkipsChildScansForEmbeddedMetadata(t *
 	assert.Zero(t, recorder.calls[FunctionMetaPrefix+"/"])
 }
 
+func TestCatalogListCollectionsForRecoveryReportsCollectionIDsBeforeChildScans(t *testing.T) {
+	records := map[string][]byte{
+		CollectionMetaPrefix + "/50": marshalRecoveryProto(t, &pb.CollectionInfo{
+			ID: 50, DbId: util.DefaultDBID, Schema: &schemapb.CollectionSchema{Name: "legacy"}, State: pb.CollectionState_CollectionCreated,
+		}),
+		CollectionInfoMetaPrefix + "/1/100": marshalRecoveryProto(t, &pb.CollectionInfo{
+			ID: 100, DbId: 1, Schema: &schemapb.CollectionSchema{Name: "c100"}, State: pb.CollectionState_CollectionCreated,
+		}),
+		CollectionInfoMetaPrefix + "/1/200": marshalRecoveryProto(t, &pb.CollectionInfo{
+			ID: 200, DbId: 1, Schema: &schemapb.CollectionSchema{Name: "c200"}, State: pb.CollectionState_CollectionCreated,
+		}),
+		CollectionInfoMetaPrefix + "/1/999": []byte(tombstone()),
+		FieldMetaPrefix + "/100/11":         marshalRecoveryProto(t, &schemapb.FieldSchema{FieldID: 11, Name: "f100"}),
+	}
+	recorder := &recoveryWalkRecorder{calls: make(map[string]int), pageSizes: make(map[string]int)}
+	metaKV := newRecoveryMetaKV(t, records, recorder)
+	var reported [][]int64
+	childScansAtReport := -1
+	catalog := NewCatalog(metaKV, WithRecoveredCollectionIDs(func(collectionIDs []int64) {
+		reported = append(reported, collectionIDs)
+		recorder.mu.Lock()
+		childScansAtReport = recorder.calls[FieldMetaPrefix+"/"] + recorder.calls[PartitionMetaPrefix+"/"]
+		recorder.mu.Unlock()
+	})).(*Catalog)
+
+	collectionsByDB, err := catalog.ListCollectionsForRecovery(context.Background(), []int64{util.NonDBID, 1}, 0)
+	require.NoError(t, err)
+	require.Len(t, collectionsByDB[1], 2)
+	require.Len(t, reported, 1)
+	assert.ElementsMatch(t, []int64{50, 100, 200}, reported[0])
+	assert.Zero(t, childScansAtReport)
+	assert.Positive(t, recorder.calls[FieldMetaPrefix+"/"])
+}
+
 func TestCatalogListCollectionsForRecoveryFallsBackWithoutWalker(t *testing.T) {
 	collection := &pb.CollectionInfo{
 		ID:                         100,
@@ -419,4 +457,142 @@ func TestCatalogListCollectionsForRecoveryMigratesLegacyCollectionIntoDefaultBuc
 	assert.Equal(t, "field", migrated.Fields[0].Name)
 	assert.NotContains(t, records, CollectionMetaPrefix+"/100")
 	assert.Contains(t, records, BuildCollectionKey(util.DefaultDBID, 100))
+}
+
+func TestCatalogListRLSPoliciesForRecoveryMatchesPerCollectionReads(t *testing.T) {
+	ctx := context.Background()
+	metaKV, cleanup := newTombstoneTestMetaKV(t)
+	defer cleanup()
+	catalog := NewCatalog(metaKV).(*Catalog)
+
+	for _, policy := range []*model.RLSPolicy{
+		{DBID: 1, CollectionID: 20, PolicyID: 102, PolicyName: "tenant", Actions: []rlsutil.PolicyAction{rlsutil.PolicyActionQuery}, UsingExpr: "true"},
+		{DBID: 1, CollectionID: 20, PolicyID: 103, PolicyName: "owner", CheckExpr: "true"},
+		// Same name as 103: listings order it by ID; MetaTable rejects the pair.
+		{DBID: 1, CollectionID: 20, PolicyID: 101, PolicyName: "owner"},
+		// Key prefix ".../2/" must not absorb ".../20/" or the other way round.
+		{DBID: 2, CollectionID: 2, PolicyID: 200, PolicyName: "sibling"},
+		{DBID: 3, CollectionID: 999, PolicyID: 900, PolicyName: "orphan"},
+	} {
+		require.NoError(t, catalog.SaveRLSPolicy(ctx, policy))
+	}
+	// A key equal to the per-collection prefix is still part of that collection's read.
+	bare := &model.RLSPolicy{CollectionID: 30, PolicyID: 300, PolicyName: "bare-prefix-key"}
+	require.NoError(t, metaKV.Save(ctx, BuildRLSPolicyPrefix(30), string(marshalRecoveryProto(t, model.MarshalRLSPolicyModel(bare)))))
+	// Corrupt values under keys no per-collection read of a recovered collection returns.
+	for _, key := range []string{
+		BuildRLSPolicyKey(999, 901),
+		RLSPolicyMetaPrefix + "/020/1",
+		RLSPolicyMetaPrefix + "/+20/1",
+		RLSPolicyMetaPrefix + "/20",
+		RLSPolicyMetaPrefix + "/not-a-collection/1",
+	} {
+		require.NoError(t, metaKV.Save(ctx, key, "corrupt-policy"))
+	}
+	_, err := catalog.ListRLSPolicies(ctx, 999)
+	require.ErrorIs(t, err, merr.ErrDataIntegrity, "the orphan value must be undecodable")
+
+	recovered := typeutil.NewUniqueSet(2, 20, 30, 40)
+	policiesByCollectionID, supported, err := catalog.ListRLSPoliciesForRecovery(ctx, func(collectionID int64) bool {
+		return recovered.Contain(collectionID)
+	})
+	require.NoError(t, err)
+	require.True(t, supported)
+	assert.ElementsMatch(t, []int64{2, 20, 30}, lo.Keys(policiesByCollectionID))
+	for collectionID := range recovered {
+		expected, err := catalog.ListRLSPolicies(ctx, collectionID)
+		require.NoError(t, err)
+		if len(expected) == 0 {
+			assert.NotContains(t, policiesByCollectionID, collectionID)
+			continue
+		}
+		assert.Equal(t, expected, policiesByCollectionID[collectionID], "collection %d", collectionID)
+	}
+	assert.Equal(t, []int64{101, 103, 102}, lo.Map(policiesByCollectionID[20], func(policy *model.RLSPolicy, _ int) int64 {
+		return policy.PolicyID
+	}))
+}
+
+func TestCatalogListRLSPoliciesForRecoveryDecodesOnlyRecoveredCollections(t *testing.T) {
+	records := map[string][]byte{
+		BuildRLSPolicyKey(20, 100): marshalRecoveryProto(t, model.MarshalRLSPolicyModel(&model.RLSPolicy{CollectionID: 20, PolicyID: 100, PolicyName: "tenant"})),
+		BuildRLSPolicyKey(30, 300): []byte("corrupt-policy"),
+		BuildRLSPolicyKey(40, 400): []byte(tombstone()),
+	}
+	newCatalog := func() (*Catalog, *recoveryWalkRecorder) {
+		recorder := &recoveryWalkRecorder{calls: make(map[string]int), pageSizes: make(map[string]int)}
+		return NewCatalog(newRecoveryMetaKV(t, records, recorder)).(*Catalog), recorder
+	}
+
+	t.Run("orphan corrupt keys are skipped", func(t *testing.T) {
+		catalog, recorder := newCatalog()
+		var asked []int64
+		policiesByCollectionID, supported, err := catalog.ListRLSPoliciesForRecovery(context.Background(), func(collectionID int64) bool {
+			asked = append(asked, collectionID)
+			return collectionID == 20
+		})
+		require.NoError(t, err)
+		require.True(t, supported)
+		require.Len(t, policiesByCollectionID, 1)
+		require.Len(t, policiesByCollectionID[20], 1)
+		assert.Equal(t, "tenant", policiesByCollectionID[20][0].PolicyName)
+		assert.Equal(t, []int64{20, 30, 40}, asked)
+		assert.Equal(t, 1, recorder.calls[RLSPolicyMetaPrefix+"/"])
+	})
+
+	for _, collectionID := range []int64{30, 40} {
+		t.Run(fmt.Sprintf("corrupt policy of recovered collection %d fails", collectionID), func(t *testing.T) {
+			catalog, _ := newCatalog()
+			_, _, err := catalog.ListRLSPoliciesForRecovery(context.Background(), func(id int64) bool {
+				return id == collectionID
+			})
+			require.ErrorIs(t, err, merr.ErrDataIntegrity)
+			assert.ErrorContains(t, err, fmt.Sprintf("collection %d", collectionID))
+		})
+	}
+}
+
+func TestCatalogListRLSPoliciesForRecoveryEmptyPrefix(t *testing.T) {
+	recorder := &recoveryWalkRecorder{calls: make(map[string]int), pageSizes: make(map[string]int)}
+	catalog := NewCatalog(newRecoveryMetaKV(t, map[string][]byte{}, recorder)).(*Catalog)
+
+	policiesByCollectionID, supported, err := catalog.ListRLSPoliciesForRecovery(context.Background(), func(int64) bool {
+		t.Fatal("no key to filter")
+		return false
+	})
+	require.NoError(t, err)
+	require.True(t, supported)
+	assert.NotNil(t, policiesByCollectionID)
+	assert.Empty(t, policiesByCollectionID)
+	assert.Equal(t, 1, recorder.calls[RLSPolicyMetaPrefix+"/"])
+}
+
+func TestCatalogListRLSPoliciesForRecoveryRequiresWalker(t *testing.T) {
+	// A TxnKV without WalkWithPrefix: the mock fails the test on any call.
+	catalog := NewCatalog(mocks.NewTxnKV(t)).(*Catalog)
+
+	policiesByCollectionID, supported, err := catalog.ListRLSPoliciesForRecovery(context.Background(), func(int64) bool {
+		return true
+	})
+	require.NoError(t, err)
+	assert.False(t, supported)
+	assert.Nil(t, policiesByCollectionID)
+}
+
+func TestCatalogListRLSPoliciesForRecoveryPreservesScanError(t *testing.T) {
+	injected := merr.WrapErrIoFailedReason("injected RLS policy scan failure", "test")
+	metaKV := mocks.NewMetaKv(t)
+	metaKV.On("GetPath", mock.Anything).Return(func(key string) string {
+		return "test-root/" + key
+	})
+	metaKV.On("WalkWithPrefix", mock.Anything, RLSPolicyMetaPrefix+"/", mock.Anything, mock.Anything).
+		Return(injected).Once()
+	catalog := NewCatalog(metaKV).(*Catalog)
+
+	_, supported, err := catalog.ListRLSPoliciesForRecovery(context.Background(), func(int64) bool {
+		return true
+	})
+	assert.True(t, supported)
+	assert.ErrorIs(t, err, injected)
+	assert.ErrorIs(t, err, merr.ErrIoFailed)
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/milvus-io/milvus/internal/metastore/mocks"
 	"github.com/milvus-io/milvus/pkg/v3/proto/messagespb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
 func newTestStore(t *testing.T) (*LoadConfigStore, *mocks.QueryCoordCatalog) {
@@ -545,6 +546,31 @@ func TestRecoverLoadConfigStore_WithPersistedData(t *testing.T) {
 
 	assert.NotNil(t, snapshot.ReplicaToConfigMap()[1000])
 	assert.NotNil(t, snapshot.ReplicaToConfigMap()[1001])
+}
+
+// Replicas are read alongside collections and partitions; a failure is still
+// reported in the order the reads used to run.
+func TestRecoverLoadConfigStore_ReadErrorOrder(t *testing.T) {
+	collectionsErr := merr.WrapErrIoFailedReason("collections")
+	partitionsErr := merr.WrapErrIoFailedReason("partitions")
+	replicasErr := merr.WrapErrIoFailedReason("replicas")
+	for _, tc := range []struct {
+		collections, partitions, replicas, want error
+	}{
+		{collections: collectionsErr, replicas: replicasErr, want: collectionsErr},
+		{partitions: partitionsErr, replicas: replicasErr, want: partitionsErr},
+		{replicas: replicasErr, want: replicasErr},
+	} {
+		catalog := mocks.NewQueryCoordCatalog(t)
+		catalog.EXPECT().GetCollections(mock.Anything).Return([]*querypb.CollectionLoadInfo{{CollectionID: 100}}, tc.collections).Once()
+		if tc.collections == nil {
+			catalog.EXPECT().GetPartitions(mock.Anything, []int64{100}).Return(map[int64][]*querypb.PartitionLoadInfo{}, tc.partitions).Once()
+		}
+		catalog.EXPECT().GetReplicas(mock.Anything).Return(nil, tc.replicas).Once()
+		store, err := RecoverLoadConfigStore(context.Background(), catalog)
+		require.Equal(t, tc.want, err)
+		require.Nil(t, store)
+	}
 }
 
 func TestFromAlterLoadConfigMessage(t *testing.T) {

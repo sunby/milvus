@@ -29,6 +29,7 @@ import (
 	"github.com/tikv/client-go/v2/txnkv"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/atomic"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 	"golang.org/x/time/rate"
 
@@ -40,6 +41,7 @@ import (
 	"github.com/milvus-io/milvus/internal/metacache"
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/metastore/kv/querycoord"
+	"github.com/milvus-io/milvus/internal/metastore/kv/queryview"
 	"github.com/milvus-io/milvus/internal/querycoordv2/assign"
 	"github.com/milvus-io/milvus/internal/querycoordv2/balance"
 	"github.com/milvus-io/milvus/internal/querycoordv2/checkers"
@@ -60,6 +62,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/kv"
 	"github.com/milvus-io/milvus/pkg/v3/metrics"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
+	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v3/util"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/metricsinfo"
@@ -77,6 +80,7 @@ type Server struct {
 	wg                  sync.WaitGroup
 	status              atomic.Int32
 	etcdCli             *clientv3.Client
+	metaPrefetch        *metaPrefetchKV
 	tikvCli             *txnkv.Client
 	address             string
 	session             sessionutil.SessionInterface
@@ -296,8 +300,11 @@ func (s *Server) initQueryCoord() error {
 			tikv.WithRequestTimeout(paramtable.Get().TiKVCfg.RequestTimeout.GetAsDuration(time.Millisecond)))
 		idAllocatorKV = tsoutil.NewTSOTiKVBase(s.tikvCli, Params.TiKVCfg.KvRootPath.GetValue(), "querycoord-id-allocator")
 	case util.MetaStoreTypeEtcd:
-		s.kv = etcdkv.NewEtcdKV(s.etcdCli, Params.EtcdCfg.MetaRootPath.GetValue(),
-			etcdkv.WithRequestTimeout(paramtable.Get().EtcdCfg.RequestTimeout.GetAsDuration(time.Millisecond)))
+		s.kv = s.newEtcdMetaKV()
+		if s.metaPrefetch != nil {
+			s.kv = s.metaPrefetch
+			defer s.metaPrefetch.release()
+		}
 		idAllocatorKV = tsoutil.NewTSOKVBase(s.etcdCli, Params.EtcdCfg.KvRootPath.GetValue(), "querycoord-id-allocator")
 	default:
 		return merr.WrapErrServiceInternalMsg("unsupported meta store: %s", metaType)
@@ -322,6 +329,9 @@ func (s *Server) initQueryCoord() error {
 	// Init meta
 	s.nodeMgr = session.NewNodeManager()
 	s.nodeMgr.Start(s.ctx)
+	// List QueryViews while the meta below recovers. Their only writer is the
+	// flush scheduler that registry recovery creates after consuming the list.
+	queryViewCatalog := newPrefetchedQueryViewCatalog(s.ctx, queryview.NewQueryViewCatalog(s.kv, "coord"))
 	err = s.initMeta()
 	if err != nil {
 		return err
@@ -389,17 +399,18 @@ func (s *Server) initQueryCoord() error {
 	// Init load status cache
 	meta.GlobalFailedLoadCache = meta.NewFailedLoadCache()
 
-	if err := s.initQViewsRuntime(); err != nil {
+	if err := s.initQViewsRuntime(queryViewCatalog); err != nil {
 		return err
 	}
 	mlog.Info(s.ctx, "init querycoord done", mlog.FieldNodeID(paramtable.GetNodeID()), mlog.String("Address", s.address))
 	return err
 }
 
-func (s *Server) initQViewsRuntime() error {
+func (s *Server) initQViewsRuntime(queryViewCatalog queryview.QueryViewCatalog) error {
 	mlog.Info(s.ctx, "init query view runtime")
 	runtime, err := newQViewsRuntime(s.ctx, newDefaultQViewsRuntimeDependencies(
 		s.kv,
+		queryViewCatalog,
 		s.etcdCli,
 		s.store,
 		s.meta.ResourceManager,
@@ -430,7 +441,15 @@ func (s *Server) initMeta() error {
 	)
 
 	mlog.Info(s.ctx, "recover meta...")
+	// Collection recovery never writes replica keys, so read them meanwhile.
+	var replicas []*querypb.Replica
+	var replicasRead errgroup.Group
+	replicasRead.Go(func() (err error) {
+		replicas, err = s.store.GetReplicas(s.ctx)
+		return err
+	})
 	err := s.meta.CollectionManager.Recover(s.ctx, s.broker)
+	replicasErr := replicasRead.Wait()
 	if err != nil {
 		mlog.Warn(s.ctx, "failed to recover collections", mlog.Err(err))
 		return err
@@ -443,7 +462,11 @@ func (s *Server) initMeta() error {
 
 	metrics.QueryCoordNumPartitions.WithLabelValues().Set(float64(len(s.meta.GetAllPartitions(s.ctx))))
 
-	err = s.meta.ReplicaManager.Recover(s.ctx, collections)
+	if replicasErr != nil {
+		err = merr.Wrap(replicasErr, "failed to recover replicas")
+	} else {
+		err = s.meta.ReplicaManager.RecoverFrom(s.ctx, collections, replicas)
+	}
 	if err != nil {
 		mlog.Warn(s.ctx, "failed to recover replicas", mlog.Err(err))
 		return err
@@ -653,6 +676,21 @@ func (s *Server) SetAddress(address string) {
 }
 
 // SetEtcdClient sets etcd's client
+// StartMetaPrefetch starts reading the metadata Init recovers, so that
+// MixCoord overlaps those cold etcd reads with DataCoord recovery. It only
+// reads; Init serves its walks of that metadata from it. Call it before Init.
+func (s *Server) StartMetaPrefetch() {
+	if Params.MetaStoreCfg.MetaStoreType.GetValue() != util.MetaStoreTypeEtcd || s.etcdCli == nil {
+		return
+	}
+	s.metaPrefetch = newMetaPrefetchKV(s.ctx, s.newEtcdMetaKV())
+}
+
+func (s *Server) newEtcdMetaKV() kv.MetaKv {
+	return etcdkv.NewEtcdKV(s.etcdCli, Params.EtcdCfg.MetaRootPath.GetValue(),
+		etcdkv.WithRequestTimeout(paramtable.Get().EtcdCfg.RequestTimeout.GetAsDuration(time.Millisecond)))
+}
+
 func (s *Server) SetEtcdClient(etcdClient *clientv3.Client) {
 	s.etcdCli = etcdClient
 }
