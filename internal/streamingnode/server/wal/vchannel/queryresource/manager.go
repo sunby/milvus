@@ -504,6 +504,10 @@ func (m *Manager) prepareReady(ctx context.Context, key qviews.QueryViewKey, onR
 		return nil
 	}
 	onReady()
+	// Warming never gates readiness.
+	if ref.meta.GetWarmupEpoch() > 0 {
+		runtime.Warm(ref.meta)
+	}
 	return nil
 }
 

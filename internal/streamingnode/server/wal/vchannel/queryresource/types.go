@@ -61,6 +61,13 @@ type QueryRuntimeReleaseModule interface {
 	BeforeRelease(context.Context, qviews.DataVersion) error
 }
 
+// QueryRuntimeWarmModule warms, in the background, the resources of a read
+// schema that a Ready QueryView with a LoadCollection warmup hint serves. Warm
+// must not block.
+type QueryRuntimeWarmModule interface {
+	Warm(ReadSchemaKey)
+}
+
 // QueryRuntimeSchemaModule rebuilds schema-dependent resources before readiness.
 // Live event application remains independent of its resource I/O.
 type QueryRuntimeSchemaModule interface {
