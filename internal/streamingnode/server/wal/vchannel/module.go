@@ -211,7 +211,7 @@ func (m *VChannelRecoveryModule) ObserveMessage(
 	if m.removed {
 		return false
 	}
-	if m.vchannelView != nil && (m.vchannelView.IsClosing() || m.vchannelView.IsTombstoned()) {
+	if m.vchannelView != nil && m.vchannelView.IsClosingOrTombstoned() {
 		return true
 	}
 	switch msg.MessageType() {
@@ -246,6 +246,31 @@ func (m *VChannelRecoveryModule) ObserveMessage(
 	m.observeQueryResourceEvent(ctx, walview.VChannelResourceEvent{Message: msg})
 	m.queryResources.TryBuildLocked(m.queryWALViewLocked)
 	m.l0Materializer.ObserveMessage(retained)
+	return true
+}
+
+// observeIdleTimeTick takes a pchannel-level TimeTick on a module that it only
+// advances in time (no pending Drop, no query resource) or leaves alone (a
+// closing one), and returns false when the caller must take ObserveMessage.
+// m.mu orders it with query resource installation, so no installed runtime
+// misses a TimeTick. The L0 materializer's observed time stays behind: its
+// duplicate filter and persist cap only meet this vchannel's own messages,
+// which are later than any TimeTick before them. Hot path: no defer.
+func (m *VChannelRecoveryModule) observeIdleTimeTick(timeTick uint64) bool {
+	m.mu.Lock()
+	switch {
+	case m.removed:
+	case len(m.pendingDrops) > 0:
+		m.mu.Unlock()
+		return false
+	case m.vchannelView != nil && m.vchannelView.IsClosingOrTombstoned():
+	case !m.queryResources.Idle():
+		m.mu.Unlock()
+		return false
+	default:
+		m.queryObservedTimeTick = max(m.queryObservedTimeTick, timeTick)
+	}
+	m.mu.Unlock()
 	return true
 }
 

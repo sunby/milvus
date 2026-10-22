@@ -30,12 +30,6 @@ func (info *VChannelView) closingLocked(partitionID int64) bool {
 	return false
 }
 
-func (info *VChannelView) IsClosing() bool {
-	info.mu.Lock()
-	defer info.mu.Unlock()
-	return info.closingLocked(0)
-}
-
 func (info *VChannelView) stableMetaLocked() *streamingpb.VChannelMeta {
 	if len(info.pendingDrops) > 0 {
 		return info.pendingDrops[0].before
