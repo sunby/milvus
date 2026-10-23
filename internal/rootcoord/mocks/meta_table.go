@@ -5,6 +5,7 @@ package mockrootcoord
 import (
 	context "context"
 
+	commonpb "github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	milvuspb "github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
 	model "github.com/milvus-io/milvus/internal/metastore/model"
 	rlsutil "github.com/milvus-io/milvus/internal/util/rlsutil"
@@ -2469,6 +2470,65 @@ func (_c *IMetaTable_GetCollectionID_Call) RunAndReturn(run func(context.Context
 	return _c
 }
 
+// GetCollectionProperties provides a mock function with given fields: ctx, collectionID
+func (_m *IMetaTable) GetCollectionProperties(ctx context.Context, collectionID int64) ([]*commonpb.KeyValuePair, error) {
+	ret := _m.Called(ctx, collectionID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetCollectionProperties")
+	}
+
+	var r0 []*commonpb.KeyValuePair
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, int64) ([]*commonpb.KeyValuePair, error)); ok {
+		return rf(ctx, collectionID)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, int64) []*commonpb.KeyValuePair); ok {
+		r0 = rf(ctx, collectionID)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]*commonpb.KeyValuePair)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, int64) error); ok {
+		r1 = rf(ctx, collectionID)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// IMetaTable_GetCollectionProperties_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetCollectionProperties'
+type IMetaTable_GetCollectionProperties_Call struct {
+	*mock.Call
+}
+
+// GetCollectionProperties is a helper method to define mock.On call
+//   - ctx context.Context
+//   - collectionID int64
+func (_e *IMetaTable_Expecter) GetCollectionProperties(ctx interface{}, collectionID interface{}) *IMetaTable_GetCollectionProperties_Call {
+	return &IMetaTable_GetCollectionProperties_Call{Call: _e.mock.On("GetCollectionProperties", ctx, collectionID)}
+}
+
+func (_c *IMetaTable_GetCollectionProperties_Call) Run(run func(ctx context.Context, collectionID int64)) *IMetaTable_GetCollectionProperties_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(int64))
+	})
+	return _c
+}
+
+func (_c *IMetaTable_GetCollectionProperties_Call) Return(_a0 []*commonpb.KeyValuePair, _a1 error) *IMetaTable_GetCollectionProperties_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *IMetaTable_GetCollectionProperties_Call) RunAndReturn(run func(context.Context, int64) ([]*commonpb.KeyValuePair, error)) *IMetaTable_GetCollectionProperties_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetCollectionVirtualChannels provides a mock function with given fields: ctx, colID
 func (_m *IMetaTable) GetCollectionVirtualChannels(ctx context.Context, colID int64) []string {
 	ret := _m.Called(ctx, colID)
@@ -3776,6 +3836,64 @@ func (_c *IMetaTable_ListDatabases_Call) RunAndReturn(run func(context.Context, 
 	return _c
 }
 
+// ListFileResource provides a mock function with given fields: ctx
+func (_m *IMetaTable) ListFileResource(ctx context.Context) ([]*internalpb.FileResourceInfo, uint64) {
+	ret := _m.Called(ctx)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListFileResource")
+	}
+
+	var r0 []*internalpb.FileResourceInfo
+	var r1 uint64
+	if rf, ok := ret.Get(0).(func(context.Context) ([]*internalpb.FileResourceInfo, uint64)); ok {
+		return rf(ctx)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context) []*internalpb.FileResourceInfo); ok {
+		r0 = rf(ctx)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]*internalpb.FileResourceInfo)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context) uint64); ok {
+		r1 = rf(ctx)
+	} else {
+		r1 = ret.Get(1).(uint64)
+	}
+
+	return r0, r1
+}
+
+// IMetaTable_ListFileResource_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListFileResource'
+type IMetaTable_ListFileResource_Call struct {
+	*mock.Call
+}
+
+// ListFileResource is a helper method to define mock.On call
+//   - ctx context.Context
+func (_e *IMetaTable_Expecter) ListFileResource(ctx interface{}) *IMetaTable_ListFileResource_Call {
+	return &IMetaTable_ListFileResource_Call{Call: _e.mock.On("ListFileResource", ctx)}
+}
+
+func (_c *IMetaTable_ListFileResource_Call) Run(run func(ctx context.Context)) *IMetaTable_ListFileResource_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context))
+	})
+	return _c
+}
+
+func (_c *IMetaTable_ListFileResource_Call) Return(_a0 []*internalpb.FileResourceInfo, _a1 uint64) *IMetaTable_ListFileResource_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *IMetaTable_ListFileResource_Call) RunAndReturn(run func(context.Context) ([]*internalpb.FileResourceInfo, uint64)) *IMetaTable_ListFileResource_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ListFileResourceIfChanged provides a mock function with given fields: ctx, knownVersion
 func (_m *IMetaTable) ListFileResourceIfChanged(ctx context.Context, knownVersion uint64) ([]*internalpb.FileResourceInfo, uint64) {
 	ret := _m.Called(ctx, knownVersion)
@@ -3831,64 +3949,6 @@ func (_c *IMetaTable_ListFileResourceIfChanged_Call) Return(_a0 []*internalpb.Fi
 }
 
 func (_c *IMetaTable_ListFileResourceIfChanged_Call) RunAndReturn(run func(context.Context, uint64) ([]*internalpb.FileResourceInfo, uint64)) *IMetaTable_ListFileResourceIfChanged_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
-// ListFileResource provides a mock function with given fields: ctx
-func (_m *IMetaTable) ListFileResource(ctx context.Context) ([]*internalpb.FileResourceInfo, uint64) {
-	ret := _m.Called(ctx)
-
-	if len(ret) == 0 {
-		panic("no return value specified for ListFileResource")
-	}
-
-	var r0 []*internalpb.FileResourceInfo
-	var r1 uint64
-	if rf, ok := ret.Get(0).(func(context.Context) ([]*internalpb.FileResourceInfo, uint64)); ok {
-		return rf(ctx)
-	}
-	if rf, ok := ret.Get(0).(func(context.Context) []*internalpb.FileResourceInfo); ok {
-		r0 = rf(ctx)
-	} else {
-		if ret.Get(0) != nil {
-			r0 = ret.Get(0).([]*internalpb.FileResourceInfo)
-		}
-	}
-
-	if rf, ok := ret.Get(1).(func(context.Context) uint64); ok {
-		r1 = rf(ctx)
-	} else {
-		r1 = ret.Get(1).(uint64)
-	}
-
-	return r0, r1
-}
-
-// IMetaTable_ListFileResource_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListFileResource'
-type IMetaTable_ListFileResource_Call struct {
-	*mock.Call
-}
-
-// ListFileResource is a helper method to define mock.On call
-//   - ctx context.Context
-func (_e *IMetaTable_Expecter) ListFileResource(ctx interface{}) *IMetaTable_ListFileResource_Call {
-	return &IMetaTable_ListFileResource_Call{Call: _e.mock.On("ListFileResource", ctx)}
-}
-
-func (_c *IMetaTable_ListFileResource_Call) Run(run func(ctx context.Context)) *IMetaTable_ListFileResource_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(context.Context))
-	})
-	return _c
-}
-
-func (_c *IMetaTable_ListFileResource_Call) Return(_a0 []*internalpb.FileResourceInfo, _a1 uint64) *IMetaTable_ListFileResource_Call {
-	_c.Call.Return(_a0, _a1)
-	return _c
-}
-
-func (_c *IMetaTable_ListFileResource_Call) RunAndReturn(run func(context.Context) ([]*internalpb.FileResourceInfo, uint64)) *IMetaTable_ListFileResource_Call {
 	_c.Call.Return(run)
 	return _c
 }
