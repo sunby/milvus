@@ -137,7 +137,7 @@ func (i *TalonPrewarmInspector) inspect(ctx context.Context) {
 	batch := make([]TalonPrewarmRequest, 0, i.batchSize)
 	loaded := 0
 	flush := func() {
-		if ctx.Err() != nil {
+		if len(batch) == 0 || ctx.Err() != nil {
 			return
 		}
 		if err := i.client.BatchLoad(ctx, batch); err != nil {
@@ -148,19 +148,35 @@ func (i *TalonPrewarmInspector) inspect(ctx context.Context) {
 		}
 		batch = batch[:0]
 	}
+	add := func(request TalonPrewarmRequest) {
+		batch = append(batch, request)
+		if len(batch) == i.batchSize {
+			flush()
+		}
+	}
+	// Load the identity milvus-storage readers use (Manifest::ReadFrom,
+	// TalonFileSystem::OpenTalon): a recorded manifest size skips the HEAD and
+	// opens Talon's unchecked version; any other manifest opens with the ETag
+	// that stat reports. Manifests that record their size load first, since any
+	// other may wait for a serial stat.
 	for uri, size := range active {
 		if ctx.Err() != nil {
 			return
 		}
-		// Load the identity milvus-storage readers use (Manifest::ReadFrom,
-		// TalonFileSystem::OpenTalon): a recorded manifest size skips the HEAD
-		// and opens Talon's unchecked version; any other manifest opens with
-		// the ETag that stat reports.
+		if size > 0 {
+			add(TalonPrewarmRequest{URI: uri, Size: size})
+		}
+	}
+	flush()
+	for uri, size := range active {
+		if ctx.Err() != nil {
+			return
+		}
+		if size > 0 {
+			continue
+		}
 		request, ok := i.metadata[uri]
-		switch {
-		case size > 0:
-			request = TalonPrewarmRequest{URI: uri, Size: size}
-		case !ok:
+		if !ok {
 			size, version, err := i.client.Stat(ctx, uri)
 			if err != nil {
 				failures++
@@ -170,13 +186,8 @@ func (i *TalonPrewarmInspector) inspect(ctx context.Context) {
 			request = TalonPrewarmRequest{URI: uri, Size: size, Version: version}
 			i.metadata[uri] = request
 		}
-		batch = append(batch, request)
-		if len(batch) == i.batchSize {
-			flush()
-		}
+		add(request)
 	}
-	if len(batch) > 0 {
-		flush()
-	}
+	flush()
 	mlog.Info(ctx, "Talon prewarm round finished", mlog.Int("active", len(active)), mlog.Int("loaded", loaded), mlog.Int("failures", failures))
 }
