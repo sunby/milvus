@@ -131,7 +131,6 @@ func (i *indexInspector) Start() {
 	i.wg.Add(1)
 	go i.forwardBuildIndexCh(i.ctx)
 	i.reloadFromMeta()
-	i.requeuePendingIndexSegments(i.getUnIndexTaskSegments(i.ctx)...)
 	i.wg.Add(1)
 	go i.createIndexForSegmentLoop(i.ctx)
 }
@@ -142,9 +141,13 @@ func (i *indexInspector) Stop() {
 }
 
 func (i *indexInspector) createIndexForSegmentLoop(ctx context.Context) {
+	defer i.wg.Done()
+	// Only this loop consumes the pending segments, so it queues the unindexed
+	// ones itself before its first round instead of holding DataCoord's
+	// startup on a scan of every segment.
+	i.requeuePendingIndexSegments(i.getUnIndexTaskSegments(ctx)...)
 	mlog.Info(ctx, "start create index for segment loop...",
 		mlog.Int64("TaskCheckInterval", Params.DataCoordCfg.TaskCheckInterval.GetAsInt64()))
-	defer i.wg.Done()
 
 	ticker := time.NewTicker(Params.DataCoordCfg.TaskCheckInterval.GetAsDuration(time.Second))
 	defer ticker.Stop()
@@ -426,29 +429,36 @@ func (i *indexInspector) isExternalCollection(collectionID int64) bool {
 	return coll != nil && coll.IsExternal()
 }
 
+// reloadFromMeta re-enqueues the Unissued, Retry and InProgress builds of the
+// segments in meta, skipping deleted builds and the builds of deleted field
+// indexes as GetSegmentIndexes does. It filters the resident builds by state
+// before any lookup, so it clones only the builds it enqueues.
 func (i *indexInspector) reloadFromMeta() {
-	segments := i.meta.GetAllSegmentsUnsafe()
-	for _, segment := range segments {
-		for _, segIndex := range i.meta.indexMeta.GetSegmentIndexes(segment.GetCollectionID(), segment.ID) {
-			if segIndex.IsDeleted || (segIndex.IndexState != commonpb.IndexState_Unissued &&
-				segIndex.IndexState != commonpb.IndexState_Retry &&
-				segIndex.IndexState != commonpb.IndexState_InProgress) {
-				continue
-			}
-
-			indexParams := i.meta.indexMeta.GetIndexParams(segment.CollectionID, segIndex.IndexID)
-			fieldID := i.meta.indexMeta.GetFieldIDByIndexID(segment.CollectionID, segIndex.IndexID)
-			fieldSize := segment.getFieldBinlogSize(fieldID)
-			taskSlot := calculateIndexTaskSlot(fieldSize, segment.NumOfRows, indexParams)
-
-			i.scheduler.Enqueue(newIndexBuildTask(
-				model.CloneSegmentIndex(segIndex),
-				taskSlot,
-				i.meta,
-				i.handler,
-				i.storageCli,
-				i.indexEngineVersionManager,
-			))
+	i.meta.indexMeta.rangeSegmentIndexesBySegment(func(segIndex *model.SegmentIndex) bool {
+		if segIndex.IsDeleted || (segIndex.IndexState != commonpb.IndexState_Unissued &&
+			segIndex.IndexState != commonpb.IndexState_Retry &&
+			segIndex.IndexState != commonpb.IndexState_InProgress) {
+			return true
 		}
-	}
+		// A segment in meta in any state, dropped included.
+		segment := i.meta.GetSegment(i.ctx, segIndex.SegmentID)
+		if segment == nil || !i.meta.indexMeta.IsIndexExist(segment.CollectionID, segIndex.IndexID) {
+			return true
+		}
+
+		indexParams := i.meta.indexMeta.GetIndexParams(segment.CollectionID, segIndex.IndexID)
+		fieldID := i.meta.indexMeta.GetFieldIDByIndexID(segment.CollectionID, segIndex.IndexID)
+		fieldSize := segment.getFieldBinlogSize(fieldID)
+		taskSlot := calculateIndexTaskSlot(fieldSize, segment.NumOfRows, indexParams)
+
+		i.scheduler.Enqueue(newIndexBuildTask(
+			model.CloneSegmentIndex(segIndex),
+			taskSlot,
+			i.meta,
+			i.handler,
+			i.storageCli,
+			i.indexEngineVersionManager,
+		))
+		return true
+	})
 }
