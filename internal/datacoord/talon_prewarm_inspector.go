@@ -24,7 +24,8 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 )
 
-// TalonPrewarmRequest carries the immutable object identity returned by stat.
+// TalonPrewarmRequest names an object under the cache identity its readers
+// use. An empty Version is Talon's unchecked version.
 type TalonPrewarmRequest struct {
 	URI     string
 	Size    uint64
@@ -44,9 +45,10 @@ type TalonPrewarmInspector struct {
 	cancel    context.CancelFunc
 	supplier  func(context.Context) ([]string, error)
 	client    TalonPrewarmClient
-	resolve   func(string) (string, error)
+	resolve   func(string) (string, uint64, error)
 	interval  time.Duration
 	batchSize int
+	// metadata keeps the stat results of objects whose descriptors record no size.
 	metadata  map[string]TalonPrewarmRequest
 	mu        sync.Mutex
 	started   bool
@@ -55,7 +57,7 @@ type TalonPrewarmInspector struct {
 	closeOnce sync.Once
 }
 
-func NewTalonPrewarmInspector(ctx context.Context, supplier func(context.Context) ([]string, error), client TalonPrewarmClient, resolve func(string) (string, error), interval time.Duration, batchSize int) *TalonPrewarmInspector {
+func NewTalonPrewarmInspector(ctx context.Context, supplier func(context.Context) ([]string, error), client TalonPrewarmClient, resolve func(string) (string, uint64, error), interval time.Duration, batchSize int) *TalonPrewarmInspector {
 	ctx, cancel := context.WithCancel(ctx) // #nosec G118 -- Stop owns cancellation for the inspector lifetime.
 	return &TalonPrewarmInspector{ctx: ctx, cancel: cancel, supplier: supplier, client: client, resolve: resolve, interval: interval, batchSize: batchSize, metadata: make(map[string]TalonPrewarmRequest), done: make(chan struct{})}
 }
@@ -109,13 +111,13 @@ func (i *TalonPrewarmInspector) inspect(ctx context.Context) {
 		mlog.RatedWarn(ctx, 1, "Talon prewarm enumeration failed", mlog.Err(err))
 		return
 	}
-	active := make(map[string]struct{}, len(descriptors))
+	active := make(map[string]uint64, len(descriptors))
 	failures := 0
 	for _, descriptor := range descriptors {
 		if ctx.Err() != nil {
 			return
 		}
-		uri, err := i.resolve(descriptor)
+		uri, size, err := i.resolve(descriptor)
 		if err != nil {
 			failures++
 			mlog.RatedWarn(ctx, 1, "Talon prewarm resolution failed", mlog.Err(err))
@@ -125,10 +127,10 @@ func (i *TalonPrewarmInspector) inspect(ctx context.Context) {
 		if uri == "" {
 			continue
 		}
-		active[uri] = struct{}{}
+		active[uri] = size
 	}
 	for uri := range i.metadata {
-		if _, ok := active[uri]; !ok {
+		if size, ok := active[uri]; !ok || size > 0 {
 			delete(i.metadata, uri)
 		}
 	}
@@ -146,12 +148,19 @@ func (i *TalonPrewarmInspector) inspect(ctx context.Context) {
 		}
 		batch = batch[:0]
 	}
-	for uri := range active {
+	for uri, size := range active {
 		if ctx.Err() != nil {
 			return
 		}
+		// Load the identity milvus-storage readers use (Manifest::ReadFrom,
+		// TalonFileSystem::OpenTalon): a recorded manifest size skips the HEAD
+		// and opens Talon's unchecked version; any other manifest opens with
+		// the ETag that stat reports.
 		request, ok := i.metadata[uri]
-		if !ok {
+		switch {
+		case size > 0:
+			request = TalonPrewarmRequest{URI: uri, Size: size}
+		case !ok:
 			size, version, err := i.client.Stat(ctx, uri)
 			if err != nil {
 				failures++
