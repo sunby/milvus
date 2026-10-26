@@ -4,6 +4,9 @@ import (
 	"context"
 	"sync"
 
+	"github.com/samber/lo"
+	"golang.org/x/sync/errgroup"
+
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/pkg/v3/proto/querypb"
 	"github.com/milvus-io/milvus/pkg/v3/util/lock"
@@ -59,24 +62,20 @@ type LoadConfigEntry struct {
 // in-memory state from ETCD via the catalog. It is the sole constructor:
 // the store is always fully recovered before any operation.
 func RecoverLoadConfigStore(ctx context.Context, catalog metastore.QueryCoordCatalog, loadInfos ...*LoadInfoStore) (*LoadConfigStore, error) {
-	collections, err := catalog.GetCollections(ctx)
+	// Replicas do not depend on the collection list, so read them meanwhile.
+	var replicas []*querypb.Replica
+	var replicasRead errgroup.Group
+	replicasRead.Go(func() (err error) {
+		replicas, err = catalog.GetReplicas(ctx)
+		return err
+	})
+	collections, partitions, err := recoverCollectionsAndPartitions(ctx, catalog)
+	replicasErr := replicasRead.Wait()
 	if err != nil {
 		return nil, err
 	}
-
-	collectionIDs := make([]int64, 0, len(collections))
-	for _, c := range collections {
-		collectionIDs = append(collectionIDs, c.GetCollectionID())
-	}
-
-	partitions, err := catalog.GetPartitions(ctx, collectionIDs)
-	if err != nil {
-		return nil, err
-	}
-
-	replicas, err := catalog.GetReplicas(ctx)
-	if err != nil {
-		return nil, err
+	if replicasErr != nil {
+		return nil, replicasErr
 	}
 
 	// Group replicas by collection for efficient lookup.
@@ -85,19 +84,23 @@ func RecoverLoadConfigStore(ctx context.Context, catalog metastore.QueryCoordCat
 		replicasByColl[r.GetCollectionID()] = append(replicasByColl[r.GetCollectionID()], r)
 	}
 
-	configs := make(map[int64]*LoadConfig, len(collections))
-	versions := make(map[int64]uint64, len(collections))
+	cfgs := make([]*LoadConfig, 0, len(collections))
 	for _, info := range collections {
 		collID := info.GetCollectionID()
-		cfg := buildFromPersisted(info, partitions[collID], replicasByColl[collID])
-		if len(loadInfos) > 0 && loadInfos[0] != nil {
-			cfg, err = loadInfos[0].normalize(ctx, cfg)
-			if err != nil {
-				return nil, err
-			}
+		cfgs = append(cfgs, buildFromPersisted(info, partitions[collID], replicasByColl[collID]))
+	}
+	if len(loadInfos) > 0 && loadInfos[0] != nil {
+		// A config without persisted required fields resolves its schema, which
+		// is one DescribeCollection per loaded collection.
+		if err := loadInfos[0].normalizeAll(ctx, cfgs); err != nil {
+			return nil, err
 		}
-		configs[collID] = cfg
-		versions[collID] = loadInfoVersion(cfg)
+	}
+	configs := make(map[int64]*LoadConfig, len(cfgs))
+	versions := make(map[int64]uint64, len(cfgs))
+	for _, cfg := range cfgs {
+		configs[cfg.CollectionID] = cfg
+		versions[cfg.CollectionID] = loadInfoVersion(cfg)
 	}
 
 	store := &LoadConfigStore{
@@ -109,13 +112,27 @@ func RecoverLoadConfigStore(ctx context.Context, catalog metastore.QueryCoordCat
 	}
 	if len(loadInfos) > 0 && loadInfos[0] != nil {
 		store.loadInfos = loadInfos[0]
-		for _, cfg := range configs {
-			if err := store.loadInfos.Ensure(ctx, cfg); err != nil {
-				return nil, err
-			}
+		if err := store.loadInfos.EnsureAll(ctx, lo.Values(configs)); err != nil {
+			return nil, err
 		}
 	}
 	return store, nil
+}
+
+func recoverCollectionsAndPartitions(ctx context.Context, catalog metastore.QueryCoordCatalog) ([]*querypb.CollectionLoadInfo, map[int64][]*querypb.PartitionLoadInfo, error) {
+	collections, err := catalog.GetCollections(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	collectionIDs := make([]int64, 0, len(collections))
+	for _, c := range collections {
+		collectionIDs = append(collectionIDs, c.GetCollectionID())
+	}
+	partitions, err := catalog.GetPartitions(ctx, collectionIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	return collections, partitions, nil
 }
 
 // Put persists the full LoadConfig to ETCD and updates the live in-memory state.
