@@ -6424,6 +6424,9 @@ type dataCoordConfig struct {
 	TalonPrewarmInterval  ParamItem `refreshable:"false"`
 	TalonPrewarmBatchSize ParamItem `refreshable:"false"`
 
+	ManifestSizeBackfillEnabled     ParamItem `refreshable:"false"`
+	ManifestSizeBackfillConcurrency ParamItem `refreshable:"false"`
+
 	// --- CHANNEL ---
 	WatchTimeoutInterval         ParamItem `refreshable:"false"`
 	LegacyVersionWithoutRPCWatch ParamItem `refreshable:"false"`
@@ -6673,6 +6676,22 @@ func (p *dataCoordConfig) init(base *BaseTable) {
 		Doc:          "Maximum objects per Talon batch. Valid range: [1, 4096]. Requires a restart.",
 	}
 	p.TalonPrewarmBatchSize.Init(base.mgr)
+	p.ManifestSizeBackfillEnabled = ParamItem{
+		Key:          "dataCoord.manifestSizeBackfill.enabled",
+		Version:      "3.0.1",
+		DefaultValue: "false",
+		Export:       false,
+		Doc:          "Once DataCoord is healthy, record the object size in the manifest paths of live segments that record none, so reads skip asking storage for it. The Talon prewarm starts after it. Remote storage only. Requires a restart.",
+	}
+	p.ManifestSizeBackfillEnabled.Init(base.mgr)
+	p.ManifestSizeBackfillConcurrency = ParamItem{
+		Key:          "dataCoord.manifestSizeBackfill.concurrency",
+		Version:      "3.0.1",
+		DefaultValue: "16",
+		Export:       false,
+		Doc:          "Concurrent object size requests of the manifest size backfill. Valid range: [1, 256]. Requires a restart.",
+	}
+	p.ManifestSizeBackfillConcurrency.Init(base.mgr)
 
 	p.initStatsDiscovery(base)
 	p.WatchTimeoutInterval = ParamItem{

@@ -171,6 +171,7 @@ type Server struct {
 	indexInspector                   *indexInspector
 	analyzeInspector                 *analyzeInspector
 	talonPrewarmInspector            *TalonPrewarmInspector
+	manifestSizeBackfill             *manifestSizeBackfill
 	segmentChangeInspector           *segmentChangeInspector
 	externalCollectionRefreshManager ExternalCollectionRefreshManager
 	globalScheduler                  task.GlobalScheduler
@@ -451,6 +452,11 @@ func (s *Server) initDataCoord() (initErr error) {
 	if err := s.initTalonPrewarm(); err != nil {
 		return err
 	}
+	backfill, err := newManifestSizeBackfill(Params, s.meta)
+	if err != nil {
+		return err
+	}
+	s.manifestSizeBackfill = backfill
 
 	mlog.Info(s.ctx, "init datacoord done", mlog.FieldNodeID(paramtable.GetNodeID()), mlog.String("Address", s.address))
 
@@ -482,10 +488,17 @@ func (s *Server) startDataCoord() {
 	s.afterStart()
 	s.UpdateStateCode(commonpb.StateCode_Healthy)
 	// The first prewarm round reads the recovered metadata through a healthy
-	// DataCoord; starting it earlier could skip that round as not ready.
-	if s.talonPrewarmInspector != nil {
-		s.talonPrewarmInspector.Start()
-	}
+	// DataCoord; starting it earlier could skip that round as not ready. It
+	// follows the manifest size backfill, so that round loads the manifests the
+	// backfill sized without a stat.
+	s.serverLoopWg.Go(func() {
+		if s.manifestSizeBackfill != nil {
+			s.manifestSizeBackfill.run(s.serverLoopCtx)
+		}
+		if s.talonPrewarmInspector != nil {
+			s.talonPrewarmInspector.Start()
+		}
+	})
 	sessionutil.SaveServerInfo(typeutil.MixCoordRole, s.session.GetServerID())
 }
 

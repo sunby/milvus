@@ -387,7 +387,7 @@ func (m *meta) CommitSegmentManifest(ctx context.Context, commit SegmentManifest
 			return merr.Wrap(err, "publish segment manifest")
 		}
 		// Memory is installed only after the store write has succeeded.
-		if base.GetManifestPath() != updated.GetManifestPath() {
+		if !packed.SameManifestPath(base.GetManifestPath(), updated.GetManifestPath()) {
 			manifestUpdates = append(manifestUpdates, updated)
 		}
 		m.publishSegment(updated, versions[commit.SegmentID])

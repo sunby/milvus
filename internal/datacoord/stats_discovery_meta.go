@@ -16,6 +16,8 @@
 
 package datacoord
 
+import "github.com/milvus-io/milvus/internal/storagev2/packed"
+
 // statsSegmentChanged compares only eligibility/dependency fields. In
 // particular, row-count/checkpoint updates do not enqueue discovery work.
 // Stats filenames need not be compared: discovery cares about field presence
@@ -26,7 +28,7 @@ func statsSegmentChanged(old, current *SegmentInfo) bool {
 	}
 	if old.GetState() != current.GetState() || old.GetLevel() != current.GetLevel() ||
 		old.GetIsSorted() != current.GetIsSorted() || old.GetIsSortedByNamespace() != current.GetIsSortedByNamespace() ||
-		old.GetStorageVersion() != current.GetStorageVersion() || old.GetManifestPath() != current.GetManifestPath() ||
+		old.GetStorageVersion() != current.GetStorageVersion() || !packed.SameManifestPath(old.GetManifestPath(), current.GetManifestPath()) ||
 		old.GetSchemaVersion() != current.GetSchemaVersion() || old.GetDataVersion() != current.GetDataVersion() ||
 		old.GetIsImporting() != current.GetIsImporting() || old.GetIsInvisible() != current.GetIsInvisible() ||
 		len(old.GetBinlogs()) != len(current.GetBinlogs()) {

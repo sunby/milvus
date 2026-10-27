@@ -144,23 +144,26 @@ func TestTalonPrewarmUsesDataCoordConfiguration(t *testing.T) {
 	require.ErrorIs(t, err, factoryErr)
 }
 
-func TestTalonPrewarmDataCoordStartAfterHealthy(t *testing.T) {
-	// Keep DC's state transition and prewarm loop real; suppress unrelated
-	// schedulers, import recovery, service discovery and the process-level
-	// server-info file.
-	patchScheduler := mockey.Mock((*Server).startTaskScheduler).To(func(*Server) {}).Build()
-	defer patchScheduler.UnPatch()
-	patchImportReload := mockey.Mock((*importInspector).Reload).To(func(*importInspector) {}).Build()
-	defer patchImportReload.UnPatch()
-	patchLoops := mockey.Mock((*Server).startServerLoop).To(func(*Server) {}).Build()
-	defer patchLoops.UnPatch()
-	patchInfo := mockey.Mock(sessionutil.SaveServerInfo).To(func(string, int64) {}).Build()
-	defer patchInfo.UnPatch()
-
+// newPrewarmStartTestServer returns a DataCoord holding one Flushed segment that
+// points to manifestPath, with a prewarm on a recording client. Its Start keeps
+// DC's state transition and prewarm start real; unrelated schedulers, import
+// recovery, service discovery and the process-level server-info file are
+// suppressed.
+func newPrewarmStartTestServer(t *testing.T, manifestPath string) (*Server, *recordingTalonPrewarm) {
+	for _, patch := range []*mockey.Mocker{
+		mockey.Mock((*Server).startTaskScheduler).To(func(*Server) {}).Build(),
+		mockey.Mock((*importInspector).Reload).To(func(*importInspector) {}).Build(),
+		mockey.Mock((*Server).startServerLoop).To(func(*Server) {}).Build(),
+		mockey.Mock(sessionutil.SaveServerInfo).To(func(string, int64) {}).Build(),
+	} {
+		t.Cleanup(func() { patch.UnPatch() })
+	}
 	s := &Server{ctx: context.Background(), meta: newEmptyTestMeta(), importInspector: &importInspector{}}
+	s.serverLoopCtx, s.serverLoopCancel = context.WithCancel(s.ctx)
+	t.Cleanup(s.stopServerLoop)
 	s.UpdateStateCode(commonpb.StateCode_Initializing)
 	s.meta.segments.SetSegment(1, NewSegmentInfo(&datapb.SegmentInfo{
-		ID: 1, CollectionID: 10, State: commonpb.SegmentState_Flushed, ManifestPath: "unloaded/object",
+		ID: 1, CollectionID: 10, State: commonpb.SegmentState_Flushed, ManifestPath: manifestPath,
 	}))
 	session := sessionutil.NewMockSession(t)
 	session.EXPECT().GetServerID().Return(int64(1))
@@ -172,7 +175,11 @@ func TestTalonPrewarmDataCoordStartAfterHealthy(t *testing.T) {
 		s.talonPrewarmInspector.Stop()
 		<-c.closeStarted
 	})
+	return s, c
+}
 
+func TestTalonPrewarmDataCoordStartAfterHealthy(t *testing.T) {
+	s, c := newPrewarmStartTestServer(t, "unloaded/object")
 	require.NoError(t, s.Start())
 	select {
 	case <-c.pending:

@@ -2474,6 +2474,45 @@ func UpdateManifest(segmentID int64, manifestPath string) UpdateOperator {
 	}
 }
 
+// RecordManifestSize records size as the object size of the manifest revision
+// segmentID points to when its manifest path records none, so reads skip asking
+// storage for it. It applies only while the segment is live and still points
+// to manifestPath's revision, so a size never lands on another revision. The
+// rewrite keeps the revision, which every manifest comparison treats as the
+// same manifest.
+func RecordManifestSize(segmentID int64, manifestPath string, size int64) UpdateOperator {
+	return func(modPack *updateSegmentPack) bool {
+		// Peek first: Get adds the segment to the write even when nothing changes.
+		current := modPack.Peek(segmentID)
+		if !hasLiveManifest(current) || !packed.SameManifestPath(current.GetManifestPath(), manifestPath) {
+			return false
+		}
+		manifest, err := packed.ParseManifestPath(current.GetManifestPath())
+		if err != nil || manifest.Size > 0 {
+			return false
+		}
+		recorded := packed.CommittedManifestPath(manifest.BasePath, manifest.ManifestVersion, size, Params.CommonCfg.StorageType.GetValue())
+		if recorded == current.GetManifestPath() {
+			return false
+		}
+		modPack.Get(segmentID).ManifestPath = recorded
+		return true
+	}
+}
+
+// RecordManifestSizes applies RecordManifestSize to each of sizes in one write
+// and returns how many segments it rewrote. QueryView and DataView are not
+// told: the manifest revisions are unchanged, and a new load reads the
+// recorded size. A QueryNode holding such a segment prepares it once more when
+// it next resubscribes, since QueryCoord's load-info revision hashes the path.
+func (m *meta) RecordManifestSizes(ctx context.Context, sizes []manifestSize) (int, error) {
+	operators := lo.Map(sizes, func(size manifestSize, _ int) UpdateOperator {
+		return RecordManifestSize(size.segmentID, size.manifestPath, size.size)
+	})
+	updates, err := m.updateSegmentsInfo(ctx, operators...)
+	return len(updates), err
+}
+
 // UpdateManifestHasIndex sets the segment's manifest_has_index marker
 // when a copy target adopts a worker-produced manifest containing target index
 // entries. It must be committed together with UpdateManifest so recovery can
