@@ -2,6 +2,7 @@ package qnview
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -37,6 +38,9 @@ type SegmentResourceManager struct {
 	resources   map[int64]*segmentResource
 	warmTasks   []*segmentWarmTask
 	warmWorkers int
+
+	// viewsByCollection counts the views of each collection for quota metrics.
+	viewsByCollection map[int64]int
 }
 
 type viewResources struct {
@@ -119,7 +123,7 @@ type segmentResource struct {
 }
 
 func NewSegmentResourceManager(ctx context.Context, scheduler nodescheduler.Scheduler, loader PhysicalSegmentLoader, estimator SegmentResourceEstimator, stream SegmentLoadInfoStream, buffer TransformLogBuffer, collections QueryViewCollectionRuntimeManager) *SegmentResourceManager {
-	return &SegmentResourceManager{ctx: ctx, scheduler: scheduler, loader: loader, estimator: estimator, stream: stream, buffer: buffer, collections: collections, views: make(map[qviews.QueryViewKey]*viewResources), resources: make(map[int64]*segmentResource)}
+	return &SegmentResourceManager{ctx: ctx, scheduler: scheduler, loader: loader, estimator: estimator, stream: stream, buffer: buffer, collections: collections, views: make(map[qviews.QueryViewKey]*viewResources), viewsByCollection: make(map[int64]int), resources: make(map[int64]*segmentResource)}
 }
 
 func (m *SegmentResourceManager) Acquire(req AcquireSegments) {
@@ -139,6 +143,7 @@ func (m *SegmentResourceManager) Acquire(req AcquireSegments) {
 		return
 	}
 	m.views[req.Key] = v
+	m.viewsByCollection[req.Meta.GetCollectionId()]++
 	for _, partition := range req.View.GetPartitions() {
 		for i, id := range partition.GetSegmentIds() {
 			r := m.resources[id]
@@ -617,12 +622,24 @@ func (r *segmentResource) close() {
 	m.mu.Unlock()
 }
 
+// CollectionIDs returns the collections this node holds QueryViews for.
+func (m *SegmentResourceManager) CollectionIDs() []int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Collect(maps.Keys(m.viewsByCollection))
+}
+
 func (m *SegmentResourceManager) Release(req ReleaseSegments) {
 	m.mu.Lock()
 	v := m.views[req.Key]
 	delete(m.views, req.Key)
 	var closed []<-chan struct{}
 	if v != nil {
+		if id := v.req.Meta.GetCollectionId(); m.viewsByCollection[id] > 1 {
+			m.viewsByCollection[id]--
+		} else {
+			delete(m.viewsByCollection, id)
+		}
 		v.released = true
 		v.cancel()
 		for _, b := range v.bindings {
