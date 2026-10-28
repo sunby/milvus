@@ -20,6 +20,7 @@ package paramtable
 type queryViewConfig struct {
 	IDFLazyLoadSealedStats                  ParamItem `refreshable:"true"`
 	IDFSealedStatsLoadConcurrencyRatio      ParamItem `refreshable:"true"`
+	IDFStatsMemoryLimitRatio                ParamItem `refreshable:"true"`
 	LeaseDuration                           ParamItem `refreshable:"false"`
 	LogicalSizeSource                       ParamItem `refreshable:"false"`
 	LogicalSizeBytesPerUnit                 ParamItem `refreshable:"false"`
@@ -65,6 +66,21 @@ func (p *queryViewConfig) init(base *BaseTable) {
 		},
 	}
 	p.IDFSealedStatsLoadConcurrencyRatio.Init(base.mgr)
+
+	p.IDFStatsMemoryLimitRatio = ParamItem{
+		Key:          "queryView.idfOracle.statsMemoryLimitRatio",
+		Version:      "3.1.0",
+		Export:       true,
+		DefaultValue: "0.1",
+		Doc:          "Maximum estimated memory of the merged BM25 statistics that QueryView IDF runtimes on a StreamingNode keep, as a ratio of its memory; the statistics of growing segments kept for live updates are not counted. Above it, the least recently searched runtimes drop their statistics and rebuild them on their next BM25 search, and new runtimes defer loading them as with lazyLoadSealedStats. Checked every second. Zero disables the limit.",
+		Formatter: func(v string) string {
+			if getAsFloat(v) < 0 {
+				return "0.1"
+			}
+			return v
+		},
+	}
+	p.IDFStatsMemoryLimitRatio.Init(base.mgr)
 
 	p.LeaseDuration = ParamItem{
 		Key:          "queryView.leaseDuration",

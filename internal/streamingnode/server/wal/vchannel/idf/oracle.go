@@ -4,6 +4,8 @@ import (
 	"context"
 	"slices"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -230,7 +232,6 @@ type oracleRuntime struct {
 
 	advanceMu       sync.Mutex
 	mu              sync.RWMutex
-	lazy            bool
 	closed          bool
 	currentVersion  qviews.DataVersion
 	currentStats    bm25Stats
@@ -238,6 +239,9 @@ type oracleRuntime struct {
 	currentGrowing  map[int64]struct{}
 	materialization *materializationCall
 	growingStore    *growingStatsStore
+	// lastSearch, the last search or else creation time, orders oracles for
+	// dropping statistics over the node budget.
+	lastSearch atomic.Int64
 
 	closeOnce sync.Once
 }
@@ -258,7 +262,6 @@ func newOracleRuntime(
 	}()
 	r := &oracleRuntime{
 		provider:        provider,
-		lazy:            lazy,
 		collectionID:    walView.CollectionID,
 		vchannel:        walView.VChannel,
 		partitionIDs:    slices.Clone(walView.PartitionIDs),
@@ -275,11 +278,13 @@ func newOracleRuntime(
 	if r.writeSchema == nil {
 		r.writeSchema = r.schema
 	}
+	r.lastSearch.Store(time.Now().UnixNano())
 	if lazy {
 		if err := r.loadInitialGrowing(ctx, walView); err != nil {
 			return nil, err
 		}
 		keep = true
+		provider.track(r)
 		return r, nil
 	}
 
@@ -313,6 +318,7 @@ func newOracleRuntime(
 	}
 	r.growingStore.cleanup(r.currentVersion, r.currentGrowing)
 	keep = true
+	provider.track(r)
 	return r, nil
 }
 
@@ -398,7 +404,7 @@ func (r *oracleRuntime) PrepareDataVersion(ctx context.Context, target qviews.Da
 		r.mu.Unlock()
 		return nil
 	}
-	if r.lazy && r.currentStats == nil {
+	if r.currentStats == nil {
 		if err := ctx.Err(); err != nil {
 			r.mu.Unlock()
 			return err
@@ -671,7 +677,37 @@ func (r *oracleRuntime) applySegmentSealed(segmentID int64, sealedAt qviews.Data
 	r.mu.Unlock()
 }
 
+// statsMemSize estimates the memory of the materialized statistics.
+func (r *oracleRuntime) statsMemSize() int64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var size int64
+	for _, stats := range r.currentStats {
+		size += stats.MemSize()
+	}
+	return size
+}
+
+// dematerialize drops the statistics of an oracle that is not advancing or
+// materializing, turning it lazy: the next BM25 search rebuilds them from the
+// sealed resources of the current DataVersion and the retained growing stats.
+func (r *oracleRuntime) dematerialize() bool {
+	if !r.advanceMu.TryLock() {
+		return false
+	}
+	defer r.advanceMu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.currentStats == nil || r.materialization != nil {
+		return false
+	}
+	r.currentStats, r.currentSealed, r.currentGrowing = nil, nil, nil
+	r.growingStore.cleanup(r.currentVersion, nil)
+	return true
+}
+
 func (r *oracleRuntime) Close() {
+	r.provider.untrack(r)
 	r.closeOnce.Do(func() {
 		r.mu.Lock()
 		r.closed = true
@@ -805,10 +841,18 @@ func (r *oracleRuntime) includesPartition(id int64) bool {
 // BuildIDF deliberately ignores the query DataVersion: all views share the
 // latest successfully published aggregate.
 func (r *oracleRuntime) BuildIDFBatch(ctx context.Context, requests []queryresource.IDFRequest) ([]queryresource.IDFResult, error) {
-	if err := r.ensureMaterialized(ctx); err != nil {
-		return nil, err
+	r.lastSearch.Store(time.Now().UnixNano())
+	for {
+		if err := r.ensureMaterialized(ctx); err != nil {
+			return nil, err
+		}
+		r.mu.RLock()
+		// The node budget may drop the statistics before this read lock.
+		if r.currentStats != nil {
+			break
+		}
+		r.mu.RUnlock()
 	}
-	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if r.closed {
 		return nil, context.Canceled
