@@ -142,6 +142,11 @@ func (ctx *allocationContext) nodeScore(node int64, rows int64) placementScore {
 	}
 }
 
+// nodeRows is the logical size a node holds with this shard's current placement.
+func (ctx *allocationContext) nodeRows(node int64) int64 {
+	return ctx.base[node] + ctx.rows[node]
+}
+
 func (ctx *allocationContext) score() placementScore {
 	var score placementScore
 	for _, n := range ctx.nodes {

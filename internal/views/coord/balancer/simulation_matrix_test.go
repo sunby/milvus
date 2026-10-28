@@ -2,7 +2,9 @@ package balancer
 
 import (
 	"fmt"
+	"maps"
 	"math/rand"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -402,4 +404,32 @@ func TestBalanceSimulationRetiredShardDiagnostic(t *testing.T) {
 	}
 	s.emit(simulationResult{Scenario: t.Name(), Phase: "remove_vchannel", Outcome: outcome, Sweeps: 10, Scope: 1, Batch: 1, Before: before, After: s.sample(false), Counters: simulationCounterDelta(s.counters, start), Config: *s.cache.GetBalanceConfig()})
 	t.Logf("SIM_DIAGNOSTIC retired-shard target_rows=%d desired_rows=%d retries=%d", rows, desired, s.counters.Retries-start.Retries)
+}
+
+// Equal-gain placements went to the lowest node ID, so many tiny shards
+// filled the lowest-ID nodes to the top of the tolerance band.
+func TestBalanceSimulationTinyShardsSpreadEvenly(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		absoluteTolerance int64
+	}{
+		{"absolute_band", DefaultBalanceConfig().ResourceGroupAbsoluteTolerance},
+		{"relative_band", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newBalanceSimulation(t, 6)
+			cfg := DefaultBalanceConfig()
+			cfg.ResourceGroupAbsoluteTolerance = tc.absoluteTolerance
+			s.cache.UpdateBalanceConfig(cfg)
+			var r simulationResult
+			for id := int64(1); id <= 300; id++ {
+				s.addCollection(id, []string{"rg1"}, [][]int64{{200, 200, 200, 200, 200}})
+				if id%50 == 0 {
+					r = s.settle("load", nil, 0, 40)
+				}
+			}
+			rows := slices.Collect(maps.Values(r.After.Groups["rg1"].Rows))
+			require.LessOrEqual(t, float64(slices.Max(rows))/float64(slices.Min(rows)), 1.05, "rows per node: %v", r.After.Groups["rg1"].Rows)
+		})
+	}
 }
