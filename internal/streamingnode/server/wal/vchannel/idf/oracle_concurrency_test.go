@@ -81,6 +81,8 @@ func TestOracleConcurrentSealingPreparationAndQueries(t *testing.T) {
 				defer wg.Done()
 				<-start
 				for range 64 {
+					// The node budget may drop the statistics between searches.
+					r.dematerialize()
 					if _, err := r.BuildIDFBatch(ctx, []queryresource.IDFRequest{{FieldID: 102}}); err != nil && !errors.Is(err, merr.ErrServiceNotReady) {
 						results <- err
 						return

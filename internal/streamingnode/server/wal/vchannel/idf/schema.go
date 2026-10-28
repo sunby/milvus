@@ -322,6 +322,8 @@ func (b *viewBinding) BuildIDFBatch(ctx context.Context, requests []queryresourc
 		} else if !version.EQ(oracle.currentVersion) {
 			return nil, merr.WrapErrServiceNotReadyMsg("BM25 fields are advancing to a common DataVersion")
 		}
+		// The node budget may drop the statistics before these read locks. The
+		// error replans the query, which rebuilds them.
 		if oracle.currentStats == nil {
 			return nil, merr.WrapErrServiceNotReadyMsg("BM25 field materialization changed")
 		}

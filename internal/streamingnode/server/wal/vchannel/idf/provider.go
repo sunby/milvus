@@ -58,6 +58,7 @@ type Provider struct {
 	client                 datapb.DataCoordClient
 	chunkManager           storage.ChunkManager
 	sealedStatsLoadLimiter *syncutil.Semaphore
+	statsBudget            *statsBudget
 }
 
 type ProviderOption func(*Provider)
@@ -72,6 +73,7 @@ func NewProvider(client datapb.DataCoordClient, opts ...ProviderOption) *Provide
 	provider := &Provider{
 		client:                 client,
 		sealedStatsLoadLimiter: getGlobalSealedStatsLoadLimiter(),
+		statsBudget:            getGlobalStatsBudget(),
 	}
 	for _, opt := range opts {
 		opt(provider)
@@ -83,6 +85,7 @@ type FutureProvider struct {
 	client                 *syncutil.Future[types.MixCoordClient]
 	chunkManager           storage.ChunkManager
 	sealedStatsLoadLimiter *syncutil.Semaphore
+	statsBudget            *statsBudget
 }
 
 func NewFutureProvider(client *syncutil.Future[types.MixCoordClient], opts ...ProviderOption) *FutureProvider {
@@ -94,6 +97,7 @@ func NewFutureProvider(client *syncutil.Future[types.MixCoordClient], opts ...Pr
 		client:                 client,
 		chunkManager:           provider.chunkManager,
 		sealedStatsLoadLimiter: getGlobalSealedStatsLoadLimiter(),
+		statsBudget:            getGlobalStatsBudget(),
 	}
 }
 
@@ -154,6 +158,7 @@ func (r *Runtime) resolveProvider(ctx context.Context) (*Provider, error) {
 		client:                 client,
 		chunkManager:           r.future.chunkManager,
 		sealedStatsLoadLimiter: r.future.sealedStatsLoadLimiter,
+		statsBudget:            r.future.statsBudget,
 	}, nil
 }
 
@@ -166,7 +171,7 @@ func (p *Provider) buildOracle(
 		return nil, merr.WrapErrServiceInternalMsg("querycoord client is nil")
 	}
 
-	if lazyLoadSealedStats {
+	if lazyLoadSealedStats || p.statsBudget.isFull() {
 		return newOracleRuntime(ctx, p, walView, nil, true)
 	}
 	resources, err := p.getSealedBM25Resources(ctx, walView.CollectionID, walView.VChannel, walView.SegmentSnapshot.DataVersion, walView.PartitionIDs, walView.LoadInfoVersion)
@@ -367,4 +372,18 @@ func hasLoadedBM25Function(schema *schemapb.CollectionSchema, loadedFields []int
 		}
 	}
 	return false
+}
+
+// track subjects an oracle to the node budget for materialized statistics
+// until untrack.
+func (p *Provider) track(r *oracleRuntime) {
+	if p != nil && p.statsBudget != nil {
+		p.statsBudget.oracles.Insert(r)
+	}
+}
+
+func (p *Provider) untrack(r *oracleRuntime) {
+	if p != nil && p.statsBudget != nil {
+		p.statsBudget.oracles.Remove(r)
+	}
 }
