@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/milvus-io/milvus/internal/datacoord/broker"
+	"github.com/milvus-io/milvus/internal/storagev2/packed"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/indexpb"
 	"github.com/milvus-io/milvus/pkg/v3/proto/internalpb"
@@ -250,4 +251,16 @@ func TestStatsDiscoveryRelevantMetadataChanges(t *testing.T) {
 			require.Equal(t, tc.changed, statsSegmentChanged(old, updated))
 		})
 	}
+}
+
+// A recorded manifest size keeps the revision, so discovery has nothing to redo.
+func TestStatsDiscoveryIgnoresRecordedManifestSize(t *testing.T) {
+	old := discoverySegment(1, true)
+	old.ManifestPath = packed.MarshalManifestPath("files/insert_log/1/2/1", 3)
+	sized := old.Clone()
+	sized.ManifestPath = packed.CommittedManifestPath("files/insert_log/1/2/1", 3, 4096, "remote")
+	require.False(t, statsSegmentChanged(old, sized))
+	next := old.Clone()
+	next.ManifestPath = packed.MarshalManifestPath("files/insert_log/1/2/1", 4)
+	require.True(t, statsSegmentChanged(old, next))
 }

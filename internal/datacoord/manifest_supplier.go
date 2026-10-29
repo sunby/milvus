@@ -43,16 +43,21 @@ func (s *Server) GetPublishedManifestPaths(ctx context.Context) ([]string, error
 			if err = ctx.Err(); err != nil {
 				return
 			}
-			if !isSegmentHealthy(segment) || segment.GetIsImporting() || segment.GetIsInvisible() || segment.GetManifestPath() == "" {
-				continue
-			}
-			// Growing/Flushing and L0 segments can already have published manifests.
 			// The resolver rejects the version-zero placeholder outside this lock.
-			manifests = append(manifests, segment.GetManifestPath())
+			if hasLiveManifest(segment) {
+				manifests = append(manifests, segment.GetManifestPath())
+			}
 		}
 	})
 	if err != nil {
 		return nil, err
 	}
 	return manifests, nil
+}
+
+// hasLiveManifest reports whether segment is a live segment pointing to a
+// manifest. Growing/Flushing and L0 segments can already have published ones;
+// version zero is the placeholder of a segment that has published none.
+func hasLiveManifest(segment *SegmentInfo) bool {
+	return isSegmentHealthy(segment) && !segment.GetIsImporting() && !segment.GetIsInvisible() && segment.GetManifestPath() != ""
 }

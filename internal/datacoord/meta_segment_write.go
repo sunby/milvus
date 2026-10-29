@@ -11,6 +11,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus/internal/metastore"
+	"github.com/milvus-io/milvus/internal/storagev2/packed"
 	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 )
@@ -129,7 +130,7 @@ func (m *meta) publishLanded(ctx context.Context, landed []landedSegment) {
 	previous := m.publishSegments(segments, versions)
 	var manifestUpdates []*SegmentInfo
 	for _, segment := range segments {
-		if prev := previous[segment.GetID()]; prev == nil || prev.GetManifestPath() != segment.GetManifestPath() {
+		if prev := previous[segment.GetID()]; prev == nil || !packed.SameManifestPath(prev.GetManifestPath(), segment.GetManifestPath()) {
 			manifestUpdates = append(manifestUpdates, segment)
 		}
 	}
