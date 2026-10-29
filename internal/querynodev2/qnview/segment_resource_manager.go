@@ -289,13 +289,20 @@ func (r *segmentResource) retryAtLocked(at time.Time) {
 func (r *segmentResource) reconcile(schedulerCtx context.Context) error {
 	m := r.manager
 	m.mu.Lock()
+	if r.closing {
+		// Close has already started; a closing resource takes no new work.
+		r.scheduled = false
+		m.mu.Unlock()
+		return nil
+	}
+	// close() waits for a running reconcile, like catch-ups and warms.
+	r.operations.Add(1)
+	defer r.operations.Done()
 	// Every return holds mu. Events arriving during I/O either get consumed
 	// by the next iteration or transfer to a successor under this same lock.
 	defer func() {
 		r.scheduled = false
-		if r.dirty {
-			// Release can set closing during I/O. Its successor must still run
-			// to close the resource after the physical operation finishes.
+		if r.dirty && !r.closing {
 			r.submitLocked()
 		}
 		m.mu.Unlock()
@@ -305,9 +312,7 @@ func (r *segmentResource) reconcile(schedulerCtx context.Context) error {
 	for {
 		r.dirty = false
 		if r.closing || (len(r.bindings) == 0 && r.queryRefs == 0) {
-			r.closing = true
-			r.cancel()
-			go r.close()
+			r.closeLocked()
 			return nil
 		}
 		if r.metadataClosed {
@@ -584,6 +589,19 @@ func (r *segmentResource) catchup(base *segmentBase) {
 	}
 }
 
+// closeLocked closes a resource nothing binds or queries any more. It does not
+// wait for a scheduler worker: loads waiting for the memory this close frees
+// may hold all of them. close() itself waits for a running reconcile.
+func (r *segmentResource) closeLocked() {
+	if r.closing {
+		return
+	}
+	r.closing = true
+	r.stopRetryLocked()
+	r.cancel()
+	go r.close()
+}
+
 func (r *segmentResource) close() {
 	m := r.manager
 	r.operations.Wait()
@@ -635,10 +653,7 @@ func (m *SegmentResourceManager) Release(req ReleaseSegments) {
 			}
 			if len(r.bindings) == 0 && r.queryRefs == 0 && !r.closing {
 				// Establish closure before another Bind can reuse this owner.
-				r.wakeLocked()
-				r.closing = true
-				r.stopRetryLocked()
-				r.cancel()
+				r.closeLocked()
 				closed = append(closed, r.done)
 			} else {
 				r.wakeLocked()

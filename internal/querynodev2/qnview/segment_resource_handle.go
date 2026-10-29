@@ -57,11 +57,10 @@ func (m *SegmentResourceManager) AcquireSealedSegmentHandles(ctx context.Context
 			r.queryRefs--
 			read.base.queryRefs--
 			v.operationRefs--
-			r.wakeLocked()
 			if len(r.bindings) == 0 && r.queryRefs == 0 {
-				r.closing = true
-				r.stopRetryLocked()
-				r.cancel()
+				r.closeLocked()
+			} else {
+				r.wakeLocked()
 			}
 			m.mu.Unlock()
 			// These are the exact objects acquired above, even after the View

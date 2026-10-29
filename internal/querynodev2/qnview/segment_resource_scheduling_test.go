@@ -69,7 +69,7 @@ func setupResourceSchedulingTest(t *testing.T, synchronousSnapshot bool) *resour
 				return nil, err
 			}
 		}
-		base := &segmentBase{segment: &fakeTransformSegment{id: r.id}, caughtUp: f.caughtUp}
+		base := &segmentBase{segment: &fakeTransformSegment{id: r.id}, caughtUp: f.caughtUp, registration: instantTransformRegistration{}}
 		return &preparedSegmentRead{schema: b.view.req.Meta.SchemaVersion, load: b.view.req.Meta.LoadInfoVersion, revision: snapshot.Revision, base: base, read: &resourceTestRead{}}, nil
 	}).Build()
 	m := NewSegmentResourceManager(t.Context(), &resourceSchedulingTestScheduler{}, &resourceTestLoader{}, nil, &resourceTestStream{}, nil, nil)
@@ -254,8 +254,7 @@ func TestSegmentResourceReleaseCancelsRetry(t *testing.T) {
 		f.r.manager.Release(ReleaseSegments{Key: f.r.bindings[0].view.req.Key, OnDropped: func() { close(dropped) }})
 		require.Nil(t, f.r.retryTimer)
 		callback()
-		require.Len(t, f.queue, 1, "only the close task is queued")
-		f.runNext()
+		require.Empty(t, f.queue, "an idle resource closes without a scheduler task")
 		select {
 		case <-dropped:
 		case <-time.After(5 * time.Second):
@@ -269,6 +268,28 @@ func TestSegmentResourceReleaseCancelsRetry(t *testing.T) {
 		callback()
 		require.Empty(t, f.queue)
 		require.False(t, next.scheduled)
+	})
+}
+
+func TestSegmentResourceLastQueryClosesWithoutScheduler(t *testing.T) {
+	mockey.PatchConvey("the last query handle closes a released resource without a scheduler task", t, func() {
+		f := setupResourceSchedulingTest(t, true)
+		mockey.Mock((*resourceTestRead).RetainReadState).Return(func() {}).Build()
+		f.wake()
+		f.runNext()
+		req := f.r.bindings[0].view.req
+		handles, err := f.r.manager.AcquireSealedSegmentHandles(t.Context(), req.Key, req.View, 0)
+		require.NoError(t, err)
+		f.r.manager.Release(ReleaseSegments{Key: req.Key})
+		require.Len(t, f.queue, 1, "the executing query keeps the resource, so release only wakes it")
+		handles[0].Release()
+		select {
+		case <-f.r.done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the last query handle did not close the resource")
+		}
+		f.runNext()
+		require.Empty(t, f.queue, "the stale reconcile finds the resource closed")
 	})
 }
 
