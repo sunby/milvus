@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/errors"
@@ -51,6 +52,7 @@ import (
 	"github.com/milvus-io/milvus/internal/querynodev2/cluster"
 	"github.com/milvus-io/milvus/internal/querynodev2/delegator"
 	"github.com/milvus-io/milvus/internal/querynodev2/pipeline"
+	"github.com/milvus-io/milvus/internal/querynodev2/qnview"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
 	"github.com/milvus-io/milvus/internal/registry"
 	"github.com/milvus-io/milvus/internal/storage"
@@ -111,6 +113,7 @@ type QueryNode struct {
 
 	// internal components
 	manager               *segments.Manager
+	queryViewSegments     atomic.Pointer[qnview.SegmentResourceManager]
 	collectionMetricsMu   sync.Mutex
 	clusterManager        cluster.Manager
 	pipelineManager       pipeline.Manager
