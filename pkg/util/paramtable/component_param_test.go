@@ -596,6 +596,25 @@ func TestComponentParam_IDFSealedStatsLoadConcurrencyRatio(t *testing.T) {
 	assert.Equal(t, 1.0, item.GetAsFloat())
 }
 
+func TestComponentParam_IDFStatsMemoryLimitRatio(t *testing.T) {
+	Init()
+	params := Get()
+	item := &params.QueryViewCfg.IDFStatsMemoryLimitRatio
+	t.Cleanup(func() { params.Reset(item.Key) })
+
+	assert.Equal(t, "queryView.idfOracle.statsMemoryLimitRatio", item.Key)
+	assert.Equal(t, "0.1", item.DefaultValue)
+	assert.True(t, item.Export)
+	assert.Equal(t, 0.1, item.GetAsFloat())
+
+	assert.NoError(t, params.Save(item.Key, "0.25"))
+	assert.Equal(t, 0.25, item.GetAsFloat())
+	assert.NoError(t, params.Save(item.Key, "0"))
+	assert.Equal(t, 0.0, item.GetAsFloat())
+	assert.NoError(t, params.Save(item.Key, "-1"))
+	assert.Equal(t, 0.1, item.GetAsFloat())
+}
+
 func TestComponentParam_QueryViewConcurrency(t *testing.T) {
 	Init()
 	params := Get()
