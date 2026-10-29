@@ -331,6 +331,17 @@ func (r *Runtime) PrepareSchemaDataVersion(ctx context.Context, meta *viewpb.Que
 	return oracle.PrepareDataVersion(ctx, qviews.FromProtoDataVersion(meta.GetVersion().GetDataVersion()))
 }
 
+// Warm warms, in the background, the aggregate of a read schema that a Ready
+// QueryView with a LoadCollection warmup hint serves.
+func (r *Runtime) Warm(key queryresource.ReadSchemaKey) {
+	r.mu.RLock()
+	oracle := r.oracles[key]
+	r.mu.RUnlock()
+	if oracle != nil {
+		oracle.warm()
+	}
+}
+
 func (r *Runtime) ApplyLiveEvent(ctx context.Context, event walview.VChannelResourceEvent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

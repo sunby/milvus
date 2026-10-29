@@ -277,6 +277,17 @@ func (r *QueryRuntime) PrepareIndexMeta(ctx context.Context, meta *viewpb.QueryV
 	return nil
 }
 
+// Warm asks the modules to warm the resources that the view serves.
+func (r *QueryRuntime) Warm(meta *viewpb.QueryViewMeta) {
+	key := readSchemaKey(meta)
+	r.RangeModules(func(module QueryRuntimeModule) bool {
+		if warm, ok := module.(QueryRuntimeWarmModule); ok {
+			warm.Warm(key)
+		}
+		return true
+	})
+}
+
 func (r *QueryRuntime) BeforeRelease(ctx context.Context, version qviews.DataVersion) error {
 	var result error
 	r.RangeModules(func(module QueryRuntimeModule) bool {
