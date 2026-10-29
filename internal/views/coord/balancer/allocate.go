@@ -78,7 +78,9 @@ func allocate(p *planningContext, shardID qviews.ShardID, baseRows map[int64]int
 		best, bestGain := ctx.nodes[0], -math.MaxFloat64
 		for _, node := range ctx.nodes {
 			gain, _ := ctx.evaluate([]*SegmentDataView{segment}, node)
-			if gain > bestGain+scoreEpsilon {
+			// The band penalty is flat inside the tolerance band; break gain
+			// ties toward the less loaded node.
+			if gain > bestGain+scoreEpsilon || (gain >= bestGain-scoreEpsilon && ctx.nodeRows(node) < ctx.nodeRows(best)) {
 				best, bestGain = node, gain
 			}
 		}
