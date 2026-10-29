@@ -803,7 +803,7 @@ func (q *QuotaCenter) forceDenyWriting(errorCode commonpb.ErrorCode, cluster boo
 		mlog.RatedWarn(q.ctx, rate.Limit(30), "QuotaCenter force to deny writing",
 			mlog.Bool("cluster", cluster),
 			mlog.Int64s("dbIDs", dbIDs),
-			mlog.Int64s("collectionIDs", collectionIDs),
+			mlog.Int("collectionNum", len(collectionIDs)),
 			mlog.Any("partitionIDs", col2partitionIDs),
 			mlog.String("errorCode", errorCode.String()),
 			mlog.String("denyReason", denyReason))
@@ -815,7 +815,7 @@ func (q *QuotaCenter) forceDenyWriting(errorCode commonpb.ErrorCode, cluster boo
 // forceDenyReading sets dql rates to 0 to reject all dql requests.
 func (q *QuotaCenter) forceDenyReading(errorCode commonpb.ErrorCode, cluster bool, dbIDs []int64, denyReason string) {
 	if cluster {
-		var collectionIDs []int64
+		denied := 0
 		for dbID, collectionIDToPartIDs := range q.readableCollections {
 			for collectionID := range collectionIDToPartIDs {
 				collectionLimiter := q.rateLimiter.GetCollectionLimiters(dbID, collectionID)
@@ -828,12 +828,12 @@ func (q *QuotaCenter) forceDenyReading(errorCode commonpb.ErrorCode, cluster boo
 					ErrorCode: errorCode,
 					Reason:    denyReason,
 				})
-				collectionIDs = append(collectionIDs, collectionID)
+				denied++
 			}
 		}
 
 		mlog.RatedWarn(q.ctx, rate.Limit(10), "QuotaCenter force to deny reading",
-			mlog.Int64s("collectionIDs", collectionIDs),
+			mlog.Int("collectionNum", denied),
 			mlog.String("errorCode", errorCode.String()),
 			mlog.String("denyReason", denyReason))
 	}
@@ -875,12 +875,15 @@ func (q *QuotaCenter) getRealTimeRate(label string) float64 {
 	return rate
 }
 
-// guaranteeMinRate make sure the rate will not be less than the min rate.
-func (q *QuotaCenter) guaranteeMinRate(minRate float64, rt internalpb.RateType, rln *rlinternal.RateLimiterNode) {
+// guaranteeMinRate make sure the rate will not be less than the min rate,
+// and reports whether it raised the rate.
+func (q *QuotaCenter) guaranteeMinRate(minRate float64, rt internalpb.RateType, rln *rlinternal.RateLimiterNode) bool {
 	v, ok := rln.GetLimiters().Get(rt)
 	if ok && minRate > 0 && v.Limit() < Limit(minRate) {
 		v.SetLimit(Limit(minRate))
+		return true
 	}
+	return false
 }
 
 func (q *QuotaCenter) getDenyReadingDBs() map[int64]struct{} {
@@ -1010,8 +1013,8 @@ func (q *QuotaCenter) calculateWriteRates() error {
 		if collectionLimiter == nil {
 			return merr.WrapErrServiceInternalMsg("collection limiter not found: %d", collection)
 		}
-		q.recordLocalQuotaEffect(collection)
 
+		changed := false
 		limiter := collectionLimiter.GetLimiters()
 		for _, rt := range []internalpb.RateType{
 			internalpb.RateType_DMLInsert,
@@ -1034,15 +1037,21 @@ func (q *QuotaCenter) calculateWriteRates() error {
 					continue
 				}
 			}
+			changed = changed || Limit(newRate) != v.Limit()
 			v.SetLimit(Limit(newRate))
 			q.prevRates[rateKey] = newRate
 		}
 
 		collectionProps := q.getCollectionLimitProperties(collection)
-		q.guaranteeMinRate(getCollectionRateLimitConfig(collectionProps, common.CollectionInsertRateMinKey),
+		insertRaised := q.guaranteeMinRate(getCollectionRateLimitConfig(collectionProps, common.CollectionInsertRateMinKey),
 			internalpb.RateType_DMLInsert, collectionLimiter)
-		q.guaranteeMinRate(getCollectionRateLimitConfig(collectionProps, common.CollectionDeleteRateMinKey),
+		deleteRaised := q.guaranteeMinRate(getCollectionRateLimitConfig(collectionProps, common.CollectionDeleteRateMinKey),
 			internalpb.RateType_DMLDelete, collectionLimiter)
+		// A neutral factor, such as a short time tick delay, leaves the
+		// limiters at their baseline, so the next round need not reset them.
+		if changed || insertRaised || deleteRaised {
+			q.recordLocalQuotaEffect(collection)
+		}
 		if factor < 1.0 {
 			mlog.RatedDebug(q.ctx, rate.Limit(10), "QuotaCenter cool write rates off done",
 				mlog.FieldCollectionID(collection),
@@ -1183,7 +1192,7 @@ func (q *QuotaCenter) getMemoryFactor() map[int64]float64 {
 		if memoryWaterLevel >= queryNodeMemoryHighWaterLevel {
 			mlog.RatedWarn(q.ctx, rate.Limit(10), "QuotaCenter: QueryNode memory to high water level",
 				mlog.String("Node", fmt.Sprintf("%s-%d", typeutil.QueryNodeRole, nodeID)),
-				mlog.Int64s("collections", metric.Effect.CollectionIDs),
+				mlog.Int("collectionNum", len(metric.Effect.CollectionIDs)),
 				mlog.Uint64("UsedMem", metric.Hms.MemoryUsage),
 				mlog.Uint64("TotalMem", metric.Hms.Memory),
 				mlog.Float64("curWatermark", memoryWaterLevel),
@@ -1196,7 +1205,7 @@ func (q *QuotaCenter) getMemoryFactor() map[int64]float64 {
 		updateCollectionFactor(factor, metric.Effect.CollectionIDs)
 		mlog.RatedWarn(q.ctx, rate.Limit(10), "QuotaCenter: QueryNode memory to low water level, limit writing rate",
 			mlog.String("Node", fmt.Sprintf("%s-%d", typeutil.QueryNodeRole, nodeID)),
-			mlog.Int64s("collections", metric.Effect.CollectionIDs),
+			mlog.Int("collectionNum", len(metric.Effect.CollectionIDs)),
 			mlog.Uint64("UsedMem", metric.Hms.MemoryUsage),
 			mlog.Uint64("TotalMem", metric.Hms.Memory),
 			mlog.Float64("curWatermark", memoryWaterLevel),
@@ -1211,7 +1220,7 @@ func (q *QuotaCenter) getMemoryFactor() map[int64]float64 {
 		if memoryWaterLevel >= dataNodeMemoryHighWaterLevel {
 			mlog.RatedWarn(q.ctx, rate.Limit(10), "QuotaCenter: DataNode memory to high water level",
 				mlog.String("Node", fmt.Sprintf("%s-%d", typeutil.DataNodeRole, nodeID)),
-				mlog.Int64s("collections", metric.Effect.CollectionIDs),
+				mlog.Int("collectionNum", len(metric.Effect.CollectionIDs)),
 				mlog.Uint64("UsedMem", metric.Hms.MemoryUsage),
 				mlog.Uint64("TotalMem", metric.Hms.Memory),
 				mlog.Float64("curWatermark", memoryWaterLevel),
@@ -1223,7 +1232,7 @@ func (q *QuotaCenter) getMemoryFactor() map[int64]float64 {
 		factor := (dataNodeMemoryHighWaterLevel - memoryWaterLevel) / (dataNodeMemoryHighWaterLevel - dataNodeMemoryLowWaterLevel)
 		mlog.RatedWarn(q.ctx, rate.Limit(10), "QuotaCenter: DataNode memory to low water level, limit writing rate",
 			mlog.String("Node", fmt.Sprintf("%s-%d", typeutil.DataNodeRole, nodeID)),
-			mlog.Int64s("collections", metric.Effect.CollectionIDs),
+			mlog.Int("collectionNum", len(metric.Effect.CollectionIDs)),
 			mlog.Uint64("UsedMem", metric.Hms.MemoryUsage),
 			mlog.Uint64("TotalMem", metric.Hms.Memory),
 			mlog.Float64("curWatermark", memoryWaterLevel),
@@ -1263,7 +1272,7 @@ func (q *QuotaCenter) getGrowingSegmentsSizeFactor() map[int64]float64 {
 		updateCollectionFactor(factor, metric.Effect.CollectionIDs)
 		mlog.RatedWarn(q.ctx, rate.Limit(10), "QuotaCenter: QueryNode growing segments size exceeds watermark, limit writing rate",
 			mlog.String("Node", fmt.Sprintf("%s-%d", typeutil.QueryNodeRole, nodeID)),
-			mlog.Int64s("collections", metric.Effect.CollectionIDs),
+			mlog.Int("collectionNum", len(metric.Effect.CollectionIDs)),
 			mlog.Int64("segmentsSize", metric.GrowingSegmentsSize),
 			mlog.Uint64("TotalMem", metric.Hms.Memory),
 			mlog.Float64("highWatermark", high),
