@@ -336,7 +336,7 @@ func (b *DefaultBalancer) apply(ctx context.Context, plan *BalancePlan) error {
 	if plan == nil {
 		return nil
 	}
-	var errs []error
+	var failures failureSummary
 	// Planning is batched, but applying a view may wait for its DataView ref.
 	// Do not hold a registry-wide flush window across that wait. Each manager
 	// submits one ordered shard event; the scheduler still coalesces pending work.
@@ -346,7 +346,7 @@ func (b *DefaultBalancer) apply(ctx context.Context, plan *BalancePlan) error {
 			continue
 		}
 		if err := mgr.RequestReleaseWithControl(ctx, plan.ReleaseControls[shardID]); err != nil {
-			errs = append(errs, err)
+			failures.add(err)
 			b.queue.addRetry(TriggerScope{DirtyShards: []qviews.ShardID{shardID}})
 		}
 	}
@@ -356,7 +356,7 @@ func (b *DefaultBalancer) apply(ctx context.Context, plan *BalancePlan) error {
 		}
 		mgr := b.viewRegistry.Ensure(shardID)
 		if err := mgr.AddPreparing(ctx, builder); err != nil {
-			errs = append(errs, err)
+			failures.add(err)
 			b.queue.addRetry(TriggerScope{DirtyShards: []qviews.ShardID{shardID}})
 		}
 	}
@@ -365,13 +365,32 @@ func (b *DefaultBalancer) apply(ctx context.Context, plan *BalancePlan) error {
 	}
 	if len(plan.Retries) > 0 {
 		b.queue.addRetry(TriggerScope{DirtyShards: plan.Retries})
-		errs = append(errs, merr.WrapErrServiceUnavailableMsg("balance inputs are not ready for %d shards", len(plan.Retries)))
+		failures.add(merr.WrapErrServiceUnavailableMsg("balance inputs are not ready for %d shards", len(plan.Retries)))
 	}
-	var err error
-	for _, e := range errs {
-		err = errors.CombineErrors(err, e)
+	return failures.err()
+}
+
+// failureSummary keeps a batch's first failure and counts the rest. A pass can
+// fail on every shard it touches, and a chain of N errors costs O(N^2) in each
+// errors.Is, which rebuilds the message at every level, and puts N stack traces
+// in one log line. Every failure is retried individually regardless.
+type failureSummary struct {
+	first error
+	count int
+}
+
+func (s *failureSummary) add(err error) {
+	if s.first == nil {
+		s.first = err
 	}
-	return err
+	s.count++
+}
+
+func (s *failureSummary) err() error {
+	if s.count <= 1 {
+		return s.first
+	}
+	return merr.Wrapf(s.first, "%d failures, first", s.count)
 }
 
 // Read once per affected collection per pass, including startup recovery and
@@ -382,7 +401,7 @@ func (b *DefaultBalancer) readSchemaVersions(ctx context.Context, reader *planni
 	}
 	reader.schemaVersions = make(map[int64]int32)
 	failed := make(map[int64]error)
-	var result error
+	var failures failureSummary
 	ready := make([]qviews.ShardID, 0, len(dirty))
 	for _, shard := range dirty {
 		cfg := reader.ConfigForShard(shard)
@@ -395,7 +414,7 @@ func (b *DefaultBalancer) readSchemaVersions(ctx context.Context, reader *planni
 			version, err := b.schemaVersion(ctx, id)
 			if err != nil {
 				failed[id] = err
-				result = errors.CombineErrors(result, err)
+				failures.add(err)
 				b.queue.addRetry(TriggerScope{DirtyCollections: []int64{id}})
 			} else {
 				reader.schemaVersions[id] = version
@@ -405,5 +424,5 @@ func (b *DefaultBalancer) readSchemaVersions(ctx context.Context, reader *planni
 			ready = append(ready, shard)
 		}
 	}
-	return ready, result
+	return ready, failures.err()
 }
