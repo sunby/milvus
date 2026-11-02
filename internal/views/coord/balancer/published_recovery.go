@@ -3,8 +3,6 @@ package balancer
 import (
 	"context"
 
-	"github.com/cockroachdb/errors"
-
 	"github.com/milvus-io/milvus/internal/views/coord/balancer/api"
 	"github.com/milvus-io/milvus/internal/views/coord/coordview"
 	"github.com/milvus-io/milvus/internal/views/qviews"
@@ -69,7 +67,7 @@ func recoveryPlacementEligible(p *planningContext, id qviews.ShardID, view *view
 // A target preparing view must not starve a published schema whose QN was lost.
 // Each schema has its own preparation slot; publication retires the old slot.
 func (b *DefaultBalancer) recoverPublishedSchemas(ctx context.Context, p *planningContext, dirty []qviews.ShardID) error {
-	var result error
+	var failures failureSummary
 	for _, id := range dirty {
 		cfg := p.ConfigForShard(id)
 		if cfg == nil {
@@ -101,9 +99,9 @@ func (b *DefaultBalancer) recoverPublishedSchemas(ctx context.Context, p *planni
 			err = manager.AddPublishedRecovery(ctx, allocation.builder, source)
 		}
 		if err != nil {
-			result = errors.CombineErrors(result, err)
+			failures.add(err)
 			b.queue.addRetry(TriggerScope{DirtyShards: []qviews.ShardID{id}})
 		}
 	}
-	return result
+	return failures.err()
 }

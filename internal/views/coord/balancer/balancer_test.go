@@ -2,6 +2,7 @@ package balancer
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/proto/viewpb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/v3/util/stage"
 )
 
 func TestBalancer_ReconcileDirtyShardAppliesPrepare(t *testing.T) {
@@ -368,4 +370,36 @@ func TestTriggerQueueBatchCapturesTriggerScope(t *testing.T) {
 	assert.Len(t, batch.dirtyNodes, 2)
 	assert.Len(t, batch.dirtyShards, 1)
 	assert.Len(t, batch.dirtyColls, 1)
+}
+
+func TestApplySummarizesFailedShards(t *testing.T) {
+	const shards = 2000
+	patch := mockey.Mock((*coordview.ShardViewManager).AddPreparing).To(func(*coordview.ShardViewManager, context.Context, *qviews.QueryViewAtCoordBuilder) error {
+		return merr.WrapErrServiceUnavailableMsg("shard is being released")
+	}).Build()
+	t.Cleanup(func() { patch.UnPatch() })
+	plan := &BalancePlan{Prepares: make(map[qviews.ShardID]*qviews.QueryViewAtCoordBuilder, shards)}
+	for replica := int64(1); replica <= shards; replica++ {
+		plan.Prepares[cacheShard(1, replica)] = &qviews.QueryViewAtCoordBuilder{}
+	}
+	controller := NewDefaultBalancer(nil, emptyRegistry(t), nil, nil)
+
+	err := controller.apply(t.Context(), plan)
+
+	require.ErrorIs(t, err, merr.ErrServiceUnavailable)
+	require.Equal(t, stage.Error, stage.Outcome(err))
+	require.Contains(t, err.Error(), "2000 failures, first: shard is being released")
+	// A chain would carry one stack trace per shard, over 2 MiB here.
+	require.Less(t, len(fmt.Sprintf("%+v", err)), 64*1024)
+	require.Len(t, controller.queue.retries.dirtyShards, shards, "every shard is retried, not only the reported one")
+}
+
+func TestFailureSummaryKeepsSingleFailureIdentity(t *testing.T) {
+	var failures failureSummary
+	require.NoError(t, failures.err())
+	first := merr.WrapErrServiceUnavailableMsg("first")
+	failures.add(first)
+	require.Equal(t, first, failures.err())
+	failures.add(merr.WrapErrServiceInternalMsg("second"))
+	require.ErrorIs(t, failures.err(), merr.ErrServiceUnavailable, "the first failure keeps classifying the pass")
 }
