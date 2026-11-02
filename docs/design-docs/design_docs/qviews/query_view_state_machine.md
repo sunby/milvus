@@ -109,7 +109,7 @@ DataView-only PR.
 | Target State | Trigger | Transition Behavior |
 |---|---|---|
 | Down | Higher-version view confirms Up / ReleaseCollection | Persist Down to ETCD; push Down to SN |
-| Unrecoverable | Any node reports Unrecoverable | Persist Unrecoverable to ETCD |
+| Unrecoverable | Any node reports Unrecoverable / a replacement was accepted while a QN of this view is lost | Persist Unrecoverable to ETCD |
 
 **Possible Peer States (and Coord's reaction):**
 - **SN**: Up / Unrecoverable
@@ -170,7 +170,7 @@ DataView-only PR.
 - Manager calls `EnterUnrecoverable` from Preparing, Ready, or Up, for example
   when preempting an in-flight view or handling RequestRelease.
 
-> Note: QueryNode loss is delivered to Coord only for active QN-targeted syncs via `OnQueryNodeLost`. In Preparing it makes the view Unrecoverable; in Dropping it counts that QN cleanup as complete. SN is bound to the vchannel and never experiences "node lost" from Coord's per-view perspective; SN unavailability is handled at the channel assignment level.
+> Note: QueryNode loss is delivered to Coord only for active QN-targeted syncs via `OnQueryNodeLost`. In Preparing it makes the view Unrecoverable; in Dropping it counts that QN cleanup as complete. An Up view has no such sync: `AddLostNodeReplacement` moves it to Unrecoverable when the Balancer's replacement is accepted, because Phase 2 can no longer reach the lost QN. Readiness stops counting it at once, and it advances to Dropping when the replacement is Up, so nodes see an ordinary handoff. SN is bound to the vchannel and never experiences "node lost" from Coord's per-view perspective; SN unavailability is handled at the channel assignment level.
 
 **Automatic Behavior:**
 1. Persist Unrecoverable to ETCD (if not already persisted).

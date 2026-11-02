@@ -180,6 +180,34 @@ func healthyUp(snap balanceInput, id qviews.ShardID) bool {
 	return true
 }
 
+// lostUpNodes returns the lost QueryNodes under the shard's Up view, unless
+// another replica can still serve the vchannel: readiness requires every replica
+// Up, so retiring this view would hold queries that replica can answer. A node
+// known only through a recovered placement has not been heard from yet (embedded
+// QueryNodes publish asynchronously at startup), so it does not count as lost.
+func lostUpNodes(snap balanceInput, id qviews.ShardID) []int64 {
+	entry := snap.ShardEntry(id)
+	if entry == nil {
+		return nil
+	}
+	var lost []int64
+	for _, node := range entry.UpNodes() {
+		if n := snap.NodesMap()[node]; n != nil && !n.Alive && n.ResourceGroup != "" {
+			lost = append(lost, node)
+		}
+	}
+	if len(lost) == 0 {
+		return nil
+	}
+	for _, replica := range snap.ConfigForShard(id).Replicas {
+		sibling := qviews.ShardID{ReplicaID: replica.ReplicaID, VChannel: id.VChannel}
+		if sibling != id && healthyUp(snap, sibling) {
+			return nil
+		}
+	}
+	return lost
+}
+
 // dataViewVersionAdvanced returns true if the shard's current Up view was
 // built on an older DataVersion than the collection's current DataView.
 // Returns false when the snapshot has no DataVersion for the collection

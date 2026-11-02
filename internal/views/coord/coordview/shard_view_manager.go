@@ -2,6 +2,7 @@ package coordview
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"sync"
 
@@ -425,17 +426,27 @@ func segmentSet(segments []int64) map[int64]bool {
 //
 // Validation: The new DataVersion must not be lower than any existing view's DataVersion.
 func (m *ShardViewManager) AddPreparing(ctx context.Context, builder *qviews.QueryViewAtCoordBuilder) error {
-	return m.addPreparing(ctx, builder, nil)
+	return m.addPreparing(ctx, builder, nil, nil)
+}
+
+// AddLostNodeReplacement is AddPreparing for a shard whose Up view sits on lost
+// QueryNodes. That view fails every Phase 2 on the missing node, so it stops
+// counting as serving once its replacement is accepted: readiness then holds
+// queries instead of letting them fail. Nodes are told nothing until the
+// replacement is Up, so surviving QueryNodes see an ordinary handoff and keep
+// their shared segments resident.
+func (m *ShardViewManager) AddLostNodeReplacement(ctx context.Context, builder *qviews.QueryViewAtCoordBuilder, lostNodes []int64) error {
+	return m.addPreparing(ctx, builder, nil, lostNodes)
 }
 
 // AddPublishedRecovery changes placement of a retained published-schema view.
 // It preserves that view's exact data and load identities while a newer schema
 // prepares independently. Ordinary planning still cannot roll DataVersion back.
 func (m *ShardViewManager) AddPublishedRecovery(ctx context.Context, builder *qviews.QueryViewAtCoordBuilder, source qviews.QueryViewVersion) error {
-	return m.addPreparing(ctx, builder, &source)
+	return m.addPreparing(ctx, builder, &source, nil)
 }
 
-func (m *ShardViewManager) addPreparing(ctx context.Context, builder *qviews.QueryViewAtCoordBuilder, source *qviews.QueryViewVersion) (retErr error) {
+func (m *ShardViewManager) addPreparing(ctx context.Context, builder *qviews.QueryViewAtCoordBuilder, source *qviews.QueryViewVersion, lostNodes []int64) (retErr error) {
 	timer := prepareDuration.Begin()
 	defer timer.EndError(&retErr)
 	newDV := builder.DataVersion()
@@ -526,6 +537,8 @@ func (m *ShardViewManager) addPreparing(ctx context.Context, builder *qviews.Que
 
 	// Process: collect persist, sync, and post-persist effects.
 	m.processStateMachine(sm)
+	// After the advance above: the replacement's Up advances this view instead.
+	m.retireUpOnLostNodesLocked(ctx, lostNodes)
 
 	// Move all accumulated effects into one shard-scoped event.
 	event := m.consumeDirtyEventLocked()
@@ -534,6 +547,28 @@ func (m *ShardViewManager) addPreparing(ctx context.Context, builder *qviews.Que
 	holdTimer.End(nil)
 	m.mu.Unlock()
 	return nil
+}
+
+func (m *ShardViewManager) retireUpOnLostNodesLocked(ctx context.Context, lostNodes []int64) {
+	for _, sm := range m.views {
+		if sm.State() != qviews.QueryViewStateUp {
+			continue
+		}
+		nodes := viewNodeIDs(sm.View())
+		lost := slices.IndexFunc(nodes, func(node int64) bool { return slices.Contains(lostNodes, node) })
+		if lost < 0 {
+			continue
+		}
+		key := m.keyForStateMachine(sm)
+		sm.EnterUnrecoverable()
+		qvobserve.Observe(ctx, qvobserve.CoordViewQueryNodeLostAppliedEvent{
+			ViewStateTransition: qvobserve.ViewStateTransition{
+				CollectionID: m.collectionIDForStateMachine(sm), View: key, From: qviews.QueryViewStateUp, To: sm.State(),
+			},
+			Node: qviews.NewQueryNode(nodes[lost]),
+		})
+		m.processStateMachine(sm)
+	}
 }
 
 // RequestRelease initiates teardown of all views in this shard.

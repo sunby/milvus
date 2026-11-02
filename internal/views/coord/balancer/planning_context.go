@@ -221,8 +221,10 @@ func shardKeys(targets map[qviews.ShardID]struct{}) []qviews.ShardID {
 }
 
 // Refresh after publishing layout selectors, before accepting any candidate.
+// Candidate membership stays as the layouts saw it: a node published since then
+// has already queued the next pass, whereas an empty target compared with newer
+// candidates would read as a replica with no quota and release its views.
 func (p *planningContext) refreshTargetInputs() {
-	p.groups = make(map[string][]int64)
 	p.groupEntries = make(map[string]*balancercache.ResourceGroupEntry)
 	p.collections = make(map[int64]*balancercache.CollectionEntry)
 	p.nodeEntries = make(map[int64]*balancercache.NodeEntry)

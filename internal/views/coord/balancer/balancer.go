@@ -355,7 +355,13 @@ func (b *DefaultBalancer) apply(ctx context.Context, plan *BalancePlan) error {
 			continue
 		}
 		mgr := b.viewRegistry.Ensure(shardID)
-		if err := mgr.AddPreparing(ctx, builder); err != nil {
+		var err error
+		if lost := plan.LostNodes[shardID]; len(lost) > 0 {
+			err = mgr.AddLostNodeReplacement(ctx, builder, lost)
+		} else {
+			err = mgr.AddPreparing(ctx, builder)
+		}
+		if err != nil {
 			failures.add(err)
 			b.queue.addRetry(TriggerScope{DirtyShards: []qviews.ShardID{shardID}})
 		}

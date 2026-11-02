@@ -191,14 +191,22 @@ func (m *ShardViewManager) AddPreparing(
     builder *qviews.QueryViewAtCoordBuilder,
 ) error
 
+func (m *ShardViewManager) AddLostNodeReplacement(
+    ctx context.Context,
+    builder *qviews.QueryViewAtCoordBuilder,
+    lostNodes []int64,
+) error
+
 func (m *ShardViewManager) RequestRelease(ctx context.Context) error
 ```
 
 `AddPreparing` assigns QueryVersion automatically, rejects DataVersion rollback,
-and preempts an existing Preparing or Ready view. `RequestRelease` starts the
-normal teardown of all views in the shard. Both methods mutate state under
-`m.mu`, atomically consume the resulting effects into one `dirtyViewEvent`,
-submit that event to the Scheduler, and then release the lock.
+and preempts an existing Preparing or Ready view. `AddLostNodeReplacement` also
+moves an Up view placed on a lost QueryNode to Unrecoverable; it advances to
+Dropping when the replacement is Up. `RequestRelease` starts the normal teardown
+of all views in the shard. These methods mutate state under `m.mu`, atomically
+consume the resulting effects into one `dirtyViewEvent`, submit that event to the
+Scheduler, and then release the lock.
 
 ## 4. Internal Flow
 

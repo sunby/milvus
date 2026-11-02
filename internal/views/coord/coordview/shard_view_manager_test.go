@@ -939,6 +939,62 @@ func TestQueryNodeLost_DroppingCleanupCompletes(t *testing.T) {
 // RequestRelease tests
 // ===========================================================================
 
+func TestAddLostNodeReplacement(t *testing.T) {
+	ctx := context.Background()
+	ver1, ver2 := testVersion(1, 1, 1), testVersion(2, 1, 1)
+	upManager := func(t *testing.T) (*testShardViewManager, *mockCatalog, *mockSyncer) {
+		catalog := newMockCatalog()
+		s := newMockSyncer()
+		mgr := newTestManager(t, catalog, s)
+		require.NoError(t, mgr.AddPreparing(ctx, testBuilder(1, 1, 1)))
+		simulateNodeResponse(t, s, testQN1, ver1, qviews.QueryViewStateReady)
+		simulateNodeResponse(t, s, testSN, ver1, qviews.QueryViewStateReady)
+		simulateNodeResponse(t, s, testSN, ver1, qviews.QueryViewStateUp)
+		catalog.reset()
+		s.reset()
+		return mgr, catalog, s
+	}
+
+	t.Run("view on other nodes keeps serving", func(t *testing.T) {
+		mgr, _, _ := upManager(t)
+		require.NoError(t, mgr.AddLostNodeReplacement(ctx, testBuilder(2, 1, 1), []int64{testQN1.ID + 1}))
+		mgr.waitFlush()
+		require.Equal(t, ver1, *mgr.Stats().UpVersion)
+	})
+
+	t.Run("view on a lost node stops serving", func(t *testing.T) {
+		mgr, catalog, s := upManager(t)
+		require.NoError(t, mgr.AddLostNodeReplacement(ctx, testBuilder(2, 1, 1), []int64{testQN1.ID}))
+		mgr.waitFlush()
+		// One flush persists both, and nodes hear only about the replacement.
+		require.Equal(t, 1, catalog.numSaveCalls())
+		require.ElementsMatch(t, []viewpb.QueryViewState{
+			viewpb.QueryViewState_QueryViewStatePreparing,
+			viewpb.QueryViewState_QueryViewStateUnrecoverable,
+		}, catalog.savedStates())
+		require.Nil(t, s.findOnQueryNodeLost(testQN1, ver1))
+		stats := mgr.Stats()
+		require.Nil(t, stats.UpVersion, "readiness must wait for the replacement")
+		require.Equal(t, ver2, *stats.PreparingVersion)
+		mgr.mu.Lock()
+		require.False(t, mgr.releaseRequested, "the shard keeps accepting views")
+		mgr.mu.Unlock()
+
+		// The replacement's Up starts the old view's cleanup, as in a normal handoff.
+		simulateNodeResponse(t, s, testQN1, ver2, qviews.QueryViewStateReady)
+		simulateNodeResponse(t, s, testSN, ver2, qviews.QueryViewStateReady)
+		simulateNodeResponse(t, s, testSN, ver2, qviews.QueryViewStateUp)
+		require.Equal(t, ver2, *mgr.Stats().UpVersion)
+		onQueryNodeLost := s.findOnQueryNodeLost(testQN1, ver1)
+		require.NotNil(t, onQueryNodeLost)
+		onQueryNodeLost(testQN1)
+		simulateNodeResponse(t, s, testSN, ver1, qviews.QueryViewStateDropped)
+		mgr.mu.Lock()
+		require.NotContains(t, mgr.views, ver1)
+		mgr.mu.Unlock()
+	})
+}
+
 func TestRequestRelease_UpView(t *testing.T) {
 	catalog := newMockCatalog()
 	s := newMockSyncer()

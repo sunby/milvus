@@ -34,6 +34,9 @@ type BalancePlan struct {
 	// Prepares lists shards that should receive a new Preparing view.
 	// The value is the builder the Balancer passes to AddPreparing.
 	Prepares map[qviews.ShardID]*qviews.QueryViewAtCoordBuilder
+	// LostNodes names, for a shard in Prepares, the lost QueryNodes under the Up
+	// view that the new view replaces.
+	LostNodes map[qviews.ShardID][]int64
 
 	// Releases lists shards whose existing views should be released
 	// (desired state absent or a suspended replica can safely drain).
