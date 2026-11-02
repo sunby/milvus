@@ -2,6 +2,7 @@ package coordview
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -449,17 +450,34 @@ func segmentSet(segments []int64) map[int64]bool {
 //
 // Validation: The new DataVersion must not be lower than any existing view's DataVersion.
 func (m *ShardViewManager) AddPreparing(ctx context.Context, builder *qviews.QueryViewAtCoordBuilder) error {
-	return m.addPreparing(ctx, builder, nil, nil)
+	return m.addPreparing(ctx, builder, prepareOptions{})
+}
+
+// AddLostNodeReplacement is AddPreparing for a shard whose Up view sits on lost
+// QueryNodes. That view fails every Phase 2 on the missing node, so it stops
+// counting as serving once its same-schema replacement is accepted: readiness holds
+// queries until a serving view is available. Accepting the replacement does
+// not send a drop for the old view. In an uninterrupted handoff, cleanup starts
+// when the replacement reaches Up.
+func (m *ShardViewManager) AddLostNodeReplacement(ctx context.Context, builder *qviews.QueryViewAtCoordBuilder, lostNodes []int64) error {
+	return m.addPreparing(ctx, builder, prepareOptions{lostNodes: lostNodes})
 }
 
 // AddPublishedRecovery changes placement of the latest view while the target
 // schema's data is not ready. It preserves the exact data and load identities,
 // and cannot run behind a newer view or bypass the DataVersion rollback check.
 func (m *ShardViewManager) AddPublishedRecovery(ctx context.Context, builder *qviews.QueryViewAtCoordBuilder, source qviews.QueryViewVersion) error {
-	return m.addPreparing(ctx, builder, &source, nil)
+	return m.addPreparing(ctx, builder, prepareOptions{source: &source})
 }
 
-func (m *ShardViewManager) addPreparing(ctx context.Context, builder *qviews.QueryViewAtCoordBuilder, source *qviews.QueryViewVersion, preparation *Preparation) (retErr error) {
+type prepareOptions struct {
+	source      *qviews.QueryViewVersion
+	preparation *Preparation
+	lostNodes   []int64
+}
+
+func (m *ShardViewManager) addPreparing(ctx context.Context, builder *qviews.QueryViewAtCoordBuilder, opts prepareOptions) (retErr error) {
+	source, preparation := opts.source, opts.preparation
 	timer := prepareDuration.Begin()
 	defer timer.EndError(&retErr)
 	newDV := builder.DataVersion()
@@ -568,6 +586,10 @@ func (m *ShardViewManager) addPreparing(ctx context.Context, builder *qviews.Que
 
 	// Process: collect persist, sync, and post-persist effects.
 	m.processStateMachine(sm)
+	// Retire these views after the advance so this event does not tell nodes to drop them.
+	if len(opts.lostNodes) > 0 {
+		m.retireUpOnLostNodesLocked(ctx, view.GetMeta().GetSchemaVersion(), opts.lostNodes)
+	}
 
 	// Move all accumulated effects into one shard-scoped event.
 	event := m.consumeDirtyEventLocked()
@@ -576,6 +598,29 @@ func (m *ShardViewManager) addPreparing(ctx context.Context, builder *qviews.Que
 	holdTimer.End(nil)
 	m.mu.Unlock()
 	return nil
+}
+
+func (m *ShardViewManager) retireUpOnLostNodesLocked(ctx context.Context, schemaVersion int32, lostNodes []int64) {
+	for _, sm := range m.views {
+		// PublishSchema owns retirement of earlier read generations.
+		if sm.State() != qviews.QueryViewStateUp || sm.View().GetMeta().GetSchemaVersion() != schemaVersion {
+			continue
+		}
+		nodes := viewNodeIDs(sm.View())
+		lost := slices.IndexFunc(nodes, func(node int64) bool { return slices.Contains(lostNodes, node) })
+		if lost < 0 {
+			continue
+		}
+		key := m.keyForStateMachine(sm)
+		sm.EnterUnrecoverable()
+		qvobserve.Observe(ctx, qvobserve.CoordViewQueryNodeLostAppliedEvent{
+			ViewStateTransition: qvobserve.ViewStateTransition{
+				CollectionID: m.collectionIDForStateMachine(sm), View: key, From: qviews.QueryViewStateUp, To: sm.State(),
+			},
+			Node: qviews.NewQueryNode(nodes[lost]),
+		})
+		m.processStateMachine(sm)
+	}
 }
 
 // RequestRelease initiates teardown of all views in this shard.

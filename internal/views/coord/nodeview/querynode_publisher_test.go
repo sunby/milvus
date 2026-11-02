@@ -64,9 +64,9 @@ func TestQueryNodePublisherReplayAndTransitions(t *testing.T) {
 	require.Equal(t, "rg-b", values[len(values)-1].ResourceGroup)
 	require.False(t, values[0].Stopping)
 	onGroup("rg-b", nil)
-	require.Nil(t, values[len(values)-1])
+	require.True(t, values[len(values)-1].Alive)
 	onGroup("rg-c", []int64{1})
-	require.NotNil(t, values[len(values)-1])
+	require.Equal(t, "rg-c", values[len(values)-1].ResourceGroup)
 	onNode(1, nil)
 	require.Nil(t, values[len(values)-1])
 	count := len(values)
@@ -133,6 +133,27 @@ func TestQueryNodePublisherEmbeddedQueryNodeResourceGroup(t *testing.T) {
 	require.Equal(t, "rg-legacy-sqn", values[3].ResourceGroup)
 
 	p.onStreamingQueryNodes(map[string]typeutil.UniqueSet{"rg-sqn": typeutil.NewUniqueSet(3)})
-	require.Nil(t, values[2])
+	require.True(t, values[2].Alive && values[2].Stopping, "a frozen streaming node keeps serving but takes no placements")
 	require.Equal(t, "rg-sqn", values[3].ResourceGroup)
+}
+
+func TestQueryNodePublisherUnboundNodeIsNotLost(t *testing.T) {
+	p := newQueryNodePublisher()
+	var node *api.NodeInfo
+	stop := p.RegisterNodeListener(func(_ int64, info *api.NodeInfo) { node = info })
+	defer stop()
+
+	p.onNode(1, &qnmanager.NodeInfo{ServerID: 1})
+	require.Nil(t, node, "a node never bound to a group is not published")
+	p.onGroup("rg-a", []int64{1})
+	require.Equal(t, api.NodeInfo{NodeID: 1, Alive: true, ResourceGroup: "rg-a"}, *node)
+
+	// A transfer updates the source group before the target group.
+	p.onGroup("rg-a", nil)
+	require.Equal(t, api.NodeInfo{NodeID: 1, Alive: true, Stopping: true, ResourceGroup: "rg-a"}, *node)
+	p.onGroup("rg-b", []int64{1})
+	require.Equal(t, api.NodeInfo{NodeID: 1, Alive: true, ResourceGroup: "rg-b"}, *node)
+
+	p.onNode(1, nil)
+	require.Nil(t, node, "only a missing session withdraws the node")
 }

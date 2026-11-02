@@ -80,7 +80,7 @@ func (m *ShardViewManager) PlacementBuilder() *qviews.QueryViewAtCoordBuilder {
 
 func (m *ShardViewManager) AddManualPreparing(ctx context.Context, builder *qviews.QueryViewAtCoordBuilder, source qviews.QueryViewVersion) (*Preparation, error) {
 	p := &Preparation{source: source, lifetime: m.ctx, result: syncutil.NewFuture[PreparationResult]()}
-	if err := m.addPreparing(ctx, builder, nil, p); err != nil {
+	if err := m.addPreparing(ctx, builder, prepareOptions{preparation: p}); err != nil {
 		return nil, err
 	}
 	return p, nil

@@ -190,11 +190,16 @@ func (p *QueryNodePublisher) publishLocked(id int64) {
 			}
 		}
 	}
-	var next *api.NodeInfo
-	if exists && rg != "" {
-		next = &api.NodeInfo{NodeID: id, Alive: true, Stopping: facts.stopping, ResourceGroup: rg}
-	}
 	old := p.published[id]
+	var next *api.NodeInfo
+	switch {
+	case exists && rg != "":
+		next = &api.NodeInfo{NodeID: id, Alive: true, Stopping: facts.stopping, ResourceGroup: rg}
+	case exists && old != nil:
+		// Running but bound to no group, as in a transfer between groups. Forbid
+		// new placements without declaring it lost: its views can still serve.
+		next = &api.NodeInfo{NodeID: id, Alive: true, Stopping: true, ResourceGroup: old.ResourceGroup}
+	}
 	if (old == nil && next == nil) || (old != nil && next != nil && *old == *next) {
 		return
 	}

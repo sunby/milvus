@@ -288,8 +288,10 @@ type BalancePlan struct {
 These are target signatures. A call-local PlanningContext fixes each input
 object after its first Get, so classification, sorting, and allocation reuse
 that object's contents. Objects acquired at different times may have different
-source revisions. Temporary row predictions belong only to this call; the
-policy never mutates cache objects.
+source revisions. Candidate membership stays as the pass's layouts saw it, even
+after publishing layout selectors refreshes the other node inputs; a node
+published later is planned by the successor pass. Temporary row predictions
+belong only to this call; the policy never mutates cache objects.
 
 | Scenario | Input difference | Algorithm behavior |
 |---|---|---|
@@ -906,6 +908,14 @@ reference provider.
    Accepted candidates update only the private projected-load delta.
 5. Apply creates Preparing views; their source hooks publish actual state.
    Updates during the batch remain queued for a successor pass.
+6. Apply creates the replacement of an Up view on a lost QN with
+   `AddLostNodeReplacement`, which also moves that view to Unrecoverable when
+   the replacement has the same schema. Phase 2
+   cannot reach the QN, so queries wait for the replacement instead of failing on
+   the missing node. This is not a release, the shard keeps accepting views.
+   Policy skips this while another replica serves the vchannel, because readiness
+   requires every replica Up. A Stopping QN still serves, so its Up view stays
+   until the normal handoff.
 
 ### 5.2 Load Collection
 
