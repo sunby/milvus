@@ -16,8 +16,8 @@ plus the implicit `+Inf` bucket. `_count` also counts completed stage attempts.
 blocked work. Prefetch/storage-batch queue stages are observed after dequeue;
 the Load worker queue stages are observed at worker completion. They do not
 track queue depth with this gauge. Use the existing executor/pool queue metrics
-for queue depth. There are 28 stage values: at most 56 histograms and 28 gauges,
-1316 exported time series per process. Labels contain no collection, segment,
+for queue depth. The 30 stage values expose up to 60 histograms and 30 gauges,
+for a maximum of 1410 time series per process. Labels contain no collection, segment,
 field, column-group, path or trace identifiers and are unchanged by collection
 metric aggregation mode. Handles and finite buckets are initialized together on
 first use, with no label-map construction on the observation hot path.
@@ -26,6 +26,8 @@ first use, with no label-map construction on the observation hot path.
 |---|---|
 | `search_prepare` | Per native search: lazy schema check, read-lease acquisition, schema compatibility and external-field validation, before invoking `segment->Search`. |
 | `search_execute` | Per executed native segment search, including operators, their initialization and prefetch waits. Inaccessible-field empty results skip this stage. |
+| `json_stats_prefetch_metadata` | Resolve the stats layout needed by one JSON predicate on a sealed segment. |
+| `json_stats_prefetch_columns` | Warm the projected cells required by that predicate and, for a shared-data fallback, its BSON posting index. Concurrent predicates can share in-flight reads. |
 | `vector_prefetch_queue`, `mvcc_prefetch_queue` | Per submitted prefetch task: submission to worker entry. A dequeued task records queue time even if it is then cancelled. |
 | `vector_prefetch_run`, `mvcc_prefetch_run` | Per worker invocation of vector/timestamp prefetch. Includes any cold reader initialization and cache loading performed by the call. |
 | `vector_prefetch_wait`, `mvcc_prefetch_wait` | Per valid prefetch future: blocking `get()` on the consumer, including cleanup waiting. The future is consumed once, so repeated `WaitPrefetch` calls do not duplicate observations. This overlaps background prefetch execution. |

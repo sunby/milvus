@@ -60,6 +60,9 @@
 #include "segcore/SegmentInterface.h"
 #include "segcore/SegmentGrowingImpl.h"
 namespace milvus {
+namespace index {
+class JsonStatsPrefetchBatch;
+}
 namespace exec {
 
 enum class FilterType { sequential = 0, random = 1 };
@@ -432,9 +435,10 @@ class Expr : public std::enable_shared_from_this<Expr> {
 
     virtual void
     PrefetchAsync(
-        const std::shared_ptr<folly::CPUThreadPoolExecutor> prefetch_pool) {
+        const std::shared_ptr<folly::CPUThreadPoolExecutor> prefetch_pool,
+        std::shared_ptr<index::JsonStatsPrefetchBatch> batch = nullptr) {
         for (const auto& input : inputs_) {
-            input->PrefetchAsync(prefetch_pool);
+            input->PrefetchAsync(prefetch_pool, batch);
         }
     }
 
@@ -4152,24 +4156,31 @@ class SegmentExpr : public Expr {
     }
 
     void
-    PrefetchAsync(const std::shared_ptr<folly::CPUThreadPoolExecutor>
-                      prefetch_pool) override {
+    PrefetchAsync(
+        const std::shared_ptr<folly::CPUThreadPoolExecutor> prefetch_pool,
+        std::shared_ptr<index::JsonStatsPrefetchBatch> batch =
+            nullptr) override {
         auto self = std::static_pointer_cast<SegmentExpr>(shared_from_this());
-        prefetch_future_.emplace(folly::via(prefetch_pool.get(), [self]() {
-            self->PrefetchOnCurrentThread();
-        }));
+        prefetch_future_.emplace(
+            folly::via(prefetch_pool.get(), [self, batch = std::move(batch)]() {
+                self->PrefetchOnCurrentThread(batch.get());
+            }));
     }
 
     // Execute the prefetch body without scheduling another task. This keeps
     // composition wrappers that already run on the prefetch pool from adding
     // a second queueing hop.
     void
-    PrefetchOnCurrentThread() {
+    PrefetchOnCurrentThread(index::JsonStatsPrefetchBatch* batch = nullptr) {
         if (op_ctx_ != nullptr &&
             op_ctx_->cancellation_token.isCancellationRequested()) {
             return;
         }
         EnsureExecPathDetermined();
+        if (exec_path_ == ExprExecPath::JsonStats) {
+            PrefetchJsonStats(batch);
+            return;
+        }
         if (exec_path_ == ExprExecPath::RawData) {
             auto column = CaptureDataScanResources().first;
             if (!UsesLegacyChunkPrefetch(column.get())) {
@@ -4186,6 +4197,14 @@ class SegmentExpr : public Expr {
             }
         }
     }
+
+    void
+    PrefetchJsonStats(index::JsonStatsPrefetchBatch* batch);
+
+    virtual void
+    PrefetchJsonStatsPath(index::JsonKeyStats& stats,
+                          const std::string& pointer,
+                          index::JsonStatsPrefetchBatch* batch) const;
 
     bool
     ShouldPrefetchRawDataEagerly() {
@@ -4616,11 +4635,7 @@ class ExprSet {
 
     void
     PrefetchAsync(
-        const std::shared_ptr<folly::CPUThreadPoolExecutor> prefetch_pool) {
-        for (const auto& expr : exprs_) {
-            expr->PrefetchAsync(prefetch_pool);
-        }
-    }
+        const std::shared_ptr<folly::CPUThreadPoolExecutor> prefetch_pool);
 
     void
     WaitPrefetch() {

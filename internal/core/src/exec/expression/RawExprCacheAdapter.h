@@ -70,8 +70,10 @@ class RawExprCacheAdapter final : public Expr {
     GetColumnInfo() const override;
 
     void
-    PrefetchAsync(const std::shared_ptr<folly::CPUThreadPoolExecutor>
-                      prefetch_pool) override;
+    PrefetchAsync(
+        const std::shared_ptr<folly::CPUThreadPoolExecutor> prefetch_pool,
+        std::shared_ptr<index::JsonStatsPrefetchBatch> batch =
+            nullptr) override;
 
     void
     WaitPrefetch() override;
