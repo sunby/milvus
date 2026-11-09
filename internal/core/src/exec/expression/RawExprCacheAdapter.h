@@ -78,6 +78,12 @@ class RawExprCacheAdapter final : public Expr {
     void
     WaitPrefetch() override;
 
+    bool
+    PrefetchReady() const override {
+        return (!prefetch_future_ || prefetch_future_->isReady()) &&
+               input_->PrefetchReady();
+    }
+
     const std::shared_ptr<SegmentExpr>&
     wrapped_expr() const {
         return input_;

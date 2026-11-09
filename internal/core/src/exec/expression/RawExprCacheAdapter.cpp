@@ -340,12 +340,14 @@ void
 RawExprCacheAdapter::Eval(EvalCtx& context, VectorPtr& result) {
     const bool has_offset_input = context.get_offset_input() != nullptr;
     SetHasOffsetInput(has_offset_input);
+    if (has_offset_input && !prefetch_future_) {
+        input_->SetHasOffsetInput(true);
+    }
+    WaitPrefetch();
     // A cache hit bypasses input_->Eval(), so mirror the offset mode that the
     // wrapped evaluator would otherwise record for its MoveCursor() guard.
     input_->SetHasOffsetInput(has_offset_input);
 
-    WaitPrefetch();
-    EnsureLookup();
     if (TryServeCacheHit(context, result)) {
         return;
     }
@@ -397,6 +399,7 @@ RawExprCacheAdapter::Eval(EvalCtx& context, VectorPtr& result) {
 
 void
 RawExprCacheAdapter::MoveCursor() {
+    WaitPrefetch();
     if (!has_offset_input_) {
         const auto rows = input_->GetNextBatchSize();
         if (rows > 0) {

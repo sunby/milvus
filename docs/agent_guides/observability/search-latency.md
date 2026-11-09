@@ -59,6 +59,13 @@ fields: `{component="queryNode",operation="search_task",stage="l0_rerank"}` and
 
 ## Interpreting cold reads
 
+For compound filters, `internal_core_search_latency_scalar` includes waits for
+predicates reached during evaluation. Earlier versions waited for the entire
+filter tree before starting this timer. Vector prefetch can run concurrently
+with filtering. `internal_core_search_latency_vector` starts after the wait at
+the ANN call. Driver cleanup also joins outstanding work for skipped operators,
+so `vector_prefetch_wait` can include a cleanup wait on a fully filtered segment.
+
 A normal V3 data file carries `file_size` and `footer_size` in the manifest, so
 reader initialization does not need a HEAD request to discover its size. A cold
 footer can still require Range GET. `manifest_reader_open` deliberately measures

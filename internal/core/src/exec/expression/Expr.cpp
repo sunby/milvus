@@ -60,6 +60,24 @@ namespace milvus {
 namespace exec {
 
 void
+Expr::WaitForPrefetches(const std::vector<ExprPtr>& exprs) {
+    std::exception_ptr first_error;
+    for (const auto& expr : exprs) {
+        try {
+            expr->WaitPrefetch();
+        } catch (...) {
+            // Other workers still borrow the request's OpContext.
+            if (!first_error) {
+                first_error = std::current_exception();
+            }
+        }
+    }
+    if (first_error) {
+        std::rethrow_exception(first_error);
+    }
+}
+
+void
 ExprSet::PrefetchAsync(
     const std::shared_ptr<folly::CPUThreadPoolExecutor> pool) {
     if (exprs_.size() == 1 && exprs_.front()->GetInputsRef().empty()) {

@@ -376,8 +376,22 @@ class Expr : public std::enable_shared_from_this<Expr> {
         return false;
     }
 
-    // set batch size to active count to execute all at once.
-    // should only be called when CanExecuteAllAtOnce() returns true.
+    // A compound filter can start its first batch while a sibling is cold.
+    // A lone leaf needs its only dependency in either execution mode.
+    bool
+    TrySetExecuteAllAtOnce() {
+        if (!inputs_.empty() && !PrefetchReady()) {
+            return false;
+        }
+        WaitPrefetch();
+        if (!CanExecuteAllAtOnce()) {
+            return false;
+        }
+        SetExecuteAllAtOnce();
+        return true;
+    }
+
+    // Set batch size to active count after CanExecuteAllAtOnce succeeds.
     virtual void
     SetExecuteAllAtOnce() {
         for (auto& input : inputs_) {
@@ -442,11 +456,20 @@ class Expr : public std::enable_shared_from_this<Expr> {
         }
     }
 
+    virtual bool
+    PrefetchReady() const {
+        return std::all_of(
+            inputs_.begin(), inputs_.end(), [](const auto& input) {
+                return input->PrefetchReady();
+            });
+    }
+
+    static void
+    WaitForPrefetches(const std::vector<std::shared_ptr<Expr>>& exprs);
+
     virtual void
     WaitPrefetch() {
-        for (const auto& input : inputs_) {
-            input->WaitPrefetch();
-        }
+        WaitForPrefetches(inputs_);
     }
 
     // Bind the request-scoped sealed read snapshot to this expression.
@@ -959,6 +982,9 @@ class SegmentExpr : public Expr {
 
     void
     MoveCursor() override {
+        if (prefetch_future_) {
+            WaitPrefetch();
+        }
         MoveCursorInternal();
     }
 
@@ -4207,6 +4233,11 @@ class SegmentExpr : public Expr {
                           index::JsonStatsPrefetchBatch* batch) const;
 
     bool
+    PrefetchReady() const override {
+        return !prefetch_future_ || prefetch_future_->isReady();
+    }
+
+    bool
     ShouldPrefetchRawDataEagerly() {
         if (!IsElementLevelExpression()) {
             return true;
@@ -4639,9 +4670,7 @@ class ExprSet {
 
     void
     WaitPrefetch() {
-        for (const auto& expr : exprs_) {
-            expr->WaitPrefetch();
-        }
+        Expr::WaitForPrefetches(exprs_);
     }
 
  private:

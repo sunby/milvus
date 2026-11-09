@@ -754,11 +754,8 @@ TEST(JsonStatsLazyInitializationTest, ConcurrentFirstUseSharesInitialization) {
 namespace {
 enum class StatsLoadFailure { None, Transient, Persistent };
 
-void
-CheckStringPredicatePrefetch(StatsLoadFailure failure) {
-    const auto segment_id = 3404 + static_cast<int>(failure);
-    auto schema = std::make_shared<Schema>();
-    auto field = schema->AddDebugField("json", DataType::JSON);
+CountedJsonStatsSlot
+MakeColdEventStats(FieldId field, int64_t segment_id) {
     auto built = BuildJsonStatsIndex(
         {R"({"kind":"commit","commit":{"operation":"create"}})",
          R"({"kind":"issue","commit":{"operation":"update"}})",
@@ -771,7 +768,28 @@ CheckStringPredicatePrefetch(StatsLoadFailure failure) {
         field.get(),
         5404,
         1);
-    auto counted = MakeCountedJsonStatsSlot(built, field);
+    return MakeCountedJsonStatsSlot(built, field);
+}
+
+std::shared_ptr<expr::UnaryRangeFilterExpr>
+EventStringEquals(FieldId field,
+                  std::vector<std::string> path,
+                  const std::string& literal) {
+    proto::plan::GenericValue value;
+    value.set_string_val(literal);
+    return std::make_shared<expr::UnaryRangeFilterExpr>(
+        expr::ColumnInfo(field, DataType::JSON, std::move(path)),
+        proto::plan::Equal,
+        value,
+        std::vector<proto::plan::GenericValue>{});
+}
+
+void
+CheckStringPredicatePrefetch(StatsLoadFailure failure) {
+    const auto segment_id = 3404 + static_cast<int>(failure);
+    auto schema = std::make_shared<Schema>();
+    auto field = schema->AddDebugField("json", DataType::JSON);
+    auto counted = MakeColdEventStats(field, segment_id);
     auto segment =
         segcore::CreateSealedSegment(schema, empty_index_meta, segment_id);
     auto* sealed =
@@ -779,13 +797,7 @@ CheckStringPredicatePrefetch(StatsLoadFailure failure) {
     ASSERT_NE(sealed, nullptr);
     sealed->SetJsonStatsForTesting(field, counted.slot);
 
-    proto::plan::GenericValue value;
-    value.set_string_val("commit");
-    auto logical = std::make_shared<expr::UnaryRangeFilterExpr>(
-        expr::ColumnInfo(field, DataType::JSON, {"kind"}),
-        proto::plan::Equal,
-        value,
-        std::vector<proto::plan::GenericValue>{});
+    auto logical = EventStringEquals(field, {"kind"}, "commit");
     auto predicate = std::make_shared<exec::PhyUnaryRangeFilterExpr>(
         std::vector<exec::ExprPtr>{},
         logical,
@@ -848,6 +860,33 @@ TEST(JsonStatsLazyInitializationTest, DemandRetriesFailedSpeculativeStatsRead) {
 
 TEST(JsonStatsLazyInitializationTest, DemandReportsPersistentStatsReadFailure) {
     CheckStringPredicatePrefetch(StatsLoadFailure::Persistent);
+}
+
+TEST(JsonStatsLazyInitializationTest, ColdCompoundFilterUsesBothProjections) {
+    constexpr int64_t segment_id = 3407;
+    auto schema = std::make_shared<Schema>();
+    auto field = schema->AddDebugField("json", DataType::JSON);
+    auto counted = MakeColdEventStats(field, segment_id);
+    auto segment =
+        segcore::CreateSealedSegment(schema, empty_index_meta, segment_id);
+    auto* sealed =
+        dynamic_cast<segcore::ChunkedSegmentSealedImpl*>(segment.get());
+    ASSERT_NE(sealed, nullptr);
+    sealed->SetJsonStatsForTesting(field, counted.slot);
+
+    auto filter = std::make_shared<expr::LogicalBinaryExpr>(
+        expr::LogicalBinaryExpr::OpType::And,
+        EventStringEquals(field, {"kind"}, "commit"),
+        EventStringEquals(field, {"commit", "operation"}, "update"));
+    auto plan =
+        std::make_shared<plan::FilterBitsNode>(DEFAULT_PLANNODE_ID, filter);
+    ASSERT_EQ(counted.translator->LoadCount(), 0);
+    auto matches = query::ExecuteQueryExpr(plan, sealed, 3, MAX_TIMESTAMP);
+    EXPECT_EQ(counted.translator->LoadCount(), 1);
+    ASSERT_EQ(matches.size(), 3);
+    EXPECT_FALSE(matches[0]);
+    EXPECT_FALSE(matches[1]);
+    EXPECT_TRUE(matches[2]);
 }
 
 TEST(JsonContainsByStatsTest, BasicContainsAnyOnArray) {
