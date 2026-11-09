@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <functional>
 #include <future>
 #include <numeric>
 #include <optional>
@@ -85,6 +86,7 @@ struct ScanTrace {
     int64_t largest_batch = 0;
     const void* last_values = nullptr;
     bool fail_pin = false;
+    std::function<void()> after_prefetch;
 };
 
 class CountingChunkTranslator : public TestChunkTranslator {
@@ -154,6 +156,9 @@ class RecordingColumn : public Base {
                    const std::vector<int64_t>& cells) const override {
         trace_->prefetched_cells.fetch_add(cells.size());
         Base::PrefetchChunks(ctx, cells);
+        if (trace_->after_prefetch) {
+            trace_->after_prefetch();
+        }
     }
 
     PinWrapper<Chunk*>
@@ -321,6 +326,34 @@ TEST(JsonStatsPrefetchTest, RepeatedStringPathSharesPhysicalReads) {
     stats->PrefetchTypedColumns(
         nullptr, "/commit/operation", {JSONType::STRING});
     EXPECT_EQ(operation.trace->loaded_cells.load(), 1);
+}
+
+TEST(JsonStatsPrefetchTest, StoppedWorkerLeavesRemainingCellsForDemand) {
+    auto kind = MakeColumn<std::string>(
+        {1, 1, 1}, {"a", "b", "c"}, DataType::STRING, false);
+    auto stats = MakeStats(kind.column);
+    JsonStatsScanTestAccessor::AddProjection(
+        *stats, "/kind", JSONType::STRING, "kind_s", kind.column);
+    folly::CancellationSource stop;
+    folly::CancellationSource request;
+    OpContext ctx(request.getToken());
+    // Stop after the first shared fill has published its cell.
+    kind.trace->after_prefetch = [&] { stop.requestCancellation(); };
+    auto pool = std::make_shared<folly::CPUThreadPoolExecutor>(1);
+    PrefetchExecutor executor(pool, stop.getToken());
+    executor
+        .Submit([&] {
+            stats->PrefetchTypedColumns(&ctx, "/kind", {JSONType::STRING});
+        })
+        .get();
+    EXPECT_EQ(kind.trace->loaded_cells.load(), 1);
+    EXPECT_FALSE(ctx.cancellation_token.isCancellationRequested());
+    auto reader = stats->CreateShreddingReader("/kind", JSONType::STRING, 3);
+    ASSERT_NE(reader, nullptr);
+    auto last = reader->Get(&ctx, 2);
+    ASSERT_TRUE(last.has_value());
+    EXPECT_EQ(std::get<std::string>(*last), "c");
+    EXPECT_EQ(kind.trace->loaded_cells.load(), 2);
 }
 
 TEST(JsonStatsPrefetchTest, MixedNumberTypesAndMissingProjection) {

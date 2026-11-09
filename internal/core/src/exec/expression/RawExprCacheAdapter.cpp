@@ -459,12 +459,12 @@ RawExprCacheAdapter::GetColumnInfo() const {
 
 void
 RawExprCacheAdapter::PrefetchAsync(
-    const std::shared_ptr<folly::CPUThreadPoolExecutor> prefetch_pool,
+    const milvus::PrefetchExecutor& prefetch_pool,
     std::shared_ptr<index::JsonStatsPrefetchBatch> batch) {
     auto self =
         std::static_pointer_cast<RawExprCacheAdapter>(shared_from_this());
     prefetch_future_.emplace(
-        folly::via(prefetch_pool.get(), [self, batch = std::move(batch)]() {
+        prefetch_pool.Submit([self, batch = std::move(batch)]() {
             if (self->op_ctx_ != nullptr &&
                 self->op_ctx_->cancellation_token.isCancellationRequested()) {
                 return;
@@ -489,17 +489,17 @@ RawExprCacheAdapter::PrefetchAsync(
 }
 
 void
-RawExprCacheAdapter::WaitPrefetch() {
+RawExprCacheAdapter::WaitPrefetch(PrefetchWait mode) {
     if (prefetch_future_.has_value()) {
         auto future = std::move(*prefetch_future_);
         prefetch_future_.reset();
         std::move(future).get();
-    } else {
+    } else if (mode == PrefetchWait::Demand) {
         EnsureLookup();
     }
 
     if (state_.lookup_state != LookupState::Hit) {
-        input_->WaitPrefetch();
+        input_->WaitPrefetch(mode);
     }
 }
 

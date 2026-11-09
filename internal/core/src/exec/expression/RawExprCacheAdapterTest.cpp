@@ -155,6 +155,7 @@ class CountingRawExpr final : public SegmentExpr {
 
     void
     DetermineExecPath() override {
+        ++path_resolutions;
         exec_path_ = ExprExecPath::RawData;
     }
 
@@ -196,6 +197,7 @@ class CountingRawExpr final : public SegmentExpr {
         return cursor_pos_;
     }
 
+    int path_resolutions{0};
     int eval_count{0};
     int move_count{0};
     int prefetch_count{0};
@@ -771,6 +773,17 @@ TEST_F(RawExprCacheAdapterTest, CacheHitSkipsWrappedRawPrefetch) {
     new_miss_adapter->PrefetchAsync(pool);
     new_miss_adapter->WaitPrefetch();
     EXPECT_EQ(new_miss_input->prefetch_count, 1);
+}
+
+TEST_F(RawExprCacheAdapterTest, CleanupDoesNotStartSkippedLookup) {
+    auto [input, adapter] = MakeAdapter("skipped");
+    auto pool = std::make_shared<folly::CPUThreadPoolExecutor>(1);
+    folly::CancellationSource stop;
+    stop.requestCancellation();
+    adapter->PrefetchAsync(PrefetchExecutor(pool, stop.getToken()));
+    adapter->WaitPrefetch(PrefetchWait::Cleanup);
+    EXPECT_EQ(input->path_resolutions, 0);
+    EXPECT_EQ(input->prefetch_count, 0);
 }
 
 TEST_F(RawExprCacheAdapterTest, CacheMissPrefetchUsesSinglePoolTask) {

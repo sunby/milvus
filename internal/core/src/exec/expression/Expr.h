@@ -28,6 +28,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "common/PrefetchExecutor.h"
 #include "common/Array.h"
 #include "common/StructElementOffsets.h"
 #include "common/FeatureBits.h"
@@ -319,6 +320,9 @@ ApplyValidMaskForCandidates(ValidityView validity,
     }
 }
 
+// Demand may initialize a lazy path. Cleanup only drains work already submitted.
+enum class PrefetchWait { Demand, Cleanup };
+
 class Expr : public std::enable_shared_from_this<Expr> {
  public:
     Expr(DataType type,
@@ -449,7 +453,7 @@ class Expr : public std::enable_shared_from_this<Expr> {
 
     virtual void
     PrefetchAsync(
-        const std::shared_ptr<folly::CPUThreadPoolExecutor> prefetch_pool,
+        const milvus::PrefetchExecutor& prefetch_pool,
         std::shared_ptr<index::JsonStatsPrefetchBatch> batch = nullptr) {
         for (const auto& input : inputs_) {
             input->PrefetchAsync(prefetch_pool, batch);
@@ -465,11 +469,12 @@ class Expr : public std::enable_shared_from_this<Expr> {
     }
 
     static void
-    WaitForPrefetches(const std::vector<std::shared_ptr<Expr>>& exprs);
+    WaitForPrefetches(const std::vector<std::shared_ptr<Expr>>& exprs,
+                      PrefetchWait mode = PrefetchWait::Demand);
 
     virtual void
-    WaitPrefetch() {
-        WaitForPrefetches(inputs_);
+    WaitPrefetch(PrefetchWait mode = PrefetchWait::Demand) {
+        WaitForPrefetches(inputs_, mode);
     }
 
     // Bind the request-scoped sealed read snapshot to this expression.
@@ -4182,13 +4187,12 @@ class SegmentExpr : public Expr {
     }
 
     void
-    PrefetchAsync(
-        const std::shared_ptr<folly::CPUThreadPoolExecutor> prefetch_pool,
-        std::shared_ptr<index::JsonStatsPrefetchBatch> batch =
-            nullptr) override {
+    PrefetchAsync(const milvus::PrefetchExecutor& prefetch_pool,
+                  std::shared_ptr<index::JsonStatsPrefetchBatch> batch =
+                      nullptr) override {
         auto self = std::static_pointer_cast<SegmentExpr>(shared_from_this());
         prefetch_future_.emplace(
-            folly::via(prefetch_pool.get(), [self, batch = std::move(batch)]() {
+            prefetch_pool.Submit([self, batch = std::move(batch)]() {
                 self->PrefetchOnCurrentThread(batch.get());
             }));
     }
@@ -4198,11 +4202,15 @@ class SegmentExpr : public Expr {
     // a second queueing hop.
     void
     PrefetchOnCurrentThread(index::JsonStatsPrefetchBatch* batch = nullptr) {
-        if (op_ctx_ != nullptr &&
-            op_ctx_->cancellation_token.isCancellationRequested()) {
+        if (PrefetchExecutor::IsStopped() ||
+            (op_ctx_ &&
+             op_ctx_->cancellation_token.isCancellationRequested())) {
             return;
         }
         EnsureExecPathDetermined();
+        if (PrefetchExecutor::IsStopped()) {
+            return;
+        }
         if (exec_path_ == ExprExecPath::JsonStats) {
             PrefetchJsonStats(batch);
             return;
@@ -4323,14 +4331,14 @@ class SegmentExpr : public Expr {
     }
 
     void
-    WaitPrefetch() override {
-        if (prefetch_future_.has_value()) {
+    WaitPrefetch(PrefetchWait mode = PrefetchWait::Demand) override {
+        if (prefetch_future_) {
             auto future = std::move(*prefetch_future_);
             prefetch_future_.reset();
             std::move(future).get();
-            return;
+        } else if (mode == PrefetchWait::Demand) {
+            EnsureExecPathDetermined();
         }
-        EnsureExecPathDetermined();
     }
 
  protected:
@@ -4665,12 +4673,11 @@ class ExprSet {
     }
 
     void
-    PrefetchAsync(
-        const std::shared_ptr<folly::CPUThreadPoolExecutor> prefetch_pool);
+    PrefetchAsync(const milvus::PrefetchExecutor& prefetch_pool);
 
     void
-    WaitPrefetch() {
-        Expr::WaitForPrefetches(exprs_);
+    WaitPrefetch(PrefetchWait mode = PrefetchWait::Demand) {
+        Expr::WaitForPrefetches(exprs_, mode);
     }
 
  private:

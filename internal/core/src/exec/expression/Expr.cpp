@@ -60,11 +60,11 @@ namespace milvus {
 namespace exec {
 
 void
-Expr::WaitForPrefetches(const std::vector<ExprPtr>& exprs) {
+Expr::WaitForPrefetches(const std::vector<ExprPtr>& exprs, PrefetchWait mode) {
     std::exception_ptr first_error;
     for (const auto& expr : exprs) {
         try {
-            expr->WaitPrefetch();
+            expr->WaitPrefetch(mode);
         } catch (...) {
             // Other workers still borrow the request's OpContext.
             if (!first_error) {
@@ -78,8 +78,7 @@ Expr::WaitForPrefetches(const std::vector<ExprPtr>& exprs) {
 }
 
 void
-ExprSet::PrefetchAsync(
-    const std::shared_ptr<folly::CPUThreadPoolExecutor> pool) {
+ExprSet::PrefetchAsync(const PrefetchExecutor& pool) {
     if (exprs_.size() == 1 && exprs_.front()->GetInputsRef().empty()) {
         exprs_.front()->PrefetchAsync(pool);
         return;
@@ -110,7 +109,7 @@ SegmentExpr::PrefetchJsonStats(index::JsonStatsPrefetchBatch* batch) {
             milvus::monitor::QueryStage::JsonStatsPrefetchMetadata);
         auto stats = segment_->GetJsonStats(op_ctx_, field_id_);
         metadata.End();
-        if (stats) {
+        if (stats && !PrefetchExecutor::IsStopped()) {
             milvus::monitor::QueryStageTimer columns(
                 milvus::monitor::QueryStage::JsonStatsPrefetchColumns);
             PrefetchJsonStatsPath(

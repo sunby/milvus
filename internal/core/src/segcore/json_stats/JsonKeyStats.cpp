@@ -38,6 +38,7 @@
 #include "boost/filesystem/operations.hpp"
 #include "cachinglayer/Manager.h"
 #include "cachinglayer/Translator.h"
+#include "common/PrefetchExecutor.h"
 #include "common/Consts.h"
 #include "common/FieldDataInterface.h"
 #include "common/FieldMeta.h"
@@ -196,7 +197,8 @@ namespace {
 
 bool
 PrefetchCanceled(OpContext* ctx) {
-    return ctx && ctx->cancellation_token.isCancellationRequested();
+    return PrefetchExecutor::IsStopped() ||
+           (ctx && ctx->cancellation_token.isCancellationRequested());
 }
 
 void

@@ -130,7 +130,8 @@ TEST(ConjunctExprTest, ColdSiblingDoesNotBlockFirstBatchAndCatchesUpOnUse) {
             return ready;
         }
         void
-        WaitPrefetch() override {
+        WaitPrefetch(PrefetchWait mode) override {
+            EXPECT_EQ(mode, PrefetchWait::Demand);
             EXPECT_TRUE(ready) << "joined before this predicate was consumed";
             ++joins;
         }
@@ -178,7 +179,8 @@ TEST(ConjunctExprTest, CleanupJoinsSiblingsAfterPrefetchFailure) {
         JoinProbe() : FixedBitmapExpr(TargetBitmap(1), TargetBitmap(1)) {
         }
         void
-        WaitPrefetch() override {
+        WaitPrefetch(PrefetchWait mode) override {
+            EXPECT_EQ(mode, PrefetchWait::Cleanup);
             ++joins;
             if (fail) {
                 throw std::runtime_error("injected prefetch failure");
@@ -191,7 +193,7 @@ TEST(ConjunctExprTest, CleanupJoinsSiblingsAfterPrefetchFailure) {
     auto sibling = std::make_shared<JoinProbe>();
     failed->fail = true;
     PhyConjunctFilterExpr tree({failed, sibling}, true, nullptr);
-    EXPECT_THROW(tree.WaitPrefetch(), std::runtime_error);
+    EXPECT_THROW(tree.WaitPrefetch(PrefetchWait::Cleanup), std::runtime_error);
     EXPECT_EQ(failed->joins, 1);
     EXPECT_EQ(sibling->joins, 1);
 }
