@@ -33,8 +33,11 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
+	"github.com/milvus-io/milvus/pkg/v3/proto/datapb"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+	tikvutil "github.com/milvus-io/milvus/pkg/v3/util/tikv"
 )
 
 type stringMarshaler struct{}
@@ -367,4 +370,39 @@ func TestEtcdPersistScanDoesNotFallbackAfterUnmarshalFailure(t *testing.T) {
 	require.Nil(t, versions)
 	require.Equal(t, int32(1), server.streamCalls.Load())
 	require.Zero(t, server.rangeCalls.Load())
+}
+
+// Seed the exact bytes produced by etcd2tikv. Both the recovery scan and a
+// subsequent CAS transaction must see the logical empty value.
+func TestTiKVPersistMigratedEmptyValue(t *testing.T) {
+	client := tikvutil.SetupLocalTxn()
+	defer client.Close()
+	ctx := t.Context()
+	seed, err := client.Begin()
+	require.NoError(t, err)
+	require.NoError(t, seed.Set([]byte("meta/empty"), []byte(tikvutil.EmptyValueString)))
+	require.NoError(t, seed.Commit(ctx))
+	store := NewOptimisticTxnTiKVPersist[string, *datapb.SegmentInfo](client, &SegmentInfoMarshaler{})
+	keys, values, _, err := store.Scan(ctx, "meta/")
+	require.NoError(t, err)
+	require.Equal(t, []string{"meta/empty"}, keys)
+	require.Len(t, values, 1)
+	require.True(t, proto.Equal(&datapb.SegmentInfo{}, values[0]))
+	entries, err := store.Get(ctx, keys)
+	require.NoError(t, err)
+	require.True(t, proto.Equal(&datapb.SegmentInfo{}, entries[keys[0]].Value))
+	// The expected version predates the key. An already-applied write of the
+	// same logical value is accepted by the versioned commit path.
+	write := store.Txn(ctx)
+	write.PutIfVersion(keys[0], &datapb.SegmentInfo{}, 0, false)
+	write.Raw(RawOp{Key: "raw/empty", Value: ""})
+	_, err = write.Commit()
+	require.NoError(t, err)
+	var sideKeys []string
+	require.NoError(t, store.WalkRaw(ctx, "raw/", func(key string, value []byte) error {
+		sideKeys = append(sideKeys, key)
+		require.Empty(t, value)
+		return nil
+	}))
+	require.Equal(t, []string{"raw/empty"}, sideKeys)
 }

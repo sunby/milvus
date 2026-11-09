@@ -29,6 +29,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/v3/util/retry"
+	tikvutil "github.com/milvus-io/milvus/pkg/v3/util/tikv"
 )
 
 var (
@@ -821,7 +822,7 @@ func tikvScan(txn *transaction.KVTxn, prefix string, fn func(key, value []byte) 
 	}
 	defer iter.Close()
 	for iter.Valid() {
-		if err := fn(iter.Key(), iter.Value()); err != nil {
+		if err := fn(iter.Key(), tikvutil.DecodeValue(iter.Value())); err != nil {
 			return err
 		}
 		if err := iter.Next(); err != nil {
@@ -862,7 +863,7 @@ func (p *tikvPersist[K, V]) tikvKeyExists(ctx context.Context, txn interface {
 		}
 		return nil, false, err
 	}
-	return entry.Value, true, nil
+	return tikvutil.DecodeValue(entry.Value), true, nil
 }
 
 // tikvKeyWithCommitTS reads the key's latest value and its commit timestamp
@@ -875,6 +876,7 @@ func (p *tikvPersist[K, V]) tikvKeyWithCommitTS(ctx context.Context, txn *transa
 		}
 		return tikvkv.ValueEntry{}, false, err
 	}
+	entry.Value = tikvutil.DecodeValue(entry.Value)
 	return entry, true, nil
 }
 
@@ -972,7 +974,7 @@ func (t *tikvTxn[K, V]) Commit() ([]TxnResult[V], error) {
 				case op.raw.Delete:
 					err = txn.Delete([]byte(op.raw.Key))
 				default:
-					err = txn.Set([]byte(op.raw.Key), []byte(op.raw.Value))
+					err = tikvutil.SetValue(txn, []byte(op.raw.Key), []byte(op.raw.Value))
 				}
 				if err != nil {
 					return err
@@ -1014,7 +1016,7 @@ func (t *tikvTxn[K, V]) Commit() ([]TxnResult[V], error) {
 					if err != nil {
 						return retry.Unrecoverable(err)
 					}
-					if err := txn.Set(keyBytes, valBytes); err != nil {
+					if err := tikvutil.SetValue(txn, keyBytes, valBytes); err != nil {
 						return err
 					}
 					results[i].Value = op.value
@@ -1037,7 +1039,7 @@ func (t *tikvTxn[K, V]) Commit() ([]TxnResult[V], error) {
 				if err != nil {
 					return retry.Unrecoverable(err)
 				}
-				if err := txn.Set(keyBytes, valBytes); err != nil {
+				if err := tikvutil.SetValue(txn, keyBytes, valBytes); err != nil {
 					return err
 				}
 				results[i].Value = op.value
@@ -1060,7 +1062,7 @@ func (t *tikvTxn[K, V]) Commit() ([]TxnResult[V], error) {
 				if err != nil {
 					return retry.Unrecoverable(err)
 				}
-				if err := txn.Set(keyBytes, valBytes); err != nil {
+				if err := tikvutil.SetValue(txn, keyBytes, valBytes); err != nil {
 					return err
 				}
 				results[i].Value = newV
@@ -1081,7 +1083,7 @@ func (t *tikvTxn[K, V]) Commit() ([]TxnResult[V], error) {
 					if err != nil {
 						return retry.Unrecoverable(err)
 					}
-					if err := txn.Set(keyBytes, valBytes); err != nil {
+					if err := tikvutil.SetValue(txn, keyBytes, valBytes); err != nil {
 						return err
 					}
 					results[i].Value = newV
@@ -1090,7 +1092,7 @@ func (t *tikvTxn[K, V]) Commit() ([]TxnResult[V], error) {
 					if err != nil {
 						return retry.Unrecoverable(err)
 					}
-					if err := txn.Set(keyBytes, valBytes); err != nil {
+					if err := tikvutil.SetValue(txn, keyBytes, valBytes); err != nil {
 						return err
 					}
 					results[i].Value = op.value

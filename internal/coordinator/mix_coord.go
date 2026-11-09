@@ -69,6 +69,10 @@ type mixCoordImpl struct {
 	tikvCli *txnkv.Client
 	address string
 
+	// stopTiKVGC stops the GC of a TiKV meta store, which runs on the active
+	// replica only; see startTiKVGCWorker.
+	stopTiKVGC func()
+
 	proxyCreator proxyutil.ProxyCreator
 	proxyWatcher *proxyutil.ProxyWatcher
 
@@ -325,6 +329,7 @@ func (s *mixCoordImpl) startAndUpdateHealthy() {
 	// task-creation feature counters (see internal/featureusage)
 	featureusage.SetEnabled(Params.CommonCfg.FeatureUsageCountersEnabled.GetAsBool())
 	s.startPosixCleanupTask()
+	s.startTiKVGCWorker()
 	RegisterMgrRoute(s)
 
 	s.onActiveMu.Lock()
@@ -461,6 +466,18 @@ func (s *mixCoordImpl) stopPosixCleanupTask() {
 	})
 }
 
+// startTiKVGCWorker starts the GC of a TiKV meta store. Only the active
+// replica calls it, so one worker runs per Milvus cluster. The TiKV cluster
+// must not also serve a TiDB or another system with a GC worker of its own:
+// both register the gc_worker service safe point, so each would replace the
+// other's life time.
+func (s *mixCoordImpl) startTiKVGCWorker() {
+	if Params.MetaStoreCfg.MetaStoreType.GetValue() != util.MetaStoreTypeTiKV || s.tikvCli == nil {
+		return
+	}
+	s.stopTiKVGC = tikv.StartGCWorker(s.ctx, s.tikvCli)
+}
+
 func (s *mixCoordImpl) posixCleanupLoop(ctx context.Context) {
 	defer s.posixCleanupWg.Done()
 
@@ -493,6 +510,9 @@ func (s *mixCoordImpl) Stop() error {
 	}()
 
 	s.stopPosixCleanupTask()
+	if s.stopTiKVGC != nil {
+		s.stopTiKVGC()
+	}
 
 	s.GracefulStop()
 	mlog.Info(s.ctx, "graceful stop done")
