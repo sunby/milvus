@@ -187,6 +187,90 @@ func TestReplicaZeroCapacityPreservesLifecycle(t *testing.T) {
 	}
 }
 
+// nodeRegisteredDuringPass publishes QueryNode 2 after the layouts have read an
+// empty resource group and before planning refreshes its node inputs.
+type nodeRegisteredDuringPass struct{ *balancercache.Cache }
+
+func (c nodeRegisteredDuringPass) PublishReplicaActivity(collection int64, active map[int64]bool) bool {
+	defer c.PublishNode(2, &NodeInfo{NodeID: 2, Alive: true, ResourceGroup: "rg1"})
+	return c.Cache.PublishReplicaActivity(collection, active)
+}
+
+func TestReplicaNodeRegisteredDuringPassDoesNotReleaseViews(t *testing.T) {
+	c := replicaCache(1, 1)
+	id := cacheShard(1, 10)
+	c.PublishShard(id, upStats(qviews.DataVersion{StreamingVersion: 1}, placement(1000, 1, 1, coordview.SegmentStateUp)))
+	p := NewDefaultBalancePolicy()
+	p.Plan(c, []qviews.ShardID{id})
+	c.PublishNode(1, &NodeInfo{NodeID: 1, ResourceGroup: "rg1"})
+
+	plan := p.Plan(nodeRegisteredDuringPass{c}, []qviews.ShardID{id})
+	require.Empty(t, plan.Releases, "losing the only node is not a release, whatever registers meanwhile")
+	require.Empty(t, plan.Prepares, "this pass planned against the empty resource group")
+
+	plan = p.Plan(c, []qviews.ShardID{id})
+	require.Empty(t, plan.Releases)
+	require.Contains(t, plan.Prepares, id, "the next pass places the shard on the new node")
+}
+
+func TestPlanNamesLostNodesOfUnservableUpViews(t *testing.T) {
+	a, b := cacheShard(1, 10), cacheShard(1, 11)
+	up := func(c *balancercache.Cache, id qviews.ShardID, node int64) {
+		c.PublishShard(id, upStats(qviews.DataVersion{StreamingVersion: 1}, placement(1000, 1, node, coordview.SegmentStateUp)))
+	}
+	lostNode := func(id int64) *NodeInfo { return &NodeInfo{NodeID: id, ResourceGroup: "rg1"} }
+	newNode := func(id int64) *NodeInfo { return &NodeInfo{NodeID: id, Alive: true, ResourceGroup: "rg1"} }
+	for _, tc := range []struct {
+		name     string
+		replicas int
+		upNodes  map[qviews.ShardID]int64
+		changes  []*NodeInfo
+		want     map[qviews.ShardID][]int64
+	}{
+		{
+			name: "only replica on a lost node", replicas: 1, upNodes: map[qviews.ShardID]int64{a: 1},
+			changes: []*NodeInfo{lostNode(1), newNode(2)},
+			want:    map[qviews.ShardID][]int64{a: {1}},
+		},
+		{
+			name: "stopping node still serves", replicas: 1, upNodes: map[qviews.ShardID]int64{a: 1},
+			changes: []*NodeInfo{{NodeID: 1, ResourceGroup: "rg1", Alive: true, Stopping: true}, newNode(2)},
+		},
+		{
+			name: "node not heard from yet", replicas: 1, upNodes: map[qviews.ShardID]int64{a: 9},
+		},
+		{
+			name: "healthy sibling replica serves the vchannel", replicas: 2, upNodes: map[qviews.ShardID]int64{a: 1, b: 2},
+			changes: []*NodeInfo{lostNode(1), newNode(3)},
+		},
+		{
+			name: "every replica lost", replicas: 2, upNodes: map[qviews.ShardID]int64{a: 1, b: 2},
+			changes: []*NodeInfo{lostNode(1), lostNode(2), newNode(3), newNode(4)},
+			want:    map[qviews.ShardID][]int64{a: {1}, b: {2}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := replicaCache(tc.replicas, tc.replicas)
+			var dirty []qviews.ShardID
+			for id, node := range tc.upNodes {
+				up(c, id, node)
+				dirty = append(dirty, id)
+			}
+			p := NewDefaultBalancePolicy()
+			p.Plan(c, dirty)
+			for _, node := range tc.changes {
+				c.PublishNode(node.NodeID, node)
+			}
+			plan := p.Plan(c, dirty)
+			require.Contains(t, plan.Prepares, a)
+			require.Len(t, plan.LostNodes, len(tc.want))
+			for id, nodes := range tc.want {
+				require.Equal(t, nodes, plan.LostNodes[id])
+			}
+		})
+	}
+}
+
 func TestReplicaSuspensionRetainsStoppingCoverUntilSiblingUp(t *testing.T) {
 	c := replicaCache(2, 1)
 	a, b := cacheShard(1, 10), cacheShard(1, 11)

@@ -35,7 +35,8 @@ func (p *DefaultBalancePolicy) Plan(reader balancercache.Reader, dirty []qviews.
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	plan := &BalancePlan{
-		Prepares: make(map[qviews.ShardID]*qviews.QueryViewAtCoordBuilder),
+		Prepares:  make(map[qviews.ShardID]*qviews.QueryViewAtCoordBuilder),
+		LostNodes: make(map[qviews.ShardID][]int64),
 	}
 	if reader == nil || len(dirty) == 0 {
 		return plan
@@ -116,6 +117,9 @@ func (p *DefaultBalancePolicy) Plan(reader balancercache.Reader, dirty []qviews.
 		}
 		snap.acceptRows(candidate.shardID, result.rowsByNode)
 		plan.Prepares[candidate.shardID] = result.builder
+		if lost := lostUpNodes(snap, candidate.shardID); len(lost) > 0 {
+			plan.LostNodes[candidate.shardID] = lost
+		}
 		projectedRows = withRows(baseRows, result.rowsByNode)
 	}
 
